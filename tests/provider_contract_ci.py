@@ -41,33 +41,29 @@ class ProviderCanary:
     reasoning_effort: str
     named_tool_choice: bool = True
     continue_to_final: bool = False
-    skip_reason: str = ""  # a route this run cannot reach: optional, skipped, and the reason is in the report
 
 
-# Release 7.9.0 only: the OpenRouter key in CI is refused by Google, Anthropic and OpenAI models (HTTP 403,
-# provider terms), so these four routes are optional and skipped with this reason. The direct Anthropic and
-# OpenAI canaries stay required. Splitting the CI keys brings the four back as required.
-_ROUTE_REFUSED_TO_CI_KEY = (
-    "skipped on this release: the CI OpenRouter key is refused by this provider (HTTP 403, provider terms); "
-    "the route returns as required once CI has a key that reaches it"
-)
+# The CI's shared OpenRouter key is refused by Google, Anthropic and OpenAI models (HTTP 403, provider terms),
+# so the routes to them read a secret of their own; the client still takes it from OpenRouter's one key
+# setting (bind_provider_canary_credential). Everything else on OpenRouter keeps the shared key.
+OPENROUTER_ROUTES_KEY_ENV = "OPENROUTER_PROVIDER_ROUTES_API_KEY"
 
 _OPENROUTER_CANARIES = (
     ProviderCanary(
         "openrouter_gemini", "google/gemini-3.8-flash", "openrouter",
-        "OPENROUTER_API_KEY", False, "medium", skip_reason=_ROUTE_REFUSED_TO_CI_KEY,
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium",
     ),
     ProviderCanary(
         "openrouter_opus", "anthropic/claude-opus-5", "openrouter",
-        "OPENROUTER_API_KEY", False, "medium", skip_reason=_ROUTE_REFUSED_TO_CI_KEY,
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium",
     ),
     ProviderCanary(
         "openrouter_fable", "anthropic/claude-fable-5.1", "openrouter",
-        "OPENROUTER_API_KEY", False, "medium", named_tool_choice=False, skip_reason=_ROUTE_REFUSED_TO_CI_KEY,
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium", named_tool_choice=False,
     ),
     ProviderCanary(
         "openrouter_gpt", "openai/gpt-5.6-luna", "openrouter",
-        "OPENROUTER_API_KEY", False, "medium", skip_reason=_ROUTE_REFUSED_TO_CI_KEY,
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium",
     ),
     ProviderCanary(
         "openrouter_grok", "x-ai/grok-4.6", "openrouter",
@@ -302,6 +298,19 @@ def require_provider_canary_credential(canary: ProviderCanary):
         f"{canary.credential_env} not set; {policy} provider canary "
         f"{canary.canary_id} ({canary.model}) was not run"
     )
+
+
+def bind_provider_canary_credential(canary: ProviderCanary, monkeypatch) -> None:
+    """Hand a route its own secret for this check only, before its client exists.
+
+    The client reads OpenRouter's key from that kind's one setting (provider_models.PROVIDER_KINDS) on
+    every request, so a route whose secret has another name puts it there for the check's duration.
+    """
+    from ouroboros.provider_models import PROVIDER_KINDS
+
+    setting = PROVIDER_KINDS["openrouter"].flat_key("api_key")
+    if canary.expected_provider == "openrouter" and canary.credential_env != setting:
+        monkeypatch.setenv(setting, os.environ[canary.credential_env])
 
 
 def full_registry_canary_tools():

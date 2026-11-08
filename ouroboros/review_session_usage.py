@@ -43,6 +43,9 @@ def session_usage_facts(run_id: str, *, requested_route: str = "",
         "cost_estimated": estimated, "cost_final": cash["cost_final"], "cost_partial": cash["cost_partial"],
         **({"attempt_execution": copy.deepcopy(attempt_execution)} if isinstance(attempt_execution, list) else {}),
         **({"input_token_usage": split} if split is not None else {}),
+        # The engine's own receipt of how a continued run was carried (native, moved or packet), never inferred.
+        **({"review_continuity": copy.deepcopy(summary["continuity"])} if isinstance(summary.get("continuity"), list)
+           and summary["continuity"] else {}),
         **event_token_counts({"prompt_tokens": summary.get("inputTokens"),
                               "completion_tokens": summary.get("outputTokens"),
                               "cached_tokens": summary.get("cachedInputTokens")}),

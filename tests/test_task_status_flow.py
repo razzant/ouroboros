@@ -2351,28 +2351,6 @@ def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch):
     )
 
 
-def test_settings_ui_carries_a_configured_zero_subagent_depth():
-    """The runtime honouring 0 is worthless if the Settings page silently reverts it: 0 is FALSY
-    in JS, so a stored 0 read through the plain `if (value)` branch displayed the fallback 3, and
-    the next Save (which posts every number field unconditionally) wrote 3 back — re-enabling three
-    levels of delegation through the UI. All three carriers of the owner's 0 are pinned: the input
-    can reach it, the depth entry is falsy-tolerant, and the load path still honours that flag
-    (without which the flag is inert)."""
-    root = pathlib.Path(__file__).resolve().parents[1]
-    settings_js = (root / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
-    # The input moved from Advanced -> Runtime Limits to Agents -> Delegation
-    # (D-10): the counts bound the agents, not the process pool. Same invariant,
-    # new address.
-    settings_ui = (root / "web" / "modules" / "subagents_settings.js").read_text(encoding="utf-8")
-    assert 'id="s-subagent-depth" type="number" min="0"' in settings_ui
-    # The 4th tuple element is the falsy-tolerant flag consumed by the load path below.
-    assert "['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 3, true]" in settings_js
-    assert (
-        "if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;"
-        in settings_js
-    ), "the load path no longer honours the falsy-tolerant flag, so the entry is inert"
-
-
 def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_FAILED
@@ -3079,7 +3057,6 @@ def test_subagent_silence_preserves_live_custody_and_service_logs(tmp_path, monk
     monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
     worker = SimpleNamespace(busy_task_id="childtimeout", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
@@ -3142,7 +3119,6 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
     worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)

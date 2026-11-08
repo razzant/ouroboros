@@ -19,10 +19,10 @@ const { places } = normalizePlacesResponse(FIXTURE.places);
 const [slack, community, mail] = places;
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
-test('the subtitle uses the projected service and instance label with its state, never raw ids', () => {
-    assert.equal(placeSheetMetaText(slack), 'Slack · Acme · active');
-    assert.equal(placeSheetMetaText(community), 'Telegram · Ouroboros community · silent');
-    assert.doesNotMatch(placeSheetMetaText(community), /telegram-bot|-100123|ouroboros_bot/);
+test('the subtitle says only what the title does not: the state, never the label again or a raw id', () => {
+    assert.equal(placeSheetMetaText(slack), 'active');
+    assert.equal(placeSheetMetaText(community), 'silent');
+    assert.doesNotMatch(placeSheetMetaText(community), /Ouroboros community|telegram-bot|-100123|ouroboros_bot/);
 });
 
 test('the service is the matching connector declaration, independent of the editable place label', () => {
@@ -106,8 +106,9 @@ function statusSheetDom(t) {
 }
 
 const sendingAccount = { id: 'mailbox-id', label: 'mail@example.test', kind: 'user' };
-const statusUrl = `/api/extensions/${slack.connector}/status`;
-const identityPlace = (fields = {}) => normalizePlace({ ...FIXTURE.places.places[0], source: { url: statusUrl }, ...fields });
+const declaredStatusUrl = `/api/extensions/${slack.connector}/status`;
+const statusUrl = `${declaredStatusUrl}?${new URLSearchParams({ account_id: slack.accountId })}`;
+const identityPlace = (fields = {}) => normalizePlace({ ...FIXTURE.places.places[0], source: { url: declaredStatusUrl }, ...fields });
 const identityPayload = (identity = { sends_as: sendingAccount,
     reads_as: [{ ...sendingAccount, id: 'reader-id', label: 'Reader account' }] }) => ({ text: 'Mailbox ready', tone: 'ok', identity });
 const jsonResponse = (data) => ({ ok: true, status: 200, json: async () => data });

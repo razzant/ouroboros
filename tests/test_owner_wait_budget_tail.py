@@ -12,8 +12,7 @@ from tests.test_owner_wait_cold_loop import EXPLICIT, cold_registry
 from tests.test_loop_transport_wait import _loop_kwargs
 
 
-@pytest.mark.parametrize("queued_override", [False, True])
-@pytest.mark.parametrize("cold_restart", [False, True])
+@pytest.mark.parametrize(("cold_restart", "queued_override"), [(False, False), (True, True)])
 def test_cold_grant_checks_saved_budget_before_ordinary_dispatch(tmp_path, monkeypatch, queued_override, cold_restart):
     (tmp_path / "logs").mkdir()
     (tmp_path / "fixture.txt").write_text("A real extra tool read")

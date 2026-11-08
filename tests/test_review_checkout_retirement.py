@@ -127,8 +127,7 @@ def test_a_marked_checkout_no_review_can_read_is_removed_and_its_worktree_pruned
     assert len(_git(subject.repo, "worktree", "list").splitlines()) == 1, "the subject's worktree entry is pruned"
 
 
-@pytest.mark.parametrize("hold", ["task_live", "task_running", "custody_active", "seat_checking", "operation_live",
-                                  "no_owner"])
+@pytest.mark.parametrize("hold", ["task_live", "seat_checking", "operation_live"])
 def test_a_checkout_a_review_may_still_read_stays(subject, hold):
     entry = _retain(subject, task_status="running" if hold == "task_running" else "completed")
     live = {TASK} if hold == "task_live" else set()
@@ -151,6 +150,50 @@ def test_a_checkout_a_review_may_still_read_stays(subject, hold):
     assert entry.is_dir() and report["checkouts_removed"] == 0 and not report["errors"], report
 
 
+@pytest.mark.parametrize("probe_result, expected", [(True, "in_use"), (False, "offer"), (None, "in_use")])
+def test_orphan_checkout_unknown_liveness_is_not_reported_as_live(subject, probe_result, expected):
+    """An unknown census is distinct from a live owner and is sampled only once."""
+    entry = _retain(subject)
+    calls = []
+
+    def live(task_id):
+        calls.append(task_id)
+        return probe_result
+
+    causes = {}
+    verdict = dict(rp.orphan_review_checkouts(subject.data, live, homes=[], causes=causes))[entry]
+    assert verdict == expected and calls == [TASK], (verdict, calls, causes)
+    if probe_result is not False:
+        cause = "liveness_unknown" if probe_result is None else "task_live"
+        assert causes[entry] == cause
+        calls.clear()
+        outcome = rp.retire_orphan_checkouts(subject.data, [entry], live, lambda: False)
+        assert outcome[entry] == cause and calls == [TASK]
+    assert entry.is_dir()
+
+
+@pytest.mark.parametrize("failure, expected", [("marker", "marker_unreadable"),
+                                                ("store", "store_busy"),
+                                                ("result", "task_result_unreadable")])
+def test_orphan_checkout_preview_and_run_keep_the_read_failure_boundary(subject, monkeypatch, failure, expected):
+    """A checkout stays, while Storage receives the source-specific reason that blocked its proof."""
+    entry = _retain(subject)
+    monkeypatch.setattr(rp, "is_kept", lambda *_args, **_kwargs: False)
+    if failure == "marker":
+        (entry / CHECKOUT_MARKER).write_text("{torn", encoding="utf-8")
+    else:
+        from ouroboros import task_results
+        from ouroboros.store import StoreBusy
+
+        error = StoreBusy("busy") if failure == "store" else ValueError("torn result")
+        monkeypatch.setattr(task_results, "load_task_result", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    causes = {}
+    listed = dict(rp.orphan_review_checkouts(subject.data, lambda _task: False, homes=[], causes=causes))
+    assert listed[entry] in {"in_use", "unreadable"} and causes[entry] == expected
+    outcome = rp.retire_orphan_checkouts(subject.data, [entry], lambda _task: False, lambda: False)
+    assert outcome[entry] == expected and entry.is_dir()
+
+
 def test_an_unmarked_checkout_goes_only_past_the_wait_when_a_recorded_round_names_its_task(subject):
     entry = _retain(subject)
     (entry / CHECKOUT_MARKER).unlink()  # made by a body before the marker
@@ -159,6 +202,29 @@ def test_an_unmarked_checkout_goes_only_past_the_wait_when_a_recorded_round_name
     assert _prune(subject)["checkouts_removed"] == 0 and entry.is_dir(), "younger than the retention wait"
     later = rp.prune_review_checkouts(subject.data, set(), now=time.time() + 30 * 86400)  # the wait has passed
     assert later["checkouts_removed"] == 1 and not entry.exists(), later
+
+
+@pytest.mark.parametrize("seat", ["late_settled_token", "in_flight", "adviser_running"])
+def test_a_settled_reviewer_row_keeping_its_start_token_no_longer_holds_its_checkout(subject, seat):
+    """#2710, the live shape (225 of 287 held checkouts on 03.11): a reviewer row that settled late yet kept its start
+    token holds nothing, so its round's checkout goes once its task ended; a reviewer still in flight, or a running
+    additional adviser beside the settled seat, keeps it."""
+    entry = _retain(subject)
+    settled = {"slot_id": "s1", "operation_id": "op-1", "status": "ok", "operation_state": "late_settled",
+               "late_result_pending": False, "pending_invocation_id": "inv-1"}
+    running = {**settled, "status": "error", "operation_state": "in_flight", "late_result_pending": True}
+    adviser = {**running, "slot_id": "a1", "operation_id": "op-a1", "pending_invocation_id": "inv-a1",
+               "review_plan": {"additional": True}}
+    rows = {"late_settled_token": [settled], "in_flight": [running], "adviser_running": [settled, adviser]}[seat]
+    (subject.data / "state" / "advisory_review.json").write_text(json.dumps({"attempts": [{
+        "task_id": TASK, "review_retry_key": RETRY_KEY, "status": "reviewed", "tool_name": "review_change",
+        "repo_key": "subject", "paid": True, "ts": "2026-10-17T00:00:00+00:00", "triad_raw_results": rows}]}),
+        encoding="utf-8")
+    report = _prune(subject)
+    if seat == "late_settled_token":
+        assert not entry.exists() and report["checkouts_removed"] == 1, report
+    else:
+        assert entry.is_dir() and report["checkouts_removed"] == 0 and not report["errors"], report
 
 
 def test_an_unreadable_review_state_removes_no_checkout(subject):
@@ -301,13 +367,25 @@ def test_existing_broken_git_metadata_keeps_the_checkout_and_reports_the_git_err
     assert not report["errors"] and report["checkouts_removed"] == 1 and not entry.exists(), report
 
 
-def test_published_rejoin_custody_keeps_the_copy_and_a_retired_rejoin_rebuilds_the_frozen_tree(subject):
+def test_published_rejoin_custody_keeps_the_copy_and_a_retired_rejoin_rebuilds_the_frozen_tree(subject, monkeypatch):
     entry = _retain(subject)
     with isolated_checkout(subject.ctx, subject.spec, retain=lambda: {"seats": ["rejoined"]},
                            token=lambda _identity: subject.name) as rejoined:
         _attempt(subject, "reviewing")  # published before the retirement judgment
         report = _prune(subject)
         assert report["checkouts_removed"] == 0 and report["checkouts_kept"] == 1, report
+        assert report["holds"] == [{"class": "review_custody_active", "count": 1, "example": entry.name}]
+        causes = {}
+        assert dict(rp.orphan_review_checkouts(subject.data, lambda _: False, causes=causes))[entry] == "in_use"
+        assert causes == {entry: "review_custody_active"}
+        from ouroboros import server_maintenance as sm
+        monkeypatch.setattr(sm, "DATA_DIR", subject.data)
+        monkeypatch.setattr(sm, "_REVIEW_VIEWS_OWED", [False])
+        monkeypatch.setattr(sm, "_startup_live_task_ids", lambda *_a, **_kw: set())
+        sm._prune_review_checkouts()
+        events = [json.loads(line) for line in (subject.data / "logs/events.jsonl").read_text().splitlines()]
+        recorded = [event for event in events if event["type"] == "review_checkout_prune"][-1]["report"]
+        assert recorded["holds"] == report["holds"] and recorded["checkouts_removed"] == 0
         assert pathlib.Path(rejoined.checkout) == entry / "repo.noindex"
         assert (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
         tree = rejoined.tree_sha

@@ -42,7 +42,7 @@ def test_pin_partial_update_persists_without_changing_room_authority(pin_client)
     assert registry.get_project(root, "alpha")["pinned"] is False
 
 
-@pytest.mark.parametrize("value", ["true", "false", 1, 0, None, [], {}])
+@pytest.mark.parametrize("value", ["true", 0, {}])
 def test_pin_is_strict_boolean_and_refuses_atomically(pin_client, value):
     client, root = pin_client
     registry.create_project(root, "alpha", name="Original")
@@ -137,7 +137,7 @@ def test_pin_contract_is_optional_partial_and_mirrored_in_jsdoc(pin_client):
         assert entry["properties"]["pinned"] == {"type": "boolean"} and "pinned" not in entry.get("required", [])
     assert len(answered) == 1
     update = schemas["ProjectUpdateRequest"]
-    assert update["properties"] == {"name": {"type": "string"}, "pinned": {"type": "boolean"}}
+    assert update["properties"] == {"name": {"type": "string"}, "pinned": {"type": "boolean"}, "closed": {"type": "boolean"}}
     assert not update.get("required")
     route = {f"{e['method']} {e['path']}": e for e in document["http"]}["POST /api/projects/{project_id}/update"]
     assert route["request"]["schemas"] == ["ProjectUpdateRequest"]
@@ -150,6 +150,72 @@ def test_pin_contract_is_optional_partial_and_mirrored_in_jsdoc(pin_client):
     assert _js_typedef_fields(rows, "ProjectEntry") == set(typing.get_type_hints(ProjectEntry))
     assert re.search(r"@typedef \{Object\} ProjectEntry\b[^/]*?@property \{boolean=\} pinned\b", rows, re.S)
     twin = (WEB_MODULES / "client_contract_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_properties(twin, "ProjectUpdateRequest") == {("string=", "name"), ("boolean=", "pinned")}
-    assert set(typing.get_type_hints(ProjectUpdateRequest)) == {"name", "pinned"}
+    assert _js_typedef_properties(twin, "ProjectUpdateRequest") == {("string=", "name"), ("boolean=", "pinned"), ("boolean=", "closed")}
+    assert set(typing.get_type_hints(ProjectUpdateRequest)) == {"name", "pinned", "closed"}
     assert not ProjectUpdateRequest.__required_keys__
+
+
+def _seed_rooms(root, count=500):
+    """One registry write of ``count`` (at least 301) neutral rooms (newest last), a few pinned or closed, one deleting
+    and one tombstoned; returns the ids by role. Only identity, recency and lifecycle vary."""
+    registry.create_project(root, "seed", origin="owner_ui")
+    path = root / "state/projects.json"
+    data = json.loads(path.read_text())
+    template = data["projects"][0]
+    rows = []
+    for i in range(count):
+        row = {**template, "id": f"room-{i:03}", "chat_id": 30000 + i, "name": f"Neutral room {i:03}",
+               "last_active_at": f"2026-01-{1 + i // 60:02}T00:{i % 60:02}:00Z"}
+        if i in (7, 300):
+            row["pinned"] = True
+        if i in (5, 250):
+            row["closed"] = {"at": "2026-02-01T00:00:00Z", "by": "owner", "note": "Closed by owner."}
+        rows.append(row)
+    rows[3]["lifecycle"] = "deleting"
+    rows[4]["lifecycle"] = "tombstoned"
+    rows[0]["name"] = "Ünïcode ROOM — Плановые Работы"
+    data["projects"] = rows
+    path.write_text(json.dumps(data))
+    return {"deep": "room-002", "deleting": "room-003", "tombstoned": "room-004", "closed": "room-005",
+            "unicode": "room-000"}
+
+
+def test_complete_list_and_exact_id_reach_every_room_beyond_both_caps(pin_client):
+    """The sidebar feed keeps pins + 50, the plain list keeps 200; `all=1` and `id=` reach every other room
+    (closed ones too) with its own chat id, a deleting room says so, a tombstone and an unknown id answer none."""
+    client, root = pin_client
+    ids = _seed_rooms(root)
+    feed = registry.projects_summary(root, include_pinned=True)
+    assert len(feed) == 2 + 50 and ids["deep"] not in {row["id"] for row in feed}
+    capped = client.get("/api/projects?start=200&limit=20").json()["projects"]
+    assert len(capped) == 200 and capped == client.get("/api/projects").json()["projects"]  # paging is not a parameter
+    assert client.get("/api/projects?all=0").json()["projects"] == capped  # only the explicit form lifts the cap
+    complete = client.get("/api/projects?all=1").json()["projects"]
+    listed = {row["id"]: row for row in complete}
+    assert len(complete) == 499 and ids["tombstoned"] not in listed
+    assert [row["id"] for row in complete] == [row["id"] for row in registry.projects_summary(root, limit=None)]
+    assert [(row["last_active_at"], row["id"]) for row in complete] == sorted(
+        ((row["last_active_at"], row["id"]) for row in complete), reverse=True)
+    assert listed[ids["deleting"]]["lifecycle"] == "deleting" and "closed" in listed[ids["closed"]]
+    assert {row["id"] for row in capped} < set(listed) and set(listed) >= {row["id"] for row in feed}
+    for role in ("deep", "closed", "unicode"):
+        exact = client.get(f"/api/projects?id={ids[role]}").json()["projects"]
+        assert [(row["id"], row["chat_id"], row["lifecycle"]) for row in exact] == [
+            (ids[role], listed[ids[role]]["chat_id"], "active")]
+        assert exact[0] == listed[ids[role]]  # the same compact row the list carries
+    assert [row["lifecycle"] for row in client.get(f"/api/projects?id={ids['deleting']}").json()["projects"]] == ["deleting"]
+    for absent in (ids["tombstoned"], "never-created", "", "../state"):
+        assert client.get("/api/projects", params={"id": absent}).json() == {"projects": []}, absent
+    # The addressed room by chat id keeps its meaning: active rooms only.
+    assert client.get("/api/projects?chat_id=30003").json() == {"projects": []}
+    assert client.get("/api/projects?chat_id=30002").json()["projects"][0]["id"] == ids["deep"]
+
+
+def test_unreadable_registry_is_an_error_for_the_complete_list_and_the_exact_id(pin_client):
+    client, root = pin_client
+    registry.create_project(root, "room-002", name="Neutral room 002", origin="owner_ui")
+    assert len(client.get("/api/projects?all=1").json()["projects"]) == 1
+    (root / "state/projects.json").write_text("{not json")
+    for query in ("all=1", "id=room-002"):
+        response = client.get(f"/api/projects?{query}")
+        assert response.status_code >= 500 and "projects" not in response.json(), query

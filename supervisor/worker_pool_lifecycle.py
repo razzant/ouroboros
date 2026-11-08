@@ -30,14 +30,131 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.config import WORKER_READY_CEILING_SEC, WORKER_READY_MAX_ATTEMPTS, WORKER_READY_WINDOW_SEC
+from ouroboros.process_identity import same_birth
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owners
 from supervisor.state import append_jsonl
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
+from ouroboros.task_carrier import EXECUTOR_WORKER, INLINE_EXECUTORS, LANE_CONVERSATION, LANE_PROJECT
 from ouroboros.utils import utc_now_iso
 from supervisor.queue import _queue_lock
 
 
 log = logging.getLogger(__name__)
+
+
+def is_project_slot(slot: Any) -> bool:
+    """A slot the project pool counts, fences and assigns queued work to (every slot not on the lane)."""
+    return getattr(slot, "lane", LANE_PROJECT) != LANE_CONVERSATION
+
+
+def is_lane_slot(slot: Any) -> bool:
+    """A conversation-lane carrier: outside MAX_WORKERS and the exhaustion fence."""
+    return getattr(slot, "lane", LANE_PROJECT) == LANE_CONVERSATION
+
+
+def is_worker_slot(slot: Any) -> bool:
+    """A custodied child process (not an inline executor's thread-backed pseudo-slot)."""
+    return getattr(slot, "executor", EXECUTOR_WORKER) not in INLINE_EXECUTORS
+
+
+def project_slots(pool: Any = None) -> list:
+    pool = _pool().WORKERS if pool is None else pool
+    return [slot for slot in pool.values() if is_project_slot(slot)]
+
+
+def lane_slots(pool: Any = None) -> list:
+    pool = _pool().WORKERS if pool is None else pool
+    return [slot for slot in pool.values() if is_lane_slot(slot)]
+
+
+def pool_slot_counts(pool: Any = None) -> Dict[str, Any]:
+    """The one in-memory measurement of the pool's slots, published by ``queue_publication._pool_counts``.
+
+    ``max_workers`` is the configured ceiling of active project capacity; ``worker_total`` counts
+    the project slots that exist now (parked owner-wait slots can remain materialized after the
+    active ceiling is reached). ``active_worker_count`` is dispatch-enabled capacity (a parked owner-wait author
+    lends its slot), not work in progress: ``busy_worker_count`` counts slots holding a task.
+    The booting/reaping/retiring flags overlap (a fresh slot is booting and reaping until its
+    readiness row); ``assignable_idle_workers`` is what dispatch could use this instant.
+    Conversation carriers are another lane, outside the ceiling, counted apart. No queue,
+    filesystem or admission work; ``worker_ready`` asks each slot's ``Process`` whether it is alive.
+    """
+    slots = _pool().WORKERS if pool is None else pool
+    projects = project_slots(slots)
+    carriers = lane_slots(slots)
+
+    def idle(slot: Any) -> bool:
+        return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
+                and getattr(slot, "active_capacity", True)
+                and not getattr(slot, "resume_hold", ""))
+
+    active = sum(1 for slot in projects if getattr(slot, "active_capacity", True))
+    return {
+        "max_workers": int(_pool().MAX_WORKERS),
+        "worker_total": len(projects),
+        "active_worker_count": active,
+        "parked_worker_count": len(projects) - active,
+        "busy_worker_count": sum(1 for slot in projects if getattr(slot, "busy_task_id", None) is not None),
+        "booting_count": sum(1 for slot in projects if getattr(slot, "booting", False)),
+        "reaping_count": sum(1 for slot in projects if getattr(slot, "reaping", False)),
+        "retiring_count": sum(1 for slot in projects if getattr(slot, "retiring", False)),
+        "assignable_idle_workers": sum(1 for slot in projects if idle(slot)),
+        "lane_carrier_total": len(carriers),
+        "lane_carrier_idle": sum(1 for slot in carriers if idle(slot)),
+    }
+
+
+def _initial_forecast() -> Dict[str, Any]:
+    return {"status": "unknown", "admissible_pending": None, "ceiling": None, "reason": "not_computed",
+            "observed_since": "", "revision": 0, "passes": 0}
+
+
+#: The growth forecast the last assignment pass computed (``reconcile_worker_capacity``), process-local;
+#: a pool generation's stop or start makes it unknown again (``workers.spawn_workers``/``kill_workers``).
+_DEMAND_FORECAST: Dict[str, Any] = _initial_forecast()
+_DEMAND_FORECAST_LOCK = threading.Lock()
+
+
+def record_demand_forecast(demand: Optional[int], *, reason: str = "", assignment_pass: bool = True) -> None:
+    """Record what one assignment pass knew about admissible demand; ``None`` with a reason when it computed none.
+
+    The value is the one ``reconcile_worker_capacity`` already grows on, never recomputed for a
+    reader. ``observed_since`` and ``revision`` move only when the observation changes, so a
+    steady pool publishes no new queue document; its currency is the document's own certificate.
+    A generation's stop or start records unknown outside any pass (``assignment_pass=False``).
+    """
+    ceiling = max(1, int(_pool().MAX_WORKERS))
+    if demand is None:
+        observed = {"status": "unknown", "admissible_pending": None, "ceiling": ceiling,
+                    "reason": str(reason or "not_computed")}
+    else:
+        observed = {"status": "computed", "admissible_pending": min(max(0, int(demand)), ceiling),
+                    "ceiling": ceiling, "reason": ""}
+    with _DEMAND_FORECAST_LOCK:
+        if assignment_pass:
+            _DEMAND_FORECAST["passes"] = int(_DEMAND_FORECAST.get("passes") or 0) + 1
+        if any(_DEMAND_FORECAST.get(key) != value for key, value in observed.items()):
+            _DEMAND_FORECAST.update(observed, observed_since=utc_now_iso(),
+                                    revision=int(_DEMAND_FORECAST.get("revision") or 0) + 1)
+
+
+def demand_forecast_passes() -> int:
+    with _DEMAND_FORECAST_LOCK:
+        return int(_DEMAND_FORECAST.get("passes") or 0)
+
+
+def demand_forecast() -> Dict[str, Any]:
+    """The published form: the last pass's admissible pending rows (capped by the ceiling), or unknown and why."""
+    with _DEMAND_FORECAST_LOCK:
+        forecast = {key: value for key, value in _DEMAND_FORECAST.items() if key != "passes"}
+    value = forecast["admissible_pending"]
+    return {**forecast, "scope": "last_assignment_pass",
+            "at_ceiling": value is not None and forecast["ceiling"] is not None and value >= forecast["ceiling"]}
+
+
+def project_fenced(slot: Any) -> bool:
+    """Whether the project pool's stop fence owns this slot's membership (a lane slot is never fenced by it)."""
+    return bool(_pool()._WORKER_POOL_DISABLED_REASON) and is_project_slot(slot)
 
 
 def _pool():
@@ -54,6 +171,12 @@ def _pool():
 
 
 _WORKER_LIFECYCLE_LOCK = threading.RLock()
+
+
+class SpawnRefusedInMarkerWindow(RuntimeError):
+    """No child starts inside an assisted update's conflict-marker window: a worker spawned now would import the
+    tree's markers. The dead slot keeps its place and the reaper's refusal episode retries it each tick until the
+    window ends (``task_reaper._respawn_refused``); the degraded executor covers the lane's turns meanwhile."""
 _WORKER_SHA_LOOKUP_TIMEOUT_SEC = 2.0  # Local diagnostic I/O, like utils.get_git_info.
 
 
@@ -85,7 +208,7 @@ def _recorded_cancel_fields(task_id: str, *, stop_source: str = "", reason: str 
 
 def _write_failure_result(
     task_id: str,
-    reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     status: str = "",
     stop_source: str = "",
 ) -> str:
@@ -250,12 +373,17 @@ def _slot_pid(slot: Any) -> int:
         return 0
 
 
-def _births_agree(slot_birth: Any, reported_birth: Any) -> bool:
+def _births_agree(slot: Any, reported: Dict[str, Any]) -> bool:
     """Births are compared only when both sides measured one; otherwise the slot's own pid decides.
 
     The owner's rule (14 Oct): bind readiness to the process birth, falling back to the pid.
+    Kernel births of one validated kind decide first (``process_identity.same_birth``): the
+    parent and the child may spell one ``ps`` birth in different zones or locales.
     """
-    ours, theirs = str(slot_birth or ""), str(reported_birth or "")
+    same = same_birth(getattr(slot, "kernel_birth", ""), reported.get("kernel_birth"))
+    if same is not None:
+        return same
+    ours, theirs = str(getattr(slot, "process_birth", "") or ""), str(reported.get("process_birth") or "")
     return not (ours and theirs) or ours == theirs
 
 
@@ -291,7 +419,7 @@ def _verify_worker_sha_after_spawn(
     ``WORKER_READY_CEILING_SEC`` from birth. Replacement still runs through ``respawn_worker`` — at
     most ``WORKER_READY_MAX_ATTEMPTS`` consecutive times for one slot, then the slot is parked and
     reported. A child that DIED during boot is released to the crash detector, which already owns
-    process death (``worker_dead_detected``, retry, the crash-storm fence). This is a contract
+    process death (``worker_dead_detected``, the one retry). This is a contract
     distinct from process liveness and from the task idle rail: a deadlocked child is alive and
     holds no task. ``spawned_at`` is the instant before ``proc.start()``: the window and the
     reported wait count from the child's birth, not from this thread's start.
@@ -386,14 +514,16 @@ def _own_ready_row(slot: Any, rows: Any) -> Optional[Dict[str, Any]]:
     """The child's own ``worker_ready`` row among the rows naming its pid, or None.
 
     A row whose measured birth differs from the slot's belongs to another process that held
-    the pid (a stale or reused pid): never this child's. An exact birth wins over a row
-    without one. Without a slot birth the newest row is taken: an earlier holder of a reused
-    pid died, and so wrote its row, before this child received the pid.
+    the pid (a stale or reused pid): never this child's. An equal kernel birth wins over an
+    exact spelling, which wins over a row without one. Without a slot birth the newest row is
+    taken: an earlier holder of a reused pid died, and so wrote its row, before this child
+    received the pid.
     """
-    birth = str(getattr(slot, "process_birth", "") or "")
-    agreeing = [row for row in rows if _births_agree(birth, row.get("process_birth"))]
+    birth, kernel = str(getattr(slot, "process_birth", "") or ""), getattr(slot, "kernel_birth", "")
+    agreeing = [row for row in rows if _births_agree(slot, row)]
+    same = [row for row in agreeing if same_birth(kernel, row.get("kernel_birth")) is True]
     exact = [row for row in agreeing if birth and str(row.get("process_birth") or "") == birth]
-    return (exact or agreeing or [None])[-1]
+    return (same or exact or agreeing or [None])[-1]
 
 
 def _worker_sha_relation(expected_sha: str, observed_sha: str) -> Dict[str, Any]:
@@ -449,7 +579,7 @@ def _open_ready_slot(
                  and slot.booting and not slot.retiring
                  and not getattr(slot, "readiness_exhausted", False)
                  and pid > 0 and row.get("pid") == pid
-                 and _births_agree(slot.process_birth, row.get("process_birth"))
+                 and _births_agree(slot, row)
                  and slot.proc.is_alive())
         if owned:
             # A birth the parent could not measure is adopted from the child, which measured it alive.
@@ -663,7 +793,8 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
             f"⚠️ Worker slot {wid} never confirmed ready in {attempt} attempts "
             f"(waited {time.time() - started:.0f}s on the last attempt); the slot is parked. Use /restart.",
             role="system", system_type="worker_readiness_notice")
-    _pool().disable_exhausted_worker_pool()
+    if is_project_slot(slot):
+        _pool().disable_exhausted_worker_pool()
 
 
 def _record_worker_processes(slots: Optional[Dict[int, Any]] = None) -> None:
@@ -678,7 +809,7 @@ def _record_worker_processes(slots: Optional[Dict[int, Any]] = None) -> None:
         from ouroboros.process_custody import record_process
 
         for w in list((_pool().WORKERS if slots is None else slots).values()):
-            if w.proc.pid and not getattr(w, "process_birth", ""):
+            if w.proc.pid and is_worker_slot(w) and not getattr(w, "process_birth", ""):
                 was_alive = w.proc.is_alive()
                 record = record_process(
                     _pool().DRIVE_ROOT,
@@ -695,7 +826,7 @@ def _record_worker_processes(slots: Optional[Dict[int, Any]] = None) -> None:
                     with _queue_lock:
                         w.process_birth = (w.process_birth or fingerprint.get("start_time_boot")
                                            or fingerprint.get("start_time") or "")
-                        # beside the legacy birth: the exit door's kernel evidence (worker_health.owe_worker_exit)
+                        # beside the legacy birth: kernel evidence for _births_agree and the exit door (worker_health)
                         w.kernel_birth = getattr(w, "kernel_birth", "") or (kernel if w.proc.is_alive() else "")
     except Exception:
         log.warning("Failed to ledger worker pids; readiness falls back to the child's birth or pid", exc_info=True)
@@ -731,6 +862,9 @@ def kill_workers_for_update(
             if worker.proc.is_alive() and worker.proc.pid:
                 kill_worker_tree(worker.proc.pid)
                 worker.proc.join(timeout=3)
+            elif worker.proc.is_alive():  # an inline executor's thread: cooperative, at its next control boundary
+                worker.proc.terminate()
+                worker.proc.join(timeout=3)
             if worker.proc.is_alive():
                 survivors.append(f"worker:{worker.proc.pid or worker.wid}")
             else:
@@ -743,9 +877,9 @@ def kill_workers_for_update(
     return survivors
 
 
-def _kill_survivors() -> None:
-    """Force-kill any workers and their descendant trees (daemon roots spared)."""
-    for w in list(_pool().WORKERS.values()):  # read outside the queue lock while a dead slot may retire
+def _kill_survivors(slots: Any = None) -> None:
+    """Force-kill the given workers (default: every slot) and their descendant trees (daemon roots spared)."""
+    for w in list(_pool().WORKERS.values() if slots is None else slots):  # read outside the queue lock while a dead slot may retire
         pid = w.proc.pid
         if pid is None:
             continue
@@ -763,27 +897,29 @@ def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
     prevents a replacement from being installed if the slot was removed while
     the queue lock was released.  The fresh slot is installed unassignable and
     handed to the readiness seam; ``ready_attempt`` is that seam's own
-    consecutive-failure count for this slot. A current pool stop fence (crash
-    storm, exhaustion, Stop, update) starts no child and forgets no slot: a
+    consecutive-failure count for this slot. A current pool stop fence
+    (exhaustion, Stop, update) starts no child and forgets no slot: a
     death or timeout captured earlier, a lent slot's included, leaves its dead
     slot to that fence's owner, whose stop needs the membership it captured.
     """
     with _queue_lock:
         old = _pool().WORKERS.get(wid)
-        fenced = bool(_pool()._WORKER_POOL_DISABLED_REASON)
+        fenced = old is not None and project_fenced(old)
     if old is None or fenced:
         return False
+    if not is_worker_slot(old):
+        return retire_worker(wid, old)  # an inline executor's pseudo-slot ends with its thread; nothing replaces it
     if not getattr(old, "active_capacity", True):
         if old.proc.is_alive():
             return False
         with _queue_lock:
-            active = sum(1 for worker in _pool().WORKERS.values()
+            active = sum(1 for worker in project_slots()
                          if getattr(worker, "active_capacity", True))
-            if active >= _pool().MAX_WORKERS:
+            if is_project_slot(old) and active >= _pool().MAX_WORKERS:
                 return retire_worker(wid, old)
         # The last sleeper can be stopped before its lent slot was created.
         # Fill only that vacancy, retaining normal failed-spawn recovery.
-    return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt)
+    return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))
 
 
 def retire_worker(wid: int, slot: Any) -> bool:
@@ -792,7 +928,7 @@ def retire_worker(wid: int, slot: Any) -> bool:
     A fenced pool forgets nothing: its stop owns the captured membership. Survivors' rows are not re-ledgered.
     """
     with _queue_lock:
-        if _pool()._WORKER_POOL_DISABLED_REASON or _pool().WORKERS.get(wid) is not slot or slot.proc.is_alive():
+        if project_fenced(slot) or _pool().WORKERS.get(wid) is not slot or slot.proc.is_alive():
             return False
         _pool().WORKERS.pop(wid)
     from supervisor.worker_health import owe_worker_exit
@@ -813,10 +949,14 @@ def retire_or_replace_worker(wid: int, slot: Any) -> str:
     Growth needs a member (an empty pool is stopped); a fence forgets and starts nothing. Serializer held, not Q."""
     with _queue_lock:
         last = len(_pool().WORKERS) == 1 and _pool().WORKERS.get(wid) is slot and not slot.proc.is_alive()
-        fenced = bool(_pool()._WORKER_POOL_DISABLED_REASON)
+        fenced = project_fenced(slot)
     if not last:
         return "retired" if retire_worker(wid, slot) else ""
-    return "replaced" if not fenced and _spawn_worker_slot(wid, slot) else ""
+    try:
+        return ("replaced" if not fenced and is_worker_slot(slot)
+                and _spawn_worker_slot(wid, slot, lane=getattr(slot, "lane", LANE_PROJECT)) else "")
+    except SpawnRefusedInMarkerWindow:
+        return ""  # the window forbids the child; the dead last member stays for the tick after it
 
 
 def request_worker_quiescence(slot: Any) -> None:
@@ -838,7 +978,7 @@ def handle_worker_quiescent(event: dict, ctx: Any) -> None:
         slot = ctx.WORKERS.get(event.get("worker_id"))
         if (slot is not None and slot.busy_task_id is None and worker_ready(slot)
                 and event.get("pid") == _slot_pid(slot)
-                and _births_agree(slot.process_birth, event.get("process_birth"))
+                and _births_agree(slot, event)
                 and event.get("token") == slot.quiescence_token and slot.quiescence_token):
             slot.quiescence_confirmed = True
             # Best-effort dialogue rows it still holds: counted lost only if this slot is retired.
@@ -854,7 +994,7 @@ def retire_quiescent_worker(slot: Any) -> bool:
     from supervisor import queue
 
     with _queue_lock:
-        if (_pool()._WORKER_POOL_DISABLED_REASON or _pool().WORKERS.get(slot.wid) is not slot
+        if (project_fenced(slot) or _pool().WORKERS.get(slot.wid) is not slot
                 or slot.busy_task_id is not None or not worker_ready(slot)):
             return False
         request_worker_quiescence(slot)
@@ -878,8 +1018,8 @@ def _idle_retirement_current(job: dict, slot: Any) -> bool:
         return (str(_pool().DRIVE_ROOT) == job["drive_root"]
                 and _pool().WORKERS.get(slot.wid) is slot and slot.retiring
                 and slot.busy_task_id is None and job["token"] == slot.quiescence_token
-                # A captured storm stop keeps membership stable; its owner tears down.
-                and not _pool()._WORKER_POOL_DISABLED_REASON)
+                # A captured fence stop keeps membership stable; its owner tears down.
+                and not project_fenced(slot))
 
 
 def reap_idle_worker(job: dict) -> None:
@@ -914,7 +1054,8 @@ def reap_idle_worker(job: dict) -> None:
 def reconcile_worker_capacity(residual_demand) -> None:
     """Demand-sized growth; one stable ready spare at quiescence, with no idle timer.
 
-    Forecast uses assignment's chooser under Q. Booting slots can satisfy future
+    Forecast uses assignment's chooser under Q, once; readers get that value
+    (``record_demand_forecast``), never a second run. Booting slots can satisfy future
     demand; exhausted or retiring slots cannot, but all keep charged reservations.
     Parked authors lend theirs only through the durable owner-wait protocol.
 
@@ -924,38 +1065,51 @@ def reconcile_worker_capacity(residual_demand) -> None:
     and frees capacity only on confirmed death; it is intentional, never a crash, and
     there is no idle timer, rotation or setting.
     """
+    from supervisor.conversation_lane import reconcile_conversation_lane
+
+    # The conversation lane first (owner decision 4A): its one reserved spare is
+    # replenished and its awaiting turns dispatched whatever the project fence says.
+    reconcile_conversation_lane()
     with _queue_lock:
         if not _pool().WORKERS or _pool()._WORKER_POOL_DISABLED_REASON:
+            record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
+                                   else "pool_absent")
             return
         demand = residual_demand()
+        record_demand_forecast(demand, reason="assignment_blocked")  # the one forecast growth reads, as computed
         if demand is None or (_pool().repo_writer_admission_closed() and not demand):
             return
-        active = [w for w in _pool().WORKERS.values() if w.active_capacity]
-        busy = any(w.busy_task_id is not None for w in active)
-        wanted = demand if busy or demand else 1
+        active = [w for w in project_slots() if w.active_capacity]
+        # The pool's one quiescent spare is the conversation lane's (4A): project
+        # growth buys only demand, and a pooled task after idle cold-starts.
+        wanted = demand
         idle = [w for w in active if w.busy_task_id is None and worker_ready(w)]
         booting = sum(w.busy_task_id is None and w.booting and not w.retiring
                       and not w.readiness_exhausted for w in active)
         # Only a warm Resume its owner authorized this tick takes lent capacity back.
-        resuming = sum(1 for w in _pool().WORKERS.values()
+        resuming = sum(1 for w in project_slots()
                        if not w.active_capacity and getattr(w, "resume_hold", ""))
         missing = min(max(0, wanted - len(idle) - booting),
                       max(0, _pool().MAX_WORKERS - len(active) - resuming))
+        # An empty table stops growth: a pool whose lane spare is absent keeps its last
+        # idle slot, as it did before the lane existed.
+        keep = wanted if len(_pool().WORKERS) > len(idle) else max(1, wanted)
         # Ask all surplus candidates: a resident with late duties is not the spare.
-        if len(idle) > wanted:
+        if len(idle) > keep:
             for slot in idle:
                 request_worker_quiescence(slot)
             quiet = [w for w in idle if w.quiescence_confirmed]
-            # Preserve an existing spare across staggered completions. Growth
-            # still buys only demand; it never creates this spare during work.
-            for slot in quiet[max(1, wanted):]:
+            # Retire only acknowledged surplus; growth never creates a project spare during work.
+            for slot in quiet[keep:]:
                 retire_quiescent_worker(slot)
         next_id = max(_pool().WORKERS, default=-1) + 1
     for wid in range(next_id, next_id + missing):
-        # Starts run without Q. The serializer excludes Stop/update/storm teardown;
-        # the health owner can still fence a storm while this start is in flight.
+        # Starts run without Q. The serializer excludes Stop/update/exhaustion teardown;
+        # the readiness owner can still fence the pool while this start is in flight.
+        from supervisor.worker_chat_lane import marker_window_closed
+
         with _queue_lock:
-            if (_pool()._WORKER_POOL_DISABLED_REASON
+            if (_pool()._WORKER_POOL_DISABLED_REASON or marker_window_closed()
                     or (_pool().repo_writer_admission_closed() and not residual_demand())):
                 break
         try:
@@ -965,8 +1119,16 @@ def reconcile_worker_capacity(residual_demand) -> None:
             break
 
 
-def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1) -> bool:
-    """Create or replace a slot under the lifecycle serializer, outside queue lock."""
+def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lane: str = LANE_PROJECT) -> bool:
+    """Create or replace a slot under the lifecycle serializer, outside queue lock.
+
+    ``lane`` names the slot's lane; a conversation carrier ignores the project
+    pool's stop fence (its membership is not that fence's)."""
+    from supervisor.worker_chat_lane import marker_window_closed
+
+    if marker_window_closed():  # respawn, replacement and growth alike: the window forbids every child
+        raise SpawnRefusedInMarkerWindow(
+            f"worker {wid} not started: a child started now would import the tree's conflict markers")
     ctx = _pool()._get_ctx()
     in_q = ctx.Queue()
     events_cursor, spawned_at = events_log_cursor(), time.time()
@@ -983,8 +1145,9 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1) -> 
         # Callers refuse a fenced start before it begins, and every fence or slot writer
         # holds this serializer (health only tries it), so this refusal is a backstop.
         if (_pool().WORKERS.get(wid) is old
-                and not _pool()._WORKER_POOL_DISABLED_REASON):
-            fresh = _pool().Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True)
+                and not (_pool()._WORKER_POOL_DISABLED_REASON and lane == LANE_PROJECT)):
+            fresh = _pool().Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True,
+                                   lane=lane)
             _pool().WORKERS[wid] = fresh
             installed = True
     if not installed:
@@ -1020,15 +1183,21 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1) -> 
         target=_pool()._verify_worker_sha_after_spawn,
         args=({wid: fresh}, events_cursor, int(ready_attempt), spawned_at), daemon=True,
     ).start()
-    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide crash storms.
+    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide a dying pool's deaths.
     return True
 
 
 def _worker_pool_execution_state(
     pool: Any = None, *, running: Any = None,
 ) -> Dict[str, Any]:
-    """Queue capacity without the separate repository-writer admission policy."""
-    pool = _pool().WORKERS if pool is None else pool
+    """Queue capacity without the separate repository-writer admission policy.
+
+    Project slots alone count: the conversation lane's carriers are outside
+    ``MAX_WORKERS`` and the exhaustion fence. A table that holds only the lane's
+    spare is a STARTED pool with zero project members (growth buys them on demand).
+    """
+    table = _pool().WORKERS if pool is None else pool
+    pool = {wid: w for wid, w in table.items() if is_project_slot(w)}
     running = _pool().RUNNING if running is None else running
     with _queue_lock:
         disabled_reason = str(_pool()._WORKER_POOL_DISABLED_REASON or "")
@@ -1053,11 +1222,11 @@ def _worker_pool_execution_state(
                 capacity = True
         if not disabled_reason and exhausted and not capacity:
             disabled_reason = "worker_readiness_exhausted"
-    available = worker_count > 0 and not disabled_reason
+    available = len(table) > 0 and not disabled_reason
     return {
         "available": available,
         "reason_code": "" if available else "worker_pool_unavailable",
-        "disabled_reason": disabled_reason or ("no_workers" if not worker_count else ""),
+        "disabled_reason": disabled_reason or ("no_workers" if not table else ""),
         "worker_count": worker_count,
     }
 
@@ -1072,13 +1241,21 @@ def disable_exhausted_worker_pool() -> bool:
         with _queue_lock:
             # A dead/finishing task may still own a saved child result. Its existing
             # completion/reaper must settle that result before pending-only disablement.
-            if (not _pool().WORKERS or _pool().RUNNING or _pool()._worker_pool_execution_state()["disabled_reason"]
+            # The conversation lane's rows are not the project pool's to settle.
+            project_running = any(not conversation_row(meta) for meta in _pool().RUNNING.values())
+            if (not project_slots() or project_running or _pool()._worker_pool_execution_state()["disabled_reason"]
                     != "worker_readiness_exhausted"):
                 return False
         return _pool().kill_workers(
             disable_reason="worker_readiness_exhausted", terminal_status="failed",
             result_reason=("Worker startup attempts were exhausted before this task could run. "
                            "Use /restart to restore the worker pool, then submit the task again."),
+            lanes=frozenset({LANE_PROJECT}),
         )
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
+
+
+def conversation_row(meta: Any) -> bool:
+    """A RUNNING row the conversation lane admitted (its carrier may be awaited, a worker or inline)."""
+    return isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION

@@ -140,6 +140,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "rollback_request": _handled("supervisor.events_runtime_controls", "ouroboros/tools/git_rollback.py"),
     "promote_to_stable": _handled(
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
+    "free_storage": _handled(
+        "supervisor.events_runtime_controls", "ouroboros/tools/control_storage.py",
+        note="the mind's Storage -> Free (owner Q3 = A): the server's one Free owner runs it with the supervisor's probes"),
     "review_late_result": _handled(
         "supervisor.cognitive_operations", "ouroboros/review_custody.py"),
     "schedule_subagent": _handled(
@@ -178,6 +181,24 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/agent_dispatch.py"),
     "task_focus_updated": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/project_journal.py"),
+    # --- the conversation lane's carrier frames (a carrier's start facts, bound facts and title) --
+    "direct_turn_phase": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier's start phase lands on its RUNNING row for the census"),
+    "direct_turn_bound": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="the Project basis the carrier bound lands on its RUNNING row (snapshot, park, restore)"),
+    "task_named": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),
+    # --- a Host-admitted Presence turn's body in a carrier: its envelope and its settlement --
+    "presence_turn_initial": _handled(
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="a continuing author's initial envelope resolves the Host's initial future (a lazy wrapper: the "
+             "dispatcher never imports Presence at module level)"),
+    "presence_turn_settled": _handled(
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="the body's result or error by value resolves the Host's future and frees the row (lazy wrapper)"),
     "task_done": _handled(
         "supervisor.events_task_done", "ouroboros/agent_task_pipeline.py",
         "supervisor/queue.py", "supervisor/task_reaper.py", "supervisor/worker_health.py", idle_input=True),
@@ -198,11 +219,21 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "ui_i18n_updated": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/control_ui_translation.py",
         note="the memory file is already written; the host broadcasts the same-named frame to its windows"),
+    "mcp_signed_in": _handled(
+        "supervisor.events_worker_reports", "ouroboros/tools/mcp_sign_in.py",
+        note="the sign-in file is already written; the host lists that server again, as only it publishes catalogs"),
+    "update_progress_changed": _handled(
+        "supervisor.events_worker_reports", "ouroboros/tools/control_update_description.py",
+        note="the update description is already saved; the host broadcasts the same-named frame to its windows"),
 
     # --- telemetry_only: recorded in the ledger, no runtime action follows -----
     "plan_task_deadline_skip": _telemetry(
         "ouroboros/tools/plan_review_runtime.py",
-        note="the fact that a deadline left no useful planning window"),
+        note="the fact that a spent deadline (less the finalization reserve) left a plan ask no dispatch"),
+    "presence_result": _telemetry(
+        "ouroboros/presence_runner.py",
+        note="a pooled Presence-bound root's result frame: its own handler records ids and sizes only, because "
+             "the words stay on the task result; an inline turn reads its copy in process, before any bus"),
     "quiz_answer_injected": _telemetry(
         "ouroboros/owner_mailbox.py"),
     "review_density_probe": _telemetry(

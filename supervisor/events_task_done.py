@@ -20,7 +20,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-from ouroboros.task_finalization import quiet_finish, send_provider_death_notice
+from ouroboros.task_finalization import quiet_finish, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -111,6 +111,8 @@ def _completed_lifecycle_display(
     phase = outcome_phase(record, task_done_event)
     if phase == "error":
         return "❌", "finished with a failed outcome"
+    if phase == "cancelled":
+        return "⏹", "stopped"
     if _finished_with_warnings(task_done_event, record):
         return "⚠️", "finished with warnings"
     return None
@@ -391,6 +393,13 @@ def _finish_task_done_dispatch(
     from ouroboros.post_task_checkpoint import settle_terminal_projection
     from ouroboros.project_dialogue import append_terminal_task_projection
 
+    try:  # the durable terminal is established: its own clock settles whatever delivery does next
+        from supervisor.consciousness_carriers import finish_pooled_wake
+
+        finish_pooled_wake(ctx, str(task_id or ""), final_task_result, {"metadata": evt.get("metadata"), **task})
+    except Exception:
+        log.warning("Own-clock settlement failed for %s", task_id, exc_info=True)
+
     # This seam is shared by the normal task_done path AND the lifecycle-fault
     # resolver, so open owner-quiz/hurry projections settle on EVERY dispatched
     # terminal transition (ingress lazy-heal covers producers that bypass it,
@@ -423,7 +432,7 @@ def _finish_task_done_dispatch(
             or load_task_result(ctx.DRIVE_ROOT, str(task_id or ""))
             or {}
         )
-        from supervisor.subagent_task_truth import enrich_task_done_event
+        from supervisor.subagent_task_truth import enrich_task_done_event, terminal_executor_route
 
         _envelope = enrich_task_done_event(task_done_event, effective_result)
         # Membership, not truthiness (C4): chat 0 real, negative A2A.
@@ -504,7 +513,7 @@ def _finish_task_done_dispatch(
                 # The terminal frame carries the route so the finished card's chip can be
                 # rebuilt on replay, and the completion-seam EVIDENCE (below) so the chip
                 # upgrades from the neutral "dispatched" decision to what actually ran.
-                "executor_route": str(effective_result.get("executor_route") or ""),
+                "executor_route": terminal_executor_route(effective_result),
                 # The effort decision survives the terminal card and its replay (empty = unknown).
                 "effort_level": str(effective_result.get("effort_level") or ""),
                 "effort_requested": str(effective_result.get("effort_requested") or ""),
@@ -532,8 +541,12 @@ def _finish_task_done_dispatch(
 
     from ouroboros.obligations import drive_finished
     drive_finished(ctx.DRIVE_ROOT, {**task, "id": task_id}, final_task_result)
+    from ouroboros.model_wait import record_execution_close
+    from ouroboros.task_status import SETTLED_STATUSES
     from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
 
+    if task_id and task_done_event.get("status") in SETTLED_STATUSES:  # #939: close its clock before the release
+        record_execution_close(ctx.DRIVE_ROOT, str(task_id), task, ctx.RUNNING.get(str(task_id)))
     with _queue_lock:
         if task_id:
             ctx.RUNNING.pop(str(task_id), None)
@@ -557,6 +570,9 @@ def _finish_task_done_dispatch(
             if not getattr(ctx.WORKERS[worker_id], "reaping", False):
                 ctx.WORKERS[worker_id].busy_task_id = None
     if task_id:
+        from ouroboros.presence_carrier import settle_ended_turn
+
+        settle_ended_turn(str(task_id))  # the row is released: a Host waiter its carrier never settled settles now
         try:
             clear_acceptance_fence_for_root(str(task_id))
         except Exception:
@@ -583,12 +599,14 @@ def _finish_task_done_dispatch(
             log.warning("Failed to release budget root fence for %s", task_id, exc_info=True)
         if tree_root:
             try:
-                from supervisor.owner_pause_control import refresh_owner_pause_tree
+                from supervisor.owner_pause_control import mark_tree_changed, refresh_owner_pause_tree
 
                 # A member that finished while its tree was pausing may be the
                 # last one the owner's Pause was waiting for — or the last writer
                 # an owner's Continue of that tree was held behind. The root's own
                 # terminal counts too: its late phase ended, or the Pause ended it.
+                # What it left running has no transition of its own: the pass looks.
+                mark_tree_changed(tree_root)
                 refresh_owner_pause_tree(tree_root)
                 from supervisor.continuation_admission import release_settled_continuations
 
@@ -691,6 +709,11 @@ def _resolve_lifecycle_fault(
             task_row = dict(meta["task"])
     except Exception:
         task_row = {}
+    # A missing or unstarted result keeps what the host still knows of this attempt, for every reader.
+    owner = task_row.get("_execution_owner") if isinstance(task_row.get("_execution_owner"), dict) else {}
+    identity = task_row.get("metadata") or evt.get("metadata")
+    known = {"metadata": identity if isinstance(identity, dict) else None, "execution_owner": owner,
+             "task_attempt": owner.get("task_attempt")}
     # GR4-3: the synthetic terminal fires the SAME assisted-update hooks the
     # normal task_done path reaches — an orphaned managed-update transaction or
     # a held assisted writer gate would otherwise survive a lifecycle-fault
@@ -730,6 +753,7 @@ def _resolve_lifecycle_fault(
             return {
                 "status": status, "reason_code": "task_done_lifecycle_fault", "outcome_axes": axes,
                 **({"result": detail} if not current.get("result") else {}),
+                **{key: value for key, value in known.items() if value and not current.get(key)},
             }
 
         write_task_result(
@@ -778,7 +802,7 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "schedule_name") if stored.get(key)},
+        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
@@ -962,8 +986,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             _events()._resolve_lifecycle_fault(evt, ctx, _evt_status)
             return
     recovery = meta.get("_terminal_file_recovery") or {}
-    from ouroboros.task_carrier import inline_execution
-    if task and not (inline_execution(task) or _evt_status == STATUS_INTERRUPTED):
+    from ouroboros.task_carrier import conversation_origin
+    if task and not (conversation_origin(task) or _evt_status == STATUS_INTERRUPTED):  # a turn owes no files
         if prepared_attempt is None or (recovery and not recovery.get("event_sent")):
             from supervisor.task_reaper import enqueue_terminal_file_recovery
 
@@ -1047,7 +1071,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "schedule_name") if known_result.get(key)},
+        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable
@@ -1061,8 +1085,6 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "artifact_status": artifact_status,
         **terminal_cost,
     }
-    from supervisor.consciousness_carriers import finish_pooled_wake
-    finish_pooled_wake(ctx, task_id, final_task_result)
     if str(evt.get("typed_routing_action") or "").strip():
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     if isinstance(artifact_bundle, dict):

@@ -19,6 +19,9 @@ def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **par
     metadata = getattr(ctx, "task_metadata", {}) or {}
     owner = (bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]
              and metadata.get("wake_cause") != "focus" and metadata.get("initiator") != "consciousness")
+    if action == "add_note":  # an act is ordered by the turn; a text is signed by whoever composed it
+        from ouroboros.owner_words import owner_words_contain
+        owner = owner and owner_words_contain(ctx, params.get("text"))
     author = AUTHOR_OWNER if owner else AUTHOR_OUROBOROS
     try:
         if action == "list":
@@ -66,7 +69,9 @@ def get_tools() -> list[ToolEntry]:
         "name": "configure_presence",
         "description": "Inspect places and their connector choices; edit state, wakes, notes, folder or model. "
                        "Only your human switches a place to Active, on its sheet or by a word in Main; propose it there. "
-                       "Only an owner-door turn may confirm an owner account. A folder is an address, not a fence. "
+                       "Only an owner-door turn may confirm an owner account. A note is your human's only in such a "
+                       "turn and only when its whole text is their exact words that reached this run; any other note is yours. "
+                       "A folder is an address, not a fence. "
                        "Connect starts Silent using the installed connector's declaration; disconnect keeps room history.",
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["list", "inspect", "connect", "disconnect", "set_state",
@@ -88,9 +93,10 @@ def get_tools() -> list[ToolEntry]:
                 "name": "presence_cancel_work",
                 "description": (
                     "Request cancellation of independent work started from this "
-                    "place, in this or another of its conversations (or of this turn's own "
-                    "children). The result is a request receipt, not proof the work stopped; "
-                    "work of another place or the owner's own tasks is refused."
+                    "place, in this or another of its conversations, of the owner's work begun "
+                    "by answering one of its questions, or of this turn's own children. The result "
+                    "is a request receipt, not proof the work stopped; work of another place or "
+                    "the owner's other tasks is refused."
                 ),
                 "parameters": {
                     "type": "object",

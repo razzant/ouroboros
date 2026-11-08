@@ -330,7 +330,13 @@ def test_project_question_pointer_display_fields_share_one_contract():
              "materials": [{"task_id": "t", "name": "brief.md", "label": "brief.md"}]}
     pointer = project_question_pointer({"task_id": "t", "quiz_id": "q"}, block,
                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
-    assert browser_fields <= set(pointer), sorted(browser_fields - set(pointer))
+    # Secret metadata is optional on ordinary questions, but must survive the same producer.
+    assert browser_fields - {"secret_request"} <= set(pointer), sorted(browser_fields - set(pointer) - {"secret_request"})
+    secret_request = {"plugin_name": "telegram", "fields": [{"id": "botToken", "setting_key": "TELEGRAM_BOT_TOKEN"}]}
+    protected = project_question_pointer({"task_id": "t", "quiz_id": "q"},
+                                        {**block, "options": [], "secret_request": secret_request},
+                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
+    assert protected["secret_request"] == secret_request
     assert pointer["option_details"] == ["A detail", ""] and pointer["stake"] == "What rides on it"
     assert pointer["host_facts"] == "Asked by task t, origin unknown."
     assert pointer["materials"] == block["materials"]
@@ -411,7 +417,6 @@ def test_readable_question_detail_carries_no_unavailable_flag(tmp_path, monkeypa
     assert "required_question_unavailable" not in rows[0]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("project_bound", [False, True])
 @pytest.mark.parametrize("registry_unavailable", [False, True])
 def test_census_wait_facts_survive_optional_project_detail_and_resume(
@@ -440,7 +445,6 @@ def test_census_wait_facts_survive_optional_project_detail_and_resume(
     assert resumed["owner_wait_state"] == "resumed" and resumed["quiz_state"] == "answered"
 
 
-@pytest.mark.serial
 def test_census_does_not_turn_a_non_quiz_wait_into_an_owner_question(tmp_path, monkeypatch):
     gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, chat_id=1)
     write_task_result(tmp_path, "t1", STATUS_RUNNING, owner_wait={"state": "waiting", "wake_at": "later"})

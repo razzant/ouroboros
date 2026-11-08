@@ -85,6 +85,7 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     answer, _, _ = f.run([
         call("read_file", {"path": "evidence.txt"}, "read"),
         call("compact_context", {"working_note": "I retained the trailing conclusion.", "keep_unit_ids": []}, "compact"),
+        call("read_file", {"path": "evidence.txt"}, "reread"),
         {"content": "done"},
     ])
     assert answer == "done"
@@ -100,10 +101,15 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     assert any(m.get("tool_call_id") == "compact" for m in after)
     assert "I retained the trailing conclusion." in str(after)
     assert "[Context view receipt]" in str(after)
+    # The same read after the fold, on the same context, returns the view the first
+    # call returned; nothing claims the folded text is still in view.
+    first = next(m["content"] for m in before if m.get("tool_call_id") == "read")
+    latest = f.inputs[-1]["messages"]
+    assert not any(m.get("tool_call_id") == "read" for m in latest)
+    assert next(m["content"] for m in latest if m.get("tool_call_id") == "reread") == first
 
 
-@pytest.mark.parametrize("role", ["root", "subagent"])
-@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+@pytest.mark.parametrize(("mode", "role"), [("nano", "root"), ("low", "subagent"), ("max", "root")])
 def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, tmp_path, monkeypatch, role, mode):
     """Mode-specific context assembly, then shared-loop delivery; not model adherence."""
     from ouroboros import context

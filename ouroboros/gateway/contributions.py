@@ -168,5 +168,6 @@ class UiPreferencesResponse(TypedDict):
     project_panel_width: int  # px; 0 = CSS default
     project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project
     main_seen_revision: Optional[int]  # Main's monotonic paint ACK; null until a client first sets it
+    read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
 

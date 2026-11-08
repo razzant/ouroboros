@@ -959,6 +959,8 @@ class LocalChatBridge:
         materials = list(block.get("materials") or [])
         if block.get("presence_contact"):
             lifecycle["presence_contact"] = block["presence_contact"]
+        if isinstance(block.get("secret_request"), dict):  # metadata only: its form is the app's own
+            lifecycle["secret_request"] = dict(block["secret_request"])
         ts = utc_now_iso()
         msg = {
             "type": "quiz",
@@ -1010,7 +1012,8 @@ class LocalChatBridge:
         )
         if stored:
             from ouroboros.chat_references import projection_fields
-            msg.update(projection_fields(stored))
+            from ouroboros.room_appearances import frame_rooms  # a private contact's question: its Project's too
+            msg.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
             from ouroboros.owner_quiz import mark_published
             mark_published(DATA_DIR, str(task_id), qid)
             # The durable ask now exists. Expose its settled delivery fact, not
@@ -1021,13 +1024,16 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         quiz_transport = self.chat_transport(chat_id)
+        from ouroboros.secret_requests import transport_hint
+
         publish_event(CHAT_QUIZ, {
             "chat_id": int(chat_id or 0),
             "transport": quiz_transport,
             "wait_for_answer": bool(wait_for_answer),
             "quiz_id": qid,
             "task_id": str(task_id or ""),
-            "question": payload["question"],
+            # A secret request reaches a transport as where to enter it, never as a card it could answer.
+            "question": transport_hint(lifecycle["secret_request"]) if "secret_request" in lifecycle else payload["question"],
             "options": payload["options"],
             "stake": payload["stake"],
             "assumption": payload["assumption"],
@@ -1058,7 +1064,8 @@ class LocalChatBridge:
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
                     for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
                                 "answered_index", "comment", "wait_for_answer", "wait_ended_at",
-                                "owner_wait_resume_reason", "host_facts", "materials", "closed_reason", "question_delivery"):
+                                "owner_wait_resume_reason", "host_facts", "materials", "closed_reason", "question_delivery",
+                                "secret_request", "secret_outcome", "secret_save"):
                         if key in pointer:
                             frame[key] = pointer[key]
                     frame.update(projection_fields(stored))
@@ -1084,6 +1091,7 @@ class LocalChatBridge:
         closed_request_id: Optional[str] = None,
         closed_by_task_id: Optional[str] = None,
         question_delivery: Optional[Dict[str, str]] = None,
+        secret_outcome: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Broadcast a quiz lifecycle update to already-rendered cards.
 
@@ -1114,6 +1122,8 @@ class LocalChatBridge:
             msg["closed_by_task_id"] = str(closed_by_task_id)
         if question_delivery:
             msg["question_delivery"] = dict(question_delivery)
+        if isinstance(secret_outcome, dict) and secret_outcome:
+            msg["secret_outcome"] = dict(secret_outcome)  # metadata only: no value exists here
         if answered_index is not None:
             msg["answered_index"] = int(answered_index)
         if str(comment or ""):
@@ -1289,7 +1299,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      narration: Optional[bool] = None,
                      require_write: bool = False,
                      ensure_record_boundary: bool = False,
-                     replay_delivery_id: str = "") -> Optional[bool]:
+                     replay_delivery_id: str = "") -> Dict[str, Any] | bool:
     """Send an owner-visible row with one voice and timestamp for history and live.
 
     Narration True means model speech, False host speech; absent legacy rows keep
@@ -1299,6 +1309,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     in the existing outbox and also requires a positive transport receipt. A
     required notice without one has one owner, its producer, which retries or
     records a failed write: it keeps the caller's wait and raises when unwritten.
+    Return the selected destination so delivery receipts and mailbox handoffs
+    retain this send's room even if task placement changes around the send.
     Replay records dispatch only after those writes, before transport; False
     means its outbox debt no longer permits sending. First live sends are unchanged.
     """
@@ -1354,7 +1366,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                 record_narration(DATA_DIR, progress_record)
                 meta.update(projection_fields(progress_record))
         else:
-            feed = _text.strip() not in ("", "\u200b") and not is_task_card_message(progress_meta)
+            # A started or handed-over Project's row in Main is drawn as that work's portal (work_portal.js ``row``), a
+            # card and no message: it never makes Main unread (DESIGN "Unread": where a row is shown decides).
+            portal = chat_id == 1 and system_type in ("project_started", "project_handoff") and bool(
+                task_id and meta.get("project_id"))
+            feed = _text.strip() not in ("", "\u200b") and not is_task_card_message(progress_meta) and not portal
             stored = log_chat(
                 # S3 (Q4): a typed SYSTEM row persists as direction="system", the
                 # role history replay already maps to a system rendering — so the
@@ -1375,9 +1391,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             )
 
         if not is_progress and stored:
-            meta.update(projection_fields(stored))
+            from ouroboros.room_appearances import frame_project, frame_rooms
+            rooms = frame_rooms(DATA_DIR, stored)
+            meta.update(projection_fields(stored), **rooms, **frame_project(DATA_DIR, stored, rooms.get("also_rooms", [])))
         if _text.strip() in ("", "\u200b"):
-            return
+            return {"chat_id": chat_id}
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
 
@@ -1398,3 +1416,4 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     raise MessageTransportError(f"message transport refused: {err}")
         except Exception as exc:
             raise MessageTransportError(str(exc)) from exc
+        return {"chat_id": chat_id}

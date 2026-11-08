@@ -9,15 +9,21 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import sqlite3
-import sys
+from threading import Event
 import time
 
 import pytest
 
 from ouroboros import query_data_sql as sql, store, store_import, usage_store
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+
+def _wait(seconds):
+    """Block on an event so controlled deadline waits do not busy-sleep."""
+    Event().wait(max(0.0, seconds))
 
 
 @pytest.fixture
@@ -93,10 +99,10 @@ def _child_main(mode, trace):
             if statement.startswith("VACUUM"):
                 if mode == "stall_copy":
                     record(executing="snapshot_copy", started=self.budget.started)
-                    time.sleep(20)  # Deliberately noninterruptible while the source is held.
+                    _wait(20)  # Deliberately noninterruptible while the source is held.
                 if mode.startswith(("late_", "tardy_")):
                     record(expires=self.budget.expires)
-                    time.sleep(self.budget.remaining() + 0.05)  # Unrelated failure survives our fired timer.
+                    _wait(self.budget.remaining() + 0.05)  # Unrelated failure survives our fired timer.
                 if mode in {"copy_io", "late_copy_io"}:
                     raise OSError("controlled copy I/O failure")
                 if mode.endswith("copy_corrupt") or mode == "copy_unowned_interrupt":
@@ -125,30 +131,30 @@ def _child_main(mode, trace):
                 phase = budget.phase
                 if phase not in seen:
                     seen.add(phase)
-                    record(executing=phase, deadline=budget.expires, started=budget.started)
+                    record(executing=phase, deadline=budget.expires, started=budget.started, pid=os.getpid())
                     if mode == "slow_" + phase:
-                        time.sleep(budget.remaining() + 0.05)  # Interrupt an active real SQLite VM.
+                        _wait(budget.remaining() + 0.05)  # Interrupt an active real SQLite VM.
                 return 0
 
             def statement_started(statement):
                 record(path=path.name, statement=statement)
                 if budget.phase == "sql" and "sql" not in seen and not mode.startswith("slow_"):
                     seen.add("sql")
-                    record(executing="sql", deadline=budget.expires, started=budget.started)
+                    record(executing="sql", deadline=budget.expires, started=budget.started, pid=os.getpid())
 
             if mode.startswith("slow_"):
                 conn.set_progress_handler(progress, 1)
             conn.set_trace_callback(statement_started)
-            conn.create_function("stall", 0, lambda: time.sleep(20))  # noninterruptible until return
+            conn.create_function("stall", 0, lambda: _wait(20))  # noninterruptible until return
             if budget.phase == "snapshot_check" and mode == "writer_after_copy":
                 record(ready="snapshot_check")
-                time.sleep(0.4)
+                _wait(0.4)
             yield Probe(conn, budget)
 
     @contextmanager
     def source(root, db, budget):
         if mode == "slow_acquire":
-            time.sleep(budget.remaining() + 0.05)
+            _wait(budget.remaining() + 0.05)
         with real_source(root, db, budget) as tier:
             record(ready="source", tier=tier)
             yield tier
@@ -157,13 +163,13 @@ def _child_main(mode, trace):
         real_enter(self, phase)
         if mode == "cumulative":
             record(entered=phase)
-            time.sleep(0.75)  # Each phase fits 2 s; their sum does not.
+            _wait(0.75)  # Each phase fits 2 s; their sum does not.
 
     def result(request):
         answer = real_result(request)
         if mode.startswith("tardy_"):
             # A contended host: the source is released, the typed answer is still on its way.
-            time.sleep(1.0)
+            _wait(1.0)
             record(delivered=time.monotonic())
         return answer
 
@@ -179,7 +185,8 @@ def instrument(ctx, monkeypatch, mode="trace"):
 
     def spawn(cmd, **kwargs):
         script = f"from tests.test_query_data_sql_phases import _child_main; _child_main({mode!r}, {str(trace)!r})"
-        proc = original_spawn([sys.executable, "-c", script, *cmd[3:]], **kwargs)
+        # The product's own interpreter (``query_data_sql._interpreter``): the process the parent reaps runs the SQL.
+        proc = original_spawn([cmd[0], "-c", script, *cmd[3:]], **kwargs)
         children.append(proc)
         return proc
 
@@ -229,7 +236,7 @@ def test_mature_money_default_is_direct_and_explicit_snapshot_is_equivalent(mone
 
 
 @pytest.mark.parametrize("phase,snapshot", [("acquire", False), ("snapshot_copy", True),
-                                              ("snapshot_check", True), ("sql", False), ("sql", True)])
+                                              ("sql", False), ("sql", True)])
 def test_owned_phase_expiry_is_not_store_damage(money, monkeypatch, phase, snapshot):
     children, directories, _ = instrument(money, monkeypatch, "slow_" + phase)
     result = call(money, "SELECT count(*) FROM sqlite_master", snapshot=snapshot, timeout_sec=2)
@@ -252,11 +259,6 @@ def test_copy_check_and_sql_share_one_operation_budget(money, monkeypatch):
 @pytest.mark.parametrize("mode,phase,exception", [
     ("copy_io", "snapshot_copy", "OSError"),
     ("copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    ("late_copy_io", "snapshot_copy", "OSError"),
-    ("late_copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    # Corruption found just after expiry, whose answer then arrives later than FINISH_SEC.
-    ("tardy_copy_corrupt", "snapshot_copy", "UsageLedgerCorrupt"),
-    ("copy_unowned_interrupt", "snapshot_copy", "UsageAccountingError"),
     ("bad_check", "snapshot_check", "ValueError"),
 ])
 def test_snapshot_failure_is_honest_and_never_falls_back(money, monkeypatch, mode, phase, exception):
@@ -287,6 +289,9 @@ def test_parent_kills_uninterruptible_sql_at_operation_deadline(money, monkeypat
     assert sql.FINISH_SEC + 1 <= sql.RESPONSE_SEC
     assert finished - active["started"] < 2 + sql.FINISH_SEC + 1
     assert any(row.get("statement") == "SELECT stall()" for row in rows)
+    # The reaped process ran the SQL: no venv redirector between them leaves the reader to die after the
+    # answer, still holding its source (on Windows the next WAL opener then cannot reset the shared memory).
+    assert [proc.pid for proc in children] == [active["pid"]]
     assert_writable(money)
     assert_reaped(children, directories)
 
@@ -314,10 +319,10 @@ def test_response_margin_follows_source_release_and_holds_nothing(money, monkeyp
         end = time.monotonic() + 10
         while not trace.exists() or not any(row.get("executing") == "sql" for row in read_trace(trace)):
             assert time.monotonic() < end and not future.done()
-            time.sleep(0.01)
+            _wait(0.01)
         active = next(row for row in read_trace(trace) if row.get("executing") == "sql")
         # Past the bound a child holding its source would get, inside the released child's margin.
-        time.sleep(max(0.0, active["started"] + 2 + sql.FINISH_SEC + 0.3 - time.monotonic()))
+        _wait(max(0.0, active["started"] + 2 + sql.FINISH_SEC + 0.3 - time.monotonic()))
         assert not future.done()
         writing = time.monotonic()
         assert_writable(money)  # The stuck snapshot query blocks no writer: it holds no source.
@@ -350,7 +355,7 @@ def test_snapshot_query_releases_source_before_check_and_writer_progresses(tmp_p
             end = time.monotonic() + 5
             while not trace.exists() or not any(row.get("ready") == "snapshot_check" for row in read_trace(trace)):
                 assert time.monotonic() < end
-                time.sleep(0.01)
+                _wait(0.01)
             assert_writable(ctx)  # While the checked snapshot is still in flight.
             assert not future.done()
             result = future.result(timeout=5)

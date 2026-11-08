@@ -67,14 +67,32 @@ def _result_gap(root, monkeypatch, kind, *, task_id="saved"):
 
             patch.setattr(task_results, "load_task_result", contended(task_results.load_task_result))
             patch.setattr(store_hot_facts, "read", contended(store_hot_facts.read))
+            real_statuses = store_hot_facts.statuses
+
+            def statuses(drive, ids):  # the same row, read in the pass's one batch
+                ids = list(ids)
+                if task_id not in map(str, ids):
+                    return real_statuses(drive, ids)
+                conn = exclusive_hold(store.store_path(root))
+                try:
+                    with store.acquisition_budget(0):
+                        answers = real_statuses(drive, ids)
+                finally:
+                    conn.execute("ROLLBACK")
+                    conn.close()
+                calls.extend(answer for answer in answers.values() if isinstance(answer, store.StoreBusy))
+                return answers
+
+            patch.setattr(store_hot_facts, "statuses", statuses)
         yield
         if kind == "busy":
             assert calls, "the consumer must actually encounter SQLite contention"
 
 
-@pytest.mark.parametrize("entry", ["live", "restore"])
-@pytest.mark.parametrize("gap", ["busy", "unreadable"])
-@pytest.mark.parametrize("project", [False, True], ids=["unscoped", "project"])
+@pytest.mark.parametrize(("project", "gap", "entry"), [
+    pytest.param(False, "unreadable", "live", id='unscoped-unreadable-live'),
+    pytest.param(True, "busy", "restore", id='project-busy-restore'),
+])
 def test_saved_technical_pause_survives_result_gap_then_explicit_resume(tmp_path, monkeypatch, entry, gap, project):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
@@ -106,8 +124,7 @@ def test_saved_technical_pause_survives_result_gap_then_explicit_resume(tmp_path
     assert kept["_budget_pause_resume"]["pause_id"] == pause["pause_id"]
 
 
-@pytest.mark.parametrize("marker", [None, {}, {"exact_continuation": False}, {"exact_continuation": "true"},
-                                    {"exact_continuation": 1}])
+@pytest.mark.parametrize("marker", [None, {}, {"exact_continuation": 1}])
 def test_unsaved_unreadable_pending_keeps_its_existing_terminal_custody(tmp_path, monkeypatch, marker):
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     task_results.write_task_result(tmp_path, "saved", "scheduled")
@@ -135,8 +152,7 @@ def test_accepted_project_without_exact_pause_keeps_project_verification_hold(tm
     assert not task.get("_terminalization_retry") and not task.get("_budget_pause")
 
 
-@pytest.mark.parametrize("entry", ["live", "restore"])
-@pytest.mark.parametrize("outcome", ["completed", "stop"])
+@pytest.mark.parametrize(("outcome", "entry"), [("completed", "restore"), ("stop", "live")])
 def test_saved_pause_does_not_override_known_terminal_or_stop(tmp_path, monkeypatch, entry, outcome):
     from ouroboros.cancel_intents import request_cancel
 

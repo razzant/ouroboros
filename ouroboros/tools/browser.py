@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import contextvars
 import dataclasses
@@ -11,11 +12,11 @@ import json
 import logging
 import os
 import pathlib
-import re
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Callable, Dict, List, Tuple
 
 try:
     from playwright_stealth import Stealth
@@ -23,8 +24,7 @@ try:
 except ImportError:
     _HAS_STEALTH = False
 
-from ouroboros import browser_policy
-from ouroboros.tool_access import active_tool_profile
+from ouroboros import browser_policy, chromium_runtime
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import (
     LegacyTextResultAdapter, ToolResult, _compose_execute_result, _publish_tool_result,
@@ -36,7 +36,6 @@ log = logging.getLogger(__name__)
 _playwright_ready = False
 _playwright_ready_engines: set[tuple[str, str]] = set()
 _playwright_browsers_path_managed = False
-_MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 _SUPPORTED_BROWSER_ENGINES = frozenset({"chromium", "webkit"})
 
 
@@ -77,15 +76,7 @@ def _bound_browser_call(fn):
     return bound
 
 
-def _runtime_mode_for_browser(ctx: Any) -> str:
-    """Read the effective mode for owner-control browser operations."""
-    try:
-        from ouroboros.config import get_runtime_mode
-        from ouroboros.consciousness_authority import effective_runtime_mode
-
-        return effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
-    except Exception:
-        return "advanced"
+_runtime_mode_for_browser = browser_policy.browser_runtime_mode  # one owner for every browser surface
 
 
 def _normalize_browser_engine(engine: str = "") -> str:
@@ -101,7 +92,8 @@ from ouroboros.tools.core import is_restricted_subagent_profile as _readonly_sub
 
 
 def _has_platform_browser(local_browsers_dir: pathlib.Path, engine: str = "chromium") -> bool:
-    """Return True when a platform-matching bundled browser executable exists."""
+    """Return True when this root holds a usable browser: WebKit for this platform, or the
+    exact pinned Chromium (never Playwright's own Chromium build)."""
     engine = _normalize_browser_engine(engine)
     if not local_browsers_dir.is_dir():
         return False
@@ -120,39 +112,10 @@ def _has_platform_browser(local_browsers_dir: pathlib.Path, engine: str = "chrom
                 if any(candidate.is_file() for candidate in webkit_dir.rglob(executable_name)):
                     return True
         return False
-    plat = sys.platform
-    if plat == "darwin":
-        candidates = ["chrome-mac", "chrome-headless-shell-mac"]
-    elif plat.startswith("win"):
-        candidates = ["chrome-win", "chrome-headless-shell-win"]
-    else:
-        candidates = ["chrome-linux", "chrome-headless-shell-linux"]
-    for chromium_dir in local_browsers_dir.iterdir():
-        if not (
-            chromium_dir.name.startswith("chromium-")
-            or chromium_dir.name.startswith("chromium_headless_shell-")
-        ):
-            continue
-        for sub in chromium_dir.iterdir():
-            if not any(sub.name.startswith(c) for c in candidates):
-                continue
-            # Avoid treating partial downloads as usable browser bundles.
-            if (
-                (plat == "darwin" and (
-                    (sub / "Chromium.app" / "Contents" / "MacOS" / "Chromium").exists()
-                    or (sub / "chrome-headless-shell").exists()
-                ))
-                or (plat.startswith("win") and (
-                    (sub / "chrome.exe").exists()
-                    or (sub / "chrome-headless-shell.exe").exists()
-                ))
-                or (not plat.startswith(("darwin", "win")) and (
-                    (sub / "chrome").exists()
-                    or (sub / "chrome-headless-shell").exists()
-                ))
-            ):
-                return True
-    return False
+    try:
+        return chromium_runtime.installed_executable(local_browsers_dir, chromium_runtime.host_pin()) is not None
+    except chromium_runtime.ChromiumRefusal:
+        return False
 
 
 def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
@@ -191,7 +154,9 @@ _set_playwright_browsers_path_if_bundled()
 
 
 def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: bool = True):
-    """Install Playwright and the requested browser engine if not already available."""
+    """Install Playwright and make the engine launchable: Chromium returns the pinned
+    headless shell's executable path (``_pinned_chromium``); WebKit stays Playwright's
+    own build and returns None."""
     global _playwright_browsers_path_managed, _playwright_ready
     engine = _normalize_browser_engine(engine)
 
@@ -208,8 +173,11 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         log.info("Playwright not found, installing...")
         from ouroboros.platform_layer import pip_install_target_args
 
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                               *pip_install_target_args(sys.executable), "playwright"])
+        _install_beside_calls("playwright-package", "the Playwright package", lambda _progress: subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", *pip_install_target_args(sys.executable), "playwright"]))
+
+    if engine == "chromium":
+        return _pinned_chromium(allow_install=allow_install)
 
     current_browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if not (current_browser_path and current_browser_path != "0" and not _playwright_browsers_path_managed):
@@ -225,9 +193,9 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
             _playwright_browsers_path_managed = True
         elif current_browser_path == "0" or _playwright_browsers_path_managed:
-            data_dir = pathlib.Path(
-                os.environ.get("OUROBOROS_DATA_DIR") or pathlib.Path.home() / "Ouroboros" / "data"
-            )
+            from ouroboros.config import resolve_data_dir
+
+            data_dir = resolve_data_dir()  # the configured data root, APP_ROOT's when only it is set
             target = data_dir / "playwright-browsers"
             if target.exists() and _has_platform_browser(target, engine):
                 target_str = str(target)
@@ -249,6 +217,7 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
     key = (engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""))
     if _playwright_ready and key in _playwright_ready_engines:
         return
+    install_key = ":".join(key)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -262,7 +231,7 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
                 local_browsers = None
             if local_browsers is None or not _has_platform_browser(local_browsers, engine):
                 raise RuntimeError(f"bundled Playwright {engine} is missing")
-        elif not executable_path.exists():
+        elif not executable_path.exists() or install_key in _installs:  # still being installed: join it
             raise RuntimeError(f"Playwright {engine} binary not found at {executable_path}")
         log.info("Playwright %s binary found", engine)
     except Exception:
@@ -270,97 +239,224 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
             raise RuntimeError(
                 f"Browser tools are unavailable in local_readonly_subagent mode because {engine} is not already installed."
             )
-        if not getattr(sys, "frozen", False):
-            install_python = sys.executable
-        else:
-            install_python = ""
-            try:
-                from ouroboros.platform_layer import embedded_python_candidates
-                bases: list[pathlib.Path] = []
-                frozen_base = getattr(sys, "_MEIPASS", None)
-                if frozen_base:
-                    bases.append(pathlib.Path(frozen_base))
-                exe_parent = pathlib.Path(sys.executable).resolve().parent
-                bases.extend([exe_parent, exe_parent.parent])
-                for base in bases:
-                    for candidate in embedded_python_candidates(base):
-                        if candidate.exists():
-                            install_python = str(candidate)
-                            break
-                    if install_python:
-                        break
-            except Exception:
-                install_python = ""
-            if not install_python:
-                raise RuntimeError(
-                    "Playwright browser install requires the embedded python-standalone interpreter, "
-                    "but it was not found in this packaged app."
-                )
-        log.info("Installing Playwright %s dependencies and binary...", engine)
-        try:
-            subprocess.check_call([install_python, "-m", "playwright", "install-deps", engine])
-        except Exception as exc:
-            log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
-        subprocess.check_call([install_python, "-m", "playwright", "install", engine])
+        install_python = _playwright_python()
+
+        def install(_progress: Dict[str, Any]) -> None:  # Playwright's own installer locks its browsers root
+            log.info("Installing Playwright %s dependencies and binary...", engine)
+            _repair_host_dependencies(engine, install_python)
+            subprocess.check_call([install_python, "-m", "playwright", "install", engine])
+
+        _install_beside_calls(install_key, f"Playwright {engine}", install)
 
     _playwright_ready_engines.add((engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "")))
     _playwright_ready = True
 
 
-def _maybe_alias_playwright_binary(exc: Exception) -> bool:
-    """Bridge x64->arm64 browser cache lookups on Apple Silicon when possible."""
-    match = _MISSING_EXECUTABLE_RE.search(str(exc))
-    if not match:
-        return False
-
-    missing_path = pathlib.Path(match.group(1).strip())
-    missing_dir = missing_path.parent
-    if "-mac-x64" not in str(missing_dir):
-        return False
-
-    alternate_dir = pathlib.Path(str(missing_dir).replace("-mac-x64", "-mac-arm64"))
-    alternate_binary = alternate_dir / missing_path.name
-    if not alternate_binary.exists():
-        return False
-
+def _playwright_python() -> str:
+    """The interpreter that runs Playwright's CLI: this one, or a packaged app's embedded one."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
     try:
-        if missing_dir.exists():
-            return missing_path.exists()
-        missing_dir.symlink_to(alternate_dir, target_is_directory=True)
-        log.info("Aliased Playwright browser cache %s -> %s", missing_dir, alternate_dir)
-        return True
-    except OSError:
-        log.debug("Failed to alias Playwright browser cache", exc_info=True)
-        return False
+        from ouroboros.platform_layer import embedded_python_candidates
+        bases: list[pathlib.Path] = []
+        frozen_base = getattr(sys, "_MEIPASS", None)
+        if frozen_base:
+            bases.append(pathlib.Path(frozen_base))
+        exe_parent = pathlib.Path(sys.executable).resolve().parent
+        bases.extend([exe_parent, exe_parent.parent])
+        for base in bases:
+            for candidate in embedded_python_candidates(base):
+                if candidate.exists():
+                    return str(candidate)
+    except Exception:
+        pass
+    raise RuntimeError(
+        "Playwright browser install requires the embedded python-standalone interpreter, "
+        "but it was not found in this packaged app."
+    )
 
 
-def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium", allow_cache_write: bool = True) -> Any:
-    engine = _normalize_browser_engine(engine)
-    launch_kwargs = {
-        "headless": True,
-    }
-    if engine == "chromium":
-        launch_kwargs["args"] = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=site-per-process",
-            "--window-size=1920,1080",
-            # J (v6.39): software-GL via ANGLE+SwiftShader so WebGL/canvas/3D actually
-            # RENDER in headless (bundled chrome-headless-shell has no GPU) instead of a
-            # black frame; ignore the GPU blocklist so SwiftShader is used.
-            "--use-gl=angle",
-            "--use-angle=swiftshader",
-            "--enable-unsafe-swiftshader",
-            "--ignore-gpu-blocklist",
-        ]
-    browser_type = getattr(pw_instance, engine)
+def _repair_host_dependencies(engine: str, install_python: str = "") -> None:
+    """Best effort: Playwright installs the engine's host libraries where it can."""
     try:
-        return browser_type.launch(**launch_kwargs)
+        subprocess.check_call([install_python or _playwright_python(), "-m", "playwright", "install-deps", engine])
     except Exception as exc:
-        if engine == "chromium" and allow_cache_write and _maybe_alias_playwright_binary(exc):
-            return browser_type.launch(**launch_kwargs)
+        log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
+
+
+# One preparation per browser engine and root at a time, beside the calls that need it: the first
+# Chromium of a new pin (~100 MB) once kept four calls past their windows (04.11) while each started
+# its own download. A call waits only what is left of its own window and then says where it stands.
+_installs: Dict[str, Tuple[concurrent.futures.Future, Dict[str, Any]]] = {}
+_installs_lock = threading.Lock()
+
+
+def _install_beside_calls(key: str, what: str, install: Callable[[Dict[str, Any]], Any], hint: str = "") -> Any:
+    """Join or start the one background preparation for ``key``; wait at most this call's own window.
+
+    The worker's dispatch deadline less the settlement margin bounds the wait, so the call answers
+    with a typed fact before its outer wait ends; the preparation continues and a later call joins it
+    or finds its result. Without a deadline the call waits as before. The starting call physically
+    ends with its preparation (``hold_invocation``), so its worker is not retired mid-download. A
+    failure reaches its waiters and is never sticky: the next call starts a fresh preparation."""
+    from ouroboros.model_wait import dispatch_deadline_remaining_sec
+    from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+    from ouroboros.tool_custody import hold_invocation
+
+    with _installs_lock:
+        entry = _installs.get(key)
+        if entry is None:
+            entry, release = (concurrent.futures.Future(), {"started": time.monotonic()}), hold_invocation()
+            try:
+                threading.Thread(target=_run_install, args=(key, entry, install, release),
+                                 name=f"browser-install {key}", daemon=True).start()
+            except BaseException:
+                release()  # nothing started: no entry for later calls to wait on
+                raise
+            _installs[key] = entry
+    future, progress = entry
+    remaining = dispatch_deadline_remaining_sec()
+    try:
+        return future.result(timeout=None if remaining is None else max(0.0, remaining - NESTED_SETTLEMENT_MARGIN_SEC))
+    except concurrent.futures.TimeoutError:
+        state = ("waiting for another Ouroboros process that is installing it" if progress.get("waiting")
+                 else f"{progress['bytes']} of {progress.get('size')} bytes downloaded" if "bytes" in progress
+                 else "started")
+        raise chromium_runtime.ChromiumRefusal(chromium_runtime.PREPARING, (
+            f"{what} is still being installed ({state}, {int(time.monotonic() - progress['started'])} s so far); "
+            f"this call opened no browser. The install continues in the background and a later call uses it.{hint}"
+        )) from None
+
+
+def _run_install(key: str, entry: Tuple[concurrent.futures.Future, Dict[str, Any]],
+                 install: Callable[[Dict[str, Any]], Any], release: Callable[[], None]) -> None:
+    future, progress = entry
+    outcome, failure = None, None
+    try:
+        outcome = install(progress)
+    except BaseException as exc:  # noqa: BLE001 - every waiter receives the install's own failure
+        failure = exc
+        log.warning("Browser install %s failed: %s", key, exc)  # its callers may have answered already
+    with _installs_lock:  # settled before any waiter wakes: its next call starts afresh or finds the result
+        if _installs.get(key) is entry:
+            del _installs[key]
+    try:
+        release()
+    finally:
+        future.set_exception(failure) if failure is not None else future.set_result(outcome)
+
+
+@contextlib.contextmanager
+def _machine_lock(path: pathlib.Path, progress: Dict[str, Any]):
+    """One installer per browsers root on this machine (tasks run in separate worker processes);
+    the OS frees the lock with its process. The lock file stays: one inode, one lock. Where no
+    lock can be taken (no write access, a filesystem without locks) the install runs unlocked, as
+    before: its atomic publication still keeps two installs from colliding."""
+    from ouroboros.platform_layer import file_lock_exclusive, file_unlock
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+    except OSError:
+        yield
+        return
+    with handle:
+        progress["waiting"] = True
+        try:
+            file_lock_exclusive(handle.fileno())
+            locked = True
+        except OSError:
+            locked = False
+        progress.pop("waiting", None)
+        try:
+            yield
+        finally:
+            if locked:
+                file_unlock(handle.fileno())
+
+
+def _pinned_chromium(*, allow_install: bool) -> str:
+    """The pinned headless shell's executable: found, else installed and verified, else refused.
+
+    The exact pin is looked up under an operator's ``PLAYWRIGHT_BROWSERS_PATH`` directory, the
+    Playwright package's bundled ``.local-browsers`` and the data root's ``playwright-browsers``;
+    a missing pin installs into the operator's directory, else that cache, never the package."""
+    from ouroboros.config import resolve_data_dir
+
+    pin = chromium_runtime.host_pin()
+    chromium_runtime.require_supported_host(pin)
+    configured = "" if _playwright_browsers_path_managed else os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    operator = pathlib.Path(configured) if configured not in ("", "0") else None
+    cache = resolve_data_dir() / "playwright-browsers"
+    roots = [root for root in (operator, chromium_runtime.browsers_root("0"), cache) if root is not None]
+    found = chromium_runtime.find_installed(roots, pin)
+    if found is not None:
+        return str(found)
+    if not allow_install:
+        raise chromium_runtime.ChromiumRefusal(chromium_runtime.UNAVAILABLE, (
+            f"the pinned Chromium {chromium_runtime.CHROMIUM_VERSION} is not installed, and this read-only "
+            "actor may not install it; a Chromium browser call by its parent installs it."))
+    target = operator or cache
+
+    def install(progress: Dict[str, Any]) -> str:
+        with _machine_lock(target / f".{pin.directory}.lock", progress):
+            if (published := chromium_runtime.installed_executable(target, pin)) is not None:
+                return str(published)  # a peer process installed it while this one waited
+            _repair_host_dependencies("chromium")
+            log.info("Installing pinned Chromium %s into %s", chromium_runtime.CHROMIUM_VERSION, target)
+            progress["size"] = pin.archive_size
+            return str(chromium_runtime.install(target, pin, progress=progress))
+
+    return _install_beside_calls(f"chromium:{target}", f"the pinned Chromium {chromium_runtime.CHROMIUM_VERSION}",
+                                 install, " engine='webkit' is available where it is installed.")
+
+
+def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium",
+                                  executable_path: Any = None, sandbox: Any = None) -> Any:
+    """Launch the engine with no fallback: Chromium only as the pinned executable, inside its
+    sandbox unless the administrator opted out, and only when that build answers."""
+    engine = _normalize_browser_engine(engine)
+    browser_type = getattr(pw_instance, engine)
+    if engine != "chromium":
+        return browser_type.launch(headless=True)
+    if not executable_path:
+        raise chromium_runtime.ChromiumRefusal(chromium_runtime.UNAVAILABLE, (
+            "no pinned Chromium executable was resolved; Playwright's own Chromium build is never "
+            "launched for browser tools."))
+    sandbox = chromium_runtime.sandbox_enabled() if sandbox is None else bool(sandbox)
+    if not sandbox:
+        log.warning("Chromium sandbox is OFF by administrator opt-out %s=off", chromium_runtime.SANDBOX_ENV)
+    try:
+        browser = browser_type.launch(
+            headless=True,
+            executable_path=str(executable_path),
+            chromium_sandbox=sandbox,  # without it Playwright itself adds --no-sandbox
+            args=[
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1920,1080",
+                # J (v6.39): software-GL via ANGLE+SwiftShader so WebGL/canvas/3D actually
+                # RENDER in headless (the headless shell has no GPU) instead of a black
+                # frame; ignore the GPU blocklist so SwiftShader is used.
+                "--use-gl=angle",
+                "--use-angle=swiftshader",
+                "--enable-unsafe-swiftshader",
+                "--ignore-gpu-blocklist",
+            ],
+        )
+    except Exception as exc:
+        refusal = chromium_runtime.sandbox_refusal(exc) if sandbox else None
+        if refusal is not None:
+            raise refusal from exc
         raise
+    version = str(getattr(browser, "version", "") or "")
+    if version != chromium_runtime.CHROMIUM_VERSION:
+        with contextlib.suppress(Exception):
+            browser.close()
+        raise chromium_runtime.ChromiumRefusal(chromium_runtime.UNAVAILABLE, (
+            f"{executable_path} answered as Chromium {version or 'of an unknown version'}, not the pinned "
+            f"{chromium_runtime.CHROMIUM_VERSION}; it was closed."))
+    return browser
 
 
 def _device_context_options(pw_instance: Any, device: str = "") -> Tuple[Dict[str, Any], str]:
@@ -443,7 +539,8 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
         call.generation = bs
 
     readonly_subagent = _readonly_subagent(ctx)
-    _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
+    executable_path = _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
+    sandbox = chromium_runtime.sandbox_enabled() if engine == "chromium" else None
 
     if bs.pw_instance is None:
         backlog = _live_retired_generations(ctx)
@@ -461,7 +558,8 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
         setattr(bs, "_thread_id", current_thread_id)
         log.info("Created Playwright instance in thread %s", current_thread_id)
 
-    bs.browser = _launch_browser_with_fallback(bs.pw_instance, engine=engine, allow_cache_write=not readonly_subagent)
+    bs.browser = _launch_browser_with_fallback(bs.pw_instance, engine=engine,
+                                               executable_path=executable_path, sandbox=sandbox)
     device_options, resolved_device = _device_context_options(bs.pw_instance, requested_device)
     context_options = device_options or _default_context_options(engine)
     bs_context = bs.browser.new_context(**context_options)
@@ -524,7 +622,8 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     # Facts of THIS generation, set only once it is fully set up: a reused
     # generation reports its own, a retired one never borrows a newer one's.
     version = str(getattr(bs.browser, "version", "") or "unknown version")
-    setattr(bs, "browser_conditions", f"Browser conditions: {engine} {version} (Playwright); " + (
+    supply = "Playwright" if sandbox is None else f"Playwright; {chromium_runtime.conditions(sandbox)}"
+    setattr(bs, "browser_conditions", f"Browser conditions: {engine} {version} ({supply}); " + (
         "playwright-stealth evasions applied except iframe.contentWindow." if _HAS_STEALTH
         else "playwright-stealth is not installed, so no stealth evasions were applied."))
     return bs.page, bs
@@ -911,15 +1010,13 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext,
             + (native_note or "Use analyze_screenshot to inspect it. ")
             + "Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
         )
+    # The whole page text goes on: the exact-source delivery keeps it readable and bounds only the view.
     elif output == "html":
-        html = page.content()
-        return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
+        return page.content()
     elif output == "markdown":
-        text = _evaluate_bounded(page, _MARKDOWN_JS)
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        return _evaluate_bounded(page, _MARKDOWN_JS)
     else:  # text
-        text = page.inner_text("body")
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        return page.inner_text("body")
 
 
 def _wait_for_page_state(page: Any, selector: str, state: str, timeout: int,
@@ -1003,6 +1100,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             # expectation; a later call opening the shared slot never does.
             cleanup_browser_handles(own)
             return _SESSION_RETIRED_VOID
+        if isinstance(e, chromium_runtime.ChromiumRefusal):
+            return _chromium_refused(ctx, own, e)
         if reason := getattr(own, "request_block_reason", ""):
             return "⚠️ " + reason
         if _is_infrastructure_error(own):
@@ -1031,6 +1130,17 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         raise
 
 
+def _chromium_refused(ctx: ToolContext, own: Any, refusal: "chromium_runtime.ChromiumRefusal") -> str:
+    """A refused Chromium launch started no browser: no retry and no unknown outcome.
+
+    The half-open generation (a Playwright driver without a browser) is retired; the
+    typed text names what to change."""
+    if cleanup_browser(ctx, expected=own) is None:
+        cleanup_browser_handles(own)
+    log.warning("Chromium launch refused: %s", refusal.tool_text())
+    return refusal.tool_text()
+
+
 def _apply_viewport(page: Any, viewport: str) -> None:
     """Parse a 'WxH' string and resize the browser viewport."""
     try:
@@ -1047,20 +1157,10 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     engine: str = "", device: str = "", state: str = "visible") -> str:
     normalized_action = str(action or "").strip().lower()
     readonly_subagent = _readonly_subagent(ctx)
-    # Keep the broad restricted-subagent predicate for URL/install and
-    # secret/control protections, but do not make it a browser-JavaScript
-    # capability predicate: acting children already have an isolated write
-    # surface and may inspect the pages involved in their own work.  Invalid
-    # or missing delegated constraints still resolve to local-readonly through
-    # active_tool_profile and therefore remain blocked here.  Keeping the
-    # restricted-profile predicate in this condition also fails closed if a
-    # future restricted profile is added without an explicit acting contract.
-    if (
-        readonly_subagent
-        and active_tool_profile(ctx) != "acting_subagent"
-        and normalized_action == "evaluate"
-    ):
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: local-readonly subagents cannot run arbitrary browser JavaScript."
+    # The JavaScript rule's owner (and its rationale) is browser_policy, shared with MCP task sessions.
+    if normalized_action == "evaluate" and (script_block := browser_policy.browser_script_block_reason(ctx)):
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code="ACCESS_BLOCKED", text=f"⚠️ {script_block}"))
 
     call = _browser_call.get()
     generation_cell = [call.generation]
@@ -1125,9 +1225,8 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 return _publish_tool_result(ctx, ToolResult(
                     status="error", code="TOOL_ARG_ERROR", text="Error: value (JS code) required for evaluate"))
             result = _evaluate_bounded(page, _evaluate_source(value), effective_default_ms)
-            out = str(result)
             observation[0] = True
-            return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
+            return str(result)
         elif normalized_action == "scroll":
             direction = value or "down"
             if direction == "down":
@@ -1155,6 +1254,8 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
         if ctx.browser_state is not own:
             cleanup_browser_handles(own)
             return _SESSION_RETIRED_VOID
+        if isinstance(e, chromium_runtime.ChromiumRefusal):
+            return _chromium_refused(ctx, own, e)
         if reason := getattr(own, "request_block_reason", ""):
             return "⚠️ " + reason
         if _is_infrastructure_error(own):

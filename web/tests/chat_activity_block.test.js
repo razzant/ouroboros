@@ -187,16 +187,69 @@ for (const archives of [0, 3, 4, 12]) test(`global tool read bounds preserve set
     } finally { f.close(); }
 });
 
-test('positive per-task missing counts and actual read gaps remain visible independently of outcomes', () => {
-    const coverage = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, shown: 0, matched: 0, archives_bounded: true };
-    const empty = noteToolHostMetrics({}, { calls: 2, evidence: { coverage, observations: [] } });
-    assert.match(empty.headline, /2 tool calls.*outcome unknown/);
-    assert.match(empty.fullBody, /incomplete/);
-    for (const fact of ['started', 'wait_ended']) {
-        const view = noteToolHostMetrics({}, { evidence: { coverage,
-            observations: [{ key: fact, tool: 'read_file', fact, status: 'unknown' }] } });
-        assert.match(view.headline, /outcome unknown/);
+// #2400: counted calls with no record read are unread behind a bound, missing after a failed or
+// complete read; only an observed start, wait end or legacy start makes an outcome unknown.
+test('host-counted calls without records stay counted, never unknown outcomes (#2400)', () => {
+    const whole = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, archives: 0, archives_available: 0,
+        shown: 0, matched: 0 };
+    const view = (coverage, host = { calls: 14, errors: 0 }, observations = [], legacy) =>
+        noteToolHostMetrics({}, { ...host, evidence: { coverage: { ...whole, ...coverage }, observations, legacy } });
+    const archived = { archives_bounded: true, archives: 3, archives_available: 40 };
+    for (const bound of [archived, { archives: 3, archives_available: 40 }, { live_size: 2000, live_window: 500 }]) {
+        const row = view(bound);
+        assert.deepEqual([row.headline, row.phase], ['14 tool calls', 'result'], JSON.stringify(bound));
+        assert.match(row.fullBody, /^Only recent tool history was read\. Source: logs\/tools\.jsonl\./);
     }
+    const newest = Array.from({ length: 200 }, (_, n) => ({ key: `c${n}`, tool: 'read_file', fact: 'settled', status: 'ok' }));
+    const listed = view({ shown: 200, matched: 230 }, { calls: 230, errors: 0 }, newest);
+    assert.equal(listed.headline, '230 tool calls', 'the newest listed calls are a bound, not unknown ones');
+    assert.match(listed.fullBody, /^Only recent tool history was read\./);
+    assert.equal(view(archived, { calls: 14, errors: 2 }).headline, '14 tool calls · 2 errors', 'host errors stay');
+    const some = view(archived, { calls: 14, errors: 1 }, [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }]);
+    assert.equal(some.headline, '14 tool calls · 1 error', 'a partial read never retires the frozen error');
+    for (const failed of [{ gaps: ['torn_archive_line'] }, { live_size: undefined }, {}]) {
+        const row = view(failed);
+        assert.equal(row.headline, '14 tool calls', `${JSON.stringify(failed)}: no outcome from the deficit`);
+        assert.match(row.fullBody, /^Invocation evidence is incomplete\./);
+    }
+    assert.match(view({ ...archived, gaps: ['malformed_jsonl'] }).fullBody, /^Invocation evidence is incomplete\./,
+        'a bound never hides a read failure');
+    for (const fact of ['started', 'wait_ended']) {
+        const row = view(archived, { calls: 14 }, [{ key: fact, tool: 'read_file', fact, status: 'unknown' }]);
+        assert.match(row.headline, /outcome unknown/, `${fact} observed behind a bound`);
+    }
+    assert.match(view(archived, { calls: 14 }, [], { calls: 1, unknown: true }).headline, /outcome unknown/);
+});
+
+// The same reading on a real history response (tests/test_history_tool_carriers.py produces it):
+// reload and a reconnect re-read both rebuild the finished card from host totals.
+test('reload and reconnect keep a bounded card counted while a seen start stays unknown (#2400)', async () => {
+    const produced = process.env.OURO_TEST_BOUNDED_TOOL_HISTORY;
+    const bounded = { source: 'logs/tools.jsonl', live_size: 300, live_window: 300, archives: 3, archives_available: 5,
+        archives_bounded: true, shown: 0, matched: 0, gaps: [] };
+    const seen = { key: 'tool:started-run:s1', tool: 'read_file', fact: 'started', status: 'unknown', live: false };
+    const history = produced ? JSON.parse(readFileSync(produced, 'utf8')).messages : [
+        { task_id: 'archived-run', role: 'assistant', text: 'Health check done.', ts: TS, chat_id: 1 },
+        { task_id: 'archived-run', role: 'system', system_type: 'task_summary', text: 'Checked.', ts: TS, chat_id: 1,
+            tool_calls: 14, tool_errors: 0, tool_call_counts: { read_file: 10, run_command: 4 },
+            tool_evidence: { observations: [], legacy: { calls: 0 }, coverage: bounded } },
+        { task_id: 'started-run', role: 'system', system_type: 'task_summary', text: 'Stopped.', ts: TS, chat_id: 1,
+            tool_calls: 1, tool_errors: 0,
+            tool_evidence: { observations: [seen], legacy: { calls: 0 }, coverage: { ...bounded, shown: 1, matched: 1 } } },
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        for (const reconnect of [false, true]) {
+            if (reconnect) { f.emit('open', { previouslyConnected: true }); await new Promise(setImmediate); }
+            const archived = f.rows('archived-run').map(row => row.innerHTML).join(' ');
+            assert.match(archived, /14 tool calls/);
+            assert.doesNotMatch(archived, /outcome unknown|error/);
+            assert.match(f.meta('archived-run'), /14 tool calls/);
+            assert.match(f.rows('started-run').map(row => row.innerHTML).join(' '), /1 tool call · outcome unknown/);
+        }
+        assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
+    } finally { f.close(); }
 });
 
 for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Project-pointer dependency in room ${chatId}`, async () => {
@@ -691,20 +744,25 @@ test('the header keeps the census verdict beside a block: Thinking… for a dire
 });
 
 test('a recovered tool error on replay keeps a block that names the error', async () => {
-    const f = fixture([
-        { role: 'user', text: 'steer it', ts: TS, chat_id: 1 },
-        { ...final, ts: '2026-09-15T12:00:05Z', chat_id: 1 },
-        { ...final, role: 'system', system_type: 'task_summary', text: 'One step failed and was retried.',
-            rounds: 3, tool_calls: 2, tool_errors: 1, tool_call_counts: { steer_task: 2 },
-            ts: '2026-09-15T12:00:06Z', chat_id: 1 },
-    ]);
-    try {
-        await f.instance.refreshHistory({ revision: 1 });
-        assert.ok(f.card());
-        assert.match(f.rows()[0].innerHTML, /2 tool calls · 1 error/);
-        assert.ok(f.rows()[0].classList.contains('warn'));
-        assert.match(f.meta(), /1 error/);
-    } finally { f.close(); }
+    // The block's row names the error either way; the compact line repeats it only under a chip that warns (audit
+    // 05.11, S2): a green Done already says the work recovered (DESIGN principle 7).
+    for (const warned of [false, true]) {
+        const outcome = warned ? { outcome_axes: { execution: { status: 'degraded' } } } : {};
+        const f = fixture([
+            { role: 'user', text: 'steer it', ts: TS, chat_id: 1 },
+            { ...final, ...outcome, ts: '2026-09-15T12:00:05Z', chat_id: 1 },
+            { ...final, ...outcome, role: 'system', system_type: 'task_summary', text: 'One step failed and was retried.',
+                rounds: 3, tool_calls: 2, tool_errors: 1, tool_call_counts: { steer_task: 2 },
+                ts: '2026-09-15T12:00:06Z', chat_id: 1 },
+        ]);
+        try {
+            await f.instance.refreshHistory({ revision: 1 });
+            assert.ok(f.card());
+            assert.match(f.rows()[0].innerHTML, /2 tool calls · 1 error/);
+            assert.ok(f.rows()[0].classList.contains('warn'));
+            assert.equal(/1 error/.test(f.meta()), warned, `warned=${warned}`);
+        } finally { f.close(); }
+    }
 });
 
 // The old client forced a card whenever a terminal summary looked warn, error
@@ -976,7 +1034,7 @@ test('a refused promote keeps a block with exactly one error row live and on rel
         assert.equal(f.rows().length, 3, 'the folded count, the call\'s own error row and the terminal note');
         assert.equal(f.rows().filter((n) => /promote_chat_to_task/.test(n.innerHTML)).length, 1,
             'the failure is explained once; the fold only counts it');
-        assert.match(f.meta(), /1 error/);
+        assert.doesNotMatch(f.meta(), /1 error/, 'a Done chip: the rows name the error, the compact line does not');
     } finally { f.close(); }
     const g = fixture([
         { ...ownerRow, chat_annotation: refused },
@@ -991,7 +1049,7 @@ test('a refused promote keeps a block with exactly one error row live and on rel
         const errorRows = g.rows().filter((n) => /1 tool call · 1 error/.test(n.innerHTML));
         assert.equal(errorRows.length, 1);
         assert.ok(errorRows[0].classList.contains('warn'));
-        assert.match(g.meta(), /1 error/);
+        assert.doesNotMatch(g.meta(), /1 error/, 'a Done chip: the rows name the error, the compact line does not');
         const owner = g.messages.children.find((n) => n.dataset.clientMessageId === 'owner-1');
         assert.equal(owner?.querySelector('.msg-routing-annotation')?.textContent, cause);
     } finally { g.close(); }
@@ -1330,7 +1388,7 @@ for (const legacy of [false, true]) test(`Chat history keeps a known error when 
             }
             assert.ok(f.card(), 'an addressing-only row with a known error stays visible');
             assert.match(f.rows().map(row => row.innerHTML).join(' '), /1 error/);
-            assert.match(f.meta(), /1 error/);
+            assert.doesNotMatch(f.meta(), /1 error/, 'under a Done chip the rows keep it, the compact line does not');
         }
     } finally { f.close(); }
 });

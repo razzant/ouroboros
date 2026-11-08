@@ -26,6 +26,7 @@ from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
+from ouroboros.safety_config import OWNER_RULES_KEY
 
 from ouroboros.safety_records import (
     _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts, verdict_history_bytes,
@@ -132,6 +133,7 @@ TOOL_POLICY: Dict[str, str] = {
     "delegate_answer": POLICY_SKIP,
     "delegate_message": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    "set_task_retention": POLICY_SKIP,  # a retention fact on the owner's own held words; never deletes
     "resume_child_task": POLICY_SKIP,
     "discard_child_result": POLICY_SKIP,
     "override_delegation_constraint": POLICY_SKIP,
@@ -513,9 +515,33 @@ def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
     return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked. {next_step}", status=status)
 
 
+def _focus_event_source(row, metadata, notes):
+    """A place event's host frame as its typed records when they reproduce that row exactly.
+
+    Each row is compared on its own, so any other row (attachments, images, another turn's frame,
+    a Continue order) stays whole. Notes as they stood at the event are kept only where they differ
+    from those read now."""
+    from ouroboros.presence_context import focus_frame_sources
+
+    typed = (focus_frame_sources(metadata, row.get("content"))
+             if isinstance(row, dict) and row.get("source") == "initial_text" else None)
+    if typed is None:
+        return row
+    at_event, place_id = typed.pop("notes_at_event", None) or [], (metadata.get("focus") or {}).get("place_id")
+
+    def versions(rows):
+        return sorted((str(n.get("text")), str(n.get("author")), str(n.get("at") or "")) for n in rows)
+    if versions(at_event) != versions(n for n in notes if n["place_id"] == place_id):
+        typed["notes_at_event"] = at_event
+    return {**{key: value for key, value in row.items() if key != "content"},
+            "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance",
+            **typed}
+
+
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
     """Fixed host evidence, with authorship separate from semantic authorization."""
     from dataclasses import asdict, is_dataclass
+    from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts
     from ouroboros.places import load_places
     from ouroboros.tool_access import canonical_data_root
@@ -524,14 +550,14 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
     place = dict(call_place_facts(ctx, tool_name, arguments) or {})
+    place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     # A focus occasions the work; it does not establish where this call lands.
     # Only these two built-ins take an actual place reference as their subject.
-    if tool_name in {"configure_presence", "place_reply"} and arguments.get("place_id"):
-        place["place_id"] = arguments["place_id"]
-    place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
-    if place.get("place_id"):
-        place_ids.add(place["place_id"])
-    notes = []
+    referenced = arguments.get("place_id") if tool_name in {"configure_presence", "place_reply"} else None
+    if referenced and referenced not in place_ids:  # a resolved row already names its place
+        place["place_id"] = referenced
+        place_ids.add(referenced)
+    notes = []  # each place's notes once, read now from the canonical store
     if place_ids:
         for record in load_places(canonical_data_root(ctx)):
             if record.place_id not in place_ids:
@@ -539,9 +565,12 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
             if record.place_id == place.get("place_id"):
                 place.update(place_label=record.label, place_state=record.state)
             notes.extend({"place_id": record.place_id, "text": n.text, "author": n.author,
+                          **({"at": n.at} if n.at else {}),
                           "standing_delegation": n.author in {"owner", "migration"}} for n in record.notes)
-    if tool_name == "place_reply":
-        place.update(effect="message", targets={"destination": arguments.get("destination")})
+    if tool_name == "place_reply":  # always a message; resolved rows already carry its route
+        place["effect"] = "message"
+        if not place.get("targets"):
+            place["targets"] = {"destination": arguments.get("destination")}
     occasion = "unknown"
     if metadata.get("schedule_writer_kind"):
         occasion = metadata["schedule_writer_kind"] + "-written schedule"
@@ -553,7 +582,9 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    sources = directives if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    sources = [*directives, *owner_words.safety_sources(ctx)] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    if isinstance(directives, list):
+        sources = [_focus_event_source(row, metadata, notes) for row in sources]
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
     with _PRIOR_LOCK:
         root = _root_id(ctx)
@@ -570,7 +601,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
         "subject": {"tool": tool_name, "physical_target": target, "place": place},
-        "standing_delegation": {"owner_rules": runtime_setting("OUROBOROS_SAFETY_OWNER_RULES", ""), "place_notes": notes},
+        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``).
+        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes},
         "earlier_verdicts": earlier,
         "earlier_safe_verdicts_omitted": omitted_safe,
     }
@@ -581,11 +613,15 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
 
 
 def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse a safety JSON object from a model response.
+    """Parse the ``{"status", "reason"}`` verdict from a Safety model response.
 
-    Safety reviewers occasionally wrap JSON in prose despite the prompt. We
-    accept the first object that has the expected shape, but still fail closed
-    when no valid object exists.
+    Models occasionally wrap the JSON in prose or code fences despite the prompt.
+    The whole reply and every outermost ``{...}`` in it are candidates; the
+    strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
+    equals), so a quoted SAFE cannot outrank a direct flag. Only when no candidate
+    carries a verdict is the whole reply read as ``{"answer": "<verdict JSON>"}``
+    with no other key: that string is decoded once, never searched. Otherwise
+    None: the caller fails closed.
     """
     clean = text.replace("```json", "").replace("```", "").strip()
     candidates = [clean]
@@ -615,17 +651,26 @@ def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
                 start = -1
     best: Dict[str, Any] | None = None
     rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
+
+    def verdict_of(raw: str) -> Optional[Dict[str, Any]]:
+        obj = json.loads(raw)
+        status = str(obj.get("status") or "").upper() if isinstance(obj, dict) else ""
+        return {"status": status, "reason": str(obj.get("reason") or "")} if status in rank else None
+
     for candidate in candidates:
         try:
-            obj = json.loads(candidate)
+            found = verdict_of(candidate)
         except json.JSONDecodeError:
             continue
-        if not isinstance(obj, dict):
-            continue
-        status = str(obj.get("status") or "").upper()
-        if status in {"SAFE", "SUSPICIOUS", "DANGEROUS"}:
-            if best is None or rank[status] > rank[str(best.get("status") or "").upper()]:
-                best = {"status": status, "reason": str(obj.get("reason") or "")}
+        if found and (best is None or rank[found["status"]] > rank[best["status"]]):
+            best = found
+    if best is None:
+        try:
+            envelope = json.loads(clean)
+            if isinstance(envelope, dict) and list(envelope) == ["answer"] and isinstance(envelope["answer"], str):
+                best = verdict_of(envelope["answer"])
+        except (ValueError, RecursionError):  # a degenerate payload stays unparseable, as before
+            pass
     return best
 
 
@@ -743,14 +788,14 @@ _UNCHECKED_WARNING_SUFFIX = (
 # Only a genuine THROUGHPUT signal may wave a safety check through, so the predicate is
 # narrower than "retryable". `classify_llm_exception` folds every transient class —
 # 408, 5xx and timeouts included — into `provider_transient`, and those are outages, not
-# throttling: they keep today's blocking SAFETY_VIOLATION path. A `provider_transient`
+# throttling: no retry, this route answered nothing. A `provider_transient`
 # therefore qualifies only when the provider actually said 429, by status code or by the
 # shared rate-limit text vocabulary (`is_rate_limit_text` — imported rather than copied,
 # so the two lanes cannot fork). Permanent classes are already excluded upstream: a
-# structured `insufficient_quota` wins over a 429 status inside that helper and still
-# blocks. On the HTTP-200 body lane (`llm._normalize_remote_response`) the qualifying
+# structured `insufficient_quota` wins over a 429 status inside that helper: no retry
+# either. On the HTTP-200 body lane (`llm._normalize_remote_response`) the qualifying
 # kind is exactly `rate_limit`, which that module assigns only to a transient body error
-# whose code IS 429; its other body transients stay blocking too.
+# whose code IS 429; its other body transients are plain outages (no retry; the chain is asked next).
 # Backoff: one 2.0s sleep, inside the range the loop's own transient pattern
 # (`2.0 ** attempt`) spans; no new setting, because this lane has exactly one retry.
 _SAFETY_BODY_RATE_LIMIT_KIND = "rate_limit"
@@ -777,19 +822,20 @@ _SAFETY_RATE_LIMIT_BACKOFF_SEC = 2.0
 
 # Process-local storm latch: after a NON-fallback-lane check (remote, or a local
 # PRIMARY whose vLLM/proxy 429s) exhausted both attempts on a provider rate limit, every
-# safety check in this process short-circuits to the same blocked SAFETY_UNAVAILABLE
-# answer for this window WITHOUT a provider call (the mark/is-cooling shape of
-# ouroboros/fallback_cooldown.py, inlined because this lane needs one timestamp, not a
-# per-model map). The safety lane is the highest-frequency LIGHT consumer — every guarded
-# tool call on every in-process subagent thread — so re-probing a storming route on each
-# call would amplify the very storm it reports.
+# safety check in this process skips the Supervisor's own route for this window WITHOUT a
+# provider call: to the owner's Fallback chain, else the same blocked SAFETY_UNAVAILABLE
+# answer (the mark/is-cooling shape of ouroboros/fallback_cooldown.py, kept apart from it so a
+# checker storm never reroutes Main; a chain route keeps its own window). The safety lane is the
+# highest-frequency LIGHT consumer — every guarded tool call on every in-process subagent
+# thread — so re-probing a storming route on each call would amplify the very storm it reports.
 _SAFETY_STORM_COOLDOWN_SEC = 30.0
 _SAFETY_STORM_UNTIL = 0.0
+_CHAIN_STORMS: Dict[tuple, float] = {}  # a Fallback route's own storm window, by its complete binding
 
 
 class _SafetyRateLimited(Exception):
-    """Both safety attempts hit a provider rate limit; the caller BLOCKS this one call
-    with the typed SAFETY_UNAVAILABLE outcome (infrastructure fact, not a verdict).
+    """Both safety attempts hit a provider rate limit: the route answered nothing (the chain is tried next, else
+    the caller BLOCKS this one call with the typed SAFETY_UNAVAILABLE outcome; infrastructure, not a verdict).
     ``latched`` marks the storm-window short-circuit shape: it carries no NEW storm
     evidence, so the outcome must not extend the window (else the advised retry would
     keep re-arming it forever). ``attempts`` is the PHYSICAL call count behind this
@@ -800,6 +846,23 @@ class _SafetyRateLimited(Exception):
         super().__init__(message)
         self.latched = latched
         self.attempts = 0 if latched else attempts
+
+
+def _arm_storm_latch() -> None:
+    global _SAFETY_STORM_UNTIL
+    _SAFETY_STORM_UNTIL = time.time() + _SAFETY_STORM_COOLDOWN_SEC
+
+
+def _mark_storm(error: BaseException, binding: tuple, *, own: bool, fail_open: bool) -> None:
+    """Close a route for the latch window after a CONFIRMED storm (both attempts 429ed): the Supervisor's own
+    route through the process latch (never on the fail-open local lane), a chain route through its own window.
+    A deadline-expired single 429 is one data point, and a latched skip carries no new evidence."""
+    if not isinstance(error, _SafetyRateLimited) or error.attempts < 2:
+        return
+    if not own:
+        _CHAIN_STORMS[binding] = time.time() + _SAFETY_STORM_COOLDOWN_SEC
+    elif not fail_open:
+        _arm_storm_latch()
 
 
 def _is_throughput_rate_limit(kind: str, status_code: Optional[int], safe_error: str) -> bool:
@@ -830,7 +893,7 @@ def _safety_rate_limit_reason(
         return f"{found.kind}: {safe_error}"[:300]
     body = usage.get("provider_error") if isinstance(usage, dict) else None
     if isinstance(body, dict) and _body_is_quota_refusal(body):
-        return None  # structured insufficient-quota is PERMANENT: keep today's blocking path
+        return None  # structured insufficient-quota is PERMANENT: no retry on this route
     if not isinstance(body, dict) or str(body.get("kind") or "") != _SAFETY_BODY_RATE_LIMIT_KIND:
         return None
     return sanitize_tool_result_for_log(
@@ -850,8 +913,7 @@ def _safety_rate_limit_backoff(ctx: Optional[Any]) -> None:
 
 
 def _rate_limited_outcome(
-    ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, arm_latch: bool,
-    attempts: int = 2,
+    ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, attempts: int = 2,
 ) -> Tuple[bool, str]:
     'Terminal outcome of a rate-limited safety check, split by lane. The local-FALLBACK'
     if local_fallback:
@@ -867,26 +929,20 @@ def _rate_limited_outcome(
             f"⚠️ SAFETY_WARNING: The local fallback Safety Supervisor was rate-limited "
             f"and could not check this call ({error}). {_UNCHECKED_WARNING_SUFFIX}"
         )
-    return _safety_unavailable_blocked(ctx, tool_name, error, arm_latch=arm_latch, attempts=attempts)
+    return _safety_unavailable_blocked(ctx, tool_name, error, attempts=attempts)
 
 
 def _safety_unavailable_blocked(
-    ctx: Optional[Any], tool_name: str, error: str, *, arm_latch: bool = True, attempts: int = 2,
+    ctx: Optional[Any], tool_name: str, error: str, *, attempts: int = 2,
 ) -> Tuple[bool, str]:
-    'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome.'
-    if arm_latch and attempts >= 2:
-        # The latch's documented trigger is a CONFIRMED storm: both attempts 429ed.
-        # A deadline-expired single 429 is one data point, not a storm - later
-        # checks in this process keep their own probe.
-        global _SAFETY_STORM_UNTIL
-        _SAFETY_STORM_UNTIL = time.time() + _SAFETY_STORM_COOLDOWN_SEC
+    'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome (``_mark_storm`` closes the route).'
     shape = (
-        "storm latch, no attempt" if not arm_latch
+        "storm latch, no attempt" if not attempts
         else "deadline expired before the retry" if attempts < 2
         else "after one retry"
     )
     action = (
-        "blocked_unchecked_storm_latched" if not arm_latch
+        "blocked_unchecked_storm_latched" if not attempts
         else "blocked_unchecked_deadline_expired" if attempts < 2
         else "blocked_unchecked_after_retry"
     )
@@ -932,8 +988,12 @@ def _safety_model_call(
     use_local: bool, call_type: str, user_prompt: str, on_usage: Any,
     model_role: str = "safety", effort: str = "low", account: Optional[str] = None,
     processing: Optional[str] = None, attempts_limit: int = 2, system_prompt: Optional[str] = None,
+    latch: bool = True, wait_for_resources: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    'ONE safety model call, with ONE bounded retry when the provider rate-limits it.'
+    """ONE safety model call, with ONE bounded retry when the provider rate-limits it.
+
+    ``latch`` consults the storm latch (the Supervisor's own route only); ``wait_for_resources=False`` returns a
+    quota or sign-in refusal at once, so a configured route after this one can answer first."""
     from ouroboros import model_concurrency
     from ouroboros.llm_observability import chat_observed
     from ouroboros.tools.review_helpers import cached_prompt_blocks
@@ -944,7 +1004,7 @@ def _safety_model_call(
         if processing is None:
             processing = resolve_processing_preference("safety")
 
-    if time.time() < _SAFETY_STORM_UNTIL:
+    if latch and time.time() < _SAFETY_STORM_UNTIL:
         raise _SafetyRateLimited(
             "safety lane cooling down after a recent rate-limit storm; no attempt made",
             latched=True,
@@ -962,10 +1022,10 @@ def _safety_model_call(
         msg: Dict[str, Any] = {}
         usage: Optional[Dict[str, Any]] = None
         try:
-            # The physical sender takes the provider slot; this only carries the deadline.
-            with model_concurrency.model_call_scope(
-                light_model, use_local, _safety_deadline_epoch(ctx)
-            ):
+            deadline = _safety_deadline_epoch(ctx)
+            # The physical sender takes the provider slot; this only carries the deadline. The same
+            # task deadline that ends the slot wait and the retry also bounds the send (#572).
+            with model_concurrency.model_call_scope(light_model, use_local, deadline):
                 msg, usage = chat_observed(
                     client,
                     drive_root=_safety_drive_root(ctx),
@@ -981,10 +1041,12 @@ def _safety_model_call(
                     max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
                     timeout=get_safety_call_timeout_sec(),
                     model_role=model_role, model_account_override=account, processing_preference=processing,
-                    wait_for_resources=not mode_has_unrestricted_agency(_runtime_mode(ctx)),
+                    wait_for_resources=(not mode_has_unrestricted_agency(_runtime_mode(ctx))
+                                        if wait_for_resources is None else wait_for_resources),
                     response_format=({"type": "json_object"}
                                      if LLMClient.supports_response_format(light_model, use_local=use_local)
                                      else None),
+                    **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
                 )
         except Exception as e:
             from ouroboros.llm_claudexor import propagate_model_error
@@ -1003,6 +1065,49 @@ def _safety_model_call(
             "Safety check rate-limited for %s (attempt %d/2): %s", tool_name, attempts, reason,
         )
     raise _SafetyRateLimited(reason, attempts=attempts)
+
+
+def _safety_routes(model: str, use_local: bool, overrides: Optional[dict] = None) -> List[Tuple[str, bool, str, tuple]]:
+    """The Supervisor's route, then the owner's resilience chain (``OUROBOROS_MODEL_FALLBACKS`` on the
+    ``USE_LOCAL_FALLBACK`` lane, as the main loop walks it), each complete binding once: the effective model and
+    locality a live wait-card switch gives the role (what is sent, recorded and charged), its role, its binding."""
+    from ouroboros.model_slots import route_binding
+    from ouroboros.provider_models import fallback_candidate_targets
+
+    chain_local = str(runtime_setting("USE_LOCAL_FALLBACK", "") or "").lower() in ("true", "1")
+    rows = [(model, use_local, "safety")] + [(target.model_id, chain_local, f"fallback:{index}") for index, target
+                                             in enumerate(fallback_candidate_targets(preserve_slots=True))]
+    routes, seen = [], set()
+    for row in rows:
+        binding = route_binding(*row, overrides=overrides)
+        if binding not in seen:
+            seen.add(binding)
+            routes.append((binding[0], binding[1], row[2], binding))
+    return routes
+
+
+def _answered_nothing(msg: Dict[str, Any], usage: Optional[Dict[str, Any]]) -> str:
+    """A provider error body with no content, described; "" when the route answered."""
+    body = usage.get("provider_error") if isinstance(usage, dict) else None
+    if not isinstance(body, dict) or str((msg or {}).get("content") or "").strip():
+        return ""
+    return f"provider error {body.get('code') or ''} {body.get('type') or ''}: {body.get('message') or ''}"
+
+
+def _unanswered(ctx: Optional[Any], tool_name: str, error: Exception, *, fail_open: bool):
+    """The outcome of a route that answered nothing: the one-route rule. Only the Supervisor's own fallback
+    local route may ``fail_open``; any storm is already marked (``_mark_storm``)."""
+    if isinstance(error, _SafetyRateLimited):
+        return _Assessment(*_rate_limited_outcome(
+            ctx, tool_name, str(error), local_fallback=fail_open, attempts=error.attempts), status="UNAVAILABLE")
+    from ouroboros.llm_claudexor import propagate_model_error
+    propagate_model_error(error)
+    safe_error = sanitize_tool_result_for_log(f"{type(error).__name__}: {error}")
+    if fail_open:  # a fallback local outage warns instead of blocking all unknown tools
+        log.warning("Safety local-fallback LLM call failed for %s (%s); proceeding with warning", tool_name, safe_error)
+        return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
+    log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
+    return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
 
 
 def _run_llm_check(
@@ -1050,32 +1155,72 @@ def _run_llm_check(
         else:
             _record_safety_usage(ctx, usage_payload)
 
-    try:
-        msg, usage = _safety_model_call(
-            client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
-            use_local=_use_local_light, call_type="safety_supervisor",
-            user_prompt=prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
-        )
-    except _SafetyRateLimited as e:
-        return _Assessment(*_rate_limited_outcome(
-            ctx, tool_name, str(e),
-            local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
-            arm_latch=not getattr(e, "latched", False),
-            attempts=getattr(e, "attempts", 2),
-        ), status="UNAVAILABLE")
-    except Exception as e:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(e)
-        safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
-        # Fallback local outage warns instead of blocking all unknown tools.
-        if _use_local_light and _is_local_fallback and not _needs_checker(ctx):
-            log.warning(
-                "Safety local-fallback LLM call failed for %s (%s); proceeding with warning",
-                tool_name, safe_error,
+    # A route that answers nothing (a throttle after its retry, an outage, a quota or sign-in refusal, an error
+    # body) is an infrastructure fact, not a verdict: the check moves along the owner's chain. With no answer the
+    # Supervisor's own route decides the outcome exactly as before, its owner question (a model wait) included.
+    from ouroboros.llm_claudexor import propagate_model_error
+    from ouroboros.model_wait import current_model_wait, model_wait_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
+    fail_open = _use_local_light and _is_local_fallback and not _needs_checker(ctx)
+    waiter = current_model_wait()
+    routes = _safety_routes(light_model, _use_local_light, waiter.overrides if waiter else None)
+    alone, skipped, own_failure, own_reply = len(routes) == 1, [], None, None
+
+    def record_skips(answered: Optional[Dict[str, str]]) -> None:  # None: no route of the walk answered
+        _emit_durable_safety_event(ctx, {"type": "safety_route_fallback", "tool": tool_name,
+                                         "unavailable": skipped, "answered": answered})
+
+    for index, (light_model, _use_local_light, role, binding) in enumerate(routes):
+        try:
+            if index and time.time() < _CHAIN_STORMS.get(binding, 0.0):
+                raise _SafetyRateLimited("cooling down after this route's own rate-limit storm", latched=True)
+            msg, usage = _safety_model_call(
+                client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
+                system_prompt=system_prompt, model_role=role, latch=not index,
+                wait_for_resources=None if alone else False,
             )
-            return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
-        log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
-        return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
+            failure = "" if alone else _answered_nothing(msg, usage)
+            own_reply = (msg, usage) if failure and not index else own_reply
+        except Exception as error:
+            if not isinstance(error, _SafetyRateLimited) and not model_wait_reason(error):
+                stops = True  # an interruption or an unknown outcome never moves to another route
+                try:
+                    propagate_model_error(error)
+                    stops = outcome_unknown_on_chain(error)  # a direct call that may have answered
+                finally:
+                    if stops and skipped:
+                        record_skips(None)
+                if stops:  # never a new verdict, nor the local route's warning for another route's call
+                    return _unanswered(ctx, tool_name, error, fail_open=fail_open and not index)
+            _mark_storm(error, binding, own=not index, fail_open=fail_open)  # later checks skip it in its window
+            if alone:
+                return _unanswered(ctx, tool_name, error, fail_open=fail_open)
+            own_failure = own_failure if index else error
+            failure = f"{type(error).__name__}: {error}"
+        if not failure:
+            if skipped:
+                log.warning("Safety check for %s answered by %s after %s", tool_name, light_model, skipped)
+                record_skips({"model": light_model, "role": role})
+            break
+        skipped.append({"model": light_model, "role": role, "error": sanitize_tool_result_for_log(failure)[:300]})
+    else:
+        record_skips(None)
+        light_model, _use_local_light, role, binding = routes[0]
+        if own_reply is not None:
+            msg, usage = own_reply  # its error body takes the parse lane, as before
+        elif not model_wait_reason(own_failure):
+            return _unanswered(ctx, tool_name, own_failure, fail_open=fail_open)
+        else:
+            try:  # its quota or sign-in refusal: the owner question comes after the chain, as Main's does
+                msg, usage = _safety_model_call(
+                    client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                    call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
+                    system_prompt=system_prompt)
+            except Exception as error:
+                _mark_storm(error, binding, own=True, fail_open=fail_open)
+                return _unanswered(ctx, tool_name, error, fail_open=fail_open)
 
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
@@ -1102,19 +1247,15 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
                 use_local=_use_local_light, call_type="safety_supervisor_repair",
                 user_prompt=repair_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
+                model_role=role, latch=role == "safety",
             )
             result = _parse_safety_response(repair_msg.get("content") or "")
             if result is None:
                 failure_class = _classify_safety_parse_failure(repair_msg, repair_usage)
-        except _SafetyRateLimited as e:
-            return _Assessment(*_rate_limited_outcome(
-                ctx, tool_name, str(e),
-                local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
-                arm_latch=not getattr(e, "latched", False),
-                attempts=getattr(e, "attempts", 2),
-            ), status="UNAVAILABLE")
+        except _SafetyRateLimited as e:  # a chain route's storm closes that route; it never takes the local warning
+            _mark_storm(e, binding, own=role == "safety", fail_open=fail_open)
+            return _unanswered(ctx, tool_name, e, fail_open=fail_open and role == "safety")
         except Exception as exc:
-            from ouroboros.llm_claudexor import propagate_model_error
             propagate_model_error(exc)
             log.warning("Safety repair retry failed for %s: %s", tool_name, exc, exc_info=True)
         if result is None:
@@ -1147,7 +1288,8 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
                 call_type="safety_second_check", user_prompt=second_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
                 model_role="subagent:" + row.subagent_id, effort=row.effort or "low",
-                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1)
+                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1,
+                latch=False)
             second = _parse_safety_response(msg.get("content") or "")
         except Exception as exc:
             from ouroboros.llm_claudexor import propagate_model_error

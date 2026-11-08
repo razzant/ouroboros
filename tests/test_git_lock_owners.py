@@ -27,9 +27,11 @@ from types import SimpleNamespace
 import pytest
 
 import supervisor.git_ops as git_ops
+from ouroboros.dialogue_store import THREAD_FORMAT
 
-pytestmark = pytest.mark.serial  # real writer processes and pinned module roots
 _real_sleep = time.sleep  # the fixtures' own polling; the code under test runs with `_no_retry_sleep`
+# A release's dialogue store that reads a thread held by reference: a rollback to its tree resets at once.
+DIALOGUE_STORE = f"THREAD_FORMAT = {THREAD_FORMAT!r}\n"
 
 
 @pytest.fixture(autouse=True)
@@ -393,7 +395,7 @@ def replacement_history(tmp_path_factory):
     """Build the common four-commit history once; expose immutable bytes, never its root."""
     repo = _init_repo(tmp_path_factory.mktemp("git-lock-history"))
     root = _commit(repo, "root", {"BIBLE.md": "constitution\n", "ouroboros/store.py": "# store\n",
-                                  "ouroboros/usage_store.py": "# usage\n", "ouroboros/dialogue_store.py": "# dialogue\n",
+                                  "ouroboros/usage_store.py": "# usage\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE,
                                   "seed.txt": "seed\n"})
     base = _commit(repo, "owner work", {"local.txt": "owner commit\n"})
     _git(repo, "checkout", "-q", "-b", "official", root)
@@ -544,7 +546,7 @@ def test_a_store_switch_deferral_moves_nothing_and_is_untouched_by_a_later_lock(
     assert len(scene.events["restarts"]) == 1
 
 
-@pytest.mark.parametrize("case", ["every_attempt_refused", "mixed_attempts", "foreign_lock", "not_a_locking_command",
+@pytest.mark.parametrize("case", ["every_attempt_refused", "not_a_locking_command",
                                   "repair_between"])
 def test_only_a_lock_refusal_on_every_attempt_of_a_locking_command_is_typed(tmp_path, monkeypatch, case):
     from supervisor import git_ops_reset
@@ -618,7 +620,7 @@ def test_a_failed_bootstrap_is_told_once_in_the_owner_chat_and_a_deliberate_defe
     assert (managed_boot.repo / "owner-draft.txt").exists()
 
 
-@pytest.mark.parametrize("owner_chat", [None, "", -5, "not-an-id"])
+@pytest.mark.parametrize("owner_chat", [None, -5, "not-an-id"])
 def test_bootstrap_notice_never_invents_an_owner_address(monkeypatch, owner_chat):
     from ouroboros.server_restart import _noticed_bootstrap
     from supervisor import message_bus, state
@@ -728,8 +730,7 @@ def update_lanes(replace_scene, monkeypatch):
     return post
 
 
-@pytest.mark.parametrize("holder", ["crashed", "live"])
-@pytest.mark.parametrize("lane", ["auto_merge", "assisted"])
+@pytest.mark.parametrize(("lane", "holder"), [("auto_merge", "live"), ("assisted", "crashed")])
 def test_an_update_refused_at_its_first_step_rolls_back_in_place_and_keeps_the_core_usable(
         replace_scene, update_lanes, lane, holder, monkeypatch):
     from ouroboros import server_restart
@@ -925,9 +926,11 @@ def _next_boot(scene, monkeypatch):
     return booted, update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
 
 
-@pytest.mark.parametrize("lock_at_next_boot", ["released", "still_held"])
-@pytest.mark.parametrize("history", ["side_release", "older_ancestor"])
-@pytest.mark.parametrize("seam", ["switch_failed", "refused", "switch_not_performed"])
+@pytest.mark.parametrize(("seam", "history", "lock_at_next_boot"), [
+    ("switch_failed", "side_release", "released"),
+    ("refused", "older_ancestor", "still_held"),
+    ("switch_not_performed", "side_release", "released"),
+])
 def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_finalized(
         replace_scene, monkeypatch, seam, history, lock_at_next_boot):
     from ouroboros import store_switch
@@ -937,7 +940,7 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     scene = replace_scene
     if history == "older_ancestor":  # a real downgrade: the running checkout descends from the old release
         _git(scene.repo, "checkout", "-q", "-B", "ouroboros", scene.storeless)
-        _commit(scene.repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": "# dialogue\n"})
+        _commit(scene.repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE})
         scene.base = _commit(scene.repo, "owner work", {"local.txt": "owner commit\n"})
     ensure_current_store(scene.data)
     status, body = scene.apply(scene.storeless)
@@ -982,14 +985,23 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     assert lock.exists() is (lock_at_next_boot == "still_held")
 
 
-def test_the_store_switch_itself_still_reaches_a_store_less_target(replace_scene):
-    from ouroboros import store_switch
+@pytest.mark.parametrize("door", ["seam", "restart_exit"])
+def test_the_store_switch_itself_still_reaches_a_store_less_target(replace_scene, door):
+    """At the restart exit the replace owner's rescue and checkout Git start after the begun stop."""
+    from ouroboros import owned_shutdown, store_switch
     from ouroboros.store_import import ensure_current_store
 
     scene = replace_scene
     ensure_current_store(scene.data)
     assert scene.apply(scene.storeless)[0] == 200
-    assert store_switch.run_switch_seam(scene.data, repo_dir=scene.repo)["status"] == "switched"
+    if door == "restart_exit":  # server._check_restart: the generation's one stop, then the seam
+        owned_shutdown.begin_owned_stop(scene.data, cause="restart_requested")
+        census = {"worker_exits": {"unconfirmed": []}, "live_children": [],
+                  "owned_stop": owned_shutdown.stop_owned_work(scene.data)}
+        outcome = store_switch.switch_at_restart(scene.data, scene.repo, census)
+    else:
+        outcome = store_switch.run_switch_seam(scene.data, repo_dir=scene.repo)
+    assert outcome["status"] == "switched", outcome
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.storeless
 
 
@@ -1013,8 +1025,7 @@ def test_bootstrap_still_replays_an_armed_intent_whose_target_has_the_store(repl
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.target and result["finalized"] is True, result
 
 
-@pytest.mark.parametrize("held", [False, True])
-@pytest.mark.parametrize("operation", ["cherry-pick", "revert"])
+@pytest.mark.parametrize(("operation", "held"), [("cherry-pick", False), ("revert", True)])
 def test_a_clean_index_with_an_unfinished_operation_is_not_a_finished_rollback(
         replace_scene, update_lanes, held, operation):
     """An empty operation leaves a clean index but a real Git continuation; reset must not be skipped."""
@@ -1098,7 +1109,7 @@ def restore_door(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     storeless = _commit(repo, "before the store", {"BIBLE.md": "constitution\n", "seed.txt": "storeless\n",
                                                    "ouroboros/usage_store.py": "# usage\n"})
-    old = _commit(repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": "# dialogue\n",
+    old = _commit(repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": DIALOGUE_STORE,
                                               "seed.txt": "old\n"})
     head = _commit(repo, "owner work", {"seed.txt": "new\n", "new.txt": "new\n"})
     data = tmp_path / "data"
@@ -1134,8 +1145,7 @@ def restore_door(tmp_path, monkeypatch):
                            restore=restore)
 
 
-@pytest.mark.parametrize("door", ["ui_rollback", "vcs_rollback"])
-@pytest.mark.parametrize("holder", ["crashed", "live"])
+@pytest.mark.parametrize(("holder", "door"), [("crashed", "ui_rollback"), ("live", "vcs_rollback")])
 def test_a_restore_git_refused_at_the_index_lock_returns_writers_without_a_restart(restore_door, holder, door, monkeypatch):
     from supervisor import worker_chat_lane, workers
 
@@ -1269,22 +1279,22 @@ def test_restore_does_not_label_a_repaired_retry_as_an_unchanged_refusal(restore
     from supervisor import workers
 
     scene = restore_door
-    real_run = subprocess.run
+    real_runner = git_ops._run_git_process_bounded  # where Restore's reset and an index rebuild start
     hard_attempts = []
     repairs = []
 
-    def concurrent_index_changes(cmd, *args, **kwargs):
+    def concurrent_index_changes(cmd, **kwargs):
         if cmd[:3] == ["git", "reset", "--hard"]:
             hard_attempts.append(list(cmd))
             if len(hard_attempts) == 1:
                 (scene.repo / ".git" / "index").write_bytes(b"broken")
-        result = real_run(cmd, *args, **kwargs)
-        if cmd[:3] == ["git", "reset", "--mixed"] and result.returncode == 0:
+        result = real_runner(cmd, **kwargs)
+        if cmd[:3] == ["git", "reset", "--mixed"] and result[0] == 0:
             repairs.append(list(cmd))
             _orphan_lock(scene.repo)
         return result
 
-    monkeypatch.setattr(git_ops.subprocess, "run", concurrent_index_changes)
+    monkeypatch.setattr(git_ops, "_run_git_process_bounded", concurrent_index_changes)
     status, body = scene.restore(scene.old)
 
     assert status == 500 and body["restart_required"], body

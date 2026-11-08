@@ -7,9 +7,7 @@ import tempfile
 import threading
 import unittest
 
-import pytest
 
-pytestmark = pytest.mark.serial
 
 
 CALL = runpy.run_path(str(Path(__file__).parents[1] / "bootstrap" / "android-call"))["call"]

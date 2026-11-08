@@ -58,6 +58,7 @@ if sys.platform == "win32":
     _JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x800
     _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x1000
     _JOBOBJECTINFOCLASS_EXTENDED = 9
+    _JOBOBJECTINFOCLASS_PROCESS_ID_LIST = 3
     _PROCESS_SET_QUOTA = 0x0100
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_SUSPEND_RESUME = 0x0800
@@ -74,6 +75,14 @@ if sys.platform == "win32":
             ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
             ("PriorityClass", ctypes.wintypes.DWORD),
             ("SchedulingClass", ctypes.wintypes.DWORD),
+        ]
+
+    class _JOBOBJECT_BASIC_PROCESS_ID_LIST(ctypes.Structure):
+        # A fixed capacity: a Job naming more processes fails the query (ERROR_MORE_DATA), read as unknown.
+        _fields_ = [
+            ("NumberOfAssignedProcesses", ctypes.wintypes.DWORD),
+            ("NumberOfProcessIdsInList", ctypes.wintypes.DWORD),
+            ("ProcessIdList", ctypes.c_size_t * 1024),  # ULONG_PTR
         ]
 
     class _IO_COUNTERS(ctypes.Structure):

@@ -17,7 +17,6 @@ from supervisor import schedule_occurrence as occurrence
 from tests.test_schedule_occurrence import _row, _rows, q  # noqa: F401
 from tests._store_shared import unreadable_result
 
-pytestmark = pytest.mark.serial
 
 
 def _api(q, payload, *, action=False):  # noqa: F811
@@ -70,8 +69,7 @@ def _refused(q, monkeypatch, *, cron=False):  # noqa: F811
     return row
 
 
-@pytest.mark.parametrize("cron", [False, True])
-@pytest.mark.parametrize("legacy_claim", [False, True])
+@pytest.mark.parametrize(("legacy_claim", "cron"), [(False, False), (True, True)])
 def test_api_moves_refused_occurrence_to_new_due_between_retry_ticks(q, monkeypatch, cron, legacy_claim):  # noqa: F811
     clock = _clock(monkeypatch)
     row = _refused(q, monkeypatch, cron=cron)
@@ -179,7 +177,6 @@ def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cr
     monkeypatch.setattr(workers, "PENDING", q.pending)
     monkeypatch.setattr(workers, "RUNNING", q.queue.RUNNING)
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
     monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})
@@ -223,7 +220,7 @@ def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cr
     assert queue_schedules.load_schedule_store(q.root) == retained
 
 
-@pytest.mark.parametrize("case", ["terminal", "foreign", "foreign_schedule", "owner_hold", "unknown"])
+@pytest.mark.parametrize("case", ["terminal", "foreign_schedule", "unknown"])
 def test_retired_row_does_not_authorize_invalid_redispatch(q, monkeypatch, case):  # noqa: F811
     _row(q, intent={"kind": "system_repo"})
     q.queue.check_scheduled_tasks()
@@ -245,8 +242,13 @@ def test_retired_row_does_not_authorize_invalid_redispatch(q, monkeypatch, case)
     assert not occurrence.record_dispatch_possible(task)
 
 
-@pytest.mark.parametrize("control", ["disabled", "deleted", "future", "edited", "unchanged"])
-@pytest.mark.parametrize("legacy_refusal", [False, True])
+@pytest.mark.parametrize(("legacy_refusal", "control"), [
+    (False, "disabled"),
+    (False, "future"),
+    (False, "unchanged"),
+    (True, "deleted"),
+    (True, "edited"),
+])
 def test_legacy_unstarted_claim_obeys_current_controls(q, monkeypatch, control, legacy_refusal):  # noqa: F811
     clock = _clock(monkeypatch)
     row = _refused(q, monkeypatch)

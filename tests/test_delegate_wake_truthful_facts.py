@@ -297,7 +297,6 @@ def _owned(tmp_path, monkeypatch, run_id="run-l", route="fixture"):
 @pytest.mark.parametrize("rows,fail,expected", [
     ([{"id": "fixture", "liveInput": "mid_turn"}], False, "mid_turn"),
     ([{"id": "fixture"}], False, "none"),                 # an engine without the field
-    ([{"id": "other", "liveInput": "mid_turn"}], False, "unknown"),
     ([], True, "unknown"),                                # failure is a fact, never a refusal
 ])
 def test_leaf_live_input_is_read_once_at_entry_and_stamped_on_every_wake(

@@ -16,7 +16,7 @@ from tests import test_ui_smoke_playwright as ui
 from tests.candidate_checkout import SENTINEL_ROUTE, candidate_checkout
 from tests._store_shared import read_result
 
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _served(running, route: str) -> bytes:

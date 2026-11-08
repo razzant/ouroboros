@@ -493,7 +493,10 @@ def test_same_text_replacement_after_evidence_change_does_not_inherit_old_pass(
     assert "review_evidence_revision" not in replacement.acceptance_binding
 
 
-def test_production_final_candidate_reaches_the_result_review_as_its_exact_sanitized_bytes(tmp_path, monkeypatch):
+def test_production_final_candidate_reaches_the_result_review_as_its_exact_bytes(tmp_path, monkeypatch):
+    """The answer is the author's semantic reply (owner, 29.10): the result review, the candidate, its
+    identity and the loop's return carry it as written; only the trace note behind the stored summary
+    is redacted."""
     import hashlib
 
     import ouroboros.loop as loop
@@ -542,11 +545,12 @@ def test_production_final_candidate_reaches_the_result_review_as_its_exact_sanit
     candidate = reviewed_candidates[0]
     binding = trace["delivery_candidate"]["acceptance_binding"]
     assert safe_answer != answer
-    assert reviewed_contents == [safe_answer]
-    assert candidate.full_text == safe_answer
-    assert result == safe_answer
+    assert reviewed_contents == [answer]
+    assert candidate.full_text == answer
+    assert result == answer
+    assert trace["reasoning_notes"][-1] == safe_answer
     assert trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(
-        safe_answer.encode("utf-8")
+        answer.encode("utf-8")
     ).hexdigest()
     assert binding["candidate_sha256"] == trace["delivery_candidate"]["content_sha256"]
     assert binding["acceptance_status"] == "unaccepted"
@@ -700,7 +704,6 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
 
     import ouroboros.loop as loop
     from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.utils import sanitize_tool_result_for_log
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = "parent1"
@@ -737,8 +740,9 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
     })
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_args, **_kwargs: (None, 0.0))
 
+    # The rail publishes the bytes it is given; a host notice quoting a provider sanitized that
+    # quote where it was composed (``loop_transport``).
     fallback = "host fallback after ghp_abcdefghijklmnopqrstuvwxyz1234567890AB"
-    safe_fallback = sanitize_tool_result_for_log(fallback)
     text, usage, returned_trace = loop._forced_final_answer(
         ctx,
         prompt="finalize",
@@ -747,9 +751,8 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
     )
 
     rebound = ctx.delivery_candidate
-    assert safe_fallback != fallback
-    assert text == safe_fallback
-    assert rebound.full_text == safe_fallback
+    assert text == fallback
+    assert rebound.full_text == fallback
     assert text != candidate.full_text
     assert usage["reason_code"] == "provider_unavailable"
     assert not usage.get("_best_effort_extracted")

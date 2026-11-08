@@ -8,9 +8,9 @@ model, of what the seat cost in one wave — every attempt summed — with how m
 covers and their range. No history is "cost unknown", never a one-call estimate. A session row
 spends a seat and time, not money; callers say so before asking for a price.
 
-The table is read once per process and kept for half an hour: ``## Review`` sits in a cached prompt
-prefix, so a price that moved with every settled wave would rewrite it. A reader waits on the ledger
-lock only for the display wait and otherwise reads the last table (or none).
+The table is read once per process and kept for half an hour, so a context capture (the price rides in
+``## Review seat activity``, the changing part of every start) does not scan the ledger at every start.
+A reader waits on the ledger lock only for the display wait and otherwise reads the last table (or none).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 log = logging.getLogger(__name__)
 
 REVIEW_USAGE_CATEGORY = "multi_model_review_review"
+PLAN_USAGE_CATEGORY = "plan_review_review"  # a plan ask's waves: their own price, never mixed into a review's
 COST_UNKNOWN = "cost unknown"
 # Bounds of the measurement, not of any decision: the newest waves one row's median reads, the
 # grouped seat rows one read scans, and how long one process keeps a table it read.
@@ -50,12 +51,12 @@ class ReviewPrice:
 
 
 _lock = threading.Lock()
-_tables: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_tables: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 
 
-def _seat_rows(drive_root: Any) -> List[Dict[str, Any]]:
+def _seat_rows(drive_root: Any, category: str = REVIEW_USAGE_CATEGORY) -> List[Dict[str, Any]]:
     """This process's last read of the grouped seat costs, refreshed after ``_TABLE_TTL_SEC``."""
-    key, now = str(drive_root), time.monotonic()
+    key, now = (str(drive_root), category), time.monotonic()
     with _lock:
         held = _tables.get(key)
     if held is not None and now - held[0] < _TABLE_TTL_SEC:
@@ -65,7 +66,7 @@ def _seat_rows(drive_root: Any) -> List[Dict[str, Any]]:
         from ouroboros import usage_store
 
         with usage_store.read(drive_root, allow_stale=True) as txn:
-            rows = txn.review_seat_costs(REVIEW_USAGE_CATEGORY, limit=_SCAN_LIMIT)
+            rows = txn.review_seat_costs(category, limit=_SCAN_LIMIT)
     except Exception:
         log.debug("review prices unavailable from the usage ledger", exc_info=True)
     with _lock:
@@ -73,12 +74,13 @@ def _seat_rows(drive_root: Any) -> List[Dict[str, Any]]:
     return rows
 
 
-def review_price(drive_root: Any, row_id: str, model: str) -> Optional[ReviewPrice]:
-    """One review by ``row_id`` on ``model``: its median cost, or ``None`` without history."""
+def review_price(drive_root: Any, row_id: str, model: str, *,
+                 category: str = REVIEW_USAGE_CATEGORY) -> Optional[ReviewPrice]:
+    """One review (or, by ``category``, one plan ask) by ``row_id`` on ``model``: its median cost, or ``None``."""
     row_id, model = str(row_id or ""), str(model or "")
     if not row_id or not model or drive_root is None:
         return None
-    costs = [float(seat["usd"]) for seat in _seat_rows(drive_root)
+    costs = [float(seat["usd"]) for seat in _seat_rows(drive_root, category)
              if seat.get("row_id") == row_id and seat.get("priced") and seat.get("usd") is not None
              and model in str(seat.get("models") or "").split(",")][:RECENT_REVIEWS]
     if not costs:
@@ -91,13 +93,13 @@ def _usd(value: float) -> str:
     return f"${Decimal(value).quantize(places, rounding=ROUND_HALF_UP)}"
 
 
-def review_price_text(price: Optional[ReviewPrice]) -> str:
+def review_price_text(price: Optional[ReviewPrice], unit: str = "review") -> str:
     """A row's price in words. Settings → Agents prints the same words (``subagents_settings.js``
     ``reviewCostText``), the dollars rounded as JavaScript's ``toFixed`` does."""
     if price is None:
         return COST_UNKNOWN
     if not price.usd and not price.high:
-        return "no API cost per review"
+        return f"no API cost per {unit}"
     if price.reviews < 2:
-        return f"≈{_usd(price.usd)} per review (1 measured)"
-    return f"≈{_usd(price.usd)} per review (median of {price.reviews} measured, {_usd(price.low)}–{_usd(price.high)})"
+        return f"≈{_usd(price.usd)} per {unit} (1 measured)"
+    return f"≈{_usd(price.usd)} per {unit} (median of {price.reviews} measured, {_usd(price.low)}–{_usd(price.high)})"

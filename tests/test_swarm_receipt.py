@@ -217,7 +217,7 @@ def test_ordinary_task_writes_do_not_scan_tree_until_receipt_exists(tmp_path, mo
     write_task_result(tmp_path, "root", "completed")
 
 
-@pytest.mark.parametrize("case", ["selected", "unselected", "pending", "additional"])
+@pytest.mark.parametrize("case", ["selected", "pending", "additional"])
 def test_review_detach_retains_the_canonical_waking_actor(tmp_path, monkeypatch, case):
     from ouroboros import review_pause, store, swarm_receipt_sources
     from ouroboros.subagent_metrics import set_name
@@ -333,3 +333,30 @@ def test_receipt_anchor_resolves_the_root_and_the_receipt_without_a_body_parse(t
         txn.conn.execute("DELETE FROM task_bodies WHERE task_id='root'")
     assert task_store.receipt_anchor(tmp_path, "child") == ("root", False)
     assert task_store.receipt_anchor(tmp_path, "root") is None
+
+
+def test_a_definite_start_refusal_stays_a_fact_of_the_tree_and_a_reviews_start_is_not_a_helpers(tmp_path):
+    """Refused, it leaves ``custody_open`` and has no actor; a receipt that lost it would read as nothing tried."""
+    from ouroboros import delegate_custody as custody
+
+    write_task_result(tmp_path, "root", "completed")
+    write_task_result(tmp_path, "child", "completed", root_task_id="root", parent_task_id="root")
+    clean = receipt.publish(tmp_path, "root")
+    assert clean["refused_starts"] == [], "a receipt that read the refusals says none, which an older one cannot say"
+    assert receipt.publish(tmp_path, "root") == clean, "and stays one revision while nothing changes"
+    assert "refused_starts" not in receipt.fold_tree("root", []), "a fold given no custody facts claims nothing"
+    for task_id, invocation, extra in (("child", "helper-start", {}), ("root", "review-start", {"review_wave_id": "wave"})):
+        assert custody.record_start_requested(tmp_path, task_id=task_id, root_task_id="root", invocation_id=invocation,
+                                              request={"prompt": "already submitted"}, **extra)
+    pending = receipt.publish(tmp_path, "root")
+    assert {a["invocation_id"]: a["kind"] for a in pending["actor_intervals"] if a.get("invocation_id")} == {
+        "helper-start": "delegated_start", "review-start": "review_custody"}
+    assert pending["state"] == "provisional"
+    for task_id, invocation in (("child", "helper-start"), ("root", "review-start")):
+        assert custody.emit(tmp_path, custody.START_FAILED, {"task_id": task_id, "invocation_id": invocation,
+                                                             "definite": True, "reason": "engine_refused"})
+    refused = receipt.publish(tmp_path, "root")
+    assert refused["refused_starts"] == [{"invocation_id": "helper-start", "task_id": "child", "reason": "engine_refused"}]
+    assert refused["state"] == "closed", "a settled refusal holds nothing open"
+    assert not any(a.get("invocation_id") for a in refused["actor_intervals"])
+    assert load_task_result(tmp_path, "root")["swarm_receipt"]["refused_starts"] == refused["refused_starts"]

@@ -514,7 +514,6 @@ def _forge(root, wait_id, row, pointer=None, *, remove=False):
     patch_document(root, TASK, change)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["result", "plan_review"])
 def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is_never_told_202(
         env, monkeypatch, record_property, capsys, surface):
@@ -522,6 +521,7 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, drain_owner_entries
     from ouroboros.platform_layer import collect_descendant_pids, process_start_time
     from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.process_identity import birth_identity, process_kernel_birth
     from supervisor import queue as task_queue
     from supervisor.task_model_wait import handle_task_model_wait
 
@@ -548,6 +548,7 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
         write_task_result(f.root, TASK, "completed", result="answer")  # the author ended
         block = row["review_operation"]
         assert block["controller"] == {"pid": executing["pid"], "birth": executing["birth"],
+                                       "kernel_birth": process_kernel_birth(executing["pid"]) or "",
                                        "session": current_custody_session_id()}, topology
         # Its open pointer is part of the proof; no surface retains a checkpoint source beside it now.
         pointer = load_task_result(f.root, TASK)["review_operations"][block["owner_id"]]
@@ -559,13 +560,17 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
         assert len(forwarded) == 1 and forwarded[0]["chat_id"] == 7
         stale = gateway._decide(f.root, {**_decision(row, "stale"), "revision": row["revision"] + 5})
         assert stale.status_code == 409 and json.loads(stale.body)["reason_code"] == "stale_model_wait"
-        # Rows naming the same process but another birth (a reused pid) or another server
-        # generation are refused, and a refused claim leaves no pending action behind. A
-        # row alone disagrees with its operation's pointer; a forged row with its own
-        # matching pointer passes that check and meets the birth and session checks.
+        # Rows naming the same process but another birth (a reused pid: another spelling and
+        # kernel birth of the same kind) or another server generation are refused, and a
+        # refused claim leaves no pending action behind. A row alone disagrees with its
+        # operation's pointer; a forged row with its own matching pointer passes that check
+        # and meets the birth and session checks.
+        kind = (birth_identity(block["controller"]["kernel_birth"]) or ("",))[0]
+        reused = {"darwin": "darwin-start:1.000001", "windows": "win-filetime:1",
+                  "linux_boot": "1." + "0" * 32, "ticks": "1."}.get(kind, "")
         before = load_task_result(f.root, TASK)
         for wait_id, controller, state in (
-                ("reused-pid", {**block["controller"], "birth": "another process"}, "dead"),
+                ("reused-pid", {**block["controller"], "birth": "another process", "kernel_birth": reused}, "dead"),
                 ("other-generation", {**block["controller"], "session": "previous-server"}, "alive")):
             assert review_operation.controller_state(controller) == state
             for owner_id in (block["owner_id"], f"forged-{wait_id}"):
@@ -626,7 +631,6 @@ def test_a_real_remote_operation_consumes_its_exact_decision_and_a_closed_one_is
     assert dead.status_code == 409
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("surface", ["task_acceptance", "plan_review"])
 def test_a_decision_the_remote_operation_applies_between_the_gateway_reads_is_its_own_receipt(
         env, monkeypatch, surface):

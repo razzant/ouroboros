@@ -12,7 +12,7 @@ from typing import Literal, Optional
 class PhysicalAttemptContext:
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     rendered_mode: Literal["max", "low", "nano"]
-    measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+    measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
     route_fp: str
     round_id: str
     target_total_tokens: Optional[int]
@@ -26,3 +26,4 @@ class PhysicalAttemptContext:
     response_reserve_tokens: int = 0
     window_witness_bound: bool = False
     window_observation_fp: str = ""  # Main account scope, separate from capability/density route_fp
+    required_book_tokens: int = 0  # a directly required handbook inside this candidate (density applied), its note too

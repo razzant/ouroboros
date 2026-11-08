@@ -44,7 +44,7 @@ from tests.system_e2e.harness import (
 )
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser,
+pytestmark = [pytest.mark.browser,
               pytest.mark.skipif(os.name == "nt", reason="FIFO/crash qualification requires POSIX")]
 
 REPO = Path(__file__).resolve().parents[1]
@@ -474,7 +474,7 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                     page.screenshot(path=str(shots / "01-boot1-unknown-consciousness-chip.png"), animations="disabled")
                     passed("chat_chip_unknown", chip=chip)
                     pills = _evolution_pills(page)
-                    assert pills["evolution"] == "Unknown" and pills["consciousness"] == "Consciousness unknown", pills
+                    assert pills["evolution"] == "Unknown" and pills["consciousness"] == "Consciousness: unknown ›", pills
                     page.screenshot(path=str(shots / "02-boot1-unknown-evolution-panel.png"), animations="disabled")
                     passed("evolution_panel_unknown", pills=pills)
                     # A narrow viewport: the bar keeps the chip whole beside the title and Panic.

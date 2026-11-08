@@ -305,8 +305,9 @@ def test_worktree_root_isolation_guard(tmp_path):
 
 
 def test_worktree_prune_guards_outside_root(tmp_path):
-    # A corrupt record pointing OUTSIDE the worktree root must never cause deletion,
-    # even once its task is proven over and the pass retires the record.
+    # A record pointing OUTSIDE the worktree root (corrupt, or left by a root that moved) must
+    # never cause deletion, even once its task is proven over. Nor is it forgotten (#1239): the
+    # record stays with a removal stamp, and the next pass of this process does not retry it.
     from ouroboros.task_results import write_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
@@ -319,7 +320,11 @@ def test_worktree_prune_guards_outside_root(tmp_path):
     write_task_result(data, "evil", "completed")
     report = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=0, live=lambda _task: False)
     assert outside.exists() and (outside / "keep.txt").exists()  # guard prevented deletion
-    assert report == {"removed": 1, "kept": 0} and sw.list_worktrees(data_dir=data) == []  # only the record went
+    assert report == {"removed": 0, "kept": 1}
+    (row,) = sw.list_worktrees(data_dir=data)
+    assert row["path"] == str(outside) and row.get("removal_failed")
+    assert sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=0,
+                            live=lambda _task: False) == {"removed": 0, "kept": 1}
 
 
 def test_worktree_prune_missing(tmp_path):

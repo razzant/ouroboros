@@ -88,9 +88,11 @@ def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, dri
     """Superseded host state leaves where this request already departs from the last send.
 
     From the departure on (``transcript_prefix.departure``: a tool load re-reads from the start, a
-    rewrite from its first change) every row is read again anyway, so retiring
+    rewrite at least from its first change; on Codex, whose cache keeps only whole leading system
+    items, from the end of those items) every row is read again anyway, so retiring
     the superseded host rows there costs no extra re-read and retires no reasoning the departure
-    itself does not. Their exact rows are retained first; one host record names what left and
+    itself does not. Rows between the leading items and the departure stay even where a route
+    reads them again (a disclosed residual, C2 S6). Their exact rows are retained first; one host record names what left and
     where it is. Nothing before the departure moves, and a round that only appends keeps its
     cached prefix: this never starts a rewrite, it only rides one. Without a recorded send nothing
     proves the provider's cached prefix is gone, so nothing leaves.
@@ -204,10 +206,14 @@ def _exposed_units(messages: list, units: Sequence[_AtomicUnit], observation: Ma
     return exposed
 
 
-def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str:
-    """Typed facts of one unit from its protocol rows and trace references, never a retelling."""
+def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, error_text: bool = True) -> str:
+    """Typed facts and exact source reader from the producer's bound record, never a retelling.
+
+    A recorded outcome other than ``ok`` keeps its result text verbatim (``error_text``) when that text is no longer
+    than the record naming it: the error a work must act on is not reduced to a size, while a long log leaves its
+    exact reader (and a record that would not save room leaves the body in place, ``emergency_address_view``)."""
     rows = compaction._view_source_messages(messages[unit.start:unit.end + 1])
-    lines = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"]
+    lines, texts = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"], []
     results = {str(row.get("tool_call_id") or ""): row for row in rows if str(row.get("role") or "") == "tool"}
     for call in rows[0].get("tool_calls") or []:
         function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
@@ -224,16 +230,21 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str
             detail += f"; outcome binding unknown ({record['reason']})"
         else:
             detail += f"; invocation {record['invocation']['invocation_id']}"
-        for label, key in (("trace", "trace_ref"), ("source", "source_ref")):
-            if record.get(key):
-                detail += f"; {label} {compaction._canonical_json(record[key])}"
+        if record.get("source_ref"):
+            detail += f"; source {compaction._canonical_json(record['source_ref'])}"
         lines.append(f"- {function.get('name') or '?'} {shown} -> result {result_chars} chars{detail}")
+        status = str(record["facts"].get("status") or "unknown")
+        if record["state"] == "recorded" and status not in ("ok", "unknown") and result_text:
+            texts.append((len(lines), f"  {status} result, verbatim:\n{result_text}"))
+    bare = "\n".join(lines)  # an error text no longer than the record naming it stays; a longer log, its reader
+    for offset, (index, text) in enumerate([item for item in texts if len(item[1]) <= len(bare)] if error_text else ()):
+        lines.insert(index + offset, text)
     return "\n".join(lines)
 
 
 def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
     """Explicitly chosen bodies that fit known usable input alone (every chosen body when it is unknown)."""
-    from ouroboros.tool_capabilities import requested_result_view
+    from ouroboros.tool_capabilities import requested_call_view
 
     protected = set()
     for unit in units:
@@ -245,7 +256,7 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
             except (ValueError, TypeError):
                 continue
             row = results.get(str(call.get("id") or ""))
-            if row is None or requested_result_view(arguments) is None:
+            if row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None:
                 continue
             cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
                 [{**row, "content": ""}], density)
@@ -266,16 +277,22 @@ def emergency_address_view(
     drive_root: pathlib.Path,
     task_id: str,
     usable_input: Optional[int] = None,
+    replacing_host_kinds: Sequence[str] = (),
+    release_shown_chosen: bool = False,
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Model-free pass after the provider's typed refusal of this very request.
 
     Obsolete host rows share one exact original-checkpoint pointer; review indexes
     have no invented selectable unit IDs. ``bodies`` takes confirmed exposed complete
-    tool units oldest first, stopping at the measured goal. ``unseen_bodies`` is the
+    tool units oldest first, stopping at the measured goal; a chosen read a usable turn showed is an ordinary
+    shown body only when a provider's refusal started the round (``release_shown_chosen``: an estimate never
+    cuts a chosen read, BIBLE P1). ``unseen_bodies`` is the
     separately disclosed late rescue of units whose exposure is unconfirmed;
     ``chosen_bodies`` alone reaches such a just-chosen body that fits by itself. Exact
     body units remain restorable; no view claims understanding. ``measure_candidate``
     measures the complete final request, including the seal and fresh host facts.
+    ``replacing_host_kinds`` names snapshots the caller's final envelope supplies
+    afresh; their last old occurrence is superseded too, while intact.
     """
     label = _EMERGENCY_LABELS[rung]
     if cause == "output_exhaustion":
@@ -289,17 +306,25 @@ def emergency_address_view(
                           measurement_density=density)
     protected = compaction.owner_protected_unit_ids(messages, units)
     fitting = chosen_read_units(messages, units, usable_input=usable_input, density=density)
-    protected |= set() if rung == "chosen_bodies" else fitting
+    tool_units = [u for u in units if compaction.unit_kind(messages, u) == "tool" and u.generation == 0]
+    exposed = _exposed_units(messages, tool_units, observation or {})
+    protected |= set() if rung == "chosen_bodies" else (fitting - exposed if release_shown_chosen else fitting)
     obsolete = _obsolete_host_rows(messages) if rung == "host_copies" else set()
+    if rung == "host_copies" and replacing_host_kinds:
+        from ouroboros.context_budget import host_row_intact
+        obsolete.update(i for i, row in enumerate(messages)
+                        if row.get(HOST_CONTEXT_KIND_KEY) in replacing_host_kinds and host_row_intact(row))
     first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
     obsolete = {i for i in obsolete if i != first_user and not messages[i].get("function_call")
                 and compaction._plain_text(messages[i].get("content")) is not None}
-    raw = [u for u in units if compaction.unit_kind(messages, u) == "tool" and u.generation == 0
-           and u.unit_id not in protected]
+    raw = [u for u in tool_units if u.unit_id not in protected]
     oversized = chosen_read_units(messages, raw) - fitting  # chosen bodies that alone exceed usable input
-    exposed = _exposed_units(messages, raw, observation or {})
-    eligible = [u for u in raw if (u.unit_id in exposed) == (rung == "bodies")
-                and (u.unit_id in fitting) == (rung == "chosen_bodies")] if rung != "host_copies" else []
+    if rung == "bodies":
+        eligible = [u for u in raw if u.unit_id in exposed]
+    elif rung != "host_copies":
+        eligible = [u for u in raw if u.unit_id not in exposed and (u.unit_id in fitting) == (rung == "chosen_bodies")]
+    else:
+        eligible = []
     if not eligible and not obsolete:
         return messages, compaction._receipt("no_eligible", before_sha=before_sha)
     fingerprint = compaction._sha256(compaction._canonical_bytes({"rung": rung, "transcript": before_sha,
@@ -382,3 +407,20 @@ def emergency_address_view(
         checkpoint_ref=checkpoint_ref, capsule_refs=capsule_refs,
         source_refs=compaction._unique_refs([*source_refs, checkpoint_ref]),
     )
+
+
+def fresh_room_rows(messages, *, drive_root, task_id, persist=False):
+    """Price a fixed-width reader; retain exact bytes only for the published selection."""
+    from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
+    data = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8') if persist else b''
+    args = dict(category='context_checkpoints', source_id='room-' + hashlib.sha256(data).hexdigest()[:16],
+                data=data, extension='json')
+    try:
+        ref = (store_actor_source_bytes(pathlib.Path(drive_root), str(task_id or 'context'), **args) if persist
+               else actor_source_reference(**args))
+    except OSError:
+        log.warning('Room facts kept: exact prior view could not be retained', exc_info=True)
+        return messages, ''
+    rows = [row for row in messages if not (host_row_intact(row)
+            and row.get(HOST_CONTEXT_KIND_KEY) == 'ouroboros_context_facts')]
+    return rows, f" Exact view before this refresh: read_file(root='artifact_store', path={json.dumps(ref['path'])})."

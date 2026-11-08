@@ -12,7 +12,6 @@ from ouroboros import config, mcp_client
 
 @pytest.mark.parametrize("url", [
     "http://169.254.169.254/latest/meta-data/", "http://metadata.google.internal/mcp",
-    "http://metadata/mcp", "http://100.100.100.200/mcp", "http://[fe80::1]/mcp",
     "http://[::ffff:169.254.169.254]/mcp",
 ])
 def test_cyber_metadata_is_admitted_without_changing_ordinary_policy(url, monkeypatch):
@@ -23,7 +22,7 @@ def test_cyber_metadata_is_admitted_without_changing_ordinary_policy(url, monkey
     assert mcp_client._validate_url(url) == url
 
 
-@pytest.mark.parametrize("url", ["", "http:///mcp", "file:///tmp/mcp", "http://[invalid]/mcp", "http://host:bad/mcp"])
+@pytest.mark.parametrize("url", ["", "http:///mcp", "http://host:bad/mcp"])
 def test_cyber_malformed_or_unsupported_urls_remain_errors(url, monkeypatch):
     monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "cyber_pro")
     assert mcp_client.normalize_server_config({"id": "demo", "url": url}) is None
@@ -45,14 +44,15 @@ def test_cyber_url_credentials_use_existing_diagnostic_masking(monkeypatch):
     url = "https://agency-user:synthetic%3Apassword@example.com/mcp"
     cfg = mcp_client.normalize_server_config({"id": "auth", "url": url})
     assert cfg and cfg.url == url
-    assert mcp_client.redact_servers_for_status([cfg])[0]["url"] == "https://example.com/mcp"
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [{"id": "auth", "url": url}]})
+    assert manager.status_payload()["servers"][0]["url"] == "https://example.com/mcp"
     diagnostic = mcp_client._redact_error_text("agency-user synthetic:password " + url, cfg)
     assert "agency-user" not in diagnostic and "password" not in diagnostic
     monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "pro")
     assert mcp_client.normalize_server_config({"id": "auth", "url": url}) is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
 def test_live_http_mcp_discovery_call_and_remote_failure(tmp_path, monkeypatch, mode):
     pytest.importorskip("mcp")

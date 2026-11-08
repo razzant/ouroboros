@@ -1,14 +1,12 @@
 /* Consciousness, places and the owner's safety choices: Dashboard › Consciousness, the place sheet and the Connect
    flow, Settings › Behavior › Consciousness and Safety Supervisor, the Agents second-check mark and a connector's
-   icon on Skills cards. Composition over ui.css tokens and the existing recipes (the Storage summary, the §6 account
+   icon on Skills cards. Composition over ui.css tokens and the existing recipes (the Dashboard tab body, the §6 account
    row, the Settings segmented tray, the document-reader dialog, .ui-chip, .ui-status, .btn tones, the status mark);
    no value of its own. Narrow layouts follow their own container, never the viewport (DESIGN §10). */
 
 /* ---- shared pieces ------------------------------------------------------------------------------------------------ */
 .place-glyph { display: inline-flex; flex: 0 0 auto; color: var(--text-primary); }
 .place-glyph svg { display: block; }
-.consciousness-fact { white-space: nowrap; }
-.consciousness-num { font-variant-numeric: tabular-nums; }
 /* Work running now is the house status mark (moving dots in the surface's ink), placed after its words. */
 .status-mark.consciousness-mark { vertical-align: middle; margin-inline-start: var(--space-2); }
 /* A link inside a sentence keeps the sentence's lines (DESIGN §10): primary ink, no body. */
@@ -22,7 +20,7 @@
     font-weight: 600;
     text-align: start;
     cursor: pointer;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
 }
 .consciousness-inline-link:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* The shells give every button a finger's minimum box; a link inside a sentence keeps the sentence's lines and
@@ -61,12 +59,9 @@ textarea.ui-control.consciousness-owner-words {
 .cx-chip[hidden], .cx-chip-word[hidden] { display: none; }
 .cx-chip-glyph { display: inline-flex; flex: none; }
 .cx-chip-glyph svg { display: block; width: 18px; height: 18px; }
-/* It leads the bar's end group, so a status word that grows or shrinks never moves it (DESIGN bible 6). */
-:is(.chat-page-header, .project-panel-bar) > .cx-chip { margin-inline-start: auto; }
-:is(.chat-page-header, .project-panel-bar) > .cx-chip:not([hidden]) + :is(.app-page-actions, .app-page-trailing) { margin-inline-start: 0; }
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
-:root[data-theme] .cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
+.cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
+.cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
+.cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
 /* Its sheet is the work list's (room_work.css .rw-shade): its own opaque material hung under the bar's capsules, at
    most 40rem wide and ending under the bar's last control, so it opens under the chip. */
 .rw-shade.cx-shade { left: auto; width: min(40rem, calc(100% - var(--rw-left, 0px) - var(--rw-right, 0px))); }
@@ -78,7 +73,7 @@ textarea.ui-control.consciousness-owner-words {
 .cx-head-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cx-kicker, .cx-wakes-title { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .cx-state { margin: 0; font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; color: var(--text-primary); }
-.cx-money, .cx-wakes-note { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
+.cx-money, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
 .cx-wakes-title { margin-top: var(--space-2); }
 .cx-wakes { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .cx-wake {
@@ -90,12 +85,12 @@ textarea.ui-control.consciousness-owner-words {
 .cx-wake-outcome { font-size: var(--type-meta); color: var(--text-meta); }
 .cx-doors { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-2); }
 .cx-door {
-    padding: 0; border: 0; border-radius: var(--radius-xs); background: transparent; cursor: pointer;
+    padding: 0; border: 0; border-radius: var(--pill-radius); background: transparent; cursor: pointer;
     font: inherit; font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; color: var(--tone-crimson-word);
 }
 .cx-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (hover: hover) { .cx-door:hover { text-decoration: underline; text-underline-offset: 3px; } }
-:is(.cx-money, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-door)[hidden] { display: none; }
+:is(.cx-money, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
 
 /* ---- Settings › Behavior › Consciousness ------------------------------------------------------------------------ */
 .consciousness-levels { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -145,30 +140,12 @@ textarea.ui-control.consciousness-owner-words {
     cursor: pointer;
 }
 
-/* ---- Dashboard › Consciousness ------------------------------------------------------------------------------------- */
-.consciousness-root { gap: var(--space-4); container: consciousness / inline-size; }
-.consciousness-read-status:empty { display: none; }
-.consciousness-summary-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
-.consciousness-headline { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
-/* The words and the moving mark flow as one line box, so the mark follows the last word wherever it wraps. */
-.consciousness-headline .storage-total { min-width: 0; }
-.btn.btn-ghost.consciousness-stop { flex: 0 0 auto; }
-.consciousness-why { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-next { margin: 2px 0 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-summary-foot {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--surface-border-soft);
-}
-.consciousness-summary-foot .storage-meta { margin: 0; }
-.consciousness-causes { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
-.consciousness-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.consciousness-card-head-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.consciousness-card-head .storage-meta { margin: 0; }
+/* ---- Dashboard › Consciousness (consciousness_dashboard.js) on the Dashboard tab body ------------------------------- */
+/* The headline card is the shared .dashboard-hero: the state in the host's words with its one status mark, the money of
+   the last 24 hours and the own-task count as its meta, Start/Stop beside them; the rest is that card's Details. */
+.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); }
+.consciousness-wake-group { display: flex; flex-direction: column; gap: var(--space-3); }
+.consciousness-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .consciousness-card-head .btn { flex: 0 0 auto; }
 .consciousness-copy { margin: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-foot { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -202,7 +179,7 @@ textarea.ui-control.consciousness-owner-words {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-/* Today's spend in the place: a fact in tabular figures, the dash where nothing is known (as Costs writes it). */
+/* Today's spend in the place: a fact in tabular figures; an unknown spend leaves the column empty (never $0.00). */
 .consciousness-spend {
     grid-area: spend;
     min-width: 5ch;
@@ -213,31 +190,27 @@ textarea.ui-control.consciousness-owner-words {
     font-variant-numeric: tabular-nums;
     text-align: end;
 }
-.consciousness-spend.is-none { color: var(--text-meta); font-weight: 400; }
 .consciousness-wakes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .consciousness-wake {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     column-gap: var(--space-3);
-    align-items: start;
+    align-items: baseline;
     padding: var(--space-3) 0;
 }
-.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--surface-border-soft); }
-.consciousness-wake-time::after { content: " ·"; }
+.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--divider); }
 .consciousness-wake-time { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-variant-numeric: tabular-nums; }
 .consciousness-wake-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .consciousness-wake-head { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .consciousness-wake-where, .consciousness-wake-own { color: var(--text-primary); font-weight: 600; }
-.consciousness-wake-own { display: inline-flex; align-items: center; gap: 6px; }
+/* Its own time reads on the line's baseline: the glyph sits in the words, not beside them in a box of its own. */
+.consciousness-wake-own .place-glyph { display: inline-block; vertical-align: -0.15em; margin-inline-end: 6px; }
 .consciousness-wake-summary { margin: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-wake-lead { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-wake-facts { margin: var(--space-1) 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .consciousness-wake-facts.is-line { margin: 0; }
 .consciousness-wake-checks { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .consciousness-wake-checks .skills-chip { white-space: normal; overflow-wrap: anywhere; }
-.consciousness-wake-more { min-width: 0; font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-wake-more > summary { display: list-item; width: fit-content; margin-inline-start: 1em; color: var(--text-meta); cursor: pointer; border-radius: var(--radius-xs); }
-.consciousness-wake-more > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .consciousness-wake-note-label { margin: var(--space-2) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); font-weight: 600; }
 .consciousness-wake-note { overflow-wrap: anywhere; color: var(--text-primary); }
 .consciousness-wake-note > :first-child { margin-top: 0; }
@@ -252,11 +225,10 @@ textarea.ui-control.consciousness-owner-words {
     text-align: end;
     white-space: nowrap;
 }
-/* A narrow column (a phone, a narrow window): the time and cost share the first line, the rest gets the width;
-   a place row puts its spend under the meta. */
-@container consciousness (max-width: 560px) {
+/* A narrow tab body (a phone, a narrow window): the time and cost share the first line, the rest gets the width; a
+   place row puts its spend under the meta. */
+@container dashboard (max-width: 560px) {
     .consciousness-wake { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-1); }
-    .consciousness-wake-time::after { content: none; }
     .consciousness-wake-time { grid-column: 1; grid-row: 1; }
     .consciousness-wake-cost { grid-column: 2; grid-row: 1; }
     .consciousness-wake-main { grid-column: 1 / -1; grid-row: 2; }
@@ -267,11 +239,13 @@ textarea.ui-control.consciousness-owner-words {
 
 /* ---- the place sheet and the Connect flow: the document reader's dialog geometry ------------------------------- */
 /* On the desk the Connect list is as tall as its rows (a phone keeps the reader's full sheet). */
-:root[data-layout="docked"] .document-reader.place-connect { height: auto; }
+/* A modal dialog keeps the engine's inset 0, so only fit-content (never auto) sizes it to its rows. */
+:root[data-layout="docked"] .document-reader.place-connect { height: fit-content; }
 :root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5))); }
 .place-sheet .document-reader-title { display: flex; align-items: center; gap: var(--space-3); white-space: normal; }
 .place-sheet-body { display: flex; flex-direction: column; gap: var(--space-5); container: placesheet / inline-size; }
-.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0 auto; }
+/* One column under the sheet's head: the sections start where its title starts. */
+.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0; }
 .place-sheet-section > h3 { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 .place-sheet-section p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .place-history-plain { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -335,6 +309,7 @@ textarea.ui-control.consciousness-owner-words {
 .place-convo-row time { font-variant-numeric: tabular-nums; }
 .place-convo-fact::before { content: '·'; margin-inline-end: var(--space-2); }
 .place-convo-text { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.place-convo-reaction { overflow-wrap: anywhere; }
 .place-convo-text.chat-markdown > :first-child { margin-top: 0; }
 .place-convo-text.chat-markdown > :last-child { margin-bottom: 0; }
 .place-convo-row.is-system { padding: var(--space-2) var(--space-4); border-radius: var(--radius-inner); background: var(--system-bubble-bg); }

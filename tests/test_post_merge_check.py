@@ -1,7 +1,9 @@
-"""The post-merge check: base choice, one retry, bisection to the culprit merge and the hand-over.
+"""The post-merge check: base choice, book-growth mode, one retry, the size check, bisection to the
+culprit merge and the summary (the hand-over itself: tests/test_post_merge_routing.py).
 
 Deterministic: GitHub is a fake, test sessions are fakes that write tests/ci_evidence.py's files,
-and the only git is a throwaway local repository without remotes.
+and git is a throwaway local repository without remotes, beside one read-only `git grep` of this
+checkout for the modules of its size check.
 """
 from __future__ import annotations
 
@@ -85,6 +87,52 @@ def test_the_base_command_survives_an_api_error_and_publishes_its_choice(tmp_pat
     assert "HTTP 503" in capsys.readouterr().out
 
 
+# --- growth ----------------------------------------------------------------------------------
+
+def test_each_merge_of_the_window_is_judged_as_its_own_push_and_one_approval_decides(tmp_path, monkeypatch):
+    asked = []
+
+    def decide(environ):
+        asked.append(environ)
+        return "approved" if environ["SHA"] == "1" * 40 else "block"
+
+    environ = {"REPO": "razzant/ouroboros", "OWNER": "razzant", "GH_TOKEN": "t", "GITHUB_OUTPUT": "/dev/null",
+               "EVENT": "pull_request", "PR_NUMBER": "9"}
+    assert pmc.approved_merges(["2" * 40, "1" * 40], environ, decide) == ["1" * 40]
+    assert asked[0] == {"REPO": "razzant/ouroboros", "OWNER": "razzant", "GH_TOKEN": "t", "EVENT": "push",
+                        "REF": "refs/heads/ouroboros", "SHA": "2" * 40}  # nothing else of this job leaks in
+    monkeypatch.setattr(pmc, "merges", lambda base, head: [("2" * 40, "Merge #2"), ("1" * 40, "Merge #1")])
+    args = type("Args", (), {"evidence_dir": tmp_path, "base": "b" * 40, "head": HEAD})
+    for verdict, mode, approved in ((decide, "approved", ["1" * 40]), (lambda environ: "block", "block", [])):
+        assert pmc.command_growth(args, environ, verdict) == 0
+        assert json.loads((tmp_path / "growth.json").read_text(encoding="utf-8")) == {
+            "format": 1, "base": "b" * 40, "head": HEAD, "mode": mode, "merges": ["2" * 40, "1" * 40], "approved": approved}
+
+
+def test_the_growth_decision_is_book_growth_mode_for_one_push(monkeypatch):
+    """scripts/book_growth_mode.py itself decides each merge: the owner labelled its merged PR last."""
+    import io
+
+    from scripts import book_growth_mode
+
+    sha, events = "1" * 40, []
+    pages = {f"commits/{sha}/pulls": [{"number": 7, "state": "closed", "merged_at": "2026-10-28T00:00:00Z",
+                                       "merge_commit_sha": sha,
+                                       "base": {"ref": "ouroboros", "repo": {"full_name": "razzant/ouroboros"}}}],
+             "issues/7/events": events}
+
+    def urlopen(request, timeout):
+        response = io.BytesIO(json.dumps(pages[request.full_url.split("/razzant/ouroboros/")[1].split("?")[0]]).encode())
+        response.headers = {}
+        return response
+
+    monkeypatch.setattr(book_growth_mode.urllib.request, "urlopen", urlopen)
+    environ = {"REPO": "razzant/ouroboros", "OWNER": "razzant"}
+    assert pmc.approved_merges([sha], environ, pmc._book_growth_mode) == []
+    events.append({"event": "labeled", "actor": {"login": "razzant"}, "label": {"name": "book-growth"}})
+    assert pmc.approved_merges([sha], environ, pmc._book_growth_mode) == [sha]
+
+
 # --- sessions --------------------------------------------------------------------------------
 
 def test_a_session_without_its_final_export_is_read_from_its_journal(tmp_path):
@@ -115,7 +163,7 @@ def test_outcomes_name_each_id_and_a_module_stands_for_its_tests(tmp_path):
                                   "tests/u.py::test_late", "tests/t.py::test_gone", "tests/w.py::test_any",
                                   "tests/v.py", "tests/u.py", "tests/w.py"]) == {
         "tests/t.py::test_ok": "passed", "tests/t.py::test_red": "failed", "tests/t.py::test_skip": "skipped",
-        "tests/u.py::test_late": "failed", "tests/t.py::test_gone": "absent", "tests/w.py::test_any": "failed",
+        "tests/u.py::test_late": "failed", "tests/t.py::test_gone": "unknown", "tests/w.py::test_any": "failed",
         "tests/v.py": "passed", "tests/u.py": "failed", "tests/w.py": "failed"}
 
 
@@ -254,6 +302,115 @@ def test_a_lint_finding_is_probed_on_its_file_as_the_commit_has_it(tmp_path):
     assert pmc.lint_answers(tree, [], lambda cwd, paths: pytest.fail("no finding, no ruff")) == {}
 
 
+SIZED = "size tests/test_smoke.py::test_no_oversized_modules"
+
+
+def test_the_size_check_is_the_release_lane_over_the_modules_that_mark_it(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "tests" / "nested").mkdir(parents=True)
+    files = {"tests/test_sized.py": "@pytest.mark.size_ratchet\ndef test_a(): pass\n",
+             "tests/nested/test_deep.py": "pytestmark = [pytest.mark.serial, pytest.mark.size_ratchet]\n",
+             "tests/test_class.py": "class TestK:\n    pytestmark: list = [pytest.mark.size_ratchet]\n",
+             "tests/test_plain.py": "def test_b(): pass  # the size_ratchet marker lane\n",
+             # Mentions, not declarations: a fixture string, a comment, a longer marker name.
+             "tests/test_fixture.py": 'SOURCE = "@pytest.mark.size_ratchet\\ndef test_x(): pass"\n'
+                                      "# @pytest.mark.size_ratchet goes on each size test\n"
+                                      "@pytest.mark.size_ratchet_extra\ndef test_y(): pass\n",
+             "tests/helper.py": "@pytest.mark.size_ratchet\n"}  # not a test module
+    for path, text in files.items():
+        (repo / path).write_text(text, encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    assert pmc.size_modules(repo) == ["tests/nested/test_deep.py", "tests/test_class.py", "tests/test_sized.py"]
+    _git(repo, "rm", "-q", "--cached", "tests/test_class.py")
+    seen = []
+
+    def run(args, directory, *, cwd, env):
+        seen.append((list(args), Path(directory), Path(cwd), env))
+        _results(directory, [_row("tests/test_sized.py::test_a", "failed")])
+
+    session = pmc.size_session(tmp_path / "size", base="b" * 40, mode="approved", cwd=repo, run=run)
+    assert seen == [(["-m", "size_ratchet", "tests/nested/test_deep.py", "tests/test_sized.py"], tmp_path / "size", repo,
+                     {"OURO_SIZE_RATCHET_BASE_REF": "b" * 40, "OURO_BOOK_GROWTH_MODE": "approved"})]
+    assert pmc.size_findings(session) == ({"size tests/test_sized.py::test_a": "failed in call"}, [])
+    _git(repo, "rm", "-q", "--cached", "tests/test_sized.py", "tests/nested/test_deep.py")
+    assert pmc.size_modules(repo) == []  # an untracked module is not the tree's
+    assert pmc.size_session(tmp_path / "none", base="b" * 40, cwd=repo, run=run) is None and len(seen) == 1
+
+
+def test_the_release_size_modules_are_found_in_this_checkout():
+    if not (REPO / ".git").exists():
+        pytest.skip("this tree is not a git checkout")
+    release = {"tests/test_reference_book_budgets.py", "tests/test_repo_health_smoke.py", "tests/test_smoke.py"}
+    found = set(pmc.size_modules(REPO))
+    assert release <= found and all(Path(path).name.startswith("test_") for path in found)
+    # This module writes the marker into its fixtures; it declares no size test of its own.
+    assert "tests/test_post_merge_check.py" not in found
+
+
+def test_a_size_check_that_skipped_or_did_not_finish_measured_nothing(tmp_path):
+    _results(tmp_path / "skip", [_row("tests/test_smoke.py::test_a"), _row("tests/test_b.py::test_books", "skipped", "setup")])
+    found, problems = pmc.size_findings(pmc.read_session(tmp_path / "skip"))
+    assert found == {} and problems == ["the size check skipped `tests/test_b.py::test_books`, so it measured nothing there"]
+    _results(tmp_path / "green", [_row("tests/test_smoke.py::test_a")])
+    assert pmc.size_findings(pmc.read_session(tmp_path / "green")) == ({}, [])
+    unfinished = ["the size check could not run or finish, so it went unchecked"]
+    _results(tmp_path / "interrupted", [_row("tests/test_smoke.py::test_a", "failed")], exit_code=2)
+    assert pmc.size_findings(pmc.read_session(tmp_path / "interrupted")) == (None, unfinished)
+    assert pmc.size_findings(pmc.read_session(tmp_path / "missing")) == (None, unfinished)
+    assert pmc.size_findings(None) == (None, unfinished)  # no module marks a size test
+    assert pmc.size_status(None, [SIZED]) == {SIZED: "unknown"}
+
+
+def test_a_red_size_test_is_failed_without_a_retry(tmp_path):
+    _selection(tmp_path, parallel="failure")
+    _results(tmp_path / "parallel", [_row("tests/t.py::test_red", "failed")])
+    _results(tmp_path / "serial", [])
+    _results(tmp_path / "size", [_row(SIZED.removeprefix("size "), "failed"), _row("tests/test_smoke.py::test_ok")])
+    retried = []
+
+    def retry(args, directory):
+        retried.append(list(args))
+        _results(directory, [_row("tests/t.py::test_red", "failed")])
+
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0, size=lambda: pmc.read_session(tmp_path / "size"))
+    assert retried == [["tests/t.py::test_red"]]  # the size test is deterministic: never in the retry
+    assert [(row["id"], row["pass"], row["retry"]) for row in record["failed"]] == [
+        (SIZED, "size", "failed"), ("tests/t.py::test_red", "parallel", "failed")]
+    assert record["size_checked"] is True and record["problems"] == []
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0, size=lambda: None)
+    assert record["size_checked"] is False and record["problems"] == [
+        "the size check could not run or finish, so it went unchecked"]
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0)  # a leg without the size check
+    assert "size_checked" not in record and [row["id"] for row in record["failed"]] == ["tests/t.py::test_red"]
+
+
+def test_classify_runs_the_gates_its_leg_names_and_measures_books_by_the_decided_mode(tmp_path, monkeypatch):
+    _selection(tmp_path)
+    for label in ("parallel", "serial"):
+        _results(tmp_path / label, [_row(f"tests/{label}.py::test_ok")])
+    sessions, linted = [], []
+    monkeypatch.setattr(pmc, "size_session", lambda directory, **kwargs: sessions.append(kwargs) or None)
+    monkeypatch.setattr(pmc, "lint_findings", lambda: linted.append(True) or {})
+    monkeypatch.setattr(pmc, "run_pytest", lambda *a, **k: pytest.fail("nothing to retry"))
+    (tmp_path / "growth.json").write_text(json.dumps({"mode": "approved", "approved": ["a" * 40]}), encoding="utf-8")
+    assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--lint", "--size", "--base", "b" * 40]) == 0
+    record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
+    assert sessions == [{"base": "b" * 40, "mode": "approved"}] and linted == [True]
+    assert record["gates"] == ["lint", "size"] and record["size"] == {
+        "base": "b" * 40, "mode": "approved", "decided": True, "approved": ["a" * 40]}
+    (tmp_path / "growth.json").unlink()  # the growth step did not run: books are measured strictly
+    assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--size", "--base", "b" * 40]) == 0
+    record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
+    assert sessions[-1] == {"base": "b" * 40, "mode": "block"} and record["size"]["decided"] is False
+    assert record["gates"] == ["size"] and linted == [True]  # this leg did not lint
+    assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD]) == 0  # the Windows leg
+    record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
+    assert record["gates"] == [] and "size" not in record and len(sessions) == 2 and linted == [True]
+    with pytest.raises(SystemExit):
+        pmc.main(["classify", "--evidence-dir", str(tmp_path), "--size"])
+
+
 def test_a_red_node_lane_is_retried_as_one_target(tmp_path):
     for code, verdict in ((0, "flaky"), (1, "failed")):
         evidence = tmp_path / str(code)
@@ -301,6 +458,125 @@ def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
     assert record["problems"][1] == "the serial pass did not finish"
     assert [(row["id"], row["why"]) for row in record["flaky"]] == [
         ("tests/s.py::test_slow", "was running when the session ended")]
+
+
+def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeypatch, capsys):
+    red, missing = "tests/t.py::test_retry", "tests/t.py::test_unrun"
+    _selection(tmp_path, parallel="failure", inventory={
+        "parallel": {"expected": [red, missing], "executed": [red]}})
+    _results(tmp_path / "parallel", [_row(red, "failed")], exit_code=2)
+    _results(tmp_path / "serial", [])
+    retried = []
+
+    def retry(ids, directory):
+        retried.extend(ids)
+        _results(directory, [_row(red)])
+
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0)
+    assert retried == [red] and not record["failed"]
+    assert record["not_run"] == {"parallel": [missing]}
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    text, is_red = pmc.render_summary(tmp_path)
+    assert is_red and "— RED" in text and missing in text
+    assert "passed on their one retry" in text  # the good observation is not discarded
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 1
+    assert missing in capsys.readouterr().out
+    # Already retained classification records have the same meaning without reclassification.
+    record["problems"] = []
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    assert pmc.render_summary(tmp_path)[1]
+
+
+@pytest.mark.parametrize("cost_outcome,session,expected_red", [
+    ("failure", "failed", True), ("failure", "passed", True),
+    ("failure", "unfinished", True), ("skipped", "missing", True),
+    ("success", "missing", True), ("success", "failed", True),
+    ("success", "skipped", True), ("success", "passed", False),
+    ("", "missing", True),
+])
+def test_cost_outcome_reaches_the_real_summary_command(tmp_path, monkeypatch, capsys,
+                                                      cost_outcome, session, expected_red):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "complete": True, "failed": [], "flaky": [], "problems": [], "not_run": {}}), encoding="utf-8")
+    nodeid = "tests/test_cost_contract.py::test_rest_law"
+    if session not in ("missing", "unfinished"):
+        _results(tmp_path / "cost-contract", [_row(nodeid, session,
+                 "setup" if session == "skipped" else "call")])
+    elif session == "unfinished":
+        directory = tmp_path / "cost-contract"
+        directory.mkdir()
+        (directory / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": nodeid}), encoding="utf-8")
+    monkeypatch.setenv("COST_CONTRACT_OUTCOME", cost_outcome)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    code = pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "linux"])
+    text = capsys.readouterr().out
+    assert code == int(expected_red) and "Cost contract" in text
+    assert ("— RED" in text) is expected_red
+    if session == "failed":
+        assert nodeid in text
+    # Windows deliberately does not run the cost contract, even if another leg failed it.
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 0
+    assert "Cost contract: not selected on Windows" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stage", ["classify", "attribute", "route"])
+@pytest.mark.parametrize("outcome", ["failure", "skipped", "", "success"])
+def test_workflow_stage_outcome_reaches_summary_without_a_new_retry(tmp_path, monkeypatch, capsys, stage, outcome):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "complete": True, "failed": [], "flaky": [], "problems": []}), encoding="utf-8")
+    monkeypatch.setenv(f"POST_MERGE_{stage.upper()}_OUTCOME", outcome)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    code = pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"])
+    assert code == (0 if outcome == "success" else 1)
+    text = capsys.readouterr().out
+    if outcome != "success":
+        assert f"the {stage} step is {outcome or 'unknown'}" in text
+
+
+def test_a_missing_report_does_not_establish_removal_and_a_skip_does_not_establish_a_pass(tmp_path):
+    ids = ["tests/t.py", "tests/t.py::test_deselected", "tests/gone.py::test_removed"]
+    def run(args, directory):
+        assert args == ["tests/t.py"]
+        _results(directory, [_row("tests/t.py::test_ok"), _row("tests/t.py::test_skip", "skipped", "setup")])
+    found = pmc.check_ids(ids, tmp_path, read_source={"tests/t.py": "def test_deselected(): pass\n"}.get, run=run)
+    assert found == dict(zip(ids, ["skipped", "unknown", "absent"]))
+
+
+def test_source_read_failure_is_not_module_removal(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, args)
+    monkeypatch.setattr(pmc, "_git", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        pmc.tree_source("bad-revision")("tests/t.py")
+    monkeypatch.setattr(pmc, "REPO_ROOT", tmp_path)
+    assert pmc.working_source("tests/missing.py") is None
+    (tmp_path / "bad.py").write_bytes(b"\xff")
+    with pytest.raises(UnicodeError):
+        pmc.working_source("bad.py")
+
+
+def test_the_runner_final_inventory_failure_is_not_a_green_selected_run(tmp_path):
+    _selection(tmp_path)
+    selection = json.loads((tmp_path / "selection.json").read_text(encoding="utf-8"))
+    selection["outcome"] = "failure"  # the final floor check failed after both passes succeeded
+    (tmp_path / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
+    for label in ("parallel", "serial"):
+        _results(tmp_path / label, [_row(f"tests/{label}.py::test_ok")])
+    result = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no retry of the whole selection"), node=lambda: 0)
+    assert not result["failed"] and "inventory/floor" in result["problems"][0]
+    (tmp_path / "classification.json").write_text(json.dumps(result), encoding="utf-8")
+    assert pmc.render_summary(tmp_path)[1]
+
+
+def test_skipped_base_probe_is_not_a_good_revision(tmp_path, monkeypatch):
+    monkeypatch.setattr(pmc, "_git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
+    nodeid = "tests/t.py::test_case"
+    monkeypatch.setattr(pmc, "check_ids", lambda *a, **k: {nodeid: "skipped"})
+    prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD)
+    assert prober("a" * 40, [nodeid]) == {nodeid: "error"}
+    assert pmc.bisect(["base", "head"], [nodeid], prober)[0]["verdict"] == "unattributed"
 
 
 # --- attribute -------------------------------------------------------------------------------
@@ -374,239 +650,76 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
     monkeypatch.setattr(pmc, "REPO_ROOT", repo)
     evidence = tmp_path / "evidence"
     evidence.mkdir()
+    sized = "size tests/test_v.py::test_size"
     (evidence / "classification.json").write_text(json.dumps(
-        {"failed": [{"id": "tests/test_v.py::test_value"}, {"id": pmc.NODE_LANE}]}), encoding="utf-8")
-    probed = []
+        {"failed": [{"id": "tests/test_v.py::test_value"}, {"id": pmc.NODE_LANE}, {"id": sized}],
+         "size": {"base": shas[0], "mode": "approved"}}), encoding="utf-8")
+    probed, measured = [], []
 
     def run(args, directory, *, cwd):
         probed.append(Path(cwd))
         red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
         _results(directory, [_row("tests/test_v.py::test_value", "failed" if red else "passed")])
 
+    def size_session(directory, *, base, mode, cwd):  # each probe runs its own tree's size lane
+        measured.append((base, mode, Path(cwd)))
+        red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
+        _results(directory, [_row("tests/test_v.py::test_size", "failed" if red else "passed")])
+        return pmc.read_session(directory)
+
     monkeypatch.setattr(pmc, "run_pytest", run)
+    monkeypatch.setattr(pmc, "size_session", size_session)
     monkeypatch.setattr(pmc, "run_node_lane", lambda cwd: int((Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")))
     args = type("Args", (), {"evidence_dir": evidence, "base": shas[0], "head": shas[-1], "max_probes": 16,
                              "work_dir": tmp_path})
     assert pmc.command_attribute(args) == 0
     record = json.loads((evidence / "attribution.json").read_text(encoding="utf-8"))
     assert {row["id"]: (row["verdict"], row["culprit"], row["last_good"]) for row in record["verdicts"]} == {
-        nodeid: ("culprit", shas[2], shas[1]) for nodeid in ("tests/test_v.py::test_value", pmc.NODE_LANE)}
+        nodeid: ("culprit", shas[2], shas[1]) for nodeid in ("tests/test_v.py::test_value", pmc.NODE_LANE, sized)}
     # The base, then the two commits between it and the head: each probe in its own worktree, all removed.
     assert [probe["sha"] for probe in record["probes"]] == shas[:3] and len(set(probed)) == 3
+    # The size test is measured against the check's base with its growth mode, in the probed tree.
+    assert measured == [(shas[0], "approved", path) for path in probed]
     assert record["commits"] == shas[1:] and not any(path.exists() for path in probed)
     assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
     assert record["notes"] == [] and not any(probe["dependencies_differ"] for probe in record["probes"])
 
 
-# --- route -----------------------------------------------------------------------------------
+def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(pmc, "_git", lambda *args, **kwargs: "")  # no worktree: the tree is the fake's
+    monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
+    ids = [f"size tests/s.py::test_{name}" for name in ("red", "green", "new", "skip")]
 
-def test_the_machine_block_round_trips_through_an_issue_body():
-    block = {"format": 1, "kind": "culprit", "pr": 2067, "culprit": "c" * 40, "last_good": "b" * 40,
-             "ids": ["tests/t.py::test_x[a-->b]", "tests/t.py::test_y[<x>]"]}
-    body = pmc.issue_body(block, head=HEAD, run_url="https://example.invalid/run/1", author="dev")
-    assert "-->" not in pmc.machine_block(block)[:-3]
-    assert pmc.parse_machine_block(body) == block
-    assert pmc.parse_machine_block("no block here") is None
-    assert pmc.parse_machine_block("<!-- post-merge-red {not json} -->") is None
+    def size(tree, directory):
+        _results(directory, [_row("tests/s.py::test_red", "failed"), _row("tests/s.py::test_green"),
+                             _row("tests/s.py::test_skip", "skipped", "setup")])
+        return pmc.read_session(directory)
 
-
-class FakeGitHub:
-    """Issues, pull requests and labels in memory, with failures on demand."""
-
-    def __init__(self, *, issues=(), prs=None, label=False, fail=()):
-        self.issues = {issue["number"]: dict(issue, state="open") for issue in issues}
-        self.prs, self.label, self.fail = prs or {}, label, set(fail)
-        self.comments, self.posts = [], []
-
-    def _check(self, method, path):
-        if any((method, path.split("?")[0]) == entry or (method, None) == entry for entry in self.fail):
-            raise urllib.error.HTTPError(path, 502, "Bad Gateway", None, None)
-
-    def get(self, path):
-        self._check("GET", path)
-        if path == f"labels/{pmc.LABEL}" and not self.label:
-            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
-        return {}
-
-    def pages(self, path):
-        self._check("GET", path)
-        if path.startswith("issues?"):
-            return [issue for issue in self.issues.values() if issue["state"] == "open"]
-        return self.prs.get(path.split("/")[1], [])
-
-    def post(self, path, body):
-        self._check("POST", path)
-        self.posts.append((path, body))
-        if path == "labels":
-            self.label = True
-        elif path == "issues":
-            number = 100 + len(self.issues)
-            self.issues[number] = {"number": number, "body": body["body"], "title": body["title"], "state": "open"}
-            return {"number": number}
-        elif path.endswith("/comments"):
-            self.comments.append((int(path.split("/")[1]), body["body"]))
-        return {}
-
-    def patch(self, path, body):
-        self._check("PATCH", path)
-        self.issues[int(path.split("/")[1])].update(body)
-        return {}
-
-
-def _issue(number, block):
-    return {"number": number, "body": "text\n" + pmc.machine_block({"format": 1, **block})}
-
-
-def _pr(number, sha, login="dev"):
-    return {"number": number, "merge_commit_sha": sha, "merged_at": "2026-10-21T00:00:00Z",
-            "base": {"ref": "ouroboros"}, "user": {"login": login}, "title": f"Change {number}"}
-
-
-def _route(github, failed, verdicts, *, recheck=None, flaky=(), node="success"):
-    return pmc.route(github, classification={"failed": [{"id": nodeid} for nodeid in failed],
-                                             "flaky": [{"id": nodeid} for nodeid in flaky],
-                                             "selection": {"node": node}},
-                     attribution={"verdicts": verdicts}, head=HEAD, run_url="https://example.invalid/run/7",
-                     recheck=recheck or (lambda ids: pytest.fail(f"nothing to recheck: {ids}")))
-
-
-def test_a_culprit_gets_one_pr_comment_and_one_new_issue():
-    culprit = "c" * 40
-    github = FakeGitHub(prs={culprit: [_pr(2066, "d" * 40), _pr(2067, culprit, login="author")]})
-    verdicts = [{"id": nodeid, "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}
-                for nodeid in ("tests/t.py::test_a", "tests/t.py::test_b")]
-    record = _route(github, ["tests/t.py::test_a", "tests/t.py::test_b"], verdicts)
-    assert record["created"] == [100] and record["comments"] == [2067] and record["warnings"] == []
-    assert record["handed"] == [{"ids": ["tests/t.py::test_a", "tests/t.py::test_b"], "pr": 2067, "issue": 100}]
-    assert github.posts[0] == ("labels", {"name": pmc.LABEL, "color": "b60205",
-                                          "description": "A merge into ouroboros broke tests (post-merge check)"})
-    issue = github.issues[100]
-    assert issue["title"] == "Post-merge red: #2067 Change 2067"
-    assert pmc.parse_machine_block(issue["body"]) == {
-        "format": 1, "kind": "culprit", "pr": 2067, "culprit": culprit, "last_good": "b" * 40,
-        "ids": ["tests/t.py::test_a", "tests/t.py::test_b"]}
-    [(number, text)] = github.comments
-    assert number == 2067 and text.startswith("@author ")
-    for fact in ("`tests/t.py::test_a`", "`tests/t.py::test_b`", f"First bad commit: `{culprit}`",
-                 f"last good commit: `{'b' * 40}`", "https://example.invalid/run/7", "Tracking issue: #100.",
-                 "blocks nothing and reverts nothing", "fix goes forward in a new pull request"):
-        assert fact in text
-
-
-def test_an_open_issue_of_the_same_pull_request_is_extended_not_duplicated():
-    culprit = "c" * 40
-    github = FakeGitHub(label=True, prs={culprit: [_pr(2067, culprit)]}, issues=[
-        _issue(5, {"kind": "culprit", "pr": 2067, "culprit": culprit, "last_good": "b" * 40,
-                   "ids": ["tests/t.py::test_a"]})])
-    verdicts = [{"id": "tests/t.py::test_new", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
-    record = _route(github, ["tests/t.py::test_new", "tests/t.py::test_a"], verdicts)
-    assert record["created"] == [] and record["updated"] == [5] and record["closed"] == []
-    assert pmc.parse_machine_block(github.issues[5]["body"])["ids"] == ["tests/t.py::test_a", "tests/t.py::test_new"]
-    assert [number for number, _ in github.comments] == [5, 2067]
-    assert "labels" not in [path for path, _ in github.posts]
-
-
-def test_a_red_that_stays_red_does_not_comment_on_its_pull_request_again():
-    culprit = "c" * 40
-    github = FakeGitHub(prs={culprit: [_pr(2067, culprit, login="author")]})
-    verdicts = [{"id": "tests/t.py::test_a", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
-    first = _route(github, ["tests/t.py::test_a"], verdicts)
-    again = _route(github, ["tests/t.py::test_a"], verdicts)
-    assert first["comments"] == [2067] and first["created"] == [100]
-    assert again["comments"] == [] and again["created"] == again["updated"] == []
-    assert again["handed"] == [{"ids": ["tests/t.py::test_a"], "pr": 2067, "issue": 100}]
-    assert [number for number, _ in github.comments] == [2067]
-
-
-def test_issues_whose_tests_pass_at_the_head_are_closed_and_others_stay_open():
-    github = FakeGitHub(label=True, issues=[
-        _issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40, "ids": ["tests/t.py::test_fixed",
-                                                                            "tests/t.py::test_deleted"]}),
-        _issue(6, {"kind": "pre-existing", "ids": ["tests/t.py::test_still_red"]}),
-        _issue(7, {"kind": "unattributed", "ids": ["tests/t.py::test_red_this_run"]}),
-        _issue(8, {"kind": "culprit", "pr": 2, "culprit": "d" * 40, "ids": [pmc.NODE_LANE]}),
-    ])
-    asked = []
-
-    def recheck(ids):
-        asked.append(ids)
-        return {"tests/t.py::test_fixed": "passed", "tests/t.py::test_deleted": "absent",
-                "tests/t.py::test_still_red": "failed"}
-
-    record = _route(github, ["tests/t.py::test_red_this_run"],
-                    [{"id": "tests/t.py::test_red_this_run", "verdict": "pre-existing"}], recheck=recheck)
-    # This run's own failures are not run again; the Node lane's result is this run's.
-    assert asked == [["tests/t.py::test_deleted", "tests/t.py::test_fixed", "tests/t.py::test_still_red"]]
-    assert record["closed"] == [5, 8] and record["created"] == [] and record["comments"] == []
-    assert github.issues[5]["state"] == "closed" and github.issues[5]["state_reason"] == "completed"
-    assert github.issues[6]["state"] == github.issues[7]["state"] == "open"
-    assert [number for number, _ in github.comments] == [5, 8]
-    assert github.comments[0][1].startswith(f"Green at `{HEAD}`")
-    record = _route(FakeGitHub(issues=[_issue(8, {"kind": "culprit", "pr": 2, "ids": [pmc.NODE_LANE]})]),
-                    [], [], node="failure")
-    assert record["closed"] == []  # a red Node lane in this run is not green
-
-
-def test_a_lint_issue_closes_only_once_a_linted_head_no_longer_has_its_finding():
-    def run(lint_checked, failed=()):
-        github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40,
-                                                           "ids": [LINTED]})])
-        record = pmc.route(github, classification={"failed": [{"id": nodeid} for nodeid in failed], "flaky": [],
-                                                   "selection": {"node": "success"}, "lint_checked": lint_checked},
-                           attribution={"verdicts": [{"id": nodeid, "verdict": "unattributed"} for nodeid in failed]},
-                           head=HEAD, run_url="https://example.invalid/run/9",
-                           recheck=lambda ids: pytest.fail(f"a finding is not a test to rerun: {ids}") if ids else {})
-        return record["closed"]
-
-    assert run(True) == [5]
-    assert run(True, failed=[LINTED]) == []  # still found at the head
-    assert run(False) == []  # ruff did not run: nothing proves the finding gone
-
-
-def test_reds_without_blame_get_one_issue_unless_already_tracked():
-    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "pre-existing", "ids": ["tests/t.py::test_known"]})])
-    recheck = lambda ids: {nodeid: "failed" for nodeid in ids}  # noqa: E731
-    verdicts = [{"id": "tests/t.py::test_known", "verdict": "pre-existing"},
-                {"id": "tests/t.py::test_new_old", "verdict": "pre-existing"},
-                {"id": "tests/t.py::test_lost", "verdict": "unattributed", "why": "probe budget"}]
-    record = _route(github, [row["id"] for row in verdicts], verdicts, recheck=recheck)
-    assert record["updated"] == [5] and record["created"] == [101] and record["comments"] == []
-    assert pmc.parse_machine_block(github.issues[5]["body"])["ids"] == ["tests/t.py::test_known",
-                                                                        "tests/t.py::test_new_old"]
-    assert pmc.parse_machine_block(github.issues[101]["body"]) == {"format": 1, "kind": "unattributed",
-                                                                   "ids": ["tests/t.py::test_lost"]}
-    assert "@" not in github.issues[101]["body"]
-
-
-def test_api_errors_become_warnings_and_the_hand_over_goes_on():
-    culprit = "c" * 40
-    github = FakeGitHub(prs={culprit: [_pr(2067, culprit)]}, fail={("POST", "labels"), ("POST", "issues")})
-    verdicts = [{"id": "tests/t.py::test_a", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
-    record = _route(github, ["tests/t.py::test_a"], verdicts)
-    assert record["created"] == [] and record["comments"] == [2067]
-    assert record["warnings"] == ["create the post-merge-red label: HTTP 502 Bad Gateway",
-                                  "create an issue: HTTP 502 Bad Gateway"]
-    assert "Tracking issue" not in github.comments[0][1]
-    # Unreadable open issues: comments still go out, but no issue that could duplicate one.
-    github = FakeGitHub(prs={culprit: [_pr(2067, culprit)]}, fail={("GET", "issues")})
-    record = _route(github, ["tests/t.py::test_a"], verdicts)
-    assert record["created"] == [] and record["comments"] == [2067] and len(record["warnings"]) == 1
-
-
-def test_only_the_merge_commit_of_a_merged_pull_request_is_blamed():
-    culprit = "c" * 40
-    open_pr = dict(_pr(1, culprit), merged_at=None)
-    other_base = dict(_pr(2, culprit), base={"ref": "main"})
-    github = FakeGitHub(prs={culprit: [open_pr, other_base, _pr(3, "d" * 40)]})
-    assert pmc.find_merged_pr(github, culprit) is None
-    github.prs[culprit].append(_pr(4, culprit))
-    assert pmc.find_merged_pr(github, culprit)["number"] == 4
-    verdicts = [{"id": "tests/t.py::test_a", "verdict": "culprit", "culprit": "e" * 40, "last_good": "b" * 40}]
-    record = _route(FakeGitHub(), ["tests/t.py::test_a"], verdicts)  # a direct push: no pull request
-    assert record["comments"] == [] and record["created"] == [100]
+    prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=size,
+                        run=lambda *a, **k: pytest.fail("a size test is not rerun as a plain test"))
+    assert prober("a" * 40, ids) == {"size tests/s.py::test_red": "fail", "size tests/s.py::test_green": "pass",
+                                     "size tests/s.py::test_new": "error",  # no report is not proof of removal
+                                     "size tests/s.py::test_skip": "error"}  # it measured nothing there
+    for unfinished in (lambda tree, directory: None, None):  # no size session there; a Prober without one
+        prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=unfinished)
+        assert prober("a" * 40, ids[:1]) == {ids[0]: "error"}
 
 
 # --- summary ---------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("verdict", ["culprit", "pre-existing", "unattributed"])
+def test_attribution_explains_a_failed_check_without_changing_red(tmp_path, verdict):
+    nodeid = "tests/t.py::test_red"
+    (tmp_path / "classification.json").write_text(json.dumps({"complete": True,
+        "failed": [{"id": nodeid, "why": "failed in call", "pass": "serial", "retry": "skipped"}],
+        "flaky": [], "problems": []}), encoding="utf-8")
+    (tmp_path / "attribution.json").write_text(json.dumps({"verdicts": [
+        {"id": nodeid, "verdict": verdict}]}), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path)
+    assert red and "— RED" in text and verdict in text
+    assert "does not establish the same cause" in text
+    assert "red again on retry" not in text
+
 
 def test_the_summary_is_red_only_for_failures_left_after_their_retry(tmp_path):
     text, red = pmc.render_summary(tmp_path)
@@ -641,6 +754,37 @@ def test_the_summary_is_red_only_for_failures_left_after_their_retry(tmp_path):
     assert red and "the retry did not finish" in text
 
 
+def test_each_leg_names_its_system_and_the_gates_it_ran(tmp_path, monkeypatch, capsys):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "failed": [{"id": SIZED, "why": "failed in call", "pass": "size"}], "flaky": [], "problems": [],
+        "gates": ["lint", "size"], "size": {"base": "a" * 40, "mode": "approved", "decided": True, "approved": ["1" * 40]},
+        "lint_checked": True, "size_checked": True,
+        "selection": {"tier": "selected", "file_count": 3, "available": 40, "node": "success"}}), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path)
+    assert red and text.startswith("## Post-merge check on Linux — RED")
+    assert "Gates: ruff F, the size check against `aaaaaaaaaaaa` (book growth: approved by the owner at `111111111111`)." in text
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "failed": [], "flaky": [], "problems": [], "gates": [],
+        "selection": {"tier": "selected", "file_count": 3, "available": 40, "node": "success", "deferred_full": True}}),
+        encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path, system="windows")
+    assert not red and text.startswith("## Post-merge check on Windows — GREEN")
+    assert "Gates: none on this leg (ruff F and the size check run on the Linux leg)." in text
+    assert ("A full escalation was deferred to the release matrix: this leg ran the contract floor and what the other "
+            "changes select.") in text
+    assert pmc.render_summary(tmp_path / "nothing", system="windows")[0].startswith("## Post-merge check on Windows — RED")
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "failed": [{"id": "tests/t.py::test_a", "why": "failed in call", "pass": "serial"}], "flaky": [], "problems": [],
+        "gates": ["size"], "size": {"base": "a" * 40, "mode": "block", "decided": False}, "selection": {}}), encoding="utf-8")
+    text, _ = pmc.render_summary(tmp_path)
+    assert "book growth: block, as the merges' labels were not read) (unchecked)." in text  # the gate never ran
+    assert "A full escalation" not in text and "none on this leg" not in text
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 1
+    assert "::error title=Post-merge red on Windows::tests/t.py::test_a (failed in call)" in capsys.readouterr().out
+
+
 # --- run_tests.py --keep-going ---------------------------------------------------------------
 
 @pytest.fixture
@@ -672,8 +816,8 @@ def test_keep_going_runs_every_lane_after_a_red_one(run_tests, monkeypatch, tmp_
         assert code == 1 and record["outcome"] == "failure"
         assert record["node"] == ("failure" if node else "success")
         if keep_going:
-            assert ran == ["parallel", "serial"]
+            assert ran == ["warm", "parallel", "serial"]
         else:  # the unchanged default stops at the first red lane
-            assert ran == ([] if node else ["parallel"])
+            assert ran == ([] if node else ["warm", "parallel"])
     with pytest.raises(SystemExit):
         run_tests.main(["--keep-going", "tests/test_x.py"])

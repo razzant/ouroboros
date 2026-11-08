@@ -88,18 +88,31 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
+# The owner's order (7A, 09.10.2026), sized step by step: superseded host rows, then bodies already shown, oldest
+# first, for the measured excess only, then memory detail for the rest and the return-after-fold slack (its floor
+# lowers the books only where memory cannot make room, BIBLE P1); books and unseen bodies after a further refusal,
+# then memory's rest and a just-chosen body last (owner 2A, ``loop_model_call._apply_refusal_pass``).
+REFUSAL_PASSES = (("host_copies", "bodies", "floor"), ("books", "unseen_bodies"))
+# A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
+# ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
+REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "
+                         "without this requirement{}.")
+#: A round's size refusal on a known window that holds the view without the required handbook (``context_renewal``).
+REQUIRED_BOOK_UNFIT_KEY = "_context_required_book_unfit"
 
-def start_room_levels(role: str, *, focus_wake: bool = False, direct_chat: bool = False) -> int:
-    """Roots and wakes leave two eighths; direct chat turns, other Presence turns and helpers leave one.
+def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
+    """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake
+    (consciousness or a Presence focus), a direct chat turn, another Presence turn and a helper leave one.
 
-    Decided from task facts, never the task type (``memory_view.start_room`` reads them).
+    A wake is one turn of the mind beside its whole memory, as a direct chat turn is; work it starts runs as
+    its own root (owner decision 2026-10-29, question 3 = A). Decided from task facts, never the task type
+    (``memory_view.start_room`` reads them).
     """
-    if role == "consciousness" or (role == "presence" and focus_wake):
-        return 2
     return 2 if role == "integrator" and not direct_chat else 1
 
 
-def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) -> Tuple[Optional[int], int]:
+def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int, *,
+                        working_reserve_tokens: Optional[int] = None) -> Tuple[Optional[int], int]:
     """``(owner target, reply reserve)`` of a rendered mode.
 
     A target binds only the mode the owner selected: task-local Low and a mode the
@@ -108,7 +121,8 @@ def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) 
     the memory floor and the mode selection use the same R as the send.
     """
     target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(mode) if mode == owner_mode else None
-    return target, min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    reserve = min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    return target, max(reserve, working_reserve_tokens or 0)
 
 
 def _reply_floor(caller_max_tokens: int, nano: bool) -> Tuple[int, int]:
@@ -266,7 +280,7 @@ def context_overflow_message(text: Any) -> bool:
         return False
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
 
-MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 ReclaimStatus = Literal[
     "applied", "no_eligible", "checkpoint_failed", "no_measurable_shrink", "binding_mismatch",
     "no_op", "fit_rejected", "source_unavailable", "authored_note_required",
@@ -380,26 +394,16 @@ IMAGE_BLOCK_CHAR_EQUIVALENT = 4_400
 MAX_LIVE_IMAGE_BLOCKS = 5
 # Owner decision 2026-10-21: batch eviction above 10 back to the 5-image floor of 2026-07-29.
 LIVE_IMAGE_BLOCKS_HIGH_WATER = 10
+# Owner 29.10: Nano uses the same batch shape, with a two-image floor.
+NANO_LIVE_IMAGE_BLOCKS = 2
+NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER = 4
 
-# --- Scratchpad size thresholds (SSOT; previously scattered literals) -------
-# Context-section soft budget for the rendered scratchpad (warn-only).
+# --- Context-section soft budgets (warn-only log lines; no section is cut by them) ---
+# The rendered scratchpad: tier-0, always whole. No count, size or age cap evicts or
+# compresses its blocks; only a fold the mind accepts replaces them (#918).
 SCRATCHPAD_SECTION_BUDGET_CHARS = 90_000
 # Context-section soft budget for the mind's world map (warn-only; `update_world` notices above it).
 WORLD_SECTION_BUDGET_CHARS = 16_000
-# Block-storage consolidation trigger (consolidator compresses oldest blocks).
-SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS = 30_000
-# Source-side content cap for Memory.append_scratchpad_block (ibl-2b09abdadd25).
-# SINGLE SOURCE OF TRUTH for the new content cap; obeys the ordering invariant
-#   SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS (30_000)
-#     < SCRATCHPAD_MAX_CONTENT_CHARS (60_000)
-#     <= SCRATCHPAD_SECTION_BUDGET_CHARS (90_000) - RENDERING_HEADROOM
-# Pinned at 60_000 so the consolidator (trigger at >30_000) still fires before
-# this cap kicks in, AND the rendered section's framing (header + per-block
-# '### [...]' / '---' / journal-pointer lines) fits under the section budget
-# at the 10-block cap. Measured in characters (len(str)), matching the family
-# naming convention. The count cap (_SCRATCHPAD_MAX_BLOCKS in ouroboros/memory.py)
-# is AND'd with this cap (single-pass eviction), not replaced by it.
-SCRATCHPAD_MAX_CONTENT_CHARS = 60_000
 
 
 def estimate_message_chars(messages: Any) -> int:

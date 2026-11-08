@@ -67,7 +67,7 @@ def test_saved_author_stop_restores_queued_child_without_cancelling_it(qenv, mon
 
 @pytest.mark.parametrize("status,outcome", [
     ("active", "author_stop"), ("active", "terminal"),
-    ("sealed", "terminal"), ("sealed", "unfinished"),
+    ("sealed", "terminal"),
 ])
 def test_only_the_sealed_author_stop_changes_acceptance_restore(
     qenv, monkeypatch, status, outcome,

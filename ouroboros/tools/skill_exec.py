@@ -20,7 +20,7 @@ from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_k
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.skill_catalogue import LIST_SKILLS_SCHEMA as _LIST_SCHEMA
 from ouroboros.skill_catalogue import list_skills_payload
-from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready
+from ouroboros.skill_dependencies import skill_deps_not_ready as _skill_deps_not_ready, unusable_python_env
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     compute_content_hash,
@@ -33,6 +33,7 @@ from ouroboros.skill_loader import (
     summarize_skills,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
+from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.skill_review_status import executable_review_requirement, normalize_skill_review_status
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -42,11 +43,8 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.process_facts import publish_process_facts as _publish_process_facts
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.shell import (
-    _active_subprocesses,
-    _kill_process_group,
-    _subprocess_lock,
-)
+from ouroboros.tools.shell import _kill_process_group
+from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -214,8 +212,9 @@ def _run_skill_subprocess(
     confirmed = external_handoff("skill_process")
     proc = None
     try:
-        with operation_start():
-            proc = Popen(cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
+        with tracked_start() as publish, operation_start():
+            proc = contained_popen(Popen, cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
+            publish(proc)
     except OSError as exc:
         if proc is None:
             confirmed()
@@ -228,10 +227,8 @@ def _run_skill_subprocess(
         raise
     except BaseException:
         if proc is None:
-            confirmed()  # the final gate refused before Popen returned
+            confirmed()  # the final gate or a closed admission refused before Popen returned
         raise
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
     try:
         if target is not None:
             record_task_group(*target, proc.pid)
@@ -247,8 +244,7 @@ def _run_skill_subprocess(
             pass
         if proc.poll() is not None:
             confirmed()
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # unconfirmed: a running root or live tree stays named
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe:
@@ -300,8 +296,7 @@ def _run_skill_subprocess(
     finally:
         if proc.poll() is not None:
             confirmed()
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         try:
             if proc.stdout:
                 proc.stdout.close()
@@ -814,6 +809,7 @@ def _handle_review_skill(
     review_reference: Optional[Dict[str, Any]] = None,
     reviewers: Optional[List[str]] = None, reason: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
+    continue_seats: Optional[List[Dict[str, Any]]] = None,
     **_kwargs: Any,
 ) -> str:
     skill_name = str(skill or "").strip()
@@ -855,6 +851,10 @@ def _handle_review_skill(
     from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
     def _review_with_optional_rebuttal(review_ctx: ToolContext, review_name: str):
+        if continue_seats is not None:  # the exact recorded review's chosen stopped seats, never today's bytes
+            from ouroboros.skill_review import continue_skill_review
+            return continue_skill_review(review_ctx, review_name, reference=review_reference,
+                                         continue_seats=continue_seats, _resolved_binding=binding)
         return _review_skill_impl(review_ctx, review_name, review_rebuttal=str(review_rebuttal or ""), _resolved_binding=binding)
 
     # The tool's interactive author may leave the wave on an addressed message (owner, 13.10: it waits but
@@ -883,6 +883,9 @@ def _handle_review_skill(
         if payload.get("record_id"):
             reference["record_id"] = payload["record_id"]
         markdown += "\n\nReview reference: " + json.dumps(reference, sort_keys=True)
+        if payload.get("record_id") and payload.get("continuable_seats"):  # a stopped seat continues only by this choice
+            markdown += ("\n\nContinuable stopped seats (skill_review(skill, review_reference=that reference, continue_seats="
+                         "[{seat_id, operation_id}])): " + json.dumps(payload["continuable_seats"], sort_keys=True))
     if refusal_code := payload.get("dispatch_refusal_code"):
         return _skill_review_refusal(ctx, refusal_code, markdown)
     return markdown
@@ -890,8 +893,11 @@ def _handle_review_skill(
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     deps_status, reason = _skill_deps_not_ready(drive_root, loaded)
-    if not reason:
-        return ""
+    if not reason:  # ready, yet never another interpreter without its packages; a failed check runs nothing
+        python = str(getattr(loaded.manifest, "runtime", "") or "").strip().lower() in {"python", "python3"}
+        unusable = python and unusable_python_env(drive_root, loaded)
+        return (f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} declares Python packages, but their environment does not "
+                f"run on this host's Python ({unusable}); toggle_skill enabled=true re-points or reinstalls it.") if unusable else ""
     return (
         f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
         f"dependencies are not ready (status={deps_status!r}). "
@@ -1341,17 +1347,19 @@ def _handle_skill_owner_action(
 _REVIEW_SCHEMA = {
     "name": "skill_review",
     "description": (
-        "Run skill review by the review panel (paid; an unchanged snapshot replays free) on one external skill package "
-        "using the review pool configuration and scored against the "
+        "Run skill review by the review panel (paid; an unchanged snapshot's verdict replays free) on one "
+        "external skill package using the review pool configuration and scored against the "
         "Skill Review Checklist section in docs/CHECKLISTS.md. Persists the "
         "verdict to data/state/skills/<name>/review.json with a content "
         "hash so a later edit invalidates the review automatically. "
         "Max Review Cycles semantics: an identical request never buys a new "
-        "panel — the settled review record of the same subject REPLAYS free, "
+        "panel over a verdict — the settled verdict of the same subject REPLAYS free, "
         "keyed by the shared reuse identity (the subject's bytes and rules, the "
         "assigned seats, enforcement, the answer contract and the round: "
         "rebuttal, goal, scope), so only changed content, a changed panel or "
-        "contract, or a NEW rebuttal dispatches reviewers again. The shared "
+        "contract, or a NEW rebuttal dispatches reviewers again. After a settled "
+        "wave formed no verdict, the identical request is a new paid wave; a "
+        "running or unknown one is collected, never sent again. The shared "
         "OUROBOROS_REVIEW_MAX_CYCLES ceiling "
         "bounds PAID panel dispatches per ceiling key (root task for "
         "task-driven reviews; the current content snapshot for the manual "
@@ -1391,8 +1399,10 @@ _REVIEW_SCHEMA = {
             "review_reference": {
                 "type": "object", "properties": {"job_id": {"type": "string"}, "record_id": {"type": "string"}, "content_hash": {"type": "string"}},
                 "required": ["content_hash"],
-                "description": "For a review that formed no verdict (quorum failed, nothing dispatched): the exact reference returned by that skill review (its job_id or record_id with the content_hash). A review still running is not unavailable.",
+                "description": "For a review that formed no verdict (quorum failed, nothing dispatched): the exact reference returned by that skill review (its job_id or record_id with the content_hash). A review still running is not unavailable. With continue_seats (record_id and content_hash) it continues that review's stopped seats on its recorded bytes instead.",
             },
+            "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference naming its record_id and content_hash: "
+                               + CONTINUE_SEATS_SCHEMA["description"] + " The record's own bytes are collected; changed bytes gain nothing."},
             "author_rationale": {
                 "type": "string",
                 "description": "Required when author_disposition is supplied; explain why the author accepts, rejects, partially accepts, or defers the raw findings.",

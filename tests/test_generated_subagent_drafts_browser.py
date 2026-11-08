@@ -9,7 +9,7 @@ import pytest
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 from tests.test_subscription_setup_browser import capture, settings_saves
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _watch_previews(page):
@@ -128,6 +128,7 @@ def test_session_access_is_visible_and_preserved_by_the_real_editor(subscription
     if surface == "settings":
         with page.expect_response("**/api/settings"):
             page.locator("#btn-save-settings").click()
+        ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
         page.reload()
         page.locator('[data-settings-tab="agents"]').click()
         assert page.locator('[data-subagent-field="access"]').first.input_value() == "workspace_write"

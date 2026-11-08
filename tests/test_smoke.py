@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -100,16 +101,16 @@ def test_tool_set_matches(registry):
 
 EXPECTED_TOOLS = [
     "continue_in_background", "pause_task", "resume_task", "continue_task",
-    "browse_page", "browser_action",
+    "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
-    "inspect_harness", "maintain_harness", "inspect_subagent",
+    "inspect_harness", "maintain_harness", "free_storage", "inspect_subagent",
     "promote_to_stable", "schedule_subagent", "schedule_followup", "manage_schedules",
     "configure_presence",
     "integrate_subagent_patch", "compare_subagent_patches",
     # C1: the explicit acceptance seam for a delegated run's captured patch —
     # a first-class tool, so the registry contract must name it.
-    "integrate_delegated_patch", "cancel_task", "resume_child_task",
+    "integrate_delegated_patch", "cancel_task", "resume_child_task", "set_task_retention",
     "peek_task", "discard_child_result", "override_delegation_constraint",
     "request_deep_self_review", "chat_history", "update_scratchpad",
     "send_user_message", "update_identity", "update_world", "toggle_evolution",
@@ -132,17 +133,17 @@ EXPECTED_TOOLS = [
     "chronicle_write", "memory_read", "memory_mark",
     "journal_read", "journal_write", "workpad_read", "workpad_write",
     "start_task", "list_projects", "tell_task",
-    "move_to_project", "schedule_followup",
+    "move_to_project", "close_project", "schedule_followup",
     "memory_map", "memory_update_registry",
     "plan_task", "recent_tasks", "live_roots", "update_focus",
-    "search_ui_translations", "pin_ui_translation",
+    "search_ui_translations", "pin_ui_translation", "record_update_description", "remote_mcp_sign_in",
     "finish_task", "verify_and_record", "web_search",
     "start_service", "service_status", "service_logs", "stop_service",
     "run_command", "run_script",
     "list_skills", "skill_review", "skill_exec", "toggle_skill", "skill_owner_action",
     "skill_preflight", "submit_skill_to_hub",
     "skill_sources", "skill_search", "skill_install", "skill_update",
-    "list_available_tools", "enable_tools",
+    "list_available_tools", "enable_tools", "call_mcp_tool",
     "analyze_screenshot", "vlm_query", "view_image",
     "extract_pdf_text", "youtube_transcript", "extract_video_frames",
 ]
@@ -476,25 +477,25 @@ def test_size_ratchet_transition_against_explicit_base():
 
 
 def test_js_module_gate_buckets_and_grandfathering():
-    """The JS size gate sees web/tests and exempts debt by exact rel-path only."""
+    """The JS size gate leaves test modules (web/tests) and vendored code out and exempts debt by exact rel-path only."""
     from ouroboros.review import compute_complexity_metrics, module_is_grandfathered
 
     sections = [
         ("repo/web/app.js", "x\n" * 2000),                   # gated, over hard gate, not grandfathered
         ("repo/web/modules/chat.js", "x\n" * 4000),          # gated, grandfathered by rel-path
         ("repo/web/vendor/chart.umd.min.js", "x\n" * 9000),  # vendored/minified — excluded
-        ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — gated
+        ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — a test module, out of the band
         ("repo/ouroboros/small.py", "x\n" * 10),
     ]
     metrics = compute_complexity_metrics(sections)
 
-    assert metrics["js_files"] == 3  # app.js + chat.js + web/tests; vendored excluded
+    assert metrics["js_files"] == 2  # app.js + chat.js; web/tests and vendored excluded
     oversized = {p for p, _n in metrics["oversized_modules"]}
     grandfathered = {p for p, _n in metrics["grandfathered_modules"]}
     assert "web/app.js" in oversized
     assert "web/modules/chat.js" in grandfathered
     assert "web/modules/chat.js" not in oversized
-    assert "web/tests/foo.test.js" in oversized
+    assert "web/tests/foo.test.js" not in oversized
     assert "web/vendor/chart.umd.min.js" not in oversized
     assert "web/vendor/chart.umd.min.js" not in grandfathered
 
@@ -607,15 +608,16 @@ class TestPrePushGate:
         assert callable(_git_commit_with_tests)
 
     def test_pre_push_tests_timeout_is_sufficient(self):
-        """The pre-push/post-commit pytest budget must be >= 180s.
+        """A bounded run's default budget must be >= 180s.
 
-        Since v6.88.0 this is the TOTAL budget across the node test lane AND
-        both preflight passes (parallel ``not serial``, then ``serial``, which
-        gets the remainder) — not a per-pass one. A full suite takes MINUTES,
-        and one loaded-host run measured 1077s, so a cap sized for an idle host
-        reports a healthy suite as a timeout. The budget is owned by ``run_hermetic_pytest``
-        (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` env) so callers do not
-        re-pin a stale literal — this guard anchors on that single source of truth.
+        Since v6.88.0 this is the TOTAL budget across the node test lane AND both
+        preflight passes (the xdist ``not exclusive`` pass, then ``serial("exclusive")``,
+        which gets the remainder) — not a per-pass one. It bounds a selected run or an
+        explicit pytest argv; the full suite has no total budget (owner 5A, 2026-11-05:
+        each test's own 300 s bound, containment and Stop end it). The budget is owned by
+        ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` for a
+        bounded run) so callers do not re-pin a stale literal — this guard anchors on
+        that single source of truth.
         """
         from ouroboros.preflight_runner import (
             _DEFAULT_PREFLIGHT_TIMEOUT_SEC,
@@ -627,7 +629,7 @@ class TestPrePushGate:
             "FLOOR against a caller re-pinning a tiny literal, never a claim about how "
             "long the suite takes; the real budget must cover a whole loaded-host run."
         )
-        # The env override is honoured so operators can raise it on slow hosts.
+        # The env override is honoured for a bounded run so operators can raise it on slow hosts.
         import os as _os
         prev = _os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
         try:
@@ -661,7 +663,7 @@ def test_no_module_defines_the_same_top_level_name_twice():
         if parts & {".git", "node_modules", "venv", ".venv", "build", "dist"}:
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
         seen = collections.Counter()

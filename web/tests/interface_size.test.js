@@ -103,11 +103,15 @@ test('quick key presses step on from each other, and a late answer never moves t
     const first = size.step(1);
     const second = size.step(1);
     assert.deepEqual(calls, [110, 120], 'the second press steps from the first, not from the answer it has not had');
+    assert.equal(size.state().percent, 120, 'the control shows the newest choice while it is on its way');
+    assert.equal(size.state().requested, true, 'asked, not yet the window\'s size');
+    assert.equal(size.state().unconfirmed, undefined, 'a call still out is no failure');
+    assert.deepEqual(sizeNote(size.state()), ['Waiting for this window to confirm {percent}%.', { percent: 120 }]);
     answers[1]();
     await second;
     answers[0]();  // the older call's answer arrives last
     await first;
-    assert.equal(size.state().percent, 120);
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5 }, 'the window\'s own answer');
     size.dispose();
 });
 
@@ -163,6 +167,85 @@ test('the note names this surface\'s way and keys', () => {
     assert.doesNotMatch(sizeNote({ route: 'browser', touch: true })[0], /zoomIn|Ctrl|⌘/, 'a phone has no zoom keys to name');
 });
 
+test('a desktop app without the bridge gets one fact and no update advice', () => {
+    assert.deepEqual(sizeNote({ route: 'none', reason: 'app', percent: 100 }), ['This desktop app cannot change its size.', {}]);
+    // No note on any surface names an Update, a Restart or a reinstall: Dashboard › Updates alone owns those actions.
+    const surfaces = [{ route: 'app' }, { route: 'app', percent: 110, requested: true },
+        { route: 'app', percent: 120, requested: true, unconfirmed: true },
+        { route: 'screen', min: 75, max: 120 }, { route: 'browser' }, { route: 'browser', touch: true },
+        ...['app', 'engine', 'telegram', 'unread', 'pending'].map((reason) => ({ route: 'none', reason }))];
+    for (const current of surfaces) {
+        for (const mac of [true, false]) {
+            assert.doesNotMatch(sizeNote(current, { mac })[0], /update|restart|reinstall|\binstall/i, JSON.stringify(current));
+        }
+    }
+});
+
+test('before pywebview injects the bridge nothing is claimed; its answer then decides', async () => {
+    const win = fakeWindow();
+    win.pywebview = { api: {} };  // the object exists, its methods do not yet
+    const doc = fakeDocument();
+    const size = createInterfaceSize({ win, doc });
+    await tick();
+    assert.deepEqual(size.state(), { route: 'none', reason: 'pending', percent: 100 });
+    assert.equal(sizeNote(size.state())[0], '', 'no "cannot", no browser keys, no advice');
+    Object.assign(win.pywebview.api, desktopBridge({ percent: 110 }));
+    win.fire('pywebviewready');
+    await tick();
+    assert.equal(size.state().route, 'app');
+    assert.equal(size.state().percent, 110);
+    size.dispose();
+});
+
+test('a failed read says the state could not be read, never that the app cannot', async () => {
+    const bridge = { shell_info: async () => { throw new Error('bridge gone'); }, set_interface_size: async () => ({}) };
+    const size = createInterfaceSize({ win: fakeWindow({ bridge }), doc: fakeDocument() });
+    await tick();
+    assert.deepEqual(size.state(), { route: 'none', reason: 'unread', percent: 100 });
+    assert.equal(sizeNote(size.state())[0], 'Could not read whether this window can change its size.');
+    size.dispose();
+});
+
+test('an answer once given survives a later failed read: the slider stays', async () => {
+    let reads = 0;
+    const bridge = {
+        shell_info: async () => {
+            reads += 1;
+            if (reads > 1) throw new Error('bridge gone');
+            return { interface_size: { supported: true, min: 50, max: 200, step: 5, percent: 100 } };
+        },
+        set_interface_size: async () => { throw new Error('window busy'); },
+    };
+    const size = createInterfaceSize({ win: fakeWindow({ bridge }), doc: fakeDocument() });
+    await tick();
+    assert.equal(size.state().route, 'app');
+    await size.set(120);  // the setter fails, the re-read fails too
+    assert.equal(reads, 2);
+    // Not "cannot change its size" and not "unsupported"; and 120 % is the owner's choice, never the window's size.
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5, requested: true, unconfirmed: true });
+    size.dispose();
+});
+
+test('a window that answered it cannot is engine; one whose answer lacks the field or the setter is app', async () => {
+    const engine = createInterfaceSize({ win: fakeWindow({ bridge: desktopBridge({ supported: false }) }), doc: fakeDocument() });
+    const noSetter = { shell_info: async () => ({ interface_size: { supported: true, min: 50, max: 200, percent: 100 } }) };
+    const app = createInterfaceSize({ win: fakeWindow({ bridge: noSetter }), doc: fakeDocument() });
+    await tick();
+    assert.equal(engine.state().reason, 'engine');
+    assert.equal(app.state().reason, 'app', 'support without the method that sets it is an app lacking that method');
+    engine.dispose();
+    app.dispose();
+});
+
+test('a browser or Telegram never inherits the desktop capability of the server\'s app', () => {
+    for (const telegram of [false, true]) {
+        const size = createInterfaceSize({ win: fakeWindow({ viewport: { state: 'unavailable' }, telegram }), doc: fakeDocument() });
+        assert.equal(size.state().route, telegram ? 'none' : 'browser');
+        assert.equal(size.state().reason, telegram ? 'telegram' : undefined);
+        size.dispose();
+    }
+});
+
 function fakeBlock() {
     const handlers = {};
     const element = (extra = {}) => ({ hidden: false, disabled: false, textContent: '', dataset: {}, ...extra,
@@ -208,6 +291,239 @@ test('where the page cannot set the size the slider is hidden and the note says 
     mountInterfaceSize(ui.root, size, { win });
     assert.equal(ui.row.hidden, true);
     assert.match(ui.note.textContent, /Telegram/);
+});
+
+/** The desktop window as launcher_page_zoom.PageZoom answers it (`info`, `request` past its argument checks), with a
+ *  plan for its next calls: `sets`/`reads` take 'answer' (the default), 'fail' (the call rejects before the window
+ *  sees it) or 'hold' (the window answers when called, as it does; the answer waits in `held` until delivered). */
+function scriptedBridge({ percent = 100 } = {}) {
+    const zoom = { percent, kind: 'cocoa', closed: false, order: [-Infinity, 0], schedules: true };
+    const plan = { sets: [], reads: [] };
+    const held = [];
+    const log = { sets: [], reads: 0, answers: [] };
+    const run = (kind, answer) => {
+        const how = plan[kind].shift() || 'answer';
+        if (how === 'fail') return Promise.reject(new Error(`controlled ${kind} failure`));
+        const value = answer();
+        if (how === 'hold') return new Promise((resolve) => { held.push({ resolve: () => resolve(value) }); });
+        return Promise.resolve(value);
+    };
+    const request = (value, page, sequence) => {
+        if (zoom.closed) return { ok: false, state: 'closed' };
+        if (!zoom.kind) return { ok: false, state: 'unsupported', percent: zoom.percent };
+        const order = [Number(page), Number(sequence)];
+        if (order[0] < zoom.order[0] || (order[0] === zoom.order[0] && order[1] <= zoom.order[1])) {
+            return { ok: true, state: 'stale', percent: zoom.percent };
+        }
+        zoom.order = order;
+        zoom.percent = value;  // stored, for the next window too, before the engine's write is scheduled
+        return { ok: zoom.schedules, state: zoom.schedules ? 'scheduled' : 'unavailable', percent: value };
+    };
+    const bridge = {
+        shell_info: () => {
+            log.reads += 1;
+            return run('reads', () => ({ interface_size: { supported: Boolean(zoom.kind) && !zoom.closed, min: 50, max: 200,
+                step: 5, percent: zoom.percent } }));
+        },
+        set_interface_size: (value, page, sequence) => {
+            log.sets.push(value);
+            return run('sets', () => { const answer = request(value, page, sequence); log.answers.push(answer); return answer; });
+        },
+    };
+    return { bridge, plan, held, log, zoom };
+}
+
+test('a size the window never reports stays the owner\'s choice, says so, and the control stays to try again', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const doc = fakeDocument();
+    const size = createInterfaceSize({ win, doc });
+    await tick();
+    const ui = fakeBlock();
+    const dispose = mountInterfaceSize(ui.root, size, { win });
+    script.plan.sets.push('fail');
+    script.plan.reads.push('fail');
+    ui.input.value = '120';
+    ui.handlers['input:change']();
+    await tick();
+    assert.deepEqual(script.log.sets, [120]);
+    assert.equal(script.log.reads, 2, 'one read after the failed call, no more');
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5, requested: true, unconfirmed: true });
+    assert.equal(ui.note.textContent, 'This window did not confirm 120%. Choose a size again, or use ⌘ +, ⌘ − and ⌘ 0.');
+    assert.equal(ui.row.hidden, false);
+    assert.equal(ui.input.disabled, false);
+    assert.equal(ui.input.value, '120', 'the slider keeps the owner\'s choice');
+    assert.equal(ui.output.textContent, '120%');
+    assert.equal(ui.reset.disabled, false);
+    // A key press tries again from the choice on screen, and the window's answer makes it its size.
+    let prevented = false;
+    doc.key({ metaKey: true, code: 'Equal', preventDefault: () => { prevented = true; } });
+    await tick();
+    assert.ok(prevented, 'the keys stay this window\'s');
+    assert.deepEqual(script.log.sets, [120, 130]);
+    assert.deepEqual(size.state(), { route: 'app', percent: 130, min: 50, max: 200, step: 5 });
+    assert.match(ui.note.textContent, /^For this window; the next one opens at the same size/);
+    dispose();
+    size.dispose();
+});
+
+test('an unconfirmed 100 % keeps Reset, which asks again', async () => {
+    const script = scriptedBridge({ percent: 120 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const size = createInterfaceSize({ win, doc: fakeDocument() });
+    await tick();
+    const ui = fakeBlock();
+    const dispose = mountInterfaceSize(ui.root, size, { win });
+    script.plan.sets.push('fail');
+    script.plan.reads.push('fail');
+    ui.handlers['reset:click']();
+    await tick();
+    assert.equal(size.state().percent, 100);
+    assert.equal(size.state().unconfirmed, true);
+    assert.equal(ui.reset.disabled, false, 'nothing confirms 100 %: Reset must stay');
+    ui.handlers['reset:click']();
+    await tick();
+    assert.deepEqual(script.log.sets, [100, 100]);
+    assert.deepEqual(size.state(), { route: 'app', percent: 100, min: 50, max: 200, step: 5 });
+    assert.equal(ui.reset.disabled, true, 'a confirmed 100 % has nothing to reset');
+    dispose();
+    size.dispose();
+});
+
+test('a rejected call is settled by the read after it: the window\'s own size, whatever was asked', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const size = createInterfaceSize({ win: fakeWindow({ bridge: script.bridge }), doc: fakeDocument() });
+    await tick();
+    script.plan.sets.push('fail');  // the window kept 100 %
+    await size.set(120);
+    assert.equal(script.log.reads, 2);
+    assert.deepEqual(size.state(), { route: 'app', percent: 100, min: 50, max: 200, step: 5 });
+    size.dispose();
+});
+
+test('an answer without the window\'s size leaves the choice unconfirmed, and nothing more is asked', async () => {
+    for (const answer of [{ ok: false, state: 'closed' }, { ok: false, state: 'invalid_order' }, null, { ok: true, percent: null }]) {
+        const script = scriptedBridge({ percent: 100 });
+        script.bridge.set_interface_size = async () => answer;
+        const size = createInterfaceSize({ win: fakeWindow({ bridge: script.bridge }), doc: fakeDocument() });
+        await tick();
+        await size.set(120);
+        assert.equal(script.log.reads, 1, `no extra read: ${JSON.stringify(answer)}`);
+        assert.equal(size.state().percent, 120);
+        assert.equal(size.state().unconfirmed, true, JSON.stringify(answer));
+        size.dispose();
+    }
+});
+
+test('a read begun before a call came back cannot confirm it', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const size = createInterfaceSize({ win, doc: fakeDocument() });
+    await tick();
+    script.plan.reads.push('hold');  // pywebviewready's read: slow, and older than the call below
+    win.fire('pywebviewready');
+    script.plan.sets.push('fail');
+    script.plan.reads.push('fail');  // the read after the failed call
+    await size.set(120);
+    assert.equal(size.state().unconfirmed, true);
+    script.held.shift().resolve();  // the slow read reports 100 %, as the window was before the call
+    await tick();
+    assert.equal(size.state().percent, 120, 'the choice stays on screen');
+    assert.equal(size.state().unconfirmed, true, 'a read older than the call says nothing of what the call did');
+    size.dispose();
+});
+
+test('a size on its way says so, the slider and the keys stay live, and the window\'s answer settles it', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const doc = fakeDocument();
+    const size = createInterfaceSize({ win, doc });
+    await tick();
+    const ui = fakeBlock();
+    const dispose = mountInterfaceSize(ui.root, size, { win });
+    script.plan.sets.push('hold', 'hold');
+    ui.input.value = '110';
+    ui.handlers['input:change']();
+    await tick();
+    assert.equal(ui.note.textContent, 'Waiting for this window to confirm 110%.', 'not the definite "For this window"');
+    assert.equal(ui.input.value, '110');
+    assert.equal(ui.input.disabled, false, 'the slider stays live');
+    doc.key({ metaKey: true, code: 'Equal', preventDefault() {} });
+    await tick();
+    assert.deepEqual(script.log.sets, [110, 120], 'the next press steps on from the size on its way');
+    assert.equal(ui.note.textContent, 'Waiting for this window to confirm 120%.');
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5, requested: true });
+    for (const call of script.held.splice(0)) call.resolve();  // the window's answers arrive, the older first
+    await tick();
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5 });
+    assert.match(ui.note.textContent, /^For this window; the next one opens at the same size/);
+    dispose();
+    size.dispose();
+});
+
+test('a refusal that carries a percent is no size of the window\'s, nothing is polled, and a retry it takes is', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const size = createInterfaceSize({ win, doc: fakeDocument() });
+    await tick();
+    const ui = fakeBlock();
+    const dispose = mountInterfaceSize(ui.root, size, { win });
+    script.zoom.schedules = false;  // PageZoom._post could not schedule the engine's write: the size is only stored
+    ui.input.value = '120';
+    ui.handlers['input:change']();
+    await tick();
+    assert.deepEqual(script.log.answers.at(-1), { ok: false, state: 'unavailable', percent: 120 }, 'the producer\'s shape');
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5, requested: true, unconfirmed: true });
+    assert.equal(ui.note.textContent, 'This window did not confirm 120%. Choose a size again, or use ⌘ +, ⌘ − and ⌘ 0.');
+    assert.equal(ui.input.disabled, false);
+    assert.equal(script.log.reads, 1, 'nothing is polled after a refusal');
+    script.zoom.schedules = true;
+    ui.input.value = '120';
+    ui.handlers['input:change']();  // the same choice again
+    await tick();
+    assert.deepEqual(script.log.answers.at(-1), { ok: true, state: 'scheduled', percent: 120 });
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5 });
+    assert.match(ui.note.textContent, /^For this window; the next one opens at the same size/);
+    dispose();
+    size.dispose();
+});
+
+test('a refusal naming the window\'s own percent confirms nothing either; a stale answer is the window\'s word', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const size = createInterfaceSize({ win: fakeWindow({ bridge: script.bridge }), doc: fakeDocument() });
+    await tick();
+    script.zoom.kind = '';  // the window has lost its engine's zoom
+    await size.set(120);
+    assert.deepEqual(script.log.answers.at(-1), { ok: false, state: 'unsupported', percent: 100 });
+    assert.equal(size.state().percent, 120);
+    assert.equal(size.state().unconfirmed, true);
+    script.zoom.kind = 'cocoa';
+    script.zoom.order = [Number.MAX_VALUE, 0];  // a newer page of this window holds it at 150 %
+    script.zoom.percent = 150;
+    await size.set(130);
+    assert.deepEqual(script.log.answers.at(-1), { ok: true, state: 'stale', percent: 150 });
+    assert.deepEqual(size.state(), { route: 'app', percent: 150, min: 50, max: 200, step: 5 }, 'the size the window took');
+    size.dispose();
+});
+
+test('a read the window answered before taking a size, delivered after, does not bring the old size back', async () => {
+    const script = scriptedBridge({ percent: 100 });
+    const win = fakeWindow({ bridge: script.bridge });
+    const size = createInterfaceSize({ win, doc: fakeDocument() });
+    await tick();
+    script.plan.reads.push('hold');  // pywebviewready's read: the window answers it now, at 100 %
+    win.fire('pywebviewready');
+    await size.set(120);
+    assert.deepEqual(script.log.answers.at(-1), { ok: true, state: 'scheduled', percent: 120 });
+    script.held.shift().resolve();  // that 100 % answer is delivered only now
+    await tick();
+    assert.deepEqual(size.state(), { route: 'app', percent: 120, min: 50, max: 200, step: 5 }, 'the size the window took');
+    // A read begun after that still speaks for the window: another page of it moved it to 140 %.
+    script.zoom.percent = 140;
+    win.fire('pywebviewready');
+    await tick();
+    assert.deepEqual(size.state(), { route: 'app', percent: 140, min: 50, max: 200, step: 5 });
+    size.dispose();
 });
 
 // theme.js's touch half, run as the page runs it: before CSS, with the viewport meta it rewrites.

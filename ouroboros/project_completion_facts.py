@@ -17,4 +17,6 @@ def completion_facts(root, task_id: str, task: dict, result: dict, event: dict) 
         reply = origin_reply(root, task_id, {"origin_message_ref": binding.get("source_ref")})
     if reply:
         facts["reply_to"] = reply
+    if isinstance(result.get("wake_summary"), str) and result["wake_summary"].strip():
+        facts["wake_summary"] = result["wake_summary"]  # the root's own closing sentence, for its Main portal (DESIGN)
     return facts

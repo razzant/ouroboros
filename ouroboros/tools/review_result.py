@@ -29,6 +29,7 @@ RESULT_LAYER = "result"
 RESULT_KIND = "result"
 RESULT_ROOT_KIND = "task_result"
 RESULT_USER_TURN = "Review the task result against its request, as the instructions above describe."
+RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 # The rules a result wave is judged by: this section of docs/CHECKLISTS.md, read from the install as every
 # other review surface reads its own section (owner, 18.10: the rubric lives with the other checklists).
 RESULT_CHECKLIST_SECTION = "Result Review Checklist"
@@ -55,10 +56,49 @@ def result_rubric() -> str:
 
 
 def result_rules() -> Dict[str, Any]:
-    """The rules a result wave is judged by, in the checklist facts' own shape."""
+    """The rules a result wave is judged by, in the checklist facts' own shape: the record's provenance, never
+    its reuse identity (``result_contract_fingerprint``)."""
     from ouroboros.tools.review_checklist import section_fingerprint
 
     return section_fingerprint(RESULT_CHECKLIST_SECTION)
+
+
+# The result brief's own words: how it frames the author's goal and questions, named scope and answer to the
+# previous review, in the brief's order, and what a retrieving seat must read and where.
+_AUTHOR_WORDS = ("## The author's own goal and questions for this review", "## Scope the author names",
+                 "## The author's answer to the previous review of this result")
+_READ_SUBJECT = "The subject's exact text is retained at {source}; read it whole. "
+_READ_IN_PLACE = ("Every produced file the subject names is at its absolute path: read what you need in place, "
+                  "nothing is copied for you.")
+
+
+def result_contract_fingerprint() -> str:
+    """The review contract of a result wave's reuse identity (``commit_gate.commit_review_contract_fingerprint``
+    over ``result_contract_words``)."""
+    from ouroboros.tools.commit_gate import commit_review_contract_fingerprint
+
+    own, packet, retrieving = result_contract_words()
+    return commit_review_contract_fingerprint(own, packet=packet, retrieving=retrieving, layer=RESULT_LAYER, shape="array")
+
+
+def result_contract_words() -> Tuple[list, list, list]:
+    """``(every seat, packet, retrieving)``: the result brief's own text over fixed placeholders in these branches
+    (the head with and without the author's words, the subject's frame of what was asked, produced and verified,
+    the packet's and a retrieving seat's composition). The rubric (a guide), the request, the reply, the produced
+    material and the receipts are data."""
+    from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.review_words import words_material
+    from ouroboros.tools.review_multi_model import triad_stable_head
+
+    heads = [_brief_head(goal=words, scope=words, review_rebuttal=words, rubric="⟨rubric⟩") for words in ("⟨words⟩", "")]
+    produced = {"files": [{"path": "⟨path⟩", "kind": "⟨kind⟩", "sha256": "⟨sha⟩", "size": 1}], "issues": ["⟨issue⟩"],
+                "effects": [{"tool": "⟨tool⟩", "receipt": "⟨receipt⟩", "host_notes": ["⟨note⟩"]}],
+                "words_section": "⟨source words⟩"}
+    own = [RESULT_CHECKLIST_SECTION, *heads, _SUBJECT_HEAD, *_ASK_WORDS.values(), *reviewer_words_material(),
+           *words_material(RESULT_WORDS_SOURCE), *(answer_text(reply=reply, produced=material, verification="⟨verification⟩")
+             for reply, material in (("⟨reply⟩", produced), ("", {})))]
+    return (own, [RESULT_USER_TURN, triad_stable_head(RESULT_LAYER, ""), _packet_prompt("⟨head⟩", "⟨subject⟩")],
+            [_retrieving_task("⟨head⟩", source, "⟨subject⟩") for source in ("⟨source⟩", None)])
 
 
 def latest_reply(ctx: Any) -> str:
@@ -112,12 +152,68 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                 out["files"].append({"path": str(path), "kind": "workspace change", **_file_identity(path)})
             if candidates:
                 out["workspace"] = str(pathlib.Path(str(repo)).resolve(strict=False))
+                from ouroboros.review_words import ReviewWords, section_budget
+
+                try:
+                    out["words_section"] = _workspace_words(repo, snapshot, candidates, _result_words_budget())
+                except Exception as exc:
+                    out["words_section"] = ReviewWords(gaps=(
+                        f"workspace words ({type(exc).__name__}: {exc})",)).render(section_budget(), RESULT_WORDS_SOURCE)
             elif snapshot.get("blockers") and snapshot.get("blockers") != ["baseline_missing"]:
                 out["issues"].append("workspace changes not attributed: " + ", ".join(map(str, snapshot["blockers"])))
     except Exception as exc:
         out["issues"].append(f"workspace changes could not be attributed ({type(exc).__name__}: {exc})")
     out["effects"] = _declared_effects(ctx, root, task_id, out["issues"])
     return out
+
+
+def _result_words_budget() -> int:
+    """The words share a change packet takes, sized against this panel's seats: the one subject reaches every seat,
+    inline for a packet seat and in a retrieving seat's brief."""
+    from ouroboros.review_records import ReviewSlot
+    from ouroboros.review_words import section_budget
+    from ouroboros.reviewer_slot_config import commit_triad_delivery
+    from ouroboros.tools.review import _triad_governance_usable_window
+    from ouroboros.tools.review_admission import seat_vectors
+
+    try:
+        plan = seat_vectors(commit_triad_delivery())
+    except ValueError:  # the wave refuses this pool itself; the subject keeps the global bound
+        return section_budget()
+    slots = [ReviewSlot(slot_id=plan["slot_ids"][i], model=plan["models"][i],
+                        session_profile=plan["session_profiles"][i], use_local=plan["use_local"][i])
+             for i in range(len(plan.get("models") or []))]
+    if not slots:
+        return section_budget()
+    return section_budget(_triad_governance_usable_window([slot.model for slot in slots], slots))
+
+
+def _workspace_words(repo: Any, snapshot: dict, candidates: list[str], budget: int) -> str:
+    """Extract bounded words from attributed changes; the diff is transient, never retained."""
+    from ouroboros.review_words import has_words, words_for_diff
+    from ouroboros.tools.review_subject import _HARDENED_DIFF_FLAGS, _decode_diff, _git_bytes
+
+    base = snapshot.get("base_tree") or snapshot.get("base_commit")
+    if not base:
+        raise ValueError("workspace diff has no recorded baseline")
+    paths = [f":(literal){path}" for path in candidates if has_words(path)]
+    if not paths:
+        return ""
+    rc, raw, error = _git_bytes(repo, ["diff", *_HARDENED_DIFF_FLAGS, "--full-index", str(base), "--", *paths])
+    if rc:
+        raise ValueError(f"workspace diff capture failed: {error}")
+    rc, untracked, error = _git_bytes(repo, ["ls-files", "--others", "--exclude-standard", "-z", "--", *paths])
+    if rc:
+        raise ValueError(f"workspace new files could not be listed: {error}")
+    for path in untracked.decode("utf-8").split("\0"):
+        if not path:
+            continue
+        rc, added, error = _git_bytes(repo, ["diff", "--no-index", *_HARDENED_DIFF_FLAGS, "--full-index", "--", "/dev/null", path])
+        if rc not in (0, 1):
+            raise ValueError(f"workspace new file diff failed: {error}")
+        raw += added
+    diff = _decode_diff(raw)
+    return words_for_diff(repo, diff).render(budget, RESULT_WORDS_SOURCE)
 
 
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:
@@ -158,12 +254,24 @@ def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> L
     return effects
 
 
+# How the subject frames what was asked and what was verified, around the host's records of both.
+_ASK_WORDS = {"objective": "The objective above: {author}.", "claims": "claims the result is held to ({source}):",
+              "support": " (support: {support})", "unavailable": "claims: unavailable ({error})",
+              "none": "(the task states no request beyond its reply)",
+              "no_receipts": "(no host-attested verification receipts)",
+              "unreadable": "(verification receipts unreadable: {error})",
+              "readings": "Readings: the marks in force at this ask (the work's room and the global ones), each with its author and date.",
+              "reading": "- [mark {id} by {who}, {date}; {scope}{own}] {text}", "own": "; set by the work under review",
+              "readings_unreadable": "Readings: the marks in force could not be read here ({error}); memory_read reads a mark."}
+
+
 def _ask(ctx: Any) -> str:
     """What was asked, host-attested: the task's own request fields (the objective with its author,
-    ``owner_words.objective_author_line``), the claims it is held to (an ingress contract's, else the
-    latest plan revision's) and its owner's words."""
+    ``owner_words.objective_author_line``), the claims it is held to (an ingress contract's, else the latest plan
+    revision's), its owner's words and, beside them, the marks in force at this ask with author and date (a mark
+    the work under review set itself says so; an unreadable store is one line; ``marks_in_force``)."""
     from ouroboros.owner_words import objective_author_text, owner_words_text
-    from ouroboros.review_evidence_sections import _accept_effective_claims, _accept_task_contract
+    from ouroboros.review_evidence_sections import _accept_effective_claims, _accept_task_contract, marks_in_force
 
     contract = _accept_task_contract(ctx)
     lines: List[str] = []
@@ -172,21 +280,30 @@ def _ask(ctx: Any) -> str:
         if value not in (None, "", [], {}):
             lines.append(f"{key}: {value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)}")
             if key == "objective":
-                lines.append(f"The objective above: {objective_author_text(ctx)}.")
+                lines.append(_ASK_WORDS["objective"].format(author=objective_author_text(ctx)))
     try:
         claims, source, _exhibit = _accept_effective_claims(
             ctx, contract, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""))
     except Exception as exc:
         claims, source = [], ""
-        lines.append(f"claims: unavailable ({type(exc).__name__}: {exc})")
+        lines.append(_ASK_WORDS["unavailable"].format(error=f"{type(exc).__name__}: {exc}"))
     if claims:
-        lines.append(f"claims the result is held to ({source or 'task contract'}):")
-        lines.extend(f"- {claim.get('claim') or claim}" + (f" (support: {claim['support']})" if claim.get("support") else "")
+        lines.append(_ASK_WORDS["claims"].format(source=source or "task contract"))
+        lines.extend(f"- {claim.get('claim') or claim}" + (_ASK_WORDS["support"].format(support=claim["support"])
+                                                            if claim.get("support") else "")
                      for claim in claims if isinstance(claim, dict))
     words = owner_words_text(ctx, audience="reviewer")
     if words.strip():
         lines.append(words.strip())
-    return "\n".join(lines) or "(the task states no request beyond its reply)"
+    try:
+        readings = marks_in_force(ctx, str(getattr(ctx, "task_id", "") or "")) if getattr(ctx, "drive_root", None) else []
+    except Exception as exc:  # an unreadable store hides nothing else of what was asked
+        lines.append(_ASK_WORDS["readings_unreadable"].format(error=f"{type(exc).__name__}: {exc}"))
+    else:  # a mark's further lines are indented under its own, as a row's words are (``words_block``)
+        lines += [_ASK_WORDS["readings"], *(_ASK_WORDS["reading"].format(**{**item, "own": _ASK_WORDS["own"] if item["own"] else ""})
+                                            .replace("\n", "\n  ")
+                                            for item in readings)] if readings else []
+    return "\n".join(lines) or _ASK_WORDS["none"]
 
 
 def _verification(ctx: Any) -> str:
@@ -197,9 +314,9 @@ def _verification(ctx: Any) -> str:
     try:
         receipts = read_context_verification_receipts(ctx, task_id, fallback_root=getattr(ctx, "drive_root", None)) if task_id else []
     except Exception as exc:
-        return f"(verification receipts unreadable: {type(exc).__name__}: {exc})"
+        return _ASK_WORDS["unreadable"].format(error=f"{type(exc).__name__}: {exc}")
     if not receipts:
-        return "(no host-attested verification receipts)"
+        return _ASK_WORDS["no_receipts"]
     return json.dumps({"summary": _accept_verification_summary(receipts), "receipts": _accept_receipt_exhibits(receipts)},
                       ensure_ascii=False, indent=1, default=str)
 
@@ -223,6 +340,7 @@ def answer_text(*, reply: str, produced: Dict[str, Any], verification: str) -> s
         *(["Effect receipts are the tool producer's reports of execution, not proof of a UI change or goal success.", ""]
           if effects else []),
         *(files + effects + gaps or ["(nothing produced beyond the reply)"]), "",
+        *([produced["words_section"], ""] if produced.get("words_section") else []),
         "## Host-attested verification", "", verification, "",
     ])
 
@@ -269,25 +387,27 @@ def earlier_request_subject(ctx: Any, subject: Any, rows: Optional[List[Dict[str
 
 
 def _words_since(ctx: Any, earlier: str) -> List[str]:
-    """The owner's words this run holds now that the earlier subject's request did not carry, verbatim."""
-    from ouroboros.owner_words import FIELD, governing_words_for_schedule
+    """My human's rows this run holds now that the earlier subject's request did not carry, each under its stamp:
+    told by the row's identity, never by likeness of words (``owner_relay.words_unseen_in``; what my human
+    replied to is not theirs; a subject that cannot be read back names every row)."""
+    from ouroboros import owner_relay, owner_words
 
-    rows = governing_words_for_schedule(ctx).get(FIELD) or []
-    texts = [str(row.get("text") or "").strip() for row in rows if isinstance(row, dict)]
-    return [text for text in texts if text and text not in earlier] if earlier else []
+    return [f"{owner_words.words_stamp(row)}\n{row['text']}" for row in owner_relay.words_unseen_in(ctx, earlier)]
 
 
-def _request_changed_text(ctx: Any, record: Dict[str, Any]) -> str:
-    """Asked once (owner, 18.10): the only review of this exact answer judged an earlier request."""
+def _request_changed_text(ctx: Any, record: Dict[str, Any], *, outcome: bool = False) -> str:
+    """Asked once (owner, 18.10): the only review of this exact answer judged an earlier request. ``outcome``:
+    its author has not received that review yet, so its findings ride the same question, whole."""
     earlier = _retained_subject_text(ctx, str((record.get("subject") or {}).get("diff_sha") or ""))
     words = _words_since(ctx, earlier)
     aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
     lines = [f"[Result review] This exact result was reviewed (record {record.get('record_id')}: {aggregate}) before "
              "what was asked last changed; its reviewers did not see these words of your human:"]
-    lines += [f"- {text[:600]}" for text in words[:5]] or ["- (the request changed: its claims or contract, or words "
-                                                          "the earlier request cannot be read back for)"]
-    if len(words) > 5:
-        lines.append(f"- ... and {len(words) - 5} more message(s)")
+    lines += [f"- {text}".replace("\n", "\n  ") for text in words] or [  # each whole and dated, every one
+        "- (the request changed: its claims, contract or readings; no row of your human is new to that review)"]
+    found = _outcome_lines(record) if outcome else []
+    if found:
+        lines += ["What that review found:", *found]
     lines.append("Do they change what was asked? If they do, revise the result, or ask for a review of the current "
                  "request with review_change(subject=\"result\"). If they do not, deliver again: the earlier review "
                  "stands for this result (its findings and enforcement apply as they are).")
@@ -341,17 +461,23 @@ def subject_source(ctx: Any, text: str) -> Optional[pathlib.Path]:
     return task_artifact_dir_path(root, task_id) / str(ref["path"])
 
 
-def _brief_head(*, goal: str, scope: str, review_rebuttal: str) -> str:
+def _brief_head(*, goal: str, scope: str, review_rebuttal: str, rubric: Optional[str] = None) -> str:
     from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
 
-    parts = ["## REVIEW INSTRUCTIONS", "", result_rubric()]
-    if goal.strip():
-        parts += ["## The author's own goal and questions for this review", "", goal.strip(), ""]
-    if scope.strip():
-        parts += ["## Scope the author names", "", scope.strip(), ""]
-    if review_rebuttal.strip():
-        parts += ["## The author's answer to the previous review of this result", "", review_rebuttal.strip(), ""]
+    parts = ["## REVIEW INSTRUCTIONS", "", result_rubric() if rubric is None else rubric]
+    for heading, words in zip(_AUTHOR_WORDS, (goal, scope, review_rebuttal)):
+        if words.strip():
+            parts += [heading, "", words.strip(), ""]
     return "\n".join([*parts, "## Your answer", "", REVIEW_JSON_ARRAY_CONTRACT])
+
+
+def _packet_prompt(head: str, subject_text: str) -> str:
+    return f"{head}\n\n---\n\n# THE SUBJECT\n\n{subject_text}"
+
+
+def _retrieving_task(head: str, source: Any, subject_text: str) -> str:
+    where = _READ_SUBJECT.format(source=source) if source else ""
+    return f"{head}\n\n{where}{_READ_IN_PLACE}\n\n---\n\n# THE SUBJECT\n\n" + subject_text
 
 
 def prepare_result_review(ctx: Any, subject: Any, *, goal: str = "", scope: str = "",
@@ -383,9 +509,7 @@ def prepare_result_review(ctx: Any, subject: Any, *, goal: str = "", scope: str 
     for index in range(count):
         if not row_plan_retrieves(row_plan, index):
             continue
-        where = (f"The subject's exact text is retained at {source}; read it whole. " if source else "")
-        task = (f"{head}\n\n{where}Every produced file the subject names is at its absolute path: read what you "
-                "need in place, nothing is copied for you.\n\n---\n\n# THE SUBJECT\n\n" + subject.diff_text)
+        task = _retrieving_task(head, source, subject.diff_text)
         digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
         tasks[index], shas[index], texts[digest] = task, digest, task
         policies[index] = {"output_contract": REVIEW_JSON_ARRAY_CONTRACT, "output_shape": "array"}
@@ -396,7 +520,7 @@ def prepare_result_review(ctx: Any, subject: Any, *, goal: str = "", scope: str 
     accesses = list(row_plan.get("session_accesses") or [""] * len(routes))
     seats = [SimpleNamespace(route=route, session_access=access) for route, access in zip(routes, accesses)]
     packet = [str(row_plan["slot_ids"][index]) for index in range(count) if not row_plan_retrieves(row_plan, index)]
-    prompt = f"{head}\n\n---\n\n# THE SUBJECT\n\n{subject.diff_text}" if packet else ""
+    prompt = _packet_prompt(head, subject.diff_text) if packet else ""
     return {
         "prompt": prompt, "stable_prefix_len": len(head) if packet else 0,
         "models": row_plan["models"], "routes": routes, "row_plan": row_plan,
@@ -482,13 +606,18 @@ def _collect_running(ctx: Any, content: str, record_id: str, subject: Any) -> Di
     from ouroboros import review_ledger as ledger
     from ouroboros.tools.review_change import run_review_change
 
+    from ouroboros.review_continuation import ContinuationRefused
+
     record = ledger.load_record(ledger.ledger_root(ctx), record_id)
     brief = dict(record.get("brief") or {})
-    return run_review_change(ctx, subject="result", answer=str(content or ""), goal=str(brief.get("goal") or ""),
-                             scope=str(brief.get("scope") or ""),
-                             author_questions=list(brief.get("author_questions") or []),
-                             reason="Collect the running review of this result", _frozen_result=subject,
-                             _rejoin_retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
+    try:  # a continuation chosen on this round is sent first (``review_collection.repair_round``)
+        return run_review_change(ctx, subject="result", answer=str(content or ""), goal=str(brief.get("goal") or ""),
+                                 scope=str(brief.get("scope") or ""),
+                                 author_questions=list(brief.get("author_questions") or []),
+                                 reason="Collect the running review of this result", _frozen_result=subject,
+                                 _rejoin_retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
+    except ContinuationRefused as exc:  # recorded, not sent now: the review stays pending, never a new wave
+        return {"state": "pending", "record_id": record_id, "continuation": exc.payload()}
 
 
 def supersede_result_runs(llm_trace: Dict[str, Any], marker: str) -> None:
@@ -512,23 +641,32 @@ def _bind_review_run(llm_trace: Dict[str, Any], record: Dict[str, Any], subject_
     """The result review bound to the delivered answer, in the task's review runs the outcome axes read.
     ``earlier_request``: the mind judged that the owner's words since this review do not change what was
     asked, so the review of this exact answer stands for the current request too."""
+    from ouroboros.review_seat_outcome import outcome_identity
+
     runs = llm_trace.setdefault("review_runs", [])
     record_id = str(record.get("record_id") or "")
     bound = next((run for run in runs if isinstance(run, dict) and run.get("panel_id") == record_id), None)
+    verdict, outcomes = dict(record.get("verdict") or {}), outcome_identity(record)
+    aggregate = str(verdict.get("aggregate") or "")
+    signal = aggregate if aggregate in {"PASS", "FAIL"} else "DEGRADED"
+    facts = {"aggregate_signal": signal, "aggregate": aggregate, "degraded": signal == "DEGRADED",
+             "reason": str(verdict.get("reason") or ""), "critical_count": len(verdict.get("critical_findings") or []),
+             "dispatch_refusal": str((record.get("dispatch_refusal") or {}).get("kind") or "")}
     if bound is not None:
         if earlier_request:
             bound.update(binding_hash=subject_sha, earlier_request=True)
         if bound.get("binding_hash") == subject_sha:
             bound.pop("superseded_by_revision", None)  # the exact subject it reviewed is current again
+        # A genuinely new outcome under the same record (a continued seat, a late answer under the same
+        # operation) refreshes the binding; the author's earlier informed finish read the old outcome.
+        known = bound.get("outcomes")
+        if (known != outcomes) if known is not None else any(bound.get(k) != facts[k] for k in ("aggregate", "critical_count", "reason")):
+            bound.update(facts)
+            bound.pop("informed_finish", None)
+        bound["outcomes"] = outcomes
         return bound
-    verdict = dict(record.get("verdict") or {})
-    aggregate = str(verdict.get("aggregate") or "")
-    signal = aggregate if aggregate in {"PASS", "FAIL"} else "DEGRADED"
     bound = {"surface": RESULT_KIND, "authority": "host_root", "panel_id": record_id, "record_id": record_id,
-             "binding_hash": subject_sha, "aggregate_signal": signal, "aggregate": aggregate,
-             "degraded": signal == "DEGRADED", "reason": str(verdict.get("reason") or ""),
-             "critical_count": len(verdict.get("critical_findings") or []), "enforcement": enforcement,
-             "dispatch_refusal": str((record.get("dispatch_refusal") or {}).get("kind") or ""),
+             "binding_hash": subject_sha, **facts, "enforcement": enforcement, "outcomes": outcomes,
              **({"earlier_request": True} if earlier_request else {})}
     runs.append(bound)
     return bound
@@ -550,25 +688,81 @@ def pending_review_choice_offered(ctx: Any) -> bool:
     return bool(getattr(ctx, "_result_review_pending", "")) and not _blocking_enforcement()
 
 
-def _findings_text(record: Dict[str, Any], *, blocking: bool) -> str:
+def _outcome_lines(record: Dict[str, Any]) -> List[str]:
+    """A review's outcome, whole: every finding in the record's order (critical, advisory, then an added
+    reviewer's, heard and never counted) and why no verdict formed when none did. Nothing is cut."""
     verdict = dict(record.get("verdict") or {})
     aggregate = str(verdict.get("aggregate") or "")
-    lines = [f"[Result review] Your result was reviewed before delivery (record {record.get('record_id')}): {aggregate}."]
-    for finding in [*(verdict.get("critical_findings") or []), *(verdict.get("advisory_findings") or [])][:12]:
-        lines.append(f"- {finding.get('severity') or 'advisory'} ({finding.get('seat_id') or 'reviewer'}): "
-                     f"{finding.get('item') or ''} {finding.get('reason') or ''}".rstrip())
+    lines = [f"- {finding.get('severity') or 'advisory'} ({finding.get('seat_id') or 'reviewer'}{note}): "
+             f"{finding.get('item') or ''} {finding.get('reason') or ''}".rstrip()
+             for name, note in (("critical_findings", ""), ("advisory_findings", ""),
+                                ("additional_findings", "; added reviewer, heard, not counted"))
+             for finding in verdict.get(name) or [] if isinstance(finding, dict)]
+    from ouroboros.review_continuation import continuable_seats
+
+    if offers := continuable_seats(record):  # continued only by the author's explicit choice, in the same wave
+        lines.append("Stopped reviewers you may continue: review_change(review_reference="
+                     + json.dumps({"record_id": record.get("record_id"), "task_id": record.get("task_id"), "surface": "result"})
+                     + ", continue_seats=" + json.dumps([{k: o[k] for k in ("seat_id", "operation_id")} for o in offers]) + ").")
     if aggregate == "NOT_DISPATCHED":
         lines.append(str((record.get("dispatch_refusal") or {}).get("message") or "No review was dispatched."))
     elif aggregate not in {"PASS", "FAIL"}:
         lines.append(f"No verdict was formed ({verdict.get('reason') or 'unknown'}); the record names each seat's state.")
+    return lines
+
+
+def _findings_text(record: Dict[str, Any], *, blocking: bool) -> str:
+    aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
+    lines = [f"[Result review] Your result was reviewed before delivery (record {record.get('record_id')}): {aggregate}.",
+             *_outcome_lines(record)]
     lines.append(("Blocking enforcement: no review of this result can be bought until your human raises the review "
                   "ceiling, and it is not delivered unreviewed; stop the task explicitly, or wait for that."
                   if aggregate == "NOT_DISPATCHED" else
                   "Blocking enforcement: this result is not delivered until a review passes it; revise the result or "
                   "stop the task explicitly.") if blocking else
-                 "You decide: revise the result, or deliver it as it is with your reasons; nothing is delivered "
-                 "until you answer again.")
+                 "You decide: revise the result, or deliver it as it is" + ("" if aggregate == "PASS" else " with your reasons")
+                 + "; nothing is delivered until you answer again.")
     return "\n".join(lines)
+
+
+def _outcome_keys(record: Dict[str, Any]) -> set:
+    """What a review concluded, by identity: each seat's actual outcome with its status, counted seats and
+    added ones alike (``review_waiting.outcome_states``), else the record itself (a $0 refusal has no seat
+    outcome). A revision that records cost keeps it; a new outcome under the same record changes it."""
+    from ouroboros.review_waiting import outcome_states
+
+    return set(outcome_states(record)) or {str(record.get("record_id") or "")}
+
+
+def _outcome_received(ctx: Any, llm_trace: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    """Whether this exact outcome already reached its author whole: shown by this step's hold
+    (``ctx._result_review_shown``), or returned by a review tool, whose own result carried the receipt of
+    ``review_waiting.publish_delivery`` and entered the transcript complete (the loop records the call with
+    that receipt and without ``result_partial``, where ``acknowledge_delivery`` acknowledges it). A
+    [Selected results] notice or a readiness peek is not such a delivery. Exposure, never understanding or
+    agreement."""
+    record_id, seen = str(record.get("record_id") or ""), set(getattr(ctx, "_result_review_shown", None) or ())
+    for call in llm_trace.get("tool_calls") or []:
+        meta = call.get("tool_result_meta") if isinstance(call, dict) else None
+        receipt = meta.get("review_delivery") if isinstance(meta, dict) else None
+        if isinstance(receipt, dict) and not call.get("result_partial") and str(receipt.get("record_id") or "") == record_id:
+            seen.update(str(item) for item in receipt.get("outcome_states") or ())
+    return _outcome_keys(record) <= seen
+
+
+def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str, *, outcome: bool = True) -> bool:
+    """Insert the handback, then stage its receipt for the transcript checkpoint, like a whole tool return.
+    A question about changed owner words alone certifies no newly rendered outcome."""
+    ctx._completion_hold_cause = cause  # each hold names its cause to the delivery owner
+    hold(text)
+    if outcome:
+        from ouroboros.review_waiting import acknowledge_delivery, outcome_states
+
+        shown = getattr(ctx, "_result_review_shown", None) or []
+        ctx._result_review_shown = list(dict.fromkeys([*shown, *sorted(_outcome_keys(record))]))
+        acknowledge_delivery(ctx, {"record_id": str(record.get("record_id") or ""),
+                                   "outcome_states": outcome_states(record)})
+    return True
 
 
 def _ceiling() -> Optional[int]:
@@ -586,6 +780,7 @@ def _hold_refused(ctx: Any, record_id: str, hold: Any) -> bool:
         record = ledger.load_record(ledger.ledger_root(ctx), record_id) if record_id else None
     except ValueError:
         record = None
+    ctx._completion_hold_cause = "blocking_refusal"  # each hold names its cause to the delivery owner
     hold(_findings_text(record or {"verdict": {"aggregate": "NOT_DISPATCHED"}, "dispatch_refusal": {}}, blocking=True))
     return True
 
@@ -602,28 +797,59 @@ def _after_refusal(llm_trace: Dict[str, Any], subject_sha: str) -> bool:
     return False
 
 
+def _presence_turn_speech(ctx: Any) -> bool:
+    """A Presence turn delivering its own speech, known before any review: the host built the turn for one
+    connector event and stamped its ``presence_event_identity`` (``presence_runner._build_task``; the carrier
+    stamps it again). A promoted or follow-up root keeps only ``metadata.presence``
+    (``dialogue_provenance.presence_root_carrier``) and is reviewed like any root, whatever completion its
+    context holds: a focus records one (``_presence_completion``) only after this step
+    (``place_reply.prepare_focus_reply``), for a promoted root of a place too."""
+    metadata = getattr(ctx, "task_metadata", None)
+    return isinstance(metadata, dict) and bool(metadata.get("presence_event_identity"))
+
+
 def _presence_result_review(ctx: Any, content: str, llm_trace: Dict[str, Any], subject: Any,
                             record: Optional[Dict[str, Any]], *, owed: bool) -> bool:
     """Presence speech is never held. A Required review of its result still runs: its author departs at
     once (``review_pause.departed_binding``), nobody waits for the seats, and the outcome settles as a late
-    mark in the room the work came from (#1738); a review that settled at once is bound like any other."""
+    mark in the room the work came from (#1738); a review that settled at once, and a $0 refusal (the result
+    reviews' paid-cycle allowance is spent), are bound like any other. An outcome that settled unread owes that
+    mark itself (``left="unread"``) until a saved whole receipt of it ends the duty
+    (``review_waiting.acknowledge_delivery``)."""
     if record is None and owed:
         from ouroboros import review_pause
         from ouroboros.tools.review_change import ReviewChangeArgumentError, run_review_change
 
         try:
             with review_pause.receptive_author(review_pause.departed_binding(ctx)):
-                run_review_change(ctx, subject="result", answer=str(content or ""), _frozen_result=subject,
-                                  reason="Required: the host's review of a Presence result with produced work",
-                                  _chosen_by="host")
+                outcome = run_review_change(ctx, subject="result", answer=str(content or ""), _frozen_result=subject,
+                                            reason="Required: the host's review of a Presence result with produced work",
+                                            _chosen_by="host")
         except ReviewChangeArgumentError as exc:
             log.warning("Required result review of Presence %s not dispatched: %s", getattr(ctx, "task_id", ""), exc)
             return False
         record = settled_result_record(ctx, subject.diff_sha)
+        if record is None and outcome.get("state") != "pending" and outcome.get("record_id"):
+            from ouroboros import review_ledger as ledger
+
+            try:  # the refusal, read from its own record as the ordinary delivery reads it
+                record = ledger.load_record(ledger.ledger_root(ctx), str(outcome["record_id"]))
+            except ValueError:
+                record = None
     if record is not None:
         earlier = str((record.get("subject") or {}).get("diff_sha") or "") != subject.diff_sha
         _bind_review_run(llm_trace, record, subject.diff_sha, "blocking" if _blocking_enforcement() else "advisory",
                          earlier_request=earlier)
+        if str((record.get("verdict") or {}).get("aggregate") or "") == "NOT_DISPATCHED":
+            ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
+                "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
+        elif not _outcome_received(ctx, llm_trace, record):
+            # ``waiting`` may hold only cursors. Keep an existing wave duty; otherwise owe its unread outcome.
+            from ouroboros import review_pause
+
+            review_pause.owe_unwaited_review(ctx, surface=RESULT_KIND, left="unread",
+                                             record_id=str(record.get("record_id") or ""),
+                                             retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
     return False
 
 
@@ -635,12 +861,14 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     which the outcome axes read. Required adds the floor: a ROOT result with produced material that nobody
     reviewed yet is reviewed by the host, seating the whole pool with ``chosen_by="host"``, through the same
     wave as a mind's own call. The outcome reaches
-    the mind before delivery: a PASS delivers; otherwise its findings are shown once (``hold(text)``), then
-    Advisory and Cyber Pro deliver on the mind's next decision while Blocking holds until a review passes
-    the result or the task stops. A review of this result the mind started that is still running is
-    collected the same way: the delivery waits for it unless a nonblocking install's mind chose
-    ``pending_review=finish``. When the only review of this exact answer judged an earlier request (its owner's
-    words changed since), the host shows the new words once and asks whether they change what was asked; a
+    the mind before delivery: an outcome it has not received whole yet, a PASS included, is shown once with
+    every finding (``hold(text)``), and one a review tool already returned to it whole is not shown again
+    (``_outcome_received``); then a PASS delivers, Advisory and Cyber Pro deliver on the mind's next decision,
+    and Blocking holds until a review passes the result or the task stops. A review of this result the mind
+    started that is still running is collected the same way: the delivery waits for it unless a nonblocking
+    install's mind chose ``pending_review=finish``. When the only review of this exact answer judged an earlier
+    request (its owner's words changed since), the host shows the new words once, with that review's outcome
+    when it has not reached the mind, and asks whether they change what was asked; a
     delivery after that keeps that review for this result (owner, 18.10). A child is never forced; Presence
     speech is never held (its owed review runs with nobody waiting and arrives as a late mark,
     ``_presence_result_review``)."""
@@ -666,9 +894,14 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     record = settled_result_record(ctx, subject.diff_sha, rows)
     refused = getattr(ctx, "_result_review_refused", None) or {}
     if record is None and subject.diff_sha in refused:
-        if not (required and _blocking_enforcement()):
+        if _presence_turn_speech(ctx):
+            if refused[subject.diff_sha]["ceiling"] == _ceiling():
+                from ouroboros import review_ledger as ledger
+
+                record = ledger.load_record(ledger.ledger_root(ctx), refused[subject.diff_sha]["record_id"])
+        elif not (required and _blocking_enforcement()):
             return _after_refusal(llm_trace, subject.diff_sha)
-        if refused[subject.diff_sha]["ceiling"] == _ceiling():  # still spent: the refusal shown stands, nothing is written
+        elif refused[subject.diff_sha]["ceiling"] == _ceiling():  # still spent: the refusal shown stands, nothing is written
             return _hold_refused(ctx, refused[subject.diff_sha]["record_id"], hold)
         # A raised ceiling lets the owed review run now (below).
     # The only review of this exact answer may have judged an earlier request (the owner's words changed since):
@@ -681,7 +914,7 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
             running, collect = str(pending[0].get("record_id") or ""), pending[1]
         elif (settled := earlier_request_subject(ctx, subject, rows, state="settled")) is not None:
             earlier = settled_result_record(ctx, settled[1].diff_sha, rows)
-    if getattr(ctx, "_presence_completion", None):
+    if _presence_turn_speech(ctx):
         return _presence_result_review(ctx, content, llm_trace, subject, record or earlier,
                                        owed=required and not running and earlier is None)
     if running:
@@ -716,8 +949,12 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
             if (pending_review_choice_offered(ctx)
                     and str(getattr(ctx, "_acceptance_pending_review_choice", "") or "") == "finish"):
                 return False  # the mind chose to finish; the reviewers settle later and leave a mark
-            hold("[Result review] The review of your result is still running (an addressed message or a seat "
-                 "still answering). Read what reached you; your next delivery collects the same review at $0."
+            ctx._completion_hold_cause = "pending"
+            unsent = (outcome.get("continuation") or {}).get("message")
+            hold((f"[Result review] The continuation you chose for this review is recorded but was not sent ({unsent}). "
+                  "Your next delivery sends that same recorded choice; nothing is decided again."
+                  if unsent else "[Result review] The review of your result is still running (an addressed message or a "
+                  "seat still answering). Read what reached you; your next delivery collects the same review at $0.")
                  + (" You may instead finish with pending_review=finish; the reviewers then settle later."
                     if pending_review_choice_offered(ctx) else ""))
             return True
@@ -733,33 +970,31 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     if record is None:
         return False
     stands_for_earlier = str((record.get("subject") or {}).get("diff_sha") or "") not in {"", subject.diff_sha}
+    record_id = str(record.get("record_id") or "")
+    # What this step put before the mind is plain JSON (ids, [record, subject] pairs, refusals by subject), so a
+    # same-ID continuation carries it in its saved state (``owner_wait.continuation_state``).
     if stands_for_earlier:
-        asked = getattr(ctx, "_result_review_request_asked", None)
-        if not isinstance(asked, set):
-            asked = set()
-            ctx._result_review_request_asked = asked
-        if (str(record.get("record_id") or ""), subject.diff_sha) not in asked:
-            asked.add((str(record.get("record_id") or ""), subject.diff_sha))
-            hold(_request_changed_text(ctx, record))
+        asked = getattr(ctx, "_result_review_request_asked", None) or []
+        if [record_id, subject.diff_sha] not in asked:
+            # The one question carries that review's outcome too when its author has not received it yet.
+            outcome = not _outcome_received(ctx, llm_trace, record)
+            text = _request_changed_text(ctx, record, outcome=outcome)
+            _show(ctx, hold, text, record, "earlier_request", outcome=outcome)
+            ctx._result_review_request_asked = [*asked, [record_id, subject.diff_sha]]
             return True
         # Delivered again: the mind judged the new words leave what was asked as it was.
     enforcement = "blocking" if _blocking_enforcement() else "advisory"
     run = _bind_review_run(llm_trace, record, subject.diff_sha, enforcement, earlier_request=stands_for_earlier)
-    if str((record.get("verdict") or {}).get("aggregate") or "") == "PASS":
-        return False
-    refused = str((record.get("verdict") or {}).get("aggregate") or "") == "NOT_DISPATCHED"
-    if refused:
+    aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
+    received = _outcome_received(ctx, llm_trace, record)
+    if aggregate == "PASS":  # a PASS its author has not received is handed back once too (owner, 2 Nov)
+        return False if received else _show(ctx, hold, _findings_text(record, blocking=False), record, "pass")
+    if aggregate == "NOT_DISPATCHED":
         ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
-            "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
+            "ceiling": _ceiling(), "record_id": record_id}}
     blocking = required and enforcement == "blocking"
-    shown = getattr(ctx, "_result_review_shown", None)
-    if not isinstance(shown, set):
-        shown = set()
-        ctx._result_review_shown = shown
-    if str(record.get("record_id") or "") not in shown or blocking:
-        shown.add(str(record.get("record_id") or ""))
-        hold(_findings_text(record, blocking=blocking))
-        return True
+    if not received or blocking:
+        return _show(ctx, hold, _findings_text(record, blocking=blocking), record, "findings")
     if enforcement == "advisory":
-        run["informed_finish"] = True  # the mind read the findings and delivered: its own decision
+        run["informed_finish"] = True  # the mind received the findings and delivered: its own decision
     return False

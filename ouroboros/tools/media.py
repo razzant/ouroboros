@@ -36,26 +36,59 @@ _VIDEO_MAX_FRAMES = 12
 _VIDEO_FRAME_TIMEOUT_SEC = 120
 
 
+def _relative_candidates(ctx: ToolContext, text: str, raw: pathlib.Path) -> tuple[List[pathlib.Path], str]:
+    """Where a relative media path may live, in order, or a refusal when nothing can be named.
+
+    It means the active workspace (read_file's default root), as for view_image; a file
+    missing there never falls through to uploads, the serving checkout, the home or a
+    parent's roots. The one compatibility address is the staged-attachment manifest's
+    ``attachments/<name>``: after the workspace, it also names that file in this task's
+    own artifact_store (``read_file(root='artifact_store', path='attachments/<name>')``).
+    """
+    from ouroboros.artifacts import _ATTACHMENTS_SUBDIR
+
+    candidates: List[pathlib.Path] = []
+    no_workspace = ""
+    try:
+        from ouroboros.tools.registry import active_repo_dir_for
+
+        candidates.append(pathlib.Path(active_repo_dir_for(ctx)).expanduser() / raw)
+    except Exception as exc:  # noqa: BLE001 — the caller sees why no workspace could be named
+        no_workspace = str(exc) or type(exc).__name__
+    if len(raw.parts) == 2 and raw.parts[0] == _ATTACHMENTS_SUBDIR and raw.parts[1] != "..":
+        try:
+            from ouroboros.tool_access import resource_root_path
+
+            candidates.append(pathlib.Path(resource_root_path(ctx, "artifact_store")) / raw)
+        except Exception:  # noqa: BLE001 — no artifact store, no compatibility address
+            pass
+    if not candidates:
+        return [], (
+            f"⚠️ TOOL_ARG_ERROR: relative path {text!r} has no active workspace to resolve against: "
+            f"{no_workspace}. Name the file by its absolute path."
+        )
+    return [c.resolve(strict=False) for c in candidates], ""
+
+
 def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple[pathlib.Path | None, str]:
     """Resolve a local file path through the SAME trust boundary as view_image/read_file:
     it must sit under an allowed file root and pass the protected-artifact read guard.
-    Returns (path, "") on success or (None, error_message)."""
+    An absolute or ``~`` path is the file it names; a relative one follows
+    ``_relative_candidates``. Returns (path, "") on success or (None, error_message)."""
     from ouroboros.tools.vision import _allowed_file_roots, _read_file_parity_block
     from ouroboros.tool_access import path_is_relative_to
 
     text = str(path or "").strip()
     if not text:
         return None, "⚠️ TOOL_ARG_ERROR: `path` is required."
-    roots = _allowed_file_roots(ctx)
     raw = pathlib.Path(text).expanduser()
-    # Resolve against EVERY allowed root (not just the first) so a RELATIVE path from the
-    # staged-attachment manifest — e.g. `attachments/doc.pdf`, which lives under artifact_store,
-    # not the uploads root — is found wherever it actually is, matching the
-    # read_file(root='artifact_store', path='attachments/...') contract the manifest advertises.
     if raw.is_absolute():
         candidates = [raw.resolve(strict=False)]
     else:
-        candidates = [(r / text).resolve(strict=False) for r in roots]
+        candidates, refusal = _relative_candidates(ctx, text, raw)
+        if refusal:
+            return None, refusal
+    roots = _allowed_file_roots(ctx)
     confined = [c for c in candidates if any(c == r or path_is_relative_to(c, r) for r in roots)]
     if not confined:
         return None, (
@@ -79,7 +112,8 @@ def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple
     except Exception:  # noqa: BLE001 — guard is best-effort; the root check above is the floor
         pass
     if not fp.exists() or not fp.is_file():
-        return None, f"⚠️ FILE_NOT_FOUND: {text}"
+        where = "" if raw.is_absolute() else f" (resolved: {' or '.join(str(c) for c in confined)})"
+        return None, f"⚠️ FILE_NOT_FOUND: {text}{where}"
     if fp.stat().st_size > max_bytes:
         return None, f"⚠️ FILE_TOO_LARGE: {fp.stat().st_size} bytes (max {max_bytes})."
     return fp, ""
@@ -384,7 +418,7 @@ def _pdf_text_schema(name: str, lead: str) -> dict:
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Local PDF path (inside the active workspace / task drive / artifact store / attachments / uploads)."},
+                "path": {"type": "string", "description": "Local PDF path: relative to the active workspace, or absolute inside the workspace, task drive, artifact store or uploads. A staged attachments/<name> also resolves in this task's artifact store."},
                 "pages": {"type": "string", "description": "Optional 1-based pages, e.g. '3', '2-5', '7-' or '1,4-6'. Default: all pages up to max_pages."},
                 "start_char": {"type": "integer", "minimum": 0, "default": 0, "description": "Resume at this character of one selected page's extracted text. A nonzero offset requires pages selecting exactly one page."},
                 "max_pages": {"type": "integer", "description": f"Cap pages read from the selection (default {_OCR_PDF_MAX_PAGES}; pages past it are named)."},
@@ -440,7 +474,7 @@ def get_tools() -> List[ToolEntry]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Local video path inside an allowed file root."},
+                        "path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute inside an allowed file root. A staged attachments/<name> also resolves in this task's artifact store."},
                         "timestamps": {"type": "string", "description": "Optional comma/space-separated seconds to extract. Defaults to the first N integer seconds."},
                         "max_frames": {"type": "integer", "description": f"Maximum frames to extract (default 5, hard cap {_VIDEO_MAX_FRAMES})."},
                     },

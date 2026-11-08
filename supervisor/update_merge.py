@@ -20,9 +20,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pathlib
 import subprocess
 import sys
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -40,6 +40,7 @@ from supervisor.update_candidate import (  # noqa: F401
     stash_local_changes_for_update, lookup_update_stash,
     destructive_apply_guard, project_version_carriers,
     quarantine_corrupt_update_tx_marker, StashRestoreResult,
+    RESOLVER_POOL, ensure_assisted_resolver_ready, refuse_unready_boot_resolver, resolver_slot_owed,
 )
 # The planner, the clean-plan commit builder and the live materializer — the
 # carrier engine's three insertion points — live in supervisor.update_merge_plan
@@ -95,26 +96,42 @@ def write_update_tx(payload: Dict[str, Any]) -> None:
     protected_restore = payload.get("stash_restore") or (
         payload.get("phase") == "rolling_back" and payload.get("stash_sha")
     )
-    atomic_write_json(
-        _update_tx_marker_path(),
-        with_schema_version(payload, 2 if protected_restore else 1),
-        trailing_newline=True,
-    )
+    with _g.bootstrap_transition_lock():
+        atomic_write_json(
+            _update_tx_marker_path(),
+            with_schema_version(payload, 2 if protected_restore else 1),
+            trailing_newline=True,
+        )
 
 
-def clear_update_tx() -> bool:
+def clear_update_tx() -> Optional[bool]:
+    """Unlink the transaction marker, preserving busy versus cleanup failure.
+
+    ``None`` means the transition lock was busy and the marker remains the
+    authoritative recovery record. ``False`` means an actual unlink/read/write
+    failure after the cleanup attempt; callers may then record the existing
+    cleanup-failure phase.
+    """
+    from supervisor.git_ops import BootstrapTransitionBusy
+
     try:
-        _update_tx_marker_path().unlink()
-    except FileNotFoundError:
-        return True
+        with _g.bootstrap_transition_lock():
+            try:
+                _update_tx_marker_path().unlink()
+            except FileNotFoundError:
+                return True
+            return True
+    except BootstrapTransitionBusy:
+        _g.log.warning("Update transaction marker cleanup deferred: bootstrap transition is busy")
+        return None
     except Exception:
         _g.log.warning("Failed to clear update tx marker", exc_info=True)
         return False
-    return True
 
 
 _ASSISTED_PHASES = ("materializing_assisted", "assisted_resolution", "committing_assisted")
 GATE_BLOCKED_PHASE = "gate_blocked"
+_UPDATE_LOCK_HELD = False
 # The completion outcome is recorded and only the tx-marker unlink failed:
 # recovery retries that cleanup and must never roll back. A
 # separate phase — not a gate_blocked sub-kind — because gate_blocked's boot
@@ -366,27 +383,46 @@ def _assisted_head_state(tx: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def acquire_update_lock():
-    """Acquire the FAIL-CLOSED managed-update lock; return an open file handle that keeps
-    the lock held. Raise RuntimeError if another update operation holds it — the update
-    MUST NOT proceed unlocked (a self-mod write or owner-restart racing the reset has
-    corrupted trees before). Release with ``release_update_lock(fh)``."""
-    from ouroboros.platform_layer import file_lock_exclusive_nb
+def acquire_update_lock(*, restart: bool = False):
+    """Acquire the managed-update lock while serializing the ownership decision.
 
-    lock_dir = _g.DRIVE_ROOT / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    fh = (lock_dir / "managed_update.lock").open("a+")
+    The short bootstrap lock is released after the durable update lock is held; adoption authorization then
+    probes the managed lock and cannot claim the checkout after this admission point. The long update operation
+    keeps only ``managed_update.lock``. An ``authorized`` handoff holds nothing (``holds_checkout``): it refuses
+    an update, never the ``restart`` that binds it or leaves it to the next boot (``_safe_restart_serialized``).
+    """
+    from ouroboros.platform_layer import file_lock_exclusive_nb
+    from supervisor.git_ops import bootstrap_transition_lock
+
+    transition = bootstrap_transition_lock()
+    transition.__enter__()
     try:
-        file_lock_exclusive_nb(fh.fileno())  # raises OSError if already held
-    except OSError as exc:
-        fh.close()
-        raise RuntimeError("managed_update.lock is held by another update operation") from exc
-    return fh
+        from ouroboros import body_adoption
+        phase = body_adoption.read(_g.DRIVE_ROOT).get("phase")
+        if phase in {"armed", "switching", "switched", "stuck"} or (phase == "authorized" and not restart):
+            raise RuntimeError("body adoption owns the checkout")
+        lock_dir = _g.DRIVE_ROOT / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fh = (lock_dir / "managed_update.lock").open("a+")
+        try:
+            file_lock_exclusive_nb(fh.fileno())  # raises OSError if already held
+        except OSError as exc:
+            fh.close()
+            raise RuntimeError("managed_update.lock is held by another update operation") from exc
+        global _UPDATE_LOCK_HELD
+        _UPDATE_LOCK_HELD = True
+        transition.__exit__(None, None, None)
+        return fh
+    except Exception:
+        transition.__exit__(*sys.exc_info())
+        raise
 
 
 def release_update_lock(fh) -> None:
     from ouroboros.platform_layer import file_unlock
 
+    global _UPDATE_LOCK_HELD
+    _UPDATE_LOCK_HELD = False
     try:
         file_unlock(fh.fileno())
     except Exception:
@@ -395,6 +431,31 @@ def release_update_lock(fh) -> None:
         fh.close()
     except Exception:
         pass
+
+
+def managed_update_lock_held(data_dir: Optional[pathlib.Path] = None) -> bool:
+    """Probe the managed-update lock without taking ownership or waiting."""
+    from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock
+
+    root = pathlib.Path(data_dir) if data_dir is not None else _g.DRIVE_ROOT
+    if _UPDATE_LOCK_HELD and root.resolve(strict=False) == pathlib.Path(_g.DRIVE_ROOT).resolve(strict=False):
+        return True
+    path = root / "locks" / "managed_update.lock"
+    if not path.exists():
+        return False
+    try:
+        probe = path.open("a+")
+    except OSError:
+        return True
+    try:
+        try:
+            file_lock_exclusive_nb(probe.fileno())
+        except OSError:
+            return True
+        file_unlock(probe.fileno())
+        return False
+    finally:
+        probe.close()
 
 
 def apply_managed_merge_update(branch: str, merge_commit: str) -> Tuple[bool, str]:
@@ -579,8 +640,10 @@ def _finish_rollback(
         except Exception:
             _g.log.warning("rollback restart handoff could not be saved", exc_info=True)
             return False, "rollback completed but its restart handoff could not be saved; " + stash_note
-    elif not clear_update_tx():
-        return False, "rollback restored the repository but could not clear update transaction; " + stash_note
+    elif (cleared := clear_update_tx()) is not True:
+        return False, ("rollback restored the repository but another bootstrap transition is active; "
+                       "update marker remains; " + stash_note) if cleared is None else (
+                           "rollback restored the repository but could not clear update transaction; " + stash_note)
     if reopen_writer_admission:
         try:
             from supervisor.workers import open_repo_writer_admission_after_update_abort
@@ -598,42 +661,6 @@ def _finish_rollback(
     if stash_note:
         message += f"; {stash_note}"
     return True, message
-
-
-def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
-    """Prove a fresh resolver imported the exact clean tree before conflicts go live."""
-    from supervisor import workers
-    from supervisor.queue import _queue_lock
-
-    with _queue_lock:
-        if workers.WORKERS:
-            return False  # update quiescence must leave no ambiguous prior generation
-    events_cursor = workers.events_log_cursor()
-    try:
-        if not workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True):
-            return False
-    except Exception:
-        _g.log.warning("assisted resolver worker start failed", exc_info=True)
-        return False
-    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
-    while time.monotonic() < deadline:
-        with _queue_lock:
-            live_pids = {
-                int(worker.proc.pid)
-                for worker in workers.WORKERS.values()
-                if worker.proc.pid and worker.proc.is_alive()
-            }
-        if not live_pids:
-            return False
-        boot = workers._first_worker_event_since(events_cursor, "worker_ready")
-        try:
-            boot_pid = int((boot or {}).get("pid") or 0)
-        except (TypeError, ValueError):
-            boot_pid = 0
-        if boot_pid in live_pids and str((boot or {}).get("git_sha") or "") == expected_sha:
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
@@ -702,6 +729,9 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
             # honors this key first): the resolver's own id, or after a fresh-id re-enqueue the
             # ORIGINAL id, so the money ceiling never resets across resume chains of one update.
             "root_task_id": str(tx.get("original_root_task_id") or task_id),
+            # The staged merge sits in the system repository itself; a follow-up it schedules
+            # keeps that resource instead of waiting as intent-unknown (#1799).
+            "resource_intent": {"kind": "system_repo"},
             "managed_update": {
                 "target_sha": str(tx.get("target_sha") or ""),
                 "conflict_paths": list(tx.get("conflict_paths") or []),
@@ -771,18 +801,17 @@ def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
 
 def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, Any]:
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-    from ouroboros.tools.shell import _active_subprocesses, _subprocess_lock
+    from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(_g.REPO_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        **subprocess_new_group_kwargs(),
-    )
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
+    with tracked_start() as publish:
+        proc = publish(contained_popen(
+            subprocess.Popen, cmd,
+            cwd=str(_g.REPO_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **subprocess_new_group_kwargs(),
+        ))
     try:
         try:
             stdout, stderr = proc.communicate(timeout=timeout_sec)
@@ -805,8 +834,7 @@ def _run_update_smoke(cmd: List[str], timeout_sec: float = 120.0) -> Dict[str, A
             "returncode": proc.returncode,
         }
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
 
 
 def update_restart_smoke() -> Dict[str, Any]:
@@ -866,6 +894,15 @@ def _observed(tx: Dict[str, Any], outcome: str) -> Dict[str, Any]:
                          "commit": str(commit or "")}}
 
 
+def _rollback_incomplete(tx: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """A boot branch's own report that its rollback did not finish becomes that transaction's known
+    failure, naming no checkout; its ``msg``/``stash_note`` stay the cause and recovery detail."""
+    if result.get("rolled_back") is not False or "observed" in result:
+        return result
+    return {**result, "observed": {"outcome": "failed", "attempt_id": str(tx.get("attempt_id") or ""),
+                                   "reason": "rollback_incomplete"}}
+
+
 def _cleanup_observed(tx: Dict[str, Any]) -> Dict[str, Any]:
     """Recover only meanings the completed branch already established before cleanup failed."""
     restore = tx.get("stash_restore") or {}
@@ -896,29 +933,52 @@ def _complete_stash_recovery(
                   if restored.note else {})
     if not restored.complete:
         return {"finalized": False, "reason": "stash_recovery_incomplete", **disclosure}
-    if not clear_update_tx():
+    cleared = clear_update_tx()
+    if cleared is None:
+        return {"finalized": False, "reason": "bootstrap transition busy; update marker retained", **disclosure}
+    if not cleared:
         mark_update_tx_gate_blocked("stash_marker_cleanup_failed", cleanup_only=True)
         return {"finalized": False, "reason": "could not clear update marker", **disclosure}
     _log_supervisor({**event, **disclosure})
     return {**result, **disclosure}
 
 
+def rollback_managed_update_on_boot(reason: str) -> Tuple[bool, str]:
+    """Keep a raised rollback attempt reportable without classifying unrelated boot failures.
+
+    The caller already owns the strict transaction and update lock. No retry or new
+    permission follows: even a failed intent write leaves its original marker intact.
+    """
+    try:
+        return rollback_managed_update(reason, reopen_writer_admission=False)
+    except Exception as exc:
+        return _rollback_raised(exc)
+
+
+def _rollback_raised(exc: Exception) -> Tuple[bool, str]:
+    """A boot rollback door that raised: an unfinished rollback naming its cause."""
+    _g.log.warning("boot rollback failed", exc_info=True)
+    return False, f"rollback raised {type(exc).__name__}: {exc}"
+
+
 def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str]:
     """The boot-smoke door: a pre-update tree WITHOUT the store is reached through the authority
     switch (intent now, export and reset at the restart exit the caller requests); one with it
     through today's restore. A second intent before the restart is a refusal, not a reset."""
-    from ouroboros.store_switch import switch_or_reset
-
     pre = str(tx.get("pre_update_sha") or "")
     if not pre:
-        return rollback_managed_update(reason, reopen_writer_admission=False)  # its own typed refusal
+        return rollback_managed_update_on_boot(reason)  # its own typed refusal
     try:
+        from ouroboros.store_switch import switch_or_reset
+
         ok, msg, _deferred = switch_or_reset(
             _g.DRIVE_ROOT, _g.REPO_DIR, target_sha=pre, target_ref=str(tx.get("pre_update_branch") or pre),
             reason=reason, door="boot_smoke_rollback",
-            reset=lambda: rollback_managed_update(reason, reopen_writer_admission=False))
+            reset=lambda: rollback_managed_update_on_boot(reason))
     except RuntimeError as exc:
-        return False, str(exc)
+        return False, str(exc)  # the switch's own refusal, e.g. an intent already recorded
+    except Exception as exc:  # the whole door, its Git probes and intent write included
+        return _rollback_raised(exc)
     return ok, msg
 
 
@@ -986,9 +1046,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
         snapshot = str(tx.get("local_snapshot") or "")
         pre = str(tx.get("pre_update_sha") or "")
         if rc_h == 0 and snapshot and snapshot != pre and head == snapshot:
-            ok, msg = rollback_managed_update(
-                "assisted_materialization_interrupted", reopen_writer_admission=False
-            )
+            ok, msg = rollback_managed_update_on_boot("assisted_materialization_interrupted")
             _log_supervisor({"type": "managed_update_assisted_materialization_interrupted",
                              "ok": ok, "msg": msg})
             return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -1008,9 +1066,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
         # Only pending_boot_smoke proves that exact-binding verification, post-commit
         # tests, and the pre-restart smoke all passed. A commit found under an assisted
         # phase died inside those gates, so preserve it on failed-update-* and roll back.
-        ok, msg = rollback_managed_update(
-            "assisted_commit_gates_interrupted", reopen_writer_admission=False
-        )
+        ok, msg = rollback_managed_update_on_boot("assisted_commit_gates_interrupted")
         _log_supervisor({"type": "managed_update_assisted_commit_unproven",
                          "ok": ok, "msg": msg})
         return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -1027,9 +1083,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
     if state == "in_progress":
         attempts = int(tx.get("resolution_attempts") or 0) + 1
         if attempts > _ASSISTED_BOOT_ATTEMPT_CAP:
-            ok, msg = rollback_managed_update(
-                "assisted_resolution_expired", reopen_writer_admission=False
-            )
+            ok, msg = rollback_managed_update_on_boot("assisted_resolution_expired")
             _log_supervisor({"type": "managed_update_assisted_expired", "ok": ok, "msg": msg})
             return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
         # Re-establish the merge state if the restart/rescue wiped it; preserve partial
@@ -1049,9 +1103,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                         str(tx.get("target_sha") or "")
                     )
                     if not ok_bp:
-                        rb_ok, rb_msg = rollback_managed_update(
-                            "backfill_projection_failed", reopen_writer_admission=False
-                        )
+                        rb_ok, rb_msg = rollback_managed_update_on_boot("backfill_projection_failed")
                         _log_supervisor({"type": "managed_update_backfill_projection_failed",
                                          "error": bp_error, "rollback": rb_msg})
                         return {"finalized": False, "rolled_back": rb_ok, "msg": bp_error, "stash_note": rb_msg}
@@ -1072,6 +1124,9 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["conflict_paths"] = refreshed_conflicts
         rescue_info: Dict[str, Any] = {}
         if not has_progress:
+            refused = refuse_unready_boot_resolver()  # no child imports the markers below, else unwound for the owner
+            if refused:
+                return refused
             # The server's owner-control path must be resident before the
             # re-materialized conflict markers land in the live tree (#283); it imports
             # the first-party ``ouroboros`` and ``supervisor`` packages.
@@ -1096,9 +1151,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["m0_tree"] = m0_tree
             if not ok:
                 # Could not re-stage the merge — fail closed to a clean pre-update state.
-                rb_ok, rb_msg = rollback_managed_update(
-                    "assisted_rematerialize_failed", reopen_writer_admission=False
-                )
+                rb_ok, rb_msg = rollback_managed_update_on_boot("assisted_rematerialize_failed")
                 _log_supervisor({"type": "managed_update_assisted_rematerialize_failed",
                                  "materialize_msg": msg, "rollback": rb_msg})
                 return {"finalized": False, "rolled_back": rb_ok, "msg": msg, "stash_note": rb_msg}
@@ -1312,7 +1365,10 @@ def abandon_unapplied_replace(head: str, **event: Any) -> Dict[str, Any]:
     if not _g._clear_update_intent():
         mark_update_tx_gate_blocked("replace_abandon_intent_cleanup_failed")
         return {"finalized": False, "reason": "could not disarm replace replay"}
-    if not clear_update_tx():
+    cleared = clear_update_tx()
+    if cleared is None:
+        return {"finalized": False, "reason": "bootstrap transition busy; replace marker retained"}
+    if not cleared:
         mark_update_tx_gate_blocked("replace_abandon_tx_cleanup_failed", cleanup_only=True)
         return {"finalized": False, "reason": "could not clear replace transaction"}
     _log_supervisor({"type": "managed_update_replace_apply_abandoned", "head": head, **event})
@@ -1338,7 +1394,7 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
             abandoned = abandon_unapplied_replace(head)
             return {**abandoned, **_observed(tx, "not_applied")} if abandoned.get("abandoned") else abandoned
         reason = "replace_apply_interrupted"
-    ok, msg = rollback_managed_update(reason, reopen_writer_admission=False)
+    ok, msg = rollback_managed_update_on_boot(reason)
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
 
 
@@ -1425,35 +1481,32 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             {"type": "managed_update_stash_recovered_on_boot"},
         )
     if phase == "pending_boot_smoke":
-        return _finalize_pending_boot_smoke(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _finalize_pending_boot_smoke(tx, supervisor_ready))
     if phase == "applying_replace":
-        return _recover_replace_on_boot(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _recover_replace_on_boot(tx, supervisor_ready))
     if phase == "rolling_back":
-        ok, msg = rollback_managed_update(
-            str(tx.get("rollback_reason") or "boot_rollback_resume"),
-            reopen_writer_admission=False,
-        )
-        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+        ok, msg = rollback_managed_update_on_boot(str(tx.get("rollback_reason") or "boot_rollback_resume"))
+        return _rollback_incomplete(tx, {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg})
     if phase in _ASSISTED_PHASES:
-        return _recover_assisted_on_boot(tx, supervisor_ready)
+        return _rollback_incomplete(tx, _recover_assisted_on_boot(tx, supervisor_ready))
     if phase == MARKER_CLEANUP_RETRY_PHASE:
         # This includes completed rollback crossing a process restart:
         # bootstrap kept the files, so ONLY unlink, never reset/reapply.
         stash_note = (str(tx.get("gate_blocked_detail") or "")
                       if tx.get("gate_blocked_reason") == "rollback_restart_pending" else "")
-        if clear_update_tx():
+        cleared = clear_update_tx()
+        if cleared is True:
             _log_supervisor({"type": "managed_update_cleanup_retry_succeeded",
                              "reason": str(tx.get("gate_blocked_reason") or ""), "stash_note": stash_note})
             # Only a completed rollback's handoff means this restored process is the previous version.
             return {"finalized": True, "reason": "marker cleanup retried",
                     **({"stash_note": stash_note} if stash_note else {}),
                     **_cleanup_observed(tx)}
-        return {"finalized": False, "reason": "marker cleanup still failing",
+        return {"finalized": False,
+                "reason": "bootstrap transition busy; marker cleanup deferred" if cleared is None
+                else "marker cleanup still failing",
                 **({"stash_note": stash_note} if stash_note else {})}
     if phase == GATE_BLOCKED_PHASE:
-        ok, msg = rollback_managed_update(
-            str(tx.get("gate_blocked_reason") or "boot_gate_recovery"),
-            reopen_writer_admission=False,
-        )
-        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+        ok, msg = rollback_managed_update_on_boot(str(tx.get("gate_blocked_reason") or "boot_gate_recovery"))
+        return _rollback_incomplete(tx, {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg})
     return {"finalized": False, "reason": f"unhandled phase {phase}"}

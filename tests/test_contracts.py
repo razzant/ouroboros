@@ -51,6 +51,7 @@ from ouroboros.contracts import (
     read_schema_version,
     with_schema_version,
 )
+from tests._source_scan import parse
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -422,7 +423,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
     """Collect literal progress_meta keys that can reach ChatOutbound frames."""
     from tests._progress_meta_scan import progress_meta_keys
 
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    tree = parse(source_path.read_text(encoding="utf-8"))
     keys: set[str] = set()
     meta_helper_names = {"_subagent_rejection_meta", "_subagent_progress_meta", "_subagent_scheduled_meta"}
     # A producer may build the dict under a local name and hand it over as
@@ -780,46 +781,35 @@ def _find_async_fn(tree: ast.AST, name: str) -> ast.AsyncFunctionDef | None:
 
 
 def test_state_response_matches_server_payload():
-    """StateResponse declared keys must cover every ``/api/state`` success payload.
+    """StateResponse declared keys must equal the ``/api/state`` success payload's keys.
 
-    The error path returns ``{"error": str}`` with HTTP 500 — that shape is
-    intentionally outside the frozen contract, so the test whitelists
-    ``{"error"}`` only for dicts that contain it (error branch).
+    The payload is the state publication's produced fields (``state_publication.produced_fields``),
+    the per-request process facts (``state_publication.live_fields``) and the request's bindings pair
+    (``task_bindings``/``task_bindings_unchanged``, joined by ``state_publication.response_body``).
+    The error path returns ``{"error": str}`` with HTTP 500 — outside the frozen contract.
+    ``StateResponse`` is total=True, so a missing declared key fails as loudly as a leaked one.
     """
     from ouroboros.gateway.contracts import StateResponse
 
-    tree = ast.parse((REPO_ROOT / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
-    api_state_fn = _find_async_fn(tree, "api_state")
-    assert api_state_fn is not None
+    def returned_keys(path, name):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
+        literals = [node.value for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
+        assert len(literals) == 1, f"{name} must return one dict literal"
+        keys, unknown = _dict_literal_keys(literals[0])
+        assert not unknown, f"{name} uses non-constant keys: {unknown}"
+        return keys
 
+    gateway = REPO_ROOT / "ouroboros" / "gateway"
+    produced = returned_keys(gateway / "state_publication.py", "produced_fields")
+    live = returned_keys(gateway / "state_publication.py", "live_fields")
+    bindings = {"task_bindings", "task_bindings_unchanged"}
+    assert not produced & live and not (produced | live) & bindings, "a key would be written twice"
     declared = set(StateResponse.__annotations__.keys())
-    response_dicts = _api_route_response_dicts(api_state_fn)
-    assert response_dicts, "api_state exposes no JSONResponse dict literal"
-
-    happy_path_checked = False
-    for literal in response_dicts:
-        keys, unknown = _dict_literal_keys(literal)
-        assert not unknown, (
-            f"api_state response uses non-constant keys: {unknown}"
-        )
-        # The error path has exactly one key ``error``; whitelist it explicitly
-        # rather than blanket-excluding ``error`` from the happy-path contract.
-        if keys == {"error"}:
-            continue
-        leaked = keys - declared
-        assert not leaked, (
-            f"/api/state happy-path emits keys not declared in StateResponse: {leaked}"
-        )
-        # Enforce required-key presence too. ``StateResponse`` is total=True,
-        # so every declared key is required; a missing one means the runtime
-        # silently dropped a declared field and the frozen contract should fail
-        # loudly.
-        missing = declared - keys
-        assert not missing, (
-            f"/api/state happy-path is missing declared StateResponse keys: {missing}"
-        )
-        happy_path_checked = True
-    assert happy_path_checked, "api_state exposes no happy-path response dict"
+    keys = produced | live | bindings
+    assert not keys - declared, f"/api/state happy-path emits keys not declared in StateResponse: {keys - declared}"
+    assert not declared - keys, f"/api/state happy-path is missing declared StateResponse keys: {declared - keys}"
 
 
 def test_health_response_matches_server_payload():
@@ -1337,11 +1327,11 @@ def test_plugin_api_surface_is_frozen():
         "get_settings",
         "get_state_dir",
         "skill_job_dir",
-        "get_runtime_info",
+        "get_runtime_info", "read_memory",
         "register_supervised_task",
         "register_companion_process",
         "subscribe_event",
-        "get_skill_token",
+        "get_skill_token", "register_realtime_provider", "register_live_conversation",  # 2.1: additive, in-process only
     }
     members = {
         m for m in dir(PluginAPI)
@@ -1355,7 +1345,7 @@ def test_plugin_api_surface_is_frozen():
 def test_plugin_api_version_matches_documented_surface():
     from ouroboros.contracts.plugin_api import PLUGIN_API_VERSION, VALID_EXTENSION_PERMISSIONS
 
-    assert PLUGIN_API_VERSION == "2.0"
+    assert PLUGIN_API_VERSION == "2.3"
     assert "presence" in VALID_EXTENSION_PERMISSIONS
     # Additive (owner A4=A, 2026-10-03): a granted skill may leave the owner a signed System row.
     assert "notify_owner" in VALID_EXTENSION_PERMISSIONS

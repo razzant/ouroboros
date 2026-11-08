@@ -90,17 +90,18 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
         block = next(b for message in sent if isinstance(message.get("content"), list)
                      for b in message["content"] if b.get("type") == "image_url")
         prepared = base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
-        assert block["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        assert block["image_url"]["url"].startswith("data:image/png;base64,")
+        assert prepared == png  # A small native image keeps its bytes and detail without a route-specific bound.
         assert shot.read_bytes() == png
         assert Path(block["_source_path"]).read_bytes() == prepared
         with Image.open(io.BytesIO(png)) as source, Image.open(io.BytesIO(prepared)) as received:
             assert source.size == (1920, 1080) and source.format == "PNG"
-            assert received.size == (1600, 900) and received.format == "JPEG"
+            assert received.size == (1920, 1080) and received.format == "PNG"
             assert all(abs(a - b) < 5 for a, b in zip(received.getpixel((1500, 800)), (237, 244, 255)))
         if out := os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT"):
             Path(out).mkdir(parents=True, exist_ok=True)
             (Path(out) / f"page-wait-{engine}.png").write_bytes(png)
-            (Path(out) / f"page-wait-{engine}-vision.jpg").write_bytes(prepared)
+            (Path(out) / f"page-wait-{engine}-vision.png").write_bytes(prepared)
         assert "cannot run arbitrary" in call("browser_action", {"action": "evaluate", "value": "1+1"}).text
         assert "Clicked" in call("browser_action", {"action": "click", "selector": "#remove"}).text
         for state in ("hidden", "detached"):
@@ -112,7 +113,7 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
         assert evaluated.status == "ok" and evaluated.producer_text == "7"
         assert len(evaluated.host_annotations) == 1
         conditions = evaluated.host_annotations[0]
-        assert conditions.startswith(f"Browser conditions: {engine} ") and "(Playwright); " in conditions
+        assert conditions.startswith(f"Browser conditions: {engine} ") and "(Playwright" in conditions
         assert evaluated.text == f"7\n\n{conditions}"
     finally:
         try:

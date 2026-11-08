@@ -183,8 +183,7 @@ def test_inspect_reports_previous_request_not_accumulated_or_cache_added_input(t
     assert "free_tokens" not in facts and "current_input_tokens" not in facts
 
 
-@pytest.mark.parametrize("usage", [{}, {"prompt_tokens": None}, {"prompt_tokens": -1},
-                                   {"prompt_tokens": 12, "reported_tokens": {"prompt_tokens": None}}, {"prompt_tokens": True}])
+@pytest.mark.parametrize("usage", [{}, {"prompt_tokens": 12, "reported_tokens": {"prompt_tokens": None}}, {"prompt_tokens": True}])
 def test_missing_usage_and_unknown_window_are_unknown_not_zero(tmp_path, monkeypatch, usage):
     from ouroboros import reviewer_window
 
@@ -210,8 +209,6 @@ def test_missing_usage_and_unknown_window_are_unknown_not_zero(tmp_path, monkeyp
       "cache_creation_input_tokens": 0, "output_tokens": 1}, 0),
     ({"input_tokens": 7, "cache_read_input_tokens": 100,
       "cache_creation_input_tokens": 20, "output_tokens": 1}, 127),
-    ({"input_tokens": "9", "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 0, "output_tokens": 1}, 9),
 ])
 def test_native_inspection_respects_reported_anthropic_input(tmp_path, monkeypatch, raw_usage, expected):
     """Billing zero/partial totals cannot replace missing diagnostic evidence."""

@@ -315,6 +315,7 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
     registry.clear()
     mind = object.__new__(BackgroundConsciousness)
     mind._last_wake_task_id = ""
+    mind._own_wake, mind._in_flight = {}, ""
     main_actor = SimpleNamespace(
         _owner_message_admission_lock=threading.Lock(), _busy=True, _current_task_id="main-turn",
         _accepting_owner_messages=True, _current_task_metadata={}, _current_task_text="owner text",
@@ -329,7 +330,7 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
             "roots": [row["task_id"] for row in _active_direct_roots(routing_ctx)],
             "turns": [turn["id"] for turn in workers.direct_chat_turns()],
             "state": [row["activity_id"] for row in _direct_turns_snapshot_safe()],
-            "busy": (_has_running_agent_tasks(), _has_started_agent_tasks()), "wakes": mind.live_turns(),
+            "busy": (_has_running_agent_tasks(), _has_started_agent_tasks()), "wakes": mind.live_wake(),
         }
 
     class Agent:  # shaped like a real native actor: only the absent census entry hides it
@@ -354,10 +355,10 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
                                    agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(1))
         assert seen["live"] is True and seen["registered"] is None and seen["armed"] is None and armed == []
         assert seen["alone"] == {"orphan": False, "drain": [], "roots": [], "turns": [], "state": [],
-                                 "busy": (False, False), "wakes": ("", False)}
+                                 "busy": (False, False), "wakes": ""}
         assert seen["with_main"] == {"orphan": False, "drain": ["main-turn"], "roots": ["main-turn"],
                                      "turns": ["main-turn"], "state": ["main-turn"], "busy": (True, True),
-                                     "wakes": ("", True)}
+                                     "wakes": ""}
         # Once the turn returns the set is empty and the same orphan evidence reconciles.
         assert presence_runner.presence_turn_is_live(result.task_id) is False
         assert (str(tmp_path.resolve()), result.task_id) not in presence_runner._LIVE_PRESENCE_TASKS

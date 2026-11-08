@@ -4,7 +4,6 @@ import pytest
 from tests.test_saved_root_resume_grant import _saved_tree
 from tests.test_direct_chat_turn_owner_control import _live_chat_agent
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('exact_child', [False, True], ids=['saved-child', 'exact-child'])
@@ -50,7 +49,7 @@ def test_direct_warm_root_can_select_saved_child(tmp_path, monkeypatch, exact_ch
         assert not direct_chat_turn('saved-root')
         assert eb.live_root_resume_grant(q, 'saved-root', tmp_path) == {}
     finally:
-        registry.unregister('saved-root')
+        registry.unregister('saved-root')  # nothing registered: the lane leaves no in-process actor
 
 
 def test_direct_warm_resume_then_acknowledged_restart_can_select_child(tmp_path, monkeypatch):
@@ -61,14 +60,19 @@ def test_direct_warm_resume_then_acknowledged_restart_can_select_child(tmp_path,
     from supervisor.restart_retention import prepare_restart_returns
     from supervisor.workers import direct_chat_turn
     from tests._budget_pause_exact_helpers import _loop_ctx
-    from tests.test_direct_chat_turn_owner_control import _live_chat_agent
+    from tests.conversation_carrier_support import lane_row
     from tests.test_restart_saved_work import _ack, _stop_and_boot
     from tests.test_saved_root_resume_grant import _saved_tree
     from tests.test_budget_pause_holds import _idle_worker
 
     q, workers, rows = _saved_tree(tmp_path, monkeypatch)
     q.PENDING.remove(rows['saved-root'])
-    _live_chat_agent(monkeypatch, task_id='saved-root')
+    # The owner's turn is a conversation-lane RUNNING row (its carrier holds the slot): the custody
+    # every restart door reads, where the retired direct-roots fragment once stood in.
+    lane_row(workers, {'id': 'saved-root', 'type': 'task', 'chat_id': 0, 'text': 'saved root', '_is_direct_chat': True,
+                       'root_task_id': 'saved-root', '_attempt': 1}, wid=97)
+    # Parked warm under its own owner Pause: the pooled park's RUNNING fact (owner_pause_control.warm_paused_member).
+    workers.RUNNING['saved-root']['owner_wait'] = {'state': 'waiting', 'reason': 'owner_pause', 'task_attempt': 1}
     registry = get_direct_activity_registry()
     try:
         write_task_result(tmp_path, 'saved-root', 'running', chat_id=0, root_task_id='saved-root',
@@ -83,19 +87,11 @@ def test_direct_warm_resume_then_acknowledged_restart_can_select_child(tmp_path,
         owner_wait.set_owner_wait(tmp_path, 'saved-root', {'state': 'resumed', 'reason': 'owner_pause'})
         ctx, limit = _loop_ctx(tmp_path, 'saved-root', direct=True)
         wc.save_round(limit, 'post_batch')
-        turn = direct_chat_turn('saved-root')
-        assert turn and not workers.RUNNING
-        returns = prepare_restart_returns(tmp_path, workers.RUNNING, q.PENDING,
-                                          transaction_id='direct-warm-return', direct=[turn])
+        assert direct_chat_turn('saved-root') is None and 'saved-root' in workers.RUNNING  # the row, not an actor
+        returns = prepare_restart_returns(tmp_path, workers.RUNNING, q.PENDING, transaction_id='direct-warm-return')
         assert 'saved-root' in returns
         _ack(tmp_path, 'direct-warm-return')
-        from supervisor.direct_roots import collect_direct_roots, take_direct_roots
-        from ouroboros.utils import atomic_write_json
-        atomic_write_json(tmp_path / 'state' / 'direct_roots.json', collect_direct_roots())
-        registry.unregister('saved-root')
-        # The new queue generation takes the previous process's real collected roster.
-        monkeypatch.setattr(q, 'PRIOR_DIRECT_ROOTS', take_direct_roots(tmp_path))
-        _stop_and_boot(q, workers)
+        _stop_and_boot(q, workers)  # the stop retains the saved row; the next generation returns its successor
         restored = next(row for row in q.PENDING if row['id'] == 'saved-root')
         assert restored['_working_recovery']['cause'] == 'restart'
         assert eb.budget_hold_fact(restored) is None

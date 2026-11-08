@@ -190,7 +190,6 @@ def test_timeout_precheck_yields_retry_leaf_to_logical_root_cascade(
     }
     monkeypatch.setattr(qenv.q, "FINALIZATION_GRACE_SEC", 0.0)
     monkeypatch.setattr(qenv.q, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(qenv.q, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(qenv.q, "get_task_abs_ceiling_sec", lambda: 500.0)  # it ran 1000 s
     monkeypatch.setattr(qenv.q, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(qenv.q, "persist_queue_snapshot", lambda reason="": True)
@@ -341,7 +340,6 @@ def test_concurrent_custody_on_a_pending_task_settles_exactly_once(qenv):
     assert load_task_result(qenv.drive, "pending-race")["status"] == "scheduled"
     assert ci.active_intent(qenv.drive, "pending-race")["claim_owner"] == "custody-1"
 
-@pytest.mark.serial
 def test_custody_raising_mid_teardown_releases_the_reaping_slot(qenv, monkeypatch):
     """A-F1a: a crash between capture and respawn must not strand the slot."""
     task_id = "raiser"
@@ -363,7 +361,6 @@ def test_custody_raising_mid_teardown_releases_the_reaping_slot(qenv, monkeypatc
     intent = ci.active_intent(qenv.drive, task_id)
     assert intent is not None and intent["state"] == ci.INTENT_REQUESTED
 
-@pytest.mark.serial
 def test_custody_takes_over_a_slot_stranded_by_an_abandoned_claim(qenv):
     """A-F1c: the infinite CANCEL_FAILED loop a dead custody used to cause."""
     task_id = "stranded"

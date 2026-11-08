@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from ouroboros.force_remove import force_rmtree
 from ouroboros.marketplace.adapter import AdapterResult, adapt_openclaw_skill
 from ouroboros.marketplace.clawhub import (
     ClawHubArchive,
@@ -157,7 +158,15 @@ def snapshot_payload_state(
     *,
     include_state_provenance: bool = False,
 ) -> PayloadRollbackSnapshot:
-    """Copy current live payload/state so a failed install/update can restore it."""
+    """Copy current live payload/state so a failed install/update can restore it.
+
+    Links are copied as links, never through them: an environment's interpreter link may dangle
+    after the app moved, and a link target is not payload, so it is not frozen either (an
+    absolute link into the live tree reads it from this copy and from ``.previous``). The
+    dependency owner re-points a restored environment (``isolated_deps``). A failed copy is
+    removed before the error propagates, so an incomplete copy never becomes a rollback source.
+    Native Windows is unverified: a link there needs the symlink privilege (else the copy
+    fails), and CPython copies a junction as a directory."""
 
     drive_root = pathlib.Path(drive_root)
     target_dir = pathlib.Path(target_dir)
@@ -167,7 +176,13 @@ def snapshot_payload_state(
         rollback_root = target_dir.parent / ".rollback"
         rollback_root.mkdir(parents=True, exist_ok=True)
         backup_dir = rollback_root / f"{target_dir.name}.{uuid.uuid4().hex}"
-        shutil.copytree(target_dir, backup_dir)
+        try:
+            shutil.copytree(target_dir, backup_dir, symlinks=True)
+        except BaseException:
+            force_rmtree(backup_dir)
+            if backup_dir.exists():
+                log.error("Incomplete rollback copy of %s remains at %s", skill_name, backup_dir)
+            raise
     return PayloadRollbackSnapshot(
         drive_root=drive_root,
         skill_name=skill_name,
@@ -859,8 +874,15 @@ def update_skill(
     if not slug:
         return InstallResult(False, sanitized_name, error="provenance is missing slug")
     from ouroboros.skill_install_record import read_install_record, settle_pending_update
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
 
-    if settle_pending_update(drive_root, sanitized_name, force=True).get("status") == "restore_failed":
+    with _lifecycle_lock_for(sanitized_name):
+        if refusal := realtime_load_refusal(sanitized_name):
+            return InstallResult(False, sanitized_name,
+                                 error="A live call is using this skill; retry after it ends.",
+                                 error_code=refusal, error_status=409)
+        settlement = settle_pending_update(drive_root, sanitized_name, force=True)
+    if settlement.get("status") == "restore_failed":
         return InstallResult(False, sanitized_name, error="The previous update could not be restored; its evidence was kept.",
                              error_code="restore_failed", error_status=409)
 
@@ -879,14 +901,16 @@ def update_skill(
     except ValueError as exc:
         return InstallResult(False, sanitized_name, error=str(exc), error_code="bad_check", error_status=400)
     # Preserve live extension state across unload/swap when possible.
-    was_live = False
-    try:
-        from ouroboros.extension_loader import is_extension_live, unload_extension
+    from ouroboros.extension_loader import is_extension_live, unload_extension
+
+    with _lifecycle_lock_for(sanitized_name):
+        if refusal := realtime_load_refusal(sanitized_name):
+            return InstallResult(False, sanitized_name,
+                                 error="A live call is using this skill; retry after it ends.",
+                                 error_code=refusal, error_status=409)
         was_live = bool(is_extension_live(sanitized_name, drive_root))
-        _progress("Unloading existing extension…")
         unload_extension(sanitized_name)
-    except Exception:  # pragma: no cover — defensive
-        log.debug("pre-update unload failed for %s", sanitized_name, exc_info=True)
+    _progress("Unloaded existing extension")
     result = install_skill(
         drive_root,
         repo_dir,

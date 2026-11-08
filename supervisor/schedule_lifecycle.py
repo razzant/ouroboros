@@ -161,13 +161,17 @@ def _collapse_description_copies(record):
             template.pop("description", None)
 
 
-_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort"})
+# ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
+# to the template's by identity when the assignment itself changes or the write carries a verified cite.
+_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
 
 
 def _patch_value(record, key):
     if key == "objective":
         return ((record.get("notification") or {}).get("text") if record.get("kind") == "notify"
                 else (record.get("task") or {}).get("text"))
+    if key == "owner_corpus":
+        return ((record.get("task") or {}).get("metadata") or {}).get("owner_corpus")
     if key in {"context", "reasoning_effort"}:
         return (record.get("task") or {}).get(key)
     return record.get(key)
@@ -181,6 +185,8 @@ def _patched_definition(current, patch):
     incoming = copy.deepcopy(current)
     note = incoming.get("kind") == "notify"
     for key, value in patch.items():
+        if key == "owner_corpus":
+            continue  # joined below, once the new assignment is known
         if key != "trigger" and not isinstance(value, str):
             raise ScheduleRefused("invalid_template", f"{key} must be a string")
         if key == "objective":
@@ -219,6 +225,13 @@ def _patched_definition(current, patch):
     _require_template_effort(template)
     if not note:
         incoming["task"] = template
+    cited = any(isinstance(row, dict) and row.get("basis") == "cited" for row in patch.get("owner_corpus") or [])
+    if patch.get("owner_corpus") and (cited or any(_patch_value(current, key) != _patch_value(incoming, key)
+                                                   for key in ("objective", "context"))):
+        from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment, or its cite
+
+        metadata = incoming.setdefault("task", {}).setdefault("metadata", {})  # the one home, a note's template too
+        metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
     changed = sorted(key for key in patch if _patch_value(current, key) != _patch_value(incoming, key))
     if "trigger" in changed or "timezone" in changed:
         old = current.get("trigger") or {}
@@ -270,8 +283,9 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
                 from supervisor.followup_policy import relation_kind
 
                 _collapse_description_copies(incoming)
-                stamp_schedule_writer(incoming, writer_kind, writer_metadata,
-                                      started_root=relation_kind(incoming) == "independent")
+                stamp_schedule_writer(incoming, writer_kind, writer_metadata,  # the same work unless its assignment changed
+                                      started_root=relation_kind(incoming) == "independent",
+                                      same_work=not ({"objective", "context"} & set(changed_fields)))
                 if fingerprint(before) != fingerprint(incoming):
                     incoming.pop("hold", None)
                     occ = current.get("occurrence") or {}
@@ -425,13 +439,16 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                           actor: str, task_id: str = "",
                           drive_root: pathlib.Path | None = None,
                           expected_hold_id: str = "", relation: str = "",
-                          writer_kind: str = "consciousness", writer_metadata: Any = None) -> Dict[str, Any]:
+                          writer_kind: str = "consciousness", writer_metadata: Any = None,
+                          owned_by: Any = None) -> Dict[str, Any]:
     """Apply one owner-governed future-dispatch mutation, audited intent-first.
 
     Affects DISPATCH only: a task already admitted from this schedule keeps
     running, and ``running_or_queued`` says so rather than implying a stop — or
     says ``None`` when this process cannot see the live queue, because an
-    unknown in-flight run is not the same claim as no run at all.
+    unknown in-flight run is not the same claim as no run at all. ``owned_by``,
+    a narrowed caller's ownership predicate, is judged on the stored row under the
+    same transaction; a row it does not own reads ``not_found`` with nothing written.
     """
     wanted, operation = str(schedule_id or "").strip(), str(action or "").strip().lower()
     if operation not in SCHEDULE_ACTIONS:
@@ -462,7 +479,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                         "schedule_id": wanted, "detail": str(exc), "audit": "not_written"}
             tasks = list(data.get("tasks") or [])
             current = next((item for item in tasks if str(item.get("id") or "") == wanted), None)
-            if current is None:
+            if current is None or (owned_by is not None and not owned_by(current)):
                 return {"ok": False, "changed": False, "status": "not_found",
                         "schedule_id": wanted, "audit": "not_written"}
             try:
@@ -514,8 +531,8 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             if changed:
                 _collapse_description_copies(current)
                 from ouroboros.consciousness_authority import stamp_schedule_writer
-                stamp_schedule_writer(current, writer_kind, writer_metadata,
-                                      started_root=relation_kind(current) == "independent")
+                stamp_schedule_writer(current, writer_kind, writer_metadata,  # a lifecycle step of the same work
+                                      started_root=relation_kind(current) == "independent", same_work=True)
                 current["updated_at"] = utc_now_iso()
                 data["tasks"] = tasks
                 _write_scheduled_tasks(data, root)

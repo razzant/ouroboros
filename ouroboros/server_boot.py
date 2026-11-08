@@ -62,7 +62,8 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     loading fails typed and is rewritten by the next check). The owned daemon is warmed, and an
     OpenRouter install's model catalogue observed unless a process recorded a current one, for
     provisioned homes only (``warm_daemon``): background work off the startup path, so a request
-    reads the catalogue and never waits for it."""
+    reads the catalogue and never waits for it. A sign-in entry naming a copy of the app that is
+    gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
     if local_model and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
 
@@ -78,16 +79,22 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
         from ouroboros.llm import LLMClient
 
         threading.Thread(target=LLMClient.prefetch_openrouter_catalog, daemon=True, name="openrouter-catalog").start()
+    from ouroboros.desktop_autostart import follow_moved_app
+
+    follow_moved_app()
 
 
 async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
-    """Start the companions' Host Service on the main loop; its task, server and bound socket
-    land on ``boot`` for the lifespan's teardown."""
+    """Start the shared extension loop, then the companions' Host Service on the ASGI loop.
+
+    Supervised tasks and async subscribers use the extension loop. The Host Service
+    task, server and bound socket stay on this loop and land on ``boot`` for teardown.
+    """
     from ouroboros.event_bus import init_global_event_bus
     from ouroboros.extension_companion import init_global_supervisor
     from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, create_host_service_app, host_service_port
 
-    init_global_event_bus().set_loop(asyncio.get_running_loop())
+    init_global_event_bus().start_loop()
     init_global_supervisor(root)
     host_service_app = create_host_service_app(root)
     host_port = host_service_port()
@@ -102,6 +109,16 @@ async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
     boot.host_service_task = asyncio.create_task(boot.host_service_server.serve(sockets=[host_socket]), name="host-service-api")
     boot.host_service_task.add_done_callback(lambda _task: boot.host_service_listener.close())
     log.info("Host Service API listening on %s:%d", DEFAULT_HOST_SERVICE_HOST, host_port)
+
+
+def stop_extension_loop(timeout: float = 5.0) -> None:
+    """Cancel the extension loop so a skill ``finally`` still runs on shutdown."""
+    try:
+        from ouroboros.event_bus import get_global_event_bus
+
+        get_global_event_bus().stop_loop(timeout)
+    except Exception:
+        log.debug("extension loop did not stop", exc_info=True)
 
 
 def on_loop(loop: asyncio.AbstractEventLoop, coroutine) -> Any:

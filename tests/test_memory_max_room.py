@@ -1,5 +1,6 @@
 """The Max room of a start: one fact beside whole books, its cause and the words that carry it."""
 import dataclasses
+import json
 import math
 
 import pytest
@@ -41,13 +42,16 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["levels"] == 2 and fact["window"] == 2_000_000 and fact["floor_need"] <= fact["zero_need"] < fact["need"]
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
     assert dict(fact["parts"])["books"] > dict(fact["parts"])["knowledge, scratchpad and runtime facts"] and "tool schemas" not in dict(fact["parts"])
-    line = memory_facts(plan, "max")
-    assert line.startswith("Max room: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, assignment, reply reserve and work room")
+    line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
+    assert line.startswith("Max room at the start: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
+                           "assignment, reply reserve and work room")
+    assert f"(books {dict(fact['parts'])['books']:,}, " in line and f"tool schemas {fact['schemas']:,}; " in line
+    assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
     assert f"beside a Max room of {fact['allowance']:,}; Max held;" in line
-    assert "pages not yet in a part or account 40" in line and "drafts awaiting a decision 0" in line
+    assert "; marks in view 0" in line and "drafts awaiting" not in line and "shown only by address" not in line
 
 
-def test_memory_or_schemas_that_take_the_books_room_are_measured_with_their_possibility(monkeypatch):
+def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(monkeypatch):
     core = _core()
     held = _fact(_start(core, 2_000_000, monkeypatch))
     plan = _start(core, _crowded_window(held), monkeypatch)
@@ -55,12 +59,13 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_with_their_poss
     assert plan.initial_mode == "low" and fact["cause"] == "crowded" and fact["cuts"] == []
     assert fact["floor_need"] <= fact["window"] and fact["short"] == fact["need"] - fact["window"] > 0
     shown = plan.low_projection.system_content_json
-    assert ("Low with chapter maps. The host's measure of this start: window " in shown and "b" * 40_000 not in shown
-            and "Folding memory or fewer tool schemas may bring the books back." in shown)
+    assert "Low with chapter maps. The host's measure of this start: window " in shown and "b" * 40_000 not in shown
+    assert not any(words in shown for words in ("may bring the books back", "Folding memory"))
     assert f"(pages no part or account holds yet {fact['unfolded']:,})" in shown
     assert not any(words in shown for words in ("failure", "crowds the books out", "cannot make room", "did not fit beside"))
     line = memory_facts(plan, "low")
-    assert "; Low. Folding memory or fewer tool schemas may bring the books back;" in line and "failure" not in line
+    assert f"beside a Max room of {fact['allowance']:,}; Low; " in line
+    assert not any(words in line for words in ("may bring", "Folding", "failure"))
     # The fact rides in the receipt the task trace keeps, and a selection keeps the start's frame.
     assert mf.trace_facts(plan.low_projection.memory_facts)["max_room"] == fact
     selected = mf.select_view(plan, "low", [])
@@ -79,6 +84,25 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     assert "folding memory or dropping tool schemas cannot make room here." in shown and "may bring" not in shown
     line = memory_facts(plan, "low")
     assert "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here" in line
+
+
+def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(monkeypatch):
+    """The first window holding this start's Max, where the required handbook's own room note once chose Low alone
+    (Astra's counterexample): the book joins that Max with its room told after every choice, never inside one."""
+    core = dataclasses.replace(_core(), development_md="# Development\n\n## Review\n\n" + "rule " * 2_000)
+    lo, hi = 100_000, 2_000_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        try:
+            lo, hi = (lo, mid) if _start(core, mid, monkeypatch).initial_mode == "max" else (mid + 1, hi)
+        except cf.MinimumViewUnfit:
+            lo = mid + 1
+    plain, held = (_start(dataclasses.replace(core, development_required=flag), hi, monkeypatch) for flag in (False, True))
+    assert plain.initial_mode == held.initial_mode == "max"
+    assert held.max_projection.memory_facts["floor"] == plain.max_projection.memory_facts["floor"]
+    blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
+    assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
+    assert "Start room is smaller than requested: this task's directly required handbook takes" in blocks[-1]
 
 
 def test_no_fact_without_a_known_window_or_the_owners_max(tmp_path, monkeypatch):
@@ -100,11 +124,14 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     fact = {"window": 1_000, "allowance": 0, "floor_need": floor_need, "schemas": 200, "zero_need": 1_100,
             "need": 1_230, "story": 60, "room": 70, "unfolded": 20, "levels": 1, "room_id": "1", "reserve": 10,
             "work": 125, "folds": 0, "parts": [["books", 600], ["core", 40]]}
-    facts = {"floor": {"steps": {"F1": 2, "F1b": 1, "F6a": 3, "F2": 4}}}
+    facts = {"floor": {"steps": {"F1": 2, "F6w": 5, "F6a": 1, "F2": 4}}}
     settled = mf.with_max_room(facts, fact, mode)["max_room"]
     assert settled["cause"] == cause and settled["short"] == 230 and "headroom" not in settled
-    assert settled["cuts"] == (["F6a", "F2"] if cause == "held" else [])
+    assert settled["cuts"] == (["F6w", "F2", "F6a"] if cause == "held" else [])  # the ladder's order, F6a last
     assert mf.with_max_room(facts, None, mode) == facts
+    # Memory took the books' room only when everything else fits: here the tool schemas tip it (zero_need > window).
+    assert not mf.crowded_by_memory(settled) and not mf.crowded_by_memory(None)
+    assert mf.crowded_by_memory({**settled, "zero_need": 1_000}) is (cause == "crowded")
     words = mf.lowered_line("low", "max", fact) + mf.measure_text(fact, parts=True)
     assert "with no memory shown over by 100" in words
-    assert not any(word in words for word in ("must", "should", "please", "failure"))  # measures and a possibility
+    assert not any(word in words for word in ("must", "should", "please", "failure", "may bring"))  # measures only

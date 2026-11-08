@@ -12,6 +12,7 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
 from ouroboros.project_admission import ProjectAdmissionError
@@ -32,13 +33,9 @@ def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     persists every PENDING/RUNNING task (title/objective/description) at
     assignment, so it is the reliable in-flight source. Never raises."""
     try:
-        import json
-        import pathlib
+        from ouroboros.queue_observation import load_queue_document
 
-        snap = pathlib.Path(str(drive_root)) / "state" / "queue_snapshot.json"
-        if not snap.exists():
-            return {}
-        data = json.loads(snap.read_text(encoding="utf-8"))
+        data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
         for bucket in ("running", "pending"):
             for row in (data.get(bucket) or []):
                 if not isinstance(row, dict):
@@ -288,14 +285,25 @@ def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str
 
 async def api_projects_list(request: Request) -> JSONResponse:
     try:
+        from ouroboros.project_facts import explicit_project_id_ok
         from ouroboros.projects_registry import (
             projects_summary,
         )
 
         drive_root = request_drive_root(request)
-        if "chat_id" in request.query_params:
-            return JSONResponse({"projects": projects_summary(drive_root, chat_id=request.query_params["chat_id"])})
-        return JSONResponse({"projects": projects_summary(drive_root, limit=200)})
+        query = request.query_params
+        if "chat_id" in query:
+            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"])
+            return JSONResponse({"projects": projects})
+        if "id" in query:
+            if not explicit_project_id_ok(query["id"]):
+                return JSONResponse({"projects": []})
+            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"])
+            return JSONResponse({"projects": projects})
+        # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
+        projects = await run_in_threadpool(projects_summary, drive_root,
+                                           limit=None if query.get("all") == "1" else 200)
+        return JSONResponse({"projects": projects})
     except Exception as exc:
         return json_exception(exc)
 
@@ -482,7 +490,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
 
 
 async def api_project_update(request: Request) -> JSONResponse:
-    """POST /api/projects/{project_id}/update — partial name/pin metadata update."""
+    """POST /api/projects/{project_id}/update — partial name, pin or closure update."""
     try:
         from ouroboros.projects_registry import PROJECT_NAME_MAX, get_project, update_project
 
@@ -503,8 +511,13 @@ async def api_project_update(request: Request) -> JSONResponse:
             if type(body["pinned"]) is not bool:
                 return JSONResponse({"error": "pinned must be a boolean"}, status_code=400)
             updates["pinned"] = body["pinned"]
+        if "closed" in body:
+            if type(body["closed"]) is not bool:
+                return JSONResponse({"error": "closed must be a boolean"}, status_code=400)
+            from ouroboros.utils import utc_now_iso
+            updates["closed"] = {"at": utc_now_iso(), "by": "owner", "note": "Closed by owner."} if body["closed"] else None
         if not updates:
-            return JSONResponse({"error": "name or pinned is required"}, status_code=400)
+            return JSONResponse({"error": "name, pinned or closed is required"}, status_code=400)
         entry = update_project(drive_root, project_id, **updates)
         if entry is None:
             return JSONResponse({"error": "project is no longer active"}, status_code=409)

@@ -15,7 +15,9 @@
  *               the page around its task through the instance's pager (`around`), Back its own page (`revisit`)
  */
 import { fetchTaskDetail, fetchTaskDetailStrict } from './api_client.js';
-import { bindContentButton } from './chat_activity.js';
+import { bindContentButton, confirmAndSendRestart } from './chat_activity.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+import { createStartFailure, startFailureCause } from './host_starting_status.js';
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
@@ -24,10 +26,14 @@ import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js'
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, clock, openWorkControls, workControls, workMenuActions, workQuestion, workRowView,
+    OUTCOME_TONES, amberNote, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions, workQuestion,
+    workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
+import { errorWords } from './ui_primitives.js';
 import { motionMs, reducedMotion } from './motion.js';
+import { roomCoversMain } from './layout.js';
+import { closingLine } from './settled_card.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -38,8 +44,8 @@ const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 const listOf = (value) => (Array.isArray(value) ? value : []);
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
 let sequence = 0;
-// A status sentence's own dot speaks only at rest: the room at rest says Online beside its green dot.
-const AT_REST = Object.freeze({ shape: 'dot', hue: 'ok' });
+// A status sentence's own dot speaks only at rest (Online beside its green dot) and for a failed start (its red dot).
+const AT_REST = Object.freeze({ shape: 'dot', hue: 'ok' }), START_FAILED = Object.freeze({ shape: 'dot', hue: 'failed' });
 
 /** The latest represented root card: the newest unfinished one, else the newest of all. */
 export function latestRepresentedRoot(records = []) {
@@ -51,11 +57,11 @@ export function latestRepresentedRoot(records = []) {
 
 /** A card's own words as a row's view (a settled row, the Project's latest root): a known outcome keeps its tone and
  *  its dot; any other state of a card is unconfirmed here (a ring). The owner's move is a work's turn, never a card's. */
-export function cardRowView(view = {}, { settled = false } = {}) {
+export function cardRowView(view = {}, { settled = false, closing = '' } = {}) {
     const outcome = OUTCOME_TONES[view.phase] ? String(view.phase) : '';
     return { word: String(view.text || ''), secondary: String(view.secondary || ''),
         tone: OUTCOME_TONES[outcome] || (settled ? 'ended' : 'unknown'), mark: outcome ? 'none' : 'ring', owner: false,
-        outcome, focus: '' };
+        outcome, focus: settled ? String(closing || '') : '' };
 }
 
 /** The card a work's row goes to: its current episode's, else another of its episodes' root cards that is shown
@@ -139,6 +145,8 @@ export function createRoomWork({
     const titleRow = bar?.querySelector('.app-page-title-row');
     if (titleRow) titleRow.appendChild(trigger);
     else badgeParent?.insertBefore(trigger, badgeNext);
+    // A Project's name in its bar: one line that may end in an ellipsis (room_work.css), whole at the list's head.
+    const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
     const surface = element('div', 'rw-surface rw-shade');
@@ -149,12 +157,16 @@ export function createRoomWork({
     surface.setAttribute('role', 'dialog');
     // Names are authored text: the chrome in here is translated at the producer, so the overlay never walks it.
     surface.setAttribute('data-i18n-authored', '');
+    // A Project's list starts with the room's whole name, which its title in the bar may cut (DESIGN "Shell").
+    const head = name ? element('p', 'rw-title') : null;
     const list = element('div', 'rw-list');
     const note = element('p', 'rw-note');
     note.hidden = true;
     // The commands a narrow bar keeps in its list (Main's Restart and budget: page_header.js); empty, it takes no room.
     const extras = element('div', 'rw-extras');
-    surface.append(list, note, extras);
+    // A failed start heads the list: the same state the capsule says, with Restart beside it (host_starting_status.js).
+    const failure = createStartFailure(doc, { restart: () => confirmAndSendRestart({ openConfirmDialog, ws }) });
+    surface.append(...[head, failure.el, list, note, extras].filter(Boolean));
     // A zero-height anchor under the bar: the list follows the bar's real height at every width. Main's
     // header floats over the transcript, so its anchor is the header's own last child at its bottom edge.
     const shadeAnchor = element('div', 'rw-shade-anchor');
@@ -269,13 +281,12 @@ export function createRoomWork({
             const id = String(work.work_id || '');
             if (!id) continue;
             const episode = String(work.episode?.task_id || id);
-            const shown = current ? work : { ...work, activity: 'unknown', because: [], tails: [], turn: [], confirmed: false,
-                mark: 'ring' };
+            const shown = current ? work : { ...work, activity: 'unknown', because: [], tails: [], last_resume: undefined,
+                turn: [], confirmed: false, mark: 'ring' };
             const view = workRowView(shown, { stopping: records.get(episode)?.cancelPendingPolicy || '' });
             items.push({ id, kind: work.kind === 'task' ? 'task' : 'direct', work, record: workCard(work, records), view,
                 episode, attempt: state.attempts?.get?.(episode) ?? null, activity: current ? String(work.activity || '') : 'unknown',
-                online: current, confirmed: current && work.confirmed !== false,
-                cmid: String(work.client_message_id || ''),
+                online: current, confirmed: current && work.confirmed !== false, cmid: String(work.client_message_id || ''),
                 startedAt: Number(work.since) || 0 });
         }
         for (const [cmid, sent] of pending) {
@@ -288,7 +299,7 @@ export function createRoomWork({
         if (asPanel && !items.length) {
             const latest = latestRepresentedRoot([...records.values()]);
             if (latest) items.push({ id: latest.groupId, kind: 'task', work: null, record: latest, latest: true,
-                view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished }),
+                view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished, closing: closingLine(latest) }),
                 confirmed: false, cmid: '', startedAt: 0, episode: latest.groupId, attempt: null, activity: '' });
         }
         return items.map(decorate);
@@ -335,13 +346,11 @@ export function createRoomWork({
         const outcome = record?.finished ? desiredLiveCardPhase(record, replayTerminalPhase(record)) : null;
         const card = record?.root?.isConnected ? record.root : null;
         const target = card || (row.cmid ? bubbleFor(row.cmid) : null);
-        const view = outcome ? cardRowView(outcome, { settled: true })
+        const view = outcome ? cardRowView(outcome, { settled: true, closing: closingLine(record) })
             : { word: tr('room_work.ended', 'No longer listed as active'), secondary: '', tone: 'ended', mark: 'ring',
                 owner: false, outcome: '', focus: '' };
         const name = nameOf({ ...row, record }, target);
-        const refreshedName = name.source === 'neutral' ? {} : {
-            name: name.text, fullName: name.full, nameSource: name.source,
-        };
+        const refreshedName = name.source === 'neutral' ? {} : { name: name.text, fullName: name.full, nameSource: name.source };
         return { ...row, ...refreshedName, view, group: 'ended', settled: true, outcomeKnown: Boolean(outcome), canMenu: false,
             controls: null, resume: '', question: null, card: Boolean(card), target, loaded: Boolean(target),
             tone: view.tone };
@@ -372,17 +381,9 @@ export function createRoomWork({
                     if (view) { views.delete(key); views.set(fresh.key, view); }
                 }
             }
-            if (fresh) {
-                byKey.delete(fresh.key);
-                out.push({ ...fresh, slot: kept.slot });
-            } else {
-                out.push(settled(kept.row));
-            }
+            if (fresh) { byKey.delete(fresh.key); out.push({ ...fresh, slot: kept.slot }); } else out.push(settled(kept.row));
         }
-        for (const row of [...byKey.values()].sort(sorter)) {
-            order.push(row.key);
-            out.push(row);
-        }
+        for (const row of [...byKey.values()].sort(sorter)) { order.push(row.key); out.push(row); }
         for (const row of out) if (!row.settled || !frozen.has(row.key)) frozen.set(row.key, { row, slot: row.slot });
         return out;
     }
@@ -408,6 +409,10 @@ export function createRoomWork({
         const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
         if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
             tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
+        // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
+        const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
+        if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
+            : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
         const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
             : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
                 : tr('room_work.what.turn', 'A turn in this chat'))
@@ -527,7 +532,7 @@ export function createRoomWork({
         const secondary = String(row.view.secondary || '');
         if (view.secondary.textContent !== secondary) view.secondary.textContent = secondary;
         view.secondary.hidden = !secondary;
-        const focus = row.settled ? '' : String(row.view.focus || '');
+        const focus = String(row.view.focus || '');
         if (view.focus.textContent !== focus) view.focus.textContent = focus;
         view.focus.hidden = !focus;
         view.chev.hidden = !detailable;
@@ -655,9 +660,10 @@ export function createRoomWork({
         if (!loaded(row.episode)) {
             let stored = null;
             try { stored = await fetchTaskDetailStrict(row.episode); } catch (exc) {
+                // The shared failure words (U131); the raw text is the log's.
                 if (exc?.status !== 404) {
-                    showToast(`Could not refresh task state: ${exc?.message || exc}`, 'error');
-                    return;
+                    console.warn('task state read failed', exc);
+                    return void showToast(`Task state did not refresh. ${errorWords(exc).text}`, 'error');
                 }
             }
             if (intent !== menuIntent || !anchor.isConnected || !currentControls(row)) return;
@@ -686,6 +692,11 @@ export function createRoomWork({
         paintNote();
         if (!open) return;
         placeSurface();
+        if (head) {
+            const whole = clean(name.textContent);
+            if (head.textContent !== whole) head.textContent = whole;
+            head.hidden = !whole;
+        }
         const keys = new Set(rows.map((row) => row.key));
         for (const [key, view] of views) {
             if (!keys.has(key)) { view.el.remove(); views.delete(key); expanded.delete(key); }
@@ -717,20 +728,32 @@ export function createRoomWork({
     // mark stays and the control's name keeps the whole status. Measured again when the word, step, mark or available
     // width changes. Remember the capsule's width AFTER fitting, so observing its content-sized box does not feed a
     // hide/show cycle back into the ResizeObserver.
+    // A Project's name keeps one line (room_work.css). Where the room covers Main (a phone, a finger's docked column) a
+    // name still cut there makes the consciousness chip show its brain alone (its name keeps the whole state); a desk's
+    // panel beside Main keeps the chip's word and the name ellipsizes.
+    // Panic never yields.
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
     function fitWord() {
         if (destroyed) return;
         delete trigger.dataset.word;
         delete trigger.dataset.step;
+        const chip = name && bar.querySelector('.cx-chip');
+        if (chip) delete chip.dataset.fit;
         const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
+        if (chip && roomCoversMain({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+            chip.dataset.fit = 'mark';
+        }
         fittedWidth = titleRow?.clientWidth;
     }
 
     function paintTrigger() {
         const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
-        const listed = rows.length > 0 || extras.children.length > 0;
+        // A Project's list always has its head, the room's whole name, so its title opens it even with no work; a failed
+        // start always has its line and Restart.
+        const failed = startFailureCause({ badge: statusBadge, ready: hostReady(), latest: stateSnapshots?.latest?.() }) !== null;
+        const listed = Boolean(head) || failed || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
         // class name for a second opinion. Before the producer's first answer the room is not online yet: an unknown
@@ -747,7 +770,8 @@ export function createRoomWork({
         // elsewhere stays Working. A pause by the owner or by Ouroboros is not the owner's move. The room at rest says
         // Online beside its green dot.
         const owner = statusBadge.dataset.owner === '1';
-        const reshaped = paintStatusMark(mark, tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));
+        const reshaped = paintStatusMark(mark, tone === 'failed' ? START_FAILED
+            : tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));
         // The owner's move said in words too, where the word does not already say it.
         const said = amberNote(statusBadge.dataset.amber || '');
         if (waitNote.textContent !== said) waitNote.textContent = said;
@@ -759,10 +783,15 @@ export function createRoomWork({
 
     function paintNote() {
         const latest = stateSnapshots?.latest?.();
+        // The failed start the bar says, or the producer says under work words, so the list never says "starting" (U003).
+        const cause = startFailureCause({ badge: statusBadge, ready: hostReady(), latest });
+        failure.paint(cause);
         const message = !connected() ? tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.')
-            : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
+            : cause !== null ? '' : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
                 : Array.isArray(latest?.works) && latest.works_complete === false
-                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.') : '';
+                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')
+                    // A Project's list that opened on its name alone says so in Activity's words.
+                    : head && !rows.length ? tr('room_work.note.empty', 'Nothing running or queued.') : '';
         if (note.textContent !== message) note.textContent = message;
         note.hidden = !message || !open;
     }
@@ -952,6 +981,9 @@ export function createRoomWork({
 
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
+    // Whether a cut Project name takes the chip's word depends on the layout and the input (fitWord), so a switch fits
+    // again.
+    if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });
     listen(trigger, 'keydown', (event) => {

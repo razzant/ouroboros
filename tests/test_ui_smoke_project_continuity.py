@@ -105,14 +105,14 @@ _CLICK_CONTEXT_MODE = """() => {
 def _start_stale_state_response_episode(page):
     """Hold the page-wide /api/state read, prove the gate, then make it stale.
 
-    One read is in flight page-wide (chat_activity.js createStateSnapshotSequencer
+    One read is in flight page-wide (state_snapshots.js createStateSnapshotSequencer
     .gate): a forced chat refresh that lands behind the held app read starts no
-    second read and coalesces into ONE follow-up that begins once the held read
-    settles. The socket's own generation bump is the only thing that outruns a
-    held read, so a synthetic first-connection `open` (no reconnect rebuild, so
-    the feed and its live cards survive) makes the held read stale. Afterwards
-    index 0 is that stale read and index 1 the follow-up, which starts only when
-    index 0 is settled — the order the gate produces.
+    second read and coalesces into ONE follow-up. The socket's own generation bump
+    is the only thing that outruns a held read: a synthetic first-connection `open`
+    (no reconnect rebuild, so the feed and its live cards survive) retires the held
+    read, cancelling its transport, and the follow-up starts at once. Afterwards
+    index 0 is that stale read and index 1 the follow-up. Settling index 0 still
+    delivers the server's answer, which the page has abandoned.
     """
     page.route(
         "**/api/owner/context-mode",
@@ -142,7 +142,9 @@ def _start_stale_state_response_episode(page):
                 const item = pending[index];
                 if (!item || item.settled) return false;
                 item.settled = true;
-                const response = await realFetch(item.input, item.init);
+                // The page may have cancelled this read (a retired one); the server still answers it.
+                const { signal, ...init } = item.init || {};
+                const response = await realFetch(item.input, init);
                 const payload = await response.json();
                 Object.assign(payload, patch || {});
                 payload.active_chat_activities = activities;
@@ -347,8 +349,8 @@ def test_ui_smoke_snapshot_apply_time_cannot_resurrect_root(
                 page.wait_for_function("() => window.__stateResponsePending.length === 2")
                 assert page.locator(f"{card} [data-cancel-run]").count() == 1
                 assert page.evaluate("() => window.__taskDetailCalls.length") == 0
-                # The follow-up began only once the stale read settled; its own
-                # request barrier is what the same empty census is judged against.
+                # The open started the follow-up when it retired the stale read; its
+                # own request barrier is what the same empty census is judged against.
                 assert page.evaluate("() => window.__settleStateResponse(1, [])")
                 page.evaluate("() => { Date.now = window.__realDateNow; }")
                 page.wait_for_function("() => window.__taskDetailCalls.length === 1")
@@ -433,7 +435,7 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
                 )
                 assert page.locator(f"{card} [data-cancel-run]").count() == 1
 
-                # The follow-up N+1, started only once N settled, proves queue
+                # The follow-up N+1, started when the open retired N, proves queue
                 # loss and carries the fresh binding.
                 assert page.evaluate(
                     """() => window.__settleStateResponse(1, [], {
@@ -1218,11 +1220,13 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                 close_project()
                 # The server's readiness response precedes its worker/startup
                 # log paint. These legitimate rows add 37 nodes outside the
-                # project panel; observe them before measuring flat DOM.
+                # project panel; observe them before measuring flat DOM. A line
+                # says its type once: its type pill, or its headline when that
+                # already says it (#2886 3d81bcb22, U027).
                 page.wait_for_function(
                     """() => {
-                        const painted = new Set([...document.querySelectorAll('#log-entries .log-type')]
-                            .map(node => node.textContent));
+                        const painted = new Set([...document.querySelectorAll(
+                            '#log-entries .log-type, #log-entries .log-headline')].map(node => node.textContent));
                         return ['worker_sha_verify', 'startup_verification', 'worker_ready']
                             .every(type => painted.has(type));
                     }""",

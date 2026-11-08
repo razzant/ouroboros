@@ -166,19 +166,20 @@ class PlaceMixin:
 
         A separate short-lived process so that a stuck or crashing native call can be killed
         and never takes the host down, and so that every answer is read anew (AppKit caches
-        refresh only on a main run loop the server does not turn)."""
-        cmd = [self._helper_python(), "-I", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
+        refresh only on a main run loop the server does not turn). The answer is the last whole JSON line, also of
+        the output a helper stopped at its timeout left (an ``element`` receipt is printed before the read after it)."""
+        # -I ignores PYTHONDONTWRITEBYTECODE; keep the signed interpreter bundle read-only.
+        cmd = [self._helper_python(), "-I", "-B", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
         rc, out, err = self._try(cmd, timeout=timeout)
         for line in reversed(out.strip().splitlines()):
-            if line.startswith("{"):
-                try:
-                    parsed = json.loads(line)
-                except ValueError:
-                    break
-                if isinstance(parsed, dict):
-                    return parsed
-                break
-        return {"ok": False, "error": f"native helper gave no answer ({(err or out).strip()[:200] or f'exit {rc}'})", "op": op}
+            try:
+                parsed = json.loads(line) if line.startswith("{") else None
+            except ValueError:
+                continue  # a line cut off mid-write by a stopped helper
+            if isinstance(parsed, dict):
+                return parsed
+        return {"ok": False, "error": f"native helper gave no answer ({(err or out).strip()[:200] or f'exit {rc}'})", "op": op,
+                "no_answer": True}
 
     def _front_local(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
         """Who is in front NOW, read fresh each call: macOS via ``lsappinfo``, X11 via ``xdotool getactivewindow``
@@ -261,6 +262,8 @@ class PlaceMixin:
         reason = str(res.get("reason") or "")
         front = res.get("front") or {}
         where = f" ({front.get('app') or front.get('title')} is in front)" if isinstance(front, dict) and (front.get("app") or front.get("title")) else ""
+        # No earlier step ran and no switch was asked for: raise_policy='never', or a target that was already in front.
+        first = res.get("activated") is False and not res.get("before_step")
         if reason == "not_running":
             text = f"{app!r} is not a running application; nothing was sent (running: {', '.join(res.get('running') or [])[:300]})"
             if res.get("candidates"):
@@ -276,14 +279,17 @@ class PlaceMixin:
         if reason == "front_unread":
             if res.get("before_step"):
                 return f"{app!r}: who is in front could not be read before the next step ({res.get('error')}); nothing more was sent"
+            if first:
+                return f"{app!r}: who is in front could not be read; no switch was attempted and nothing was sent"
             return f"{app!r}: the switch was requested but who is in front could not be read ({res.get('error')}); nothing was sent"
         if reason == "target_lost":
             resolved = res.get("resolved") or {}
+            state, sent = ("not", "no switch was attempted and nothing was sent") if first else ("no longer", "nothing more was sent")
             if resolved.get("window_ids") and front.get("app") and front.get("app") == resolved.get("app"):
                 # The same class is in front through a window that is not the target's (a sibling, or a dialog a step opened).
-                return (f"{app!r} is no longer in front: another window of its class, {front.get('title')!r} ({front.get('window_id')}), "
-                        f"is in front and is not one of the target's windows ({', '.join(resolved.get('window_ids') or [])}); nothing more was sent")
-            return f"{app!r} is no longer in front{where}; nothing more was sent"
+                return (f"{app!r} is {state} in front: another window of its class, {front.get('title')!r} ({front.get('window_id')}), "
+                        f"is in front and is not one of the target's windows ({', '.join(resolved.get('window_ids') or [])}); {sent}")
+            return f"{app!r} is {state} in front{where}; {sent}"
         if reason == "unsupported":
             return f"application targeting is unavailable here: {res.get('error') or 'no window manager access'}; nothing was sent"
         if reason == "apps_unread":
@@ -314,36 +320,65 @@ class PlaceMixin:
         ctx["delivered_to"] = res.get("front")
         return None, ctx
 
-    def _begin(self, app: str, wait_ms: int = 2000) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    def _begin(self, app: str, wait_ms: int = 2000, *, raise_policy: str = "allow",
+               connection: tuple[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """Before an input: resolve and bring ``app`` forward (launch-free) and verify it is in front.
 
         Returns ``(refusal, context)``: a refusal sends nothing. With no ``app`` the context only records who
         is in front now (local backends), which is who will receive the input; remote backends read it in the
         same call as the input."""
         app = str(app or "").strip()
-        if self._is_remote():
-            name, conn = self._active_connection()
-            if conn.get("disabled"):
-                return json.loads(self._disabled_connection_error(name, conn)), {}
+        if raise_policy not in ("allow", "never"):
+            return {"ok": False, "reason": "invalid_raise_policy", "error": "raise_policy must be 'allow' or 'never'", "dispatched": False}, {}
+        if raise_policy == "never" and not app:
+            return {"ok": False, "reason": "app_required", "error": "raise_policy='never' requires app", "dispatched": False}, {}
+        name, conn = self._connection_snapshot(connection)
+        if conn.get("disabled"):
+            return json.loads(self._disabled_connection_error(name, conn)), {}
+        if name != "local":
             if not app:
                 return None, {}
-            return self._ctx_from_activation(app, self._remote_activate_dict(conn, app, int(wait_ms)))
+            return self._ctx_from_activation(app, self._remote_activate_dict(conn, app, int(wait_ms), raise_policy=raise_policy))
         ctx: dict[str, Any] = {}
         if not app:
             ctx["front_before"] = ctx["delivered_to"] = self._front_local()
             return None, ctx
         plat = self._plat()
         if plat == "macos":
-            res = self._native("activate", app, int(wait_ms), timeout=max(12, 3 * int(wait_ms) // 1000 + 10))
+            if raise_policy == "never":
+                resolved = self._native("resolve", app, timeout=15)
+                if not resolved.get("ok"):
+                    res = resolved
+                else:
+                    target = (resolved.get("candidates") or [{}])[0]
+                    front = self._front_local()
+                    same = bool(front and front.get("pid") == target.get("pid"))
+                    res = {"ok": same, "target": target, "front_before": front, "front": front,
+                           "activated": False, "already_front": same, "verified": same,
+                           "reason": "target_lost" if front else "front_unread", "resolved": target}
+            else:
+                res = self._native("activate", app, int(wait_ms), timeout=max(12, 3 * int(wait_ms) // 1000 + 10))
         elif plat == "linux" and self._session() != "wayland":
-            res = self._x11_activate(app, int(wait_ms))
+            if raise_policy == "never":
+                rows, err = self._x11_windows()
+                res = {"ok": False, "reason": "unsupported", "error": err} if err else x11_resolve(app, rows)
+                if res.get("ok"):
+                    target = res["target"]
+                    front = self._front_local(rows)
+                    same = x11_same(front, target)
+                    res = {"ok": same, "target": target, "front_before": front, "front": front,
+                           "activated": False, "already_front": same, "verified": same,
+                           "reason": "target_lost" if front else "front_unread", "resolved": target}
+            else:
+                res = self._x11_activate(app, int(wait_ms))
         else:
             res = {"ok": False, "reason": "unsupported", "error": f"no application targeting on {plat}/{self._session()}"}
         return self._ctx_from_activation(app, res)
 
-    def _recheck(self, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-        """Before a later step of one call (a key sequence): read the front again; a targeted call stops with
-        nothing more sent when its application is no longer in front. Returns (refusal, the step's context)."""
+    def _recheck(self, ctx: dict[str, Any], *, later: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Before a later step of one call (a key sequence, ``later``) or a never-policy input's first step: read the
+        front again; a targeted call stops, sending nothing more, when its application is not in front. Returns
+        (refusal, the step's context)."""
         front = self._front_local()
         step = dict(ctx)
         step["delivered_to"] = front
@@ -351,20 +386,21 @@ class PlaceMixin:
         if target:
             app = ctx["target"]["requested"]
             ctx["front_last"] = front  # the newest read, for the aggregate even when the step is refused
+            facts = {"before_step": later, "activated": ctx["target"].get("activated")}
             if front is None:
-                res = {"reason": "front_unread", "error": "no front reader answered before the next step", "before_step": True}
+                res = {"reason": "front_unread", "error": "no front reader answered before the next step", **facts}
                 return {"ok": False, "reason": "front_unread", "error": self._target_error(app, res), "target": ctx["target"]}, step
             # An X11/OSWorld target is its matched windows; a macOS/SSH application is its pid.
             still = x11_same(front, target) if target.get("window_ids") else front.get("pid") == target.get("pid")
             if not still:
-                res = {"reason": "target_lost", "front": front, "resolved": target}
+                res = {"reason": "target_lost", "front": front, "resolved": target, **facts}
                 return {"ok": False, "reason": "target_lost", "error": self._target_error(app, res), "target": ctx["target"], "front": front}, step
         return None, step
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself
-        reported as dropped (cliclick warns on stderr and exits 0). ``after`` is the post-input front; the local
-        backends read it here, the remote ones pass what their probe printed (None = unread)."""
+        reported as dropped (cliclick, or the paste chord program, warns on stderr and exits 0). ``after`` is the
+        post-input front; the local backends read it here, the remote ones pass what their probe printed (None = unread)."""
         if after is _UNREAD:
             after = self._front_local()
         ctx["front_last"] = after
@@ -429,20 +465,23 @@ class PlaceMixin:
             if untyped:
                 # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
                 # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
+                # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
                 if payload.get("method") == "paste":
-                    hint = "the paste chord's key has no code in the active keyboard layout: switch the layout, or use the app's own commands"
-                elif "keys" in payload:
-                    hint = "switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
+                    error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
+                             "switch the layout, or use the app's own commands")
                 else:
-                    hint = "use type_text with via=paste"
-                payload.update({"reason": "untypable_characters", "untyped": untyped[:20],
-                                "error": f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
-                                         f"not typed (the rest may have been); {hint}"})
-            else:
+                    hint = ("switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
+                            if "keys" in payload else "use type_text with via=paste")
+                    error = (f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
+                             f"not typed (the rest may have been); {hint}")
+                payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
+            else:  # the paste chord program refuses to post rather than have macOS drop it
                 payload.update({"reason": "permission_denied",
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": "macOS drops synthetic input from a process without the Accessibility grant: "
-                                         "the helper exited 0 but nothing reached the screen"})
+                                "error": ("this process may not post input events (the Accessibility grant), so the paste "
+                                          "chord was not sent" if payload.get("method") == "paste" else
+                                          "macOS drops synthetic input from a process without the Accessibility grant: "
+                                          "the helper exited 0 but nothing reached the screen")})
             effects = []
             if target.get("activated"):
                 payload["observed_effect"] = True  # the switch before it was observed
@@ -452,8 +491,8 @@ class PlaceMixin:
                 payload["observed_effect"] = True  # the clipboard write before it completed
                 payload["clipboard_done"] = True
                 effects.append("the clipboard write")
-            if untyped and payload.get("method") == "paste":
-                dropped_text = "the paste chord was not typed (see error)"
+            if payload.get("method") == "paste":
+                dropped_text = "the paste chord was not sent (see error)"
             elif untyped:
                 dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
             else:
@@ -541,36 +580,38 @@ class PlaceMixin:
         return self._backend_unavailable("window listing")
 
     def ax_tree(self, *, app: str = "", max_nodes: int = 150, timeout_ms: int = 3000, root: str = "window",
-                include_web: bool = False) -> str:
-        """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward)."""
+                include_web: bool = False, text_limit: int = 200, window: Any = "") -> str:
+        """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward):
+        the application is resolved and read in ONE helper process (``macos_native.py observe``)."""
         plat = self._plat()
         app = str(app or "").strip()
         max_nodes = max(1, min(2000, int(max_nodes or 150)))
         timeout_ms = max(100, min(15_000, int(timeout_ms or 3000)))
+        text_limit = max(1, min(100_000, int(text_limit or 200)))
         root = "focused" if str(root or "").lower() == "focused" else "window"
         if self._is_remote():
             _name, conn = self._active_connection()
             if conn.get("disabled"):
                 return self._disabled_connection_error(_name, conn)
+            if text_limit != 200 or window not in (None, ""):
+                return self._json_text({"ok": False, "backend": str(conn.get("backend") or ""), "reason": "unsupported_option",
+                                        "error": "text_limit and window apply to the local macOS reader only; a remote answers its own tree"})
             return self._remote_ax_tree(conn)
         if plat == "macos":
-            if app:
-                res = self._native("resolve", app, timeout=15)
-                if not res.get("ok"):
-                    return self._json_text({"ok": False, "platform": plat, "reason": res.get("reason") or "unresolved",
-                                  "error": self._target_error(app, res), "candidates": res.get("candidates") or []})
-                target = res["candidates"][0]
-            else:
-                target = self._front_local()
-                if not target:
-                    return self._json_text({"ok": False, "platform": plat, "reason": "front_unknown", "error": "the frontmost application could not be read"})
-            tree = self._native("tree", target["pid"], max_nodes, timeout_ms, root, "true" if include_web else "false",
-                                timeout=timeout_ms // 1000 + 8)
+            spec = {"app": app, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "root": root, "include_web": bool(include_web),
+                    "text_limit": text_limit, "window": window if window is not None else ""}
+            tree = self._native("observe", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 15)
+            target = tree.pop("target", None)
+            if tree.get("stage") == "resolve":
+                error = self._target_error(app, tree) if app else (tree.get("error") or "the frontmost application could not be read")
+                return self._json_text({"ok": False, "platform": plat, "reason": tree.get("reason") or "unresolved",
+                                        "error": error, "candidates": tree.get("candidates") or []})
             if not tree.get("ok"):
                 failed = {"ok": False, "platform": plat, "app": target, "reason": tree.get("reason") or "ax_unavailable",
                           "error": tree.get("error") or f"the accessibility read failed ({tree.get('reason')})"}
-                if tree.get("errors"):
-                    failed["errors"] = tree["errors"]
+                for key in ("errors", "windows", "ax_exposure"):
+                    if tree.get(key):
+                        failed[key] = tree[key]
                 return self._json_text(failed)
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
@@ -581,3 +622,68 @@ class PlaceMixin:
                           "error": "no element reader on Linux in this skill (use the app's own commands or screenshot)",
                           "windows": rows, **({"windows_error": err} if err else {})})
         return self._backend_unavailable("accessibility tree")
+
+    def element_act(self, *, app: str, do: str, select: dict[str, Any] | None = None, text: str | None = None,
+                    window: Any = "", max_nodes: int = 600, timeout_ms: int = 3000, include_web: bool = False,
+                    observe: bool = False, text_limit: int = 200) -> str:
+        """Act on ONE element of ``app`` through the element's own Accessibility action (macOS): ``press`` or
+        ``set_value``. The element is named by identity (the window as ``window_list`` prints it, role, exact label,
+        AXIdentifier, nth), never by a mark or node id of an earlier read; the application is resolved, the element
+        found and acted on inside ONE short-lived helper call (``macos_native.py element``), with no pointer and no
+        switch: who is in front is reported, not changed. ``observe`` adds a read of the same window after the action
+        (``observation``) within the same ``timeout_ms``. The helper composes the receipt; this method says when the
+        helper gave no answer (an unknown outcome, never "not sent") or stopped after the receipt (the receipt stands)."""
+        plat = self._plat()
+        app = str(app or "").strip()
+        do = str(do or "").strip().lower()
+        asked: dict[str, Any] = {"app": app, "do": do, "select": select if isinstance(select, dict) else {}}
+        if not app:
+            return self._json_text({"ok": False, "reason": "app_required", "dispatched": False, **asked,
+                                    "error": "app is required (a running application's name, bundle id or pid:<n>): "
+                                             "an element action is never aimed at whatever is in front"})
+        if do not in ("press", "set_value"):
+            return self._json_text({"ok": False, "reason": "unknown_action", "dispatched": False, **asked,
+                                    "error": f"do must be press or set_value, not {do!r}"})
+        if self._is_remote():
+            name, conn = self._active_connection()
+            if conn.get("disabled"):
+                return self._disabled_connection_error(name, conn)
+            return self._json_text({"ok": False, "backend": str(conn.get("backend") or ""), "reason": "unsupported", "dispatched": False, **asked,
+                                    "error": "no element actions on a remote (an OSWorld guest is Linux, an SSH Mac has no element reader "
+                                             "here); use the input tools with app= or the app's own commands through remote_exec"})
+        if plat != "macos":
+            return self._json_text({"ok": False, "platform": plat, "reason": "unsupported", "dispatched": False, **asked,
+                                    "error": "no element actions on Linux in this skill (use the app's own commands or the input tools)"})
+        text_limit = max(1, min(100_000, int(text_limit or 200)))
+        if text_limit != 200 and not observe:
+            return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
+                                    "error": "text_limit shapes the read after the action: pass observe=true or leave text_limit out"})
+        selector: dict[str, Any] = {**asked["select"], "include_web": bool(include_web)}
+        if window is not None and window != "":
+            selector["window"] = window
+        if text is not None:
+            selector["text"] = text
+        max_nodes = max(1, min(2000, int(max_nodes or 600)))
+        timeout_ms = max(100, min(15_000, int(timeout_ms or 3000)))
+        spec = {"app": app, "do": do, "select": selector, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "observe": bool(observe)}
+        if observe:
+            spec["text_limit"] = text_limit
+        res = self._native("element", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 10)
+        target = res.pop("target", None)
+        if res.get("stage") == "resolve":
+            return self._json_text({"ok": False, "platform": plat, "reason": res.get("reason") or "unresolved", "dispatched": False, **asked,
+                                    "error": self._target_error(app, res), "candidates": res.get("candidates") or []})
+        if res.pop("checkpoint", None) == "action":
+            # The saved receipt may be an action or a refusal; the later read did not finish.
+            res["observation"] = {"ok": False, "reason": "helper_stopped",
+                                  "error": "the helper stopped before the window read finished (its time ran out or it crashed); "
+                                           "the saved receipt above stands: read the window with ax_tree before acting again"}
+        out: dict[str, Any] = {"platform": plat, "app": target if target is not None else app, "do": do, **res}
+        if "dispatched" not in res:
+            # Every answer of ``act`` says whether the action call was made; one without that fact is a helper that
+            # gave no answer or stopped mid-way: whether it found the element and acted is unknown, never "not sent".
+            out.update({"ok": False, "reason": "helper_no_answer" if res.get("no_answer") else "helper_failed", "dispatched": None,
+                        "action_outcome": "unknown", "select": asked["select"],
+                        "note": "the helper that carried the action did not answer, so whether it found the element and acted "
+                                "is unknown (do not assume it did not): read the window with ax_tree before acting again"})
+        return self._json_text(out)

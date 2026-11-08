@@ -6,9 +6,10 @@ Restart repeated the whole battery for an unchanged subject. Owner decision 3A
 when everything matches, shown to reviewers, unsigned. This module keeps ONE
 small JSON per exact identity under the caller's canonical data root. Only
 ``preflight_runner.run_hermetic_pytest`` writes it, after a complete run (the
-node lane when the candidate carries web tests, the parallel ``not serial`` pass
-green on two observed xdist workers or the one admitted, the serial pass without
-xdist flags, a proven containment reap). That runner reads it at its existing reuse
+node lane when the candidate carries web tests, the xdist ``not exclusive`` pass
+(a ``serial("<resource>")`` group stays in it) green on two observed xdist workers
+or the one admitted, the ``serial("exclusive")`` pass without xdist flags, a proven
+containment reap). That runner reads it at its existing reuse
 seam after the baseline and assembly checks; adoption reads it for exactly its
 commit (``preflight_qualification.receipt_for_commit``).
 
@@ -363,9 +364,9 @@ class GateReceipt:
         if self.path is None:
             return
         try:
-            workers, admitted = len(pr._observed_worker_ids(temp_root)), pr._allocated_worker_count(temp_root)
+            workers, admitted = len(pr.observed_worker_ids(temp_root)), pr.allocated_worker_count(temp_root)
             reason = ("the parallel pass collected no tests" if "parallel" in empty_passes else
-                      f"{workers} observed xdist worker(s)" if workers < min(pr._MIN_PREFLIGHT_WORKERS, admitted) else "")
+                      f"{workers} observed xdist worker(s)" if workers < min(pr.MIN_PREFLIGHT_WORKERS, admitted) else "")
             if not reason:
                 reason = _source_status()[1]
             if not reason:
@@ -725,3 +726,23 @@ def execution_section(exhibit: Any) -> str:
         text += "\nObserved (host facts, not verdicts, never proof):\n" + "\n".join(
             line for entry in observed for line in _observation_lines(entry))
     return text
+
+
+def execution_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the seat-visible test
+    exhibit over fixed placeholder records in these branches (each evidence kind, lane and tier wording, NOT_RUN with
+    and without observations, each observation kind and outcome). The recorded facts are data."""
+    tested = {"head": "⟨head⟩", "tree": "⟨tree⟩", "index_tree": "⟨index⟩"}
+    observed = [{"source": "review_preparation", "continued_under": "⟨enforcement⟩", "message": "⟨message⟩"},
+                *({"relation": relation, "differs": ["⟨field⟩"], "outcome": outcome, "tier": "⟨tier⟩", "selected_modules": 1,
+                   "tested": tested, "failed_tests": ["⟨test⟩"], "failed_listed": 1, "lanes": {"⟨lane⟩": "⟨state⟩"},
+                   "compared_with": "⟨checkout⟩", "terminal": "unavailable ⟨why⟩"}
+                  for relation in ("same_bytes", "unknown", "other_bytes") for outcome in ("passed", *_OUTCOMES)),
+                {"relation": "same_bytes", "outcome": "failed", "diagnosis": "⟨diagnosis⟩"}]
+    passed = [{"status": "passed", "evidence": evidence, "tested": tested, "receipt": "⟨receipt⟩",
+               "receipt_origin": {"⟨key⟩": "⟨value⟩"}, "lanes": lanes, "empty_lanes": ["⟨lane⟩"], "tier": "selected",
+               "files": ["⟨file⟩"], "omitted_files": 1, "rule": "⟨rule⟩"}
+              for evidence in ("executed", "process_proof", "receipt", "⟨other⟩") for lanes in ([], ["⟨lane⟩"])]
+    return [execution_section(exhibit) for exhibit in (
+        *passed, {"status": "not_run", "reason": "⟨reason⟩"}, {"status": "not_run"},
+        {"status": "not_run", "observed": observed}, {"status": "⟨other⟩", "observed": observed})]

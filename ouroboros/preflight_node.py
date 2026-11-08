@@ -28,6 +28,8 @@ from ouroboros.platform_layer import probe_node_version, resolve_bundled_node
 
 # Version floor for the browser-module suite: the object form of
 # `t.mock.timers.enable({apis: [...]})` used by web/tests needs Node >= 20.11.
+# The bound of one Node test, the pytest passes' `--timeout=300` in milliseconds (`--test-timeout`: Node >= 20.11).
+NODE_TEST_TIMEOUT_FLAG = "--test-timeout=300000"
 # CI provisions 22; the bundled runtime is 24.x.
 NODE_MIN_VERSION = (20, 11)
 
@@ -110,7 +112,7 @@ def _version_tuple(version: str) -> tuple:
 def run_node_tests(
     worktree: pathlib.Path,
     temp_root: pathlib.Path,
-    timeout: float,
+    timeout: Optional[float],
     max_output: int,
 ) -> Optional[dict]:
     """Run the candidate's browser-module suite once, contained, or block typed.
@@ -177,9 +179,11 @@ def run_node_tests(
 
     capture = FileOutput(temp_root, "node")
     proc = None
-    argv = [node, "--test", f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
+    # `--test-timeout` (Node >= 20.11): the per-test bound the pytest passes have (`--timeout=300`), so a hung
+    # web test ends that test, not a full run that has no total deadline (owner 5A).
+    argv = [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={env['PYTEST_XDIST_AUTO_NUM_WORKERS']}", *files]
     try:
-        proc = container.spawn(argv, cwd=str(pathlib.Path(worktree) / WEB_DIR),
+        proc = container.spawn(argv, background=True, cwd=str(pathlib.Path(worktree) / WEB_DIR),
                                env=env, stdout=capture.stdout, stderr=capture.stderr)
         result["execution"] = "executed"
         try:
@@ -196,6 +200,8 @@ def run_node_tests(
         output = capture.finish(returncode=returncode, containment_error=reap_error, argv=argv)
         result["evidence_errors"] = list(capture.errors)
     except BaseException as exc:
+        if proc is not None and proc.poll() is None:
+            pr._terminate_preflight_tree(proc, temp_root)
         note_lane_process(exc, container, proc)
         raise
     finally:
@@ -206,7 +212,7 @@ def run_node_tests(
         capture.close()
     elapsed = time.monotonic() - started
     result["returncode"] = returncode
-    result["reap_error"] = reap_error
+    result["reap_error"], result["containment_token"] = reap_error, container.token
     if reap_error:
         result["error"] = pr._diagnosis(
             "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): "

@@ -15,13 +15,15 @@ import sys
 import pytest
 
 
-def test_server_py_injects_agent_python_env_var():
+def test_server_entry_names_its_own_interpreter_over_an_inherited_one(tmp_path):
+    """An older launcher or a moved app can hand down a dead interpreter; the body's handle names this one."""
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    source = (repo_root / "server.py").read_text(encoding="utf-8")
-    assert 'os.environ.get("OUROBOROS_AGENT_PYTHON")' in source
-    assert 'os.environ["OUROBOROS_AGENT_PYTHON"]' in source
-    assert "sys.executable" in source
-    assert "isinstance" in source and "_agent_python" in source
+    env = {**os.environ, "OUROBOROS_AGENT_PYTHON": str(tmp_path / "Old.app" / "python3"),
+           "OUROBOROS_REPO_DIR": str(repo_root), "PYTHONPATH": str(repo_root)}
+    done = subprocess.run([sys.executable, "-B", "-c", "import os, server; print(os.environ['OUROBOROS_AGENT_PYTHON'])"],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().splitlines()[-1] == sys.executable, "the old entry kept an inherited value"
 
 
 def test_preflight_test_runner_uses_sys_executable():

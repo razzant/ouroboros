@@ -14,6 +14,7 @@ import subprocess
 import uuid
 from typing import Any, Dict
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
+from ouroboros.delegate_readonly_inputs import native_selection_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
 from supervisor.events_chat_delivery import _bound_project_chat_id
@@ -236,6 +237,7 @@ def _compose_subagent_text(
     context: str,
     task_constraint=None,
     delegation_budget=None,
+    selected_inputs=None,
 ) -> str:
     role = str(role or "").strip()
     parts = ["[SUBAGENT ROLE]", role, ""] if role else []
@@ -255,10 +257,12 @@ def _compose_subagent_text(
             context,
             "[END_PARENT_CONTEXT]",
         ])
+    if block := native_selection_block(selected_inputs):  # host-retained copies, outside the parent's reference text
+        parts.extend(["", block])
     parts.extend([
         "",
         "[HANDOFF CONTRACT]",
-        "Return a concise final answer with sections: summary, findings, evidence, blockers, recommended_parent_action.",
+        "Your final answer goes to your parent as the handoff [EXPECTED_OUTPUT] asks for, in its form.",
     ])
     # The `[CAPABILITY DELTA]` block used to be composed HERE, from a delta the
     # scheduling tool call had already resolved. It moved to dispatch in v6.87.28
@@ -492,9 +496,9 @@ def _resolve_subagent_constraint(
             )
     if surface == "genesis":
         try:
-            from ouroboros import subagent_worktrees
+            from ouroboros import genesis_project
 
-            handle = subagent_worktrees.provision_genesis_project(
+            handle = genesis_project.provision_genesis_project(
                 repo_dir=ctx.REPO_DIR,
                 task_id=tid,
                 parent_task_id=parent_task_id,
@@ -511,7 +515,7 @@ def _resolve_subagent_constraint(
             except Exception:
                 stray = []
             if stray:
-                subagent_worktrees.remove_genesis_project(handle.path)
+                genesis_project.remove_genesis_project(handle.path, task_id=str(tid))
                 return readonly, workspace_root, workspace_mode, (
                     f"Subagent rejected: freshly provisioned genesis root is not empty "
                     f"({len(stray)} stray entries) — possible provisioning collision."

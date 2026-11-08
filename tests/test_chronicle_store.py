@@ -161,7 +161,6 @@ def test_page_rows_use_the_canonical_source_identity_of_the_raw_row(tmp_path):
     assert page(store, source_row_id({**row, "text": "Привет!"}), at=6).ok
 
 
-@pytest.mark.serial
 def test_two_processes_publish_without_losing_frontiers(tmp_path):
     import subprocess
     import sys
@@ -622,13 +621,13 @@ def test_rebuilt_index_has_the_same_rows_folds_sequences_and_page_order(tmp_path
     assert snapshot() == before
 
 
-def test_index_schema_is_version_two_and_a_foreign_version_replays(tmp_path):
+def test_index_schema_is_version_three_and_a_foreign_version_replays(tmp_path):
     store = ChronicleStore(tmp_path)
     kept = note(store, "survives")
     with sqlite3.connect(store.index_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         names = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"records", "state", "active_marks", "page_rows", "folded", "tail_rows"} <= names
+        assert {"records", "state", "active_marks", "page_rows", "folded", "tail_rows", "told"} <= names
         db.execute("PRAGMA user_version=7")
     assert store.get(kept["id"])["sequence"] == kept["sequence"]
 

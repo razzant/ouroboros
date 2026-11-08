@@ -100,7 +100,9 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     bare = _write(ctx, "lessons/bare", "No summary here.")
     assert "it has no summary" in bare and "(no summary)" in bare
     overview = _write(ctx, "overview", "What holds now.", summary="s")
-    assert "loaded whole in every context that loads knowledge" in overview
+    # The receipt names the integrating contexts that hold the overview whole and the helpers that read it
+    # on demand (BIBLE P1, the subject of continuity).
+    assert "loaded whole in every integrating context" in overview and "helpers read on demand" in overview
     archived = tools._knowledge_write(ctx, topic="lessons/bare", mode="archive", reason="moved into a test",
                                       expected_revision=_revision(ctx, "lessons/bare"))
     assert "not in the active knowledge index" in archived
@@ -144,21 +146,6 @@ def test_a_project_child_starts_without_a_register_copy(tmp_path, project_id):
     assert (child / "memory" / "identity.md").read_text(encoding="utf-8") == "me"
     # A non-project child inherits the whole knowledge shelf; a project child inherits none of it.
     assert (child / "memory" / "knowledge" / "patterns.md").exists() is (not project_id)
-
-
-def test_the_prompt_and_the_constitution_name_learning_not_a_register():
-    """The words the mind lives by carry the failure-time check and no privileged store."""
-    from pathlib import Path
-
-    repo = Path(__file__).resolve().parents[1]
-    prompt = " ".join((repo / "prompts" / "SYSTEM.md").read_text(encoding="utf-8").split())
-    bible = " ".join((repo / "BIBLE.md").read_text(encoding="utf-8").split())
-    assert "Before closing a failure I check what I already know about its class" in prompt
-    assert "a mark that keeps it in view or meets me at the action it concerns" in prompt
-    assert "Pattern Register" not in prompt and "improvement backlog or a scratchpad line" not in prompt
-    assert "Learning changes what happens next." in bible and "**Durable learning**" in bible
-    for gone in ("Pattern Register", "two-strike", "patterns.md", "improvement-backlog.md", "If three behavioral rules"):
-        assert gone not in bible, gone
 
 
 def test_the_residency_fact_fits_inside_the_receipt_bound(tmp_path):

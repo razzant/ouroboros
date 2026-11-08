@@ -695,6 +695,31 @@ test('the owner echo and its history row stay one bubble keyed by his id', async
     assert.equal(f.bubbles()[0].dataset.clientMessageId, 'owner:201');
 });
 
+test("an owner message links its http(s) address live and from history, and Copy keeps the owner's words", async (t) => {
+    const words = 'Read `https://e.com/a?b=1&c=2`, then <b>reply</b>.';
+    const link = '<a class="md-link" href="https://e.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">'
+        + 'https://e.com/a?b=1&amp;c=2</a>';
+    const message = (bubble) => bubble.innerHTML.match(/<div class="message">[\s\S]*?<\/div>/)?.[0];
+    const saved = row('chat:211', words, { role: 'user', client_message_id: 'owner:211', source: 'web' });
+    const f = fixture(t);
+    await f.refresh();
+    f.emit({ ...saved, content: words, history_id: undefined });
+    const live = f.bubbles()[0];
+    assert.equal(message(live), `<div class="message">Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
+    const copied = [];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => copied.push(text) } });
+    t.after(() => delete navigator.clipboard);
+    const copy = live.children.find((node) => node.classList.contains('chat-message-copy'));
+    for (const handler of copy.listeners.get('click')) await handler({ target: copy });
+    assert.deepEqual(copied, [words]);
+    // An earlier message with the same words arrives only from history.
+    const earlier = row('chat:210', words, { role: 'user', client_message_id: 'owner:210', source: 'web',
+        ts: '2026-09-12T11:00:00.000Z' });
+    await f.refresh(page([earlier, saved]));
+    const replayed = f.bubbles().find((bubble) => bubble.dataset.clientMessageId === 'owner:210');
+    assert.equal(message(replayed), message(live), 'history paints the same linked words');
+});
+
 test("a host reply that names the owner's submission is drawn beside his bubble, not into it", async (t) => {
     const f = fixture(t);
     await f.refresh();

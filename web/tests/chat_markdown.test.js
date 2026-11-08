@@ -9,6 +9,7 @@ import {
     parseChartConfig,
     prepareMarkdownSource,
     renderChatMarkdown,
+    linkify,
 } from '../modules/chat_markdown.js';
 
 test('prepareMarkdownSource neutralizes only raw HTML and leaves entities to the parser', () => {
@@ -128,6 +129,50 @@ test('chatMarkdownUrl rejects unsafe or non-exact relative URLs', () => {
         '/api/files/download?path=report.pdf#fragment',
     ];
     for (const source of rejected) assert.equal(chatMarkdownUrl(source), '', source);
+});
+
+// The owner's text and the addresses in it that link, as [shown words, href].
+const OWNER_TEXT_LINKS = [
+    // A sentence's punctuation and an unopened closing bracket end an address; a bracket it opened stays in it.
+    ['See https://en.wikipedia.org/wiki/Foo_(bar)). Then https://e.com/a, http://[::1]:8000/b; ok…',
+        [['https://en.wikipedia.org/wiki/Foo_(bar)', 'https://en.wikipedia.org/wiki/Foo_(bar)'],
+            ['https://e.com/a', 'https://e.com/a'], ['http://[::1]:8000/b', 'http://[::1]:8000/b']]],
+    // Guillemets and quotes are not part of the address; Cyrillic stays shown as written, the href is its parsed form.
+    ['«https://пример.рф/путь?q=1&lang=ru#раздел» "https://e.com/q" \'https://e.com/s\' “https://e.com/t”',
+        [['https://пример.рф/путь?q=1&lang=ru#раздел',
+            'https://xn--e1afmkfd.xn--p1ai/%D0%BF%D1%83%D1%82%D1%8C?q=1&lang=ru#%D1%80%D0%B0%D0%B7%D0%B4%D0%B5%D0%BB'],
+        ['https://e.com/q', 'https://e.com/q'], ['https://e.com/s', 'https://e.com/s'], ['https://e.com/t', 'https://e.com/t']]],
+    // Markdown and backticks stay literal text; an address inside them still links.
+    ['`https://e.com/code` **https://e.com/bold** [x](https://e.com/md)',
+        [['https://e.com/code', 'https://e.com/code'], ['https://e.com/bold**', 'https://e.com/bold**'],
+            ['https://e.com/md', 'https://e.com/md']]],
+    // URL data is not a Markdown delimiter: standalone suffixes survive, including query tokens.
+    ['https://e.com/download?token=AbC_ https://e.com/~ https://e.com/?q=topic*',
+        [['https://e.com/download?token=AbC_', 'https://e.com/download?token=AbC_'],
+            ['https://e.com/~', 'https://e.com/~'], ['https://e.com/?q=topic*', 'https://e.com/?q=topic*']]],
+    // HTML stays text: its javascript: attribute is never a destination, only the visible address is.
+    ['<a href="javascript:alert(1)">https://e.com/x</a><img src=x onerror=alert(1)>', [['https://e.com/x', 'https://e.com/x']]],
+    // Only an explicit http(s) address with a host links: no other scheme, bare host or address glued to a word.
+    ['javascript:alert(1) data:text/html,x mailto:a@e.com www.e.com xhttps://e.com https:// https:///x https://\\x', []],
+    // An upper-case scheme links; an invisible format character ends an address rather than hiding inside it.
+    ['HTTPS://E.COM/Up and https://e.com/a‮b​c', [['HTTPS://E.COM/Up', 'https://e.com/Up'], ['https://e.com/a', 'https://e.com/a']]],
+    // Blanks, line breaks and entities stay the author's.
+    ['a & b\n\t<c>  https://e.com/x?y=1&z=2\r\n&amp;', [['https://e.com/x?y=1&z=2', 'https://e.com/x?y=1&z=2']]],
+];
+
+test('linkify keeps the owner text literal and links only its explicit http(s) addresses', () => {
+    const anchor = /<a class="md-link" href="([^"]*)" target="_blank" rel="noopener noreferrer">([^<]*)<\/a>/g;
+    const unescape = (value) => value.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&#39;', "'")
+        .replaceAll('&quot;', '"').replaceAll('&#96;', '`').replaceAll('&amp;', '&');
+    for (const [source, expected] of OWNER_TEXT_LINKS) {
+        const html = linkify(source);
+        assert.deepEqual([...html.matchAll(anchor)].map(([, href, shown]) => [unescape(shown), unescape(href)]), expected, source);
+        // No markup but those links, and the words read back exactly as written.
+        const text = html.replace(anchor, '$2');
+        assert.equal(text.includes('<'), false, source);
+        assert.equal(unescape(text), source);
+    }
+    assert.equal(linkify(null), '');
 });
 
 test('parseChartConfig accepts exactly the supported chart types', () => {

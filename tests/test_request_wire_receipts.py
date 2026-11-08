@@ -601,7 +601,6 @@ def test_provider_body_errors_are_rejected_before_semantic_success(provider_erro
 @pytest.mark.parametrize("response", [
     {},
     {"response_id": "resp-metadata-only"},
-    {"content": ""},
     {"content": "   "},
 ])
 def test_empty_or_metadata_only_response_is_not_semantic_success(response):

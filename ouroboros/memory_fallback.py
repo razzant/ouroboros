@@ -1,14 +1,17 @@
-"""One signed Light draft: with consciousness on, a candidate from unsealed failed/cancelled work's own rows.
+"""One signed Light draft only while consciousness is off (or unknown).
 
-With consciousness off (or unknown), an open lost-Max episode that folding my memory can end
-(``memory_max.memory_can_help``) comes first: one room's oldest run of unfolded pages, whoever
-wrote them, folded into a part (``max_episode_units``); then the existing acting-draft selection:
+With consciousness off (or unknown), a root whose own start memory lowered to Low while everything
+else fit the window (``crowded_start``: its view fact's Max room, ``memory_floor.crowded_by_memory``)
+comes first: one room's oldest run of unfolded pages, whoever wrote them, folded into a part
+(``max_room_units``); then the existing acting-draft selection:
 
 1. The task's view showed this room's open rows only by address (``shortage_from_trace``,
    ``open_rows``): the room's oldest open segment, up to the newest addressed row (a
    later one when an older one is unreadable to the helper or already refused).
 2. Else the view showed old narrative only by pointer (``narrative``): adjacent unfolded
    runs of one kind of one room among those pointers, oldest first, folded into a part.
+2b. Else the view folded the words or the line of a room of my other conversations where my human or
+   I spoke (``other_room``): the oldest such room's oldest open segment.
 3. Else, only after a root that was not a direct turn (the late phase of a direct turn
    blocks the owner's next message), the oldest unfolded period of the old memory,
    blocks 1-22 (block 0 is already a retelling of two months the mind folds itself):
@@ -45,7 +48,8 @@ from ouroboros.chronicle_store import ChronicleStore, PublishResult, draft_signe
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
 from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
                                            row_class)
-from ouroboros.memory_inventory import OpenSegment, ShortageFact, shortage_from_trace
+from ouroboros.memory_floor import crowded_by_memory
+from ouroboros.memory_inventory import VIEW_TRACE_KEY, OpenSegment, ShortageFact, shortage_from_trace
 from ouroboros.utils import extract_trailing_json_object, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -173,12 +177,9 @@ class FallbackUnit:
     record_id: str = ""  # a legacy unit's record: its retelling is a hint, never a source
     member_ids: Tuple[str, ...] = ()
     head_sequence: int = 0  # the room head at selection (a part's ``expected_sequence``)
-    candidate_task: str = ""
 
     def describe(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"kind": self.kind, "room_id": self.room_id, "key": self.key}
-        if self.candidate_task:
-            out["candidate_task"] = self.candidate_task
         if self.record_id:
             out["record_id"] = self.record_id
         if self.member_ids:
@@ -250,8 +251,16 @@ def _legacy_units(root: pathlib.Path, store: ChronicleStore) -> Iterator[Fallbac
                                head_sequence=segment.head_sequence)
 
 
-def max_episode_units(store: ChronicleStore) -> Iterator[FallbackUnit]:
-    """While my memory keeps Max lost (``memory_max.memory_can_help``): a room's runs of unfolded pages no shown
+def crowded_start(trace: Any) -> bool:
+    """This root's own start was lowered to Low by memory: the view fact its trace keeps (``VIEW_TRACE_KEY``) names a
+    Max room ``crowded`` while everything but memory fit the window (``memory_floor.crowded_by_memory``). No fact,
+    a held start, a route, or tool schemas that tipped it alone: ``False``."""
+    fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None
+    return crowded_by_memory(fact.get("max_room") if isinstance(fact, Mapping) else None)
+
+
+def max_room_units(store: ChronicleStore) -> Iterator[FallbackUnit]:
+    """After a root's start that memory crowded (``crowded_start``): a room's runs of unfolded pages no shown
     account tells (the view's ``told_map``), oldest first, whoever wrote them, the room holding most such text
     first; one page is a run too, Light judges whether folding it helps, and a run it kept as it is leaves the
     next one in turn (``select_unit``). Never an account across rooms: that is the mind's."""
@@ -279,7 +288,7 @@ def candidate_units(root: Any, store: ChronicleStore, shortage: Optional[Shortag
                     allow_legacy: bool) -> Iterator[FallbackUnit]:
     """Units in consideration order: the shortage's disjoint runs, then old periods."""
     root = pathlib.Path(root)
-    if shortage is not None and shortage.kind == "open_rows":
+    if shortage is not None and shortage.kind in ("open_rows", "other_room"):
         # Oldest run first; a later run only when an older one has no readable input or a receipt.
         for segment in memory_inventory.open_segments(root, store, shortage.room_id,
                                                       until=shortage.newest_addressed_row):
@@ -441,7 +450,7 @@ class _Row:
 
 
 def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]],
-          positions: Dict[str, int], *, verbatim: bool = False) -> List[_Row]:
+          positions: Dict[str, int]) -> List[_Row]:
     lineage = row_lineage(root)  # one lineage lookup for the pass
     items = []
     for address, row in read_rows:
@@ -452,16 +461,19 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
         author = {"label": f"{cls['author'].get('kind')}: {cls['author'].get('label')}"}
         task = str(row.get("task_id") or "")
         spoken = cls["lane"] == 1
-        line = render_memory_row(address, row, author=author, indent=INDENT) if verbatim or spoken or not task else ""
+        line = render_memory_row(address, row, author=author, indent=INDENT) if spoken or not task else ""
         pointer = (f"{memory_row_header(address, row, author=author)} (words, {len(render_row_text(row))} chars — "
                    "read by address)") if spoken and cls["author"].get("kind") != "human" else ""
+        if cls["author"].get("kind") == "place_fact":
+            pointer = f"{memory_row_header(address, row, author=author)} (reaction — read by address)"
         items.append(_Row((address, row, pos), task, line, pointer))
     return items
 
 
 def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, str, str]]:
-    """``task -> (group, verbatim block, address block)``: the owner's words that caused each task."""
-    from ouroboros.owner_words import render_owner_words, task_owner_words  # D15->D17 is lazy-only
+    """``task -> (group, verbatim block, address block)``: my human's words for each task."""
+    from ouroboros.owner_words import (render_owner_words, task_owner_words, unread_target,  # D15->D17 is lazy-only
+                                       words_stamp)
 
     out: Dict[str, Tuple[str, str, str]] = {}
     for item in items:
@@ -477,10 +489,10 @@ def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, 
         block = render_owner_words(rows, absent, audience="writer", root_task_id=root_task)
         if not block:
             continue
-        refs = [f"[{row.get('ts') or 'time not recorded'} · owner · {row.get('source')} of task {row.get('task_id')}"
-                f" · {row.get('ref')}] ({len(row.get('text') or '')} chars — not shown: the input could not hold "
-                "them)" for row in rows]
-        pointer = "## Words of my human that caused this work (by reference)\n" + "\n".join(refs) if refs else block
+        # The whole form's stamps (a reply target under its own author, never my human), each body's size alone.
+        refs = [words_stamp(row) + (f" ({len(row['text'])} chars — not shown: the input could not hold them)"
+                                    if row.get("text") else f" {unread_target(row)}") for row in rows]
+        pointer = "## My human's words for this work (by reference)\n" + "\n".join(refs) if refs else block
         out[item.task] = (group, block, pointer)
     return out
 
@@ -575,11 +587,8 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
     except (LookupError, ValueError):
         return None
     positions = {entry[0]["row_sha256"]: entry[2] for entry in segment.rows}
-    if unit.candidate_task:
-        read["rows"] = [(address, row) for address, row in read["rows"]
-                        if address["row_sha256"] in positions and str(row.get("task_id") or "") == unit.candidate_task]
-    items = _rows(root, read["rows"], positions, verbatim=bool(unit.candidate_task))
-    owners = {} if unit.candidate_task else _owner_words(root, items)
+    items = _rows(root, read["rows"], positions)
+    owners = _owner_words(root, items)
     tail = ""
     if unit.record_id:
         retold = next((record for record in store.room_records(unit.room_id) if record["id"] == unit.record_id), {})
@@ -587,7 +596,7 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
             tail = ("## Earlier helper retelling of this period, not a source, may be wrong\n"
                     + _indented(retold["current_text"]))
     head, label = _head(root, _PAGE, _QUOTES), _room_label(root, unit.room_id)
-    full = host_stamp(root, [unit.candidate_task] if unit.candidate_task else read["covers"]["task_ids"], rows=read["rows"])
+    full = host_stamp(root, read["covers"]["task_ids"], rows=read["rows"])
     stamps = {entry["task_id"]: entry for entry in full["tasks"]}
     n, addressed, refs = _floor(items, budget, measure,
                                 lambda k, a, r: _compose(head, label, items, k, a, owners, r, stamps, tail))
@@ -714,14 +723,14 @@ def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
 def _publish(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, draft: WriterInput,
              answer: Dict[str, Any], usage: Dict[str, Any], binding: Dict[str, Any]) -> PublishResult:
     from ouroboros.knowledge import observed_route_stamp
-    from ouroboros.tools.chronicle import _quote_resolver
+    from ouroboros.tools.chronicle import _quote_resolver, page_room_label
 
     author = {"kind": "helper", "writer": "fallback_part" if unit.kind == "part" else "fallback_page",
               "route": observed_route_stamp(usage), "attribution": "helper draft, not lived"}
     metadata = {"unit": unit.describe(), "input_sha256": draft.input_sha256, "light_binding": binding,
                 "addressed_rows": list(draft.addressed_rows)}
-    if unit.candidate_task:
-        metadata.update(candidate=True, own_task_id=unit.candidate_task)
+    if unit.kind != "part":
+        metadata["room_label"] = page_room_label(root, unit.room_id, unit.segment.rows if unit.segment else ())
     resolver = _quote_resolver(root, row_lineage(root), draft.positions)
     if unit.kind == "part":
         return store.publish_part(room_id=unit.room_id, text=answer["text"], member_ids=list(draft.member_ids),
@@ -753,14 +762,12 @@ def _refuse(root: pathlib.Path, store: ChronicleStore, run: FallbackRun, draft: 
 
 def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: Any, trace: Any) -> FallbackRun:
     """At most one Light call: draft the chosen unit and publish it, or record why it was refused."""
-    candidate = not fallback_active()
+    if not fallback_active():
+        return FallbackRun("consciousness_on")
     root = pathlib.Path(task.get("budget_drive_root") or pathlib.Path(drive_logs).parent)
     store = ChronicleStore(root)
     if not store.log_path.exists() or not store.activation():
         return FallbackRun("not_activated")  # the writer reads the chronicle, it never creates it
-    from ouroboros.memory_sealing import failed_work_units
-    if candidate and not failed_work_units(root, store):
-        return FallbackRun("consciousness_on")
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     # The unit is chosen under the lock: a choice made outside it could pay again for an input
@@ -778,10 +785,9 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
             return fitted[0]
 
         shortage, allow_legacy = shortage_from_trace(trace), not task.get("_is_direct_chat")
-        from ouroboros.memory_max import memory_can_help  # the open lost-Max episode memory could end
-        units = (failed_work_units(root, store) if candidate else itertools.chain(
-            max_episode_units(store), candidate_units(root, store, shortage, allow_legacy=allow_legacy))
-            if memory_can_help(root) else None)
+        units = (itertools.chain(
+            max_room_units(store), candidate_units(root, store, shortage, allow_legacy=allow_legacy))
+            if crowded_start(trace) else None)
         chosen = select_unit(root, store, shortage, allow_legacy=allow_legacy, binding=binding, fit=fit, units=units)
         if chosen is None:
             return FallbackRun("nothing")

@@ -28,6 +28,7 @@ from typing import Iterable, Sequence
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
+from ouroboros.launch_roots import TUPLE_KEYS, WORK_ROOT_KEYS, configured_roots
 from ouroboros.launcher_bootstrap import (
     BootstrapContext, appimage_extracts_and_runs, bootstrap_repo, check_git, embedded_python_env,
 )
@@ -38,6 +39,7 @@ from ouroboros.platform_layer import (
     embedded_python_candidates,
     git_install_hint,
 )
+from ouroboros.unindexed import bytecode_prefix
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -51,12 +53,24 @@ class PackagedCLIError(RuntimeError):
 
 @dataclass(frozen=True)
 class PackagedRuntime:
+    """The bundle's own identity, plus the launch tuple this CLI and its desktop app share."""
+
     bundle_root: pathlib.Path
     embedded_python: pathlib.Path
     app_root: pathlib.Path
     repo_dir: pathlib.Path
     data_dir: pathlib.Path
     app_version: str
+    settings_path: pathlib.Path | None = None  # absent: derived from the roots as config derives it
+    pid_file: pathlib.Path | None = None
+    port_file: pathlib.Path | None = None
+
+    def __post_init__(self) -> None:
+        for name, derived in (("settings_path", self.data_dir / "settings.json"),
+                              ("pid_file", self.app_root / "ouroboros.pid"),
+                              ("port_file", self.data_dir / "state" / "server_port")):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, derived)
 
 
 class _StdLogger:
@@ -94,8 +108,8 @@ def _set_global_bytecode_suppression(data_dir: pathlib.Path) -> None:
     Parity with ``_inner_cli_env``'s ``embedded_python_env`` call so the CLI entry
     process and any naive ``os.environ.copy()`` child inherit the suppression. A
     signed+notarized macOS .app must never write ``__pycache__/*.pyc`` into its own
-    bundle at runtime — that breaks the codesign seal. Reuses the same
-    data_dir/state/pycache convention; ``setdefault`` keeps explicit overrides.
+    bundle at runtime — that breaks the codesign seal. Reuses the data dir's
+    ``unindexed.bytecode_prefix``, which keeps an explicit override.
 
     The module top already set ``sys.dont_write_bytecode`` (the only thing that
     stops THIS process's own imports); we re-assert it and add the cache-prefix env
@@ -103,26 +117,24 @@ def _set_global_bytecode_suppression(data_dir: pathlib.Path) -> None:
     """
     sys.dont_write_bytecode = True
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-    pycache_dir = pathlib.Path(data_dir) / "state" / "pycache"
-    try:
-        pycache_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    os.environ.setdefault("PYTHONPYCACHEPREFIX", str(pycache_dir))
+    os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(data_dir, os.environ.get("PYTHONPYCACHEPREFIX", ""))
 
 
 def resolve_packaged_runtime() -> PackagedRuntime:
     bundle_root = _find_bundle_root(_candidate_start_paths())
     embedded_python = _find_embedded_python(bundle_root)
     app_version = _read_version(bundle_root)
-    app_root = pathlib.Path.home() / "Ouroboros"
+    roots = configured_roots()  # the desktop launcher's own tuple: explicit values, else APP_ROOT's
     return PackagedRuntime(
         bundle_root=bundle_root,
         embedded_python=embedded_python,
-        app_root=app_root,
-        repo_dir=app_root / "repo",
-        data_dir=app_root / "data",
+        app_root=roots.app_root,
+        repo_dir=roots.repo_dir,
+        data_dir=roots.data_dir,
         app_version=app_version,
+        settings_path=roots.settings_path,
+        pid_file=roots.pid_file,
+        port_file=roots.port_file,
     )
 
 
@@ -196,11 +208,11 @@ def _bootstrap_runtime(runtime: PackagedRuntime) -> None:
         bundle_dir=runtime.bundle_root,
         repo_dir=runtime.repo_dir,
         data_dir=runtime.data_dir,
-        settings_path=runtime.data_dir / "settings.json",
+        settings_path=runtime.settings_path,
         embedded_python=str(runtime.embedded_python),
         app_version=runtime.app_version,
         hidden_run=_hidden_run,
-        save_settings=lambda settings: _save_settings(runtime.data_dir / "settings.json", settings),
+        save_settings=lambda settings: _save_settings(runtime.settings_path, settings),
         log=_StdLogger(),
     )
     bootstrap_repo(context)
@@ -217,15 +229,10 @@ def _save_settings(path: pathlib.Path, settings: dict) -> None:
     goes through the one persistence prologue (which proves the owner-only context/safety
     ratchets against the value on disk), the one serializer and the one byte-exact commit
     helper, so a bootstrap save cannot be the save that skips them. The path
-    it writes is the path the prologue reads: the packaged runtime resolves its data
-    dir to ``~/Ouroboros/data``, which is exactly what ``config`` resolves in a
-    process that was given no path overrides — pinned by
-    tests/test_settings_read_seam.py. That identity is CONDITIONAL on the outer
-    packaged process carrying no ``OUROBOROS_*`` path override: the packaged runtime
-    ignores the environment by design (the inner CLI child is handed the packaged
-    paths explicitly), while the prologue proves against ``config.SETTINGS_PATH``,
-    which honours one. Dormant today — ``BootstrapContext.save_settings`` has no
-    caller — and disclosed rather than papered over.
+    it writes is the path the prologue reads: the packaged runtime resolves the same
+    launch tuple ``config`` freezes (``launch_roots.configured_roots``, overrides
+    included), pinned by tests/test_settings_read_seam.py. Dormant today —
+    ``BootstrapContext.save_settings`` has no caller.
 
     The write GUARDS are taken on the path this saver actually writes, not on
     ``config.SETTINGS_PATH``: under a pinned benchmark snapshot, or from pytest against the
@@ -251,29 +258,11 @@ def _run_inner_cli(runtime: PackagedRuntime, args: Sequence[str]) -> int:
 
 
 def _inner_cli_env(runtime: PackagedRuntime) -> dict[str, str]:
-    keep = {
-        key: value
-        for key, value in os.environ.items()
-        if key
-        not in {
-            "PYTHONPATH",
-            "OUROBOROS_APP_ROOT",
-            "OUROBOROS_REPO_DIR",
-            "OUROBOROS_DATA_DIR",
-            "OUROBOROS_SETTINGS_PATH",
-            "OUROBOROS_PID_FILE",
-            "OUROBOROS_PORT_FILE",
-            BUNDLE_DIR_ENV,
-        }
-    }
+    keep = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", *TUPLE_KEYS, BUNDLE_DIR_ENV}}
+    keep.update(_roots_env(runtime))
     keep.update(
         {
             "PYTHONPATH": str(runtime.repo_dir),
-            "OUROBOROS_APP_ROOT": str(runtime.app_root),
-            "OUROBOROS_REPO_DIR": str(runtime.repo_dir),
-            "OUROBOROS_DATA_DIR": str(runtime.data_dir),
-            "OUROBOROS_SETTINGS_PATH": str(runtime.data_dir / "settings.json"),
-            "OUROBOROS_PID_FILE": str(runtime.app_root / "ouroboros.pid"),
             "OUROBOROS_APP_VERSION": runtime.app_version,
             "OUROBOROS_PACKAGED_CLI": "1",
             # The inner CLI runs out of the managed repo; bundled payloads
@@ -284,18 +273,37 @@ def _inner_cli_env(runtime: PackagedRuntime) -> dict[str, str]:
     return embedded_python_env(runtime.data_dir, keep)
 
 
+def _roots_env(runtime: PackagedRuntime) -> dict[str, str]:
+    """The launch tuple the inner CLI and an app opened for this CLI receive: every resolved path,
+    the port file only when one was given (otherwise it follows the data root)."""
+    env = {"OUROBOROS_APP_ROOT": str(runtime.app_root), "OUROBOROS_REPO_DIR": str(runtime.repo_dir),
+           "OUROBOROS_DATA_DIR": str(runtime.data_dir), "OUROBOROS_SETTINGS_PATH": str(runtime.settings_path),
+           "OUROBOROS_PID_FILE": str(runtime.pid_file)}
+    if "OUROBOROS_PORT_FILE" in os.environ:  # a relocated endpoint stays this deployment's
+        env["OUROBOROS_PORT_FILE"] = str(runtime.port_file)
+    return env
+
+
+def _app_env(runtime: PackagedRuntime) -> dict[str, str]:
+    """What an app opened through macOS must be handed, since LaunchServices starts it with its own
+    environment: this CLI's resolved tuple, including defaults, and each explicit work root."""
+    work_roots = {key: os.environ[key] for key in WORK_ROOT_KEYS if os.environ.get(key)}
+    return {**_roots_env(runtime), **work_roots}
+
+
 def _prepare_start_if_requested(args: list[str], runtime: PackagedRuntime) -> list[str]:
     command_idx, command = _find_command(args)
     start_idx = _run_start_index(args, command_idx) if command == "run" else None
     if start_idx is None:
         return args
-    base_url = _base_url_from_args(args, runtime.data_dir)
+    base_url = _base_url_from_args(args, runtime.port_file)
     if not _is_loopback_url(base_url):
         raise PackagedCLIError("--start can only launch a local loopback Ouroboros desktop runtime")
     stripped = _strip_arg_at(args, start_idx)
-    if not _gateway_supervisor_ready(base_url):
+    explicit = bool(_explicit_url(args) or os.environ.get("OUROBOROS_URL", "").strip())
+    if not _selected_ready(base_url, runtime, explicit=explicit):
         _launch_desktop_app(runtime)
-    ready_url = _wait_for_ready(base_url, runtime.data_dir, explicit_url=_explicit_url(args) != "")
+    ready_url = _wait_for_ready(base_url, runtime, explicit_url=explicit)
     os.environ["OUROBOROS_URL"] = ready_url
     return stripped
 
@@ -365,15 +373,14 @@ def _explicit_url(args: Sequence[str]) -> str:
     return ""
 
 
-def _base_url_from_args(args: Sequence[str], data_dir: pathlib.Path) -> str:
+def _base_url_from_args(args: Sequence[str], port_file: pathlib.Path) -> str:
     explicit = _explicit_url(args) or os.environ.get("OUROBOROS_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
-    # This is the packaged desktop root, not the caller's deployment: both
-    # resolve_packaged_runtime and _inner_cli_env deliberately ignore path overrides.
+    # The port file of the deployment this CLI resolved (resolve_packaged_runtime).
     port = DEFAULT_PORT
     try:
-        raw = (data_dir / "state" / "server_port").read_text(encoding="utf-8").strip()
+        raw = pathlib.Path(port_file).read_text(encoding="utf-8").strip()
         if raw:
             port = int(raw)
     except Exception:
@@ -395,15 +402,26 @@ def _gateway_supervisor_ready(base_url: str) -> bool:
         return False
 
 
-def _wait_for_ready(base_url: str, data_dir: pathlib.Path, *, explicit_url: bool) -> str:
+def _selected_ready(url: str, runtime: PackagedRuntime, *, explicit: bool) -> bool:
+    """A ready supervisor at URL that is this CLI's: one the caller named, or the main server of the
+    data root it resolved, never another installation's on a shared or fallback port."""
+    from ouroboros.server_process import serves_data_root
+
+    return (explicit or serves_data_root(url, runtime.data_dir)) and _gateway_supervisor_ready(url)
+
+
+def _wait_for_ready(base_url: str, runtime: PackagedRuntime, *, explicit_url: bool) -> str:
     deadline = time.time() + float(os.environ.get("OUROBOROS_CLI_START_TIMEOUT", START_TIMEOUT_SEC))
     current = base_url.rstrip("/")
     while time.time() < deadline:
         if not explicit_url:
-            current = _base_url_from_args([], data_dir)
-        if _gateway_supervisor_ready(current):
+            current = _base_url_from_args([], runtime.port_file)
+        if _selected_ready(current, runtime, explicit=explicit_url):
             return current
         time.sleep(0.5)
+    if not explicit_url and _gateway_supervisor_ready(current):
+        raise PackagedCLIError(f"the Ouroboros answering at {current} is not the one for {runtime.data_dir}; "
+                               "pass --url to use it")
     raise PackagedCLIError(f"desktop runtime did not become ready at {current}")
 
 
@@ -422,15 +440,15 @@ def _launch_desktop_app(runtime: PackagedRuntime) -> None:
     if not app:
         raise PackagedCLIError("could not locate packaged desktop launcher for --start")
     if IS_MACOS:
-        subprocess.Popen(["open", str(app)])
-    elif IS_WINDOWS:
-        subprocess.Popen([str(app)], cwd=str(app.parent))
-    else:
-        relaunch_env = _linux_appimage_relaunch_env(app)
-        if relaunch_env is None:
-            subprocess.Popen([str(app)], cwd=str(app.parent))
-        else:
-            subprocess.Popen([str(app)], cwd=str(app.parent), env=relaunch_env)
+        # LaunchServices keeps the app's identity and lifetime and starts it with its own environment:
+        # the resolved roots ride `open --env` into a new instance (`-n`), even for defaults: one
+        # running with other roots must not be activated instead. No global launchd variable is set.
+        carried = [arg for key, value in _app_env(runtime).items() for arg in ("--env", f"{key}={value}")]
+        subprocess.Popen(["open", "-n", *carried, str(app)])
+    else:  # never with the CLI shim's bytecode prefix: outside the data dir it leaves every worker boot recompiling
+        launch_env = (None if IS_WINDOWS else _linux_appimage_relaunch_env(app)) or os.environ
+        subprocess.Popen([str(app)], cwd=str(app.parent),
+                         env={key: value for key, value in launch_env.items() if key.upper() != "PYTHONPYCACHEPREFIX"})
 
 
 def _linux_appimage_relaunch_env(app: pathlib.Path) -> dict[str, str] | None:
@@ -462,9 +480,11 @@ def _desktop_app_path(bundle_root: pathlib.Path) -> pathlib.Path | None:
         # binary would let the CLI exit and release the payload underneath the
         # detached desktop process. Relaunch the stable AppImage path instead so
         # its own runtime owns the payload for the launcher's whole lifetime.
-        appimage = pathlib.Path(os.environ.get("APPIMAGE", "").strip())
-        if appimage.is_file():
-            return appimage
+        from ouroboros.desktop_autostart import own_appimage
+
+        appimage = own_appimage(bundle_root)  # not one inherited from another AppImage app's terminal
+        if appimage and pathlib.Path(appimage).is_file():
+            return pathlib.Path(appimage)
     for parent in (bundle_root, *bundle_root.parents):
         if IS_MACOS and parent.suffix == ".app":
             return parent

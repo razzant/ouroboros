@@ -34,20 +34,55 @@ def render_review_session_prompt(request: Any, slot: Any, task: str) -> str:
     ))
 
 
+def session_material(surface: str, contract: str, schema: Any, accesses: Any) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): an agent-session seat's wrapper
+    over a placeholder task for each seated access: the work-order frame with ``contract``, the read-only system
+    instructions or the checking copy's, the answer ``schema`` and the paged-turn pointers. The host and environment
+    facts every delegated run shares are not review text and are left out."""
+    from types import SimpleNamespace
+
+    from ouroboros.review_checking import checking_material
+    from ouroboros.review_execution import _REVIEW_SESSION_INSTRUCTIONS
+    from ouroboros.tools.review_brief_coupling import paged_review_text
+    from ouroboros.tools.review_multi_model import TRIAD_ROLE_HINT
+
+    source = {"session_relative_path": "⟨path⟩", "sha256": "⟨sha⟩"}
+    material = [json.dumps(schema, sort_keys=True), *(paged_review_text("⟨text⟩", source, label=f"review {key}",
+                                                                        delegated=True) for key in ("prompt", "instructions"))]
+    for access in sorted(set(accesses)):
+        prompt = render_review_session_prompt(SimpleNamespace(surface=surface, policy={"output_contract": contract}),
+                                              SimpleNamespace(role_hint=TRIAD_ROLE_HINT, slot_id="⟨slot⟩", session_access=access),
+                                              "⟨task⟩")
+        material += [prompt.replace(HOST_FACTS_INSTRUCTION, "").replace(SHARED_ENVIRONMENT_INSTRUCTION, ""),
+                     *([_REVIEW_SESSION_INSTRUCTIONS] if access == "readonly" else [
+                         *checking_material(), *(_ENVIRONMENT_NOTE["note"].format(where=where) for where in (
+                             _ENVIRONMENT_NOTE["scratch"].format(scratch="⟨scratch⟩"), _ENVIRONMENT_NOTE["outside"]))])]
+    return material
+
+
 def seat_service_directories(gateway: Any, route_id: str, shape: Any, data_root: Any, task_id: str,
                              operation_id: str, area: str, thread_seat: str = "") -> Any:
     """What a writable seat may write outside its copy (``workspace_preflight.session_service_directories``):
-    one run's short scratch is owned by its review task's drive, keyed by the seat's directory name. A sticky
-    thread's turns carry only geometry (``start_review_thread_turn``), so its seat negotiates none."""
+    one run's short scratch is held by the seat's own home beside the copy it serves (its record is
+    ``<home>/session_scratch_owners/seat-<home>/scratch.json``, released with the copy, never waiting for
+    the task: #2706, and the Skills-page and marketplace pseudo task ids hold nothing: #2707), and granted,
+    or at full access only named. A sticky thread's turns carry only geometry
+    (``start_review_thread_turn``), so its seat gets none."""
     from ouroboros.review_checking import seat_dir
-    from ouroboros.workspace_preflight import ServiceDirectories, session_service_directories
+    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX, ServiceDirectories, session_service_directories
 
     if thread_seat:
         return ServiceDirectories(limitation="thread_turns_carry_no_grant: a review thread's turns carry "
                                              "no execution grant" if shape.access == "workspace_write" else "")
+    home = seat_dir(data_root, task_id, operation_id)
     return session_service_directories(
         gateway, route_id, access=shape.access, mode=shape.mode, data_root=data_root, drive_root=data_root,
-        task_id=task_id, key=f"seat-{seat_dir(data_root, task_id, operation_id).name}", execution_root=area)
+        task_id=task_id, key=f"{SEAT_SCRATCH_KEY_PREFIX}{home.name}", execution_root=area, holder=home)
+
+
+# A writable seat's own note inside the environment facts every delegated run is given.
+_ENVIRONMENT_NOTE = {"scratch": "in {scratch}, this run's disposable scratch, never inside this copy",
+                     "outside": "outside this copy", "note": "{where}, since its changes are retained as evidence"}
 
 
 def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any = None) -> str:
@@ -55,7 +90,7 @@ def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any 
 
     Its copy's changes are retained as evidence (``review_checking``), so the facts say
     where an environment may live; a folder read in place has no copy to build in, so
-    its seat hears only ``service``: what the engine grants it outside its folder. The
+    its seat hears only ``service``: the scratch the host made for it outside its folder. The
     body's documented recipe is named only for a frozen tree of the body."""
     from ouroboros.workspace_preflight import (
         ENVIRONMENT_FACTS_HEADING,
@@ -67,7 +102,7 @@ def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any 
     kind, body, service = str(source.get("kind") or ""), False, service or ServiceDirectories()
     if kind not in ("git_tree", "directory"):  # a folder read in place: only what the seat may write outside
         return (ENVIRONMENT_FACTS_HEADING + session_service_facts(service, data_root).rstrip("\n")
-                if service.roots or service.limitation else "")
+                if service.scratch or service.limitation else "")
     if kind == "git_tree":
         try:
             from ouroboros.config import resolve_repo_dir
@@ -76,10 +111,10 @@ def seat_environment_facts(area: str, source: Any, data_root: Any, service: Any 
             body = body_fact(source.get("root"), system_repo=resolve_repo_dir(), data_dir=data_root).body == BODY_TRUE
         except Exception:  # an unrecognized subject is foreign: a named recipe gap, never a guess
             body = False
-    where = (f"in {service.scratch}, the scratch your engine grants this run, never inside this copy"
-             if service.scratch else "outside this copy")
+    where = (_ENVIRONMENT_NOTE["scratch"].format(scratch=service.scratch) if service.scratch
+             else _ENVIRONMENT_NOTE["outside"])
     return session_environment_facts(area, data_root=data_root, body=body, service=service,
-                                     environment_note=f"{where}, since its changes are retained as evidence")
+                                     environment_note=_ENVIRONMENT_NOTE["note"].format(where=where))
 
 
 def prepare_review_session_request(invocation: Any, route: Any, *,
@@ -98,7 +133,6 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
     from ouroboros.review_execution import ReviewRouteUnavailable, _CLAUDEXOR_MAX_SECONDS
     from ouroboros.subagents import delegated_run_shape
     shape = shape or delegated_run_shape(False, str(getattr(invocation, "access", "") or "readonly"))
-    seconds = bounded_seconds(invocation.timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
     use_thread, output_schema = invocation.use_thread, invocation.output_schema
     instructions = instructions or invocation.instructions
     run_request = {
@@ -111,8 +145,9 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
         # A one-element explicit pool is the pin; primaryHarness is only preference.
         "harnesses": [route.route_id],
         "primaryHarness": route.route_id,
-        "maxSeconds": seconds,
     }
+    if invocation.timeout_sec is not None:  # no logical window: the engine's run clock stays off
+        run_request["maxSeconds"] = bounded_seconds(invocation.timeout_sec, default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
     if execution:
         run_request["execution"] = dict(execution)
     if use_thread:

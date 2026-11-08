@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import logging
-import math
 import os
 import pathlib
 import re as _re
@@ -44,16 +43,26 @@ WORKER_PROCESS_ENV = "OUROBOROS_IN_WORKER"
 
 
 def in_worker_process() -> bool:
-    """Return True inside a supervisor worker process.
-
-    Worker processes disable system proxy resolution (``trust_env=False`` /
-    ``ProxyHandler({})``) on every HTTP client they create. This is the central
-    network-transport policy that keeps workers fork-safe: the macOS
-    ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes
-    (SIGSEGV) on the child side of a multi-threaded fork. It is also a clean,
-    proxy-free default for spawned workers on every platform.
-    """
+    """Return True inside a supervisor worker process (a process fact: ownership, lifelines, custody)."""
     return os.environ.get(WORKER_PROCESS_ENV) == "1"
+
+
+# The spawner's transport policy for a child: "1" forbids OS proxy resolution (``trust_env=False`` /
+# ``ProxyHandler({})``) on every HTTP client the child creates. It is the fork-safety rule — the macOS
+# ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes (SIGSEGV) on the child side
+# of a multi-threaded fork — stated by the parent for the start method it used; a spawned or
+# forkserver child keeps the server's own policy, so a conversation carried by a worker reaches the
+# model the way the server would (owner decision 1A, trap 1).
+TRANSPORT_NO_PROXY_ENV = "OUROBOROS_TRANSPORT_NO_PROXY"
+
+
+def transport_no_proxy() -> bool:
+    """Whether this process must avoid OS proxy lookup: the spawner's explicit fact, else the legacy
+    worker default for a child that received none."""
+    stated = os.environ.get(TRANSPORT_NO_PROXY_ENV)
+    if stated in ("0", "1"):
+        return stated == "1"
+    return in_worker_process()
 
 
 def emit_log_event(
@@ -521,7 +530,7 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
-    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True,
+    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True, lock_held: bool = False,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -533,6 +542,8 @@ def append_jsonl(
     shared owner-aware lock primitive, so a live holder is never displaced.
     ``lock_timeout_sec=0`` takes one attempt without a contention wait, for
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
+    ``lock_held``: the caller already holds this file's append lock (a read of
+    the stream and this append under one hold), so none is taken again.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
     superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
@@ -565,7 +576,7 @@ def append_jsonl(
     try:
         # Both lanes wait out a live lock holder, never displacing it;
         # the non-required lane then appends unlocked.
-        lock_fd = acquire_exclusive_file_lock(
+        lock_fd = None if lock_held else acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=lock_timeout_sec,
             stale_sec=10.0,
@@ -573,7 +584,7 @@ def append_jsonl(
             owner_aware_stale=True,
         )
 
-        if require_lock and lock_fd is None:
+        if require_lock and lock_fd is None and not lock_held:
             log.warning("append_jsonl: required lock unavailable for %s", path)
             return False
 
@@ -953,28 +964,6 @@ def iter_jsonl_chain_objects(
             yield from iter_jsonl_objects(segment, dict_only=dict_only, _handle=handle)
 
 
-def iter_llm_usage_events(
-    path: pathlib.Path,
-    *,
-    max_entries: Optional[int] = None,
-    tail_bytes: Optional[int] = None,
-) -> Iterator[Dict[str, Any]]:
-    yield from (event for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes)
-                if event.get("type") == "llm_usage")
-
-
-def llm_usage_cost(event: Dict[str, Any]) -> float:
-    usage = event.get("usage")
-    value = event.get("cost")
-    if value is None and isinstance(usage, dict):
-        value = usage.get("cost")
-    try:
-        cost = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return cost if math.isfinite(cost) else 0.0
-
-
 # ---------------------------------------------------------------------------
 # Path safety
 # ---------------------------------------------------------------------------
@@ -1248,6 +1237,16 @@ def sanitize_task_for_event(
                 metadata = dict(metadata)
                 metadata["origin_message_text"] = truncate_for_log(nested, threshold)
                 sanitized["metadata"] = metadata
+
+        # A wake's delivery forms and row addresses (``consciousness_wake.bind_wake_observation``) grow with its
+        # window; the task document and the stored source keep them, an event copy keeps only their sizes.
+        wake = metadata.get("wake_observation") if isinstance(metadata, dict) else None
+        if isinstance(wake, dict):
+            bodies = {key for key, value in wake.items()
+                      if key.endswith(("_text", "_rows", "_in_fallback")) and isinstance(value, (str, list))}
+            kept = {key: value for key, value in wake.items() if key not in bodies}
+            metadata = {**metadata, "wake_observation": {**kept, **{f"{key}_len": len(wake[key]) for key in bodies}}}
+            sanitized["metadata"] = metadata
 
         # The event needs one contract; the live task keeps both mirrors.
         contract = sanitized.get("task_contract")

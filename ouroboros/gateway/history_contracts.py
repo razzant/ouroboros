@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
+from ouroboros.gateway.reference_contracts import ChatReplyReference
 
 try:
     from typing import Literal, Required, TypedDict
@@ -82,6 +83,7 @@ class ChatHistoryCard(TypedDict):
 class PlaceHistoryAttention(TypedDict, total=False):
     decision: Required[Literal['heard', 'focus_started']]
     reason: str  # retained heard reason; no inferred matched wake
+    recipient: str  # the work or author holding a heard message (``place_intake``); whether its model read it is unknown
 
 
 class PlaceHistoryImport(TypedDict):
@@ -90,6 +92,12 @@ class PlaceHistoryImport(TypedDict):
 
     authorship: Literal['participant', 'platform_account']
     received_at: str
+
+
+class PlaceHistoryReaction(TypedDict):
+    """The host's English words for a row's typed reaction, never speech; words the row sent stay its ``text``."""
+
+    summary: str
 
 
 class PlaceHistoryFacts(TypedDict, total=False):
@@ -108,6 +116,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     checked: bool  # False on holds: the hold precedes the Safety check
     historical_import: PlaceHistoryImport  # never owner confirmation or attention
     sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
+    reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
 
 
 class ChatHistoryMessage(TypedDict, total=False):
@@ -131,10 +140,11 @@ class ChatHistoryMessage(TypedDict, total=False):
     place_history: PlaceHistoryFacts
     wait_ended_at: str
     row_address: str
-    row_client_message_id: str  # an outgoing row's own saved name, the same as its client_message_id
-    reply_to: Dict[str, Any]
+    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
+    reply_to: ChatReplyReference
     relay: Dict[str, Any]
     reply_to_relay: str
+    room_revisions: Dict[str, int]  # a row shown in several rooms: the revision it took in each room it counted in
     history_id: str  # "<source>:<offset>": the stored row's identity in this core's retained history
     history_position: ChatHistoryPosition
     markdown: bool
@@ -198,7 +208,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     elapsed_sec: Any
     tool_evidence: Dict[str, Any]  # system_type task_evidence: the task's recorded tool calls
     cancel_origin: Dict[str, Any]
-    continuation_offer: Dict[str, Any]  # ContinuationOffer of an interrupted root
+    continuation_offer: Dict[str, Any]  # ContinuationOffer of an interrupted or author-stopped root
 
 
 class ChatHistoryCoverage(TypedDict):
@@ -223,7 +233,7 @@ class ChatHistoryWindow(TypedDict, total=False):
     archive import bounded it; ``truncated_by`` names each cause (quota, page, lineage_cap,
     ``<stream>_<gap>`` such as chat_malformed_jsonl, or ``<stream>_importing``: older rows exist
     below the archive import's frontier and are not readable yet; the older page that would cross
-    it answers 503 migrating). ``latest_message`` (Project rooms) names the latest eligible
+    it answers 503 migrating). ``latest_message`` (Main and Project rooms) names the latest eligible
     non-owner standalone message by stored arrival, excluding card content; null means unknown.
     Its ``out_of_order`` flag means it sorts
     above earlier arrivals or before the recent read. With a null message, ``latest_before`` says
@@ -271,7 +281,7 @@ class ChatHistoryResponse(TypedDict, total=False):
 
 
 __all__ = [
-    "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryFacts",
+    "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
 ]

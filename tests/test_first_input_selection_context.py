@@ -35,7 +35,7 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
                "MEMORY_REGISTRY", "INSTALLED_SKILLS", "DRIVE_STATE", "SHARED_REVIEW"]
     monkeypatch.setattr(context, "build_memory_sections", source(omitted[0], [omitted[0]]))
     monkeypatch.setattr(context, "build_knowledge_sections", source(omitted[1], [omitted[1]]))
-    for name, marker in zip(("build_health_invariants", "_build_registry_digest",
+    for name, marker in zip(("build_health_invariants", "_build_registry_section",
                              "_build_installed_skills_section", "_drive_state_section"), omitted[2:6]):
         monkeypatch.setattr(context, name, source(marker, marker))
     monkeypatch.setattr(memory, "recent_activity_sections", source("OWN_PROCESS", ["OWN_PROCESS"]))
@@ -52,12 +52,17 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
         if marker != knowledge:
             assert (marker in text) == (selection != "declared")
             assert (marker in calls) == (selection != "declared")
-    assert bool(core.memory_view_json) == (selection != "declared")  # a declared child carries no view
-    assert ("Input source selection" in text) == (selection == "declared")
-    # The owner's words: a shared child's view holds them; a declared child its own block, once its schedule
-    # recorded that its selection carries them. Every memory channel above stays shut either way.
-    assert ("OWNER_ASKED" in core.memory_view_json) == (selection != "declared")
-    assert ("OWNER_ASKED" in core.dynamic_text) == (selection == "declared" and words)
+    # One builder, one view: a declared child's draws the words, the marks and no story or room page.
+    import json
+
+    spec = json.loads(core.memory_view_json)["spec"]
+    assert spec["marks"] == "room_and_global" and spec["story"] == (selection != "declared")
+    assert spec["room_page"] == (selection != "declared") and not spec["room_lanes"] and not spec["knowledge"]
+    assert ("Input source selection" in core.dynamic_text) == (selection == "declared")
+    # The owner's words ride the view's block for a shared child and for a declared child whose schedule recorded
+    # that its selection carries them; never the dynamic text. Every memory channel above stays shut either way.
+    assert ("OWNER_ASKED" in core.memory_view_json) == (selection != "declared" or words)
+    assert spec["owner_words"] == (selection != "declared" or words) and "OWNER_ASKED" not in core.dynamic_text
 
 
 @pytest.mark.parametrize("explicit", [None, {"knowledge": True}])
@@ -73,6 +78,86 @@ def test_a_child_loads_knowledge_only_when_its_view_holds_it(tmp_path, monkeypat
     core = context._capture_context_core(env, memory, child, None, None)
     assert ("KNOWLEDGE_MARKER" in core.dynamic_head_text) == (explicit is not None)
     assert "KNOWLEDGE_MARKER" not in core.semi_stable_text + core.dynamic_text
+
+
+def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_builds(tmp_path, monkeypatch):
+    """The producer end to end: ``schedule_subagent(memory_view=…)`` is carried by the schedule's record and
+    the supervisor's payload to the start the worker builds. A field the view knows widens the child (the
+    whole knowledge base at its birth, no outline); a value it does not know is carried too, refused at the start
+    with the role default and one event, and the child is born as any child. A view that turns my human's words or
+    the marks off, or names a field the description does not offer, is refused where it enters and nothing is
+    queued; a plain call still births a child holding the words."""
+    import dataclasses
+    import json
+    import queue
+
+    from ouroboros import memory_view as mv
+    from ouroboros.context import build_llm_messages
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.tools import control
+    from ouroboros.tools.control_scheduling import _schedule_task
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.task_dispatch import build_scheduled_task_payload
+    from tests.test_available_subagents_runtime import _api_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row()))
+    monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "4")
+    env, memory = _make_env_and_memory(tmp_path)
+    root = memory.drive_root
+    assert write_knowledge_note(resolve_knowledge_address(root, "people/owner", "global"),
+                                "---\ntitle: people/owner\nsummary: WHOLE_INDEX_SUMMARY\n---\n# Owner\n").ok
+    parent = ToolContext(repo_dir=env.repo_dir, drive_root=root, current_task_type="task", current_chat_id=1)
+    parent.task_id, parent.event_queue = "root0001", queue.Queue()
+    parent.task_metadata = {"root_task_id": "root0001",
+                            "governing_owner_words": [{"text": "OWNER_ASKED", "source": "initial_user", "task_id": "root0001"}]}
+
+    def call(**extra):
+        return _schedule_task(parent, subagent_id="api-builder", objective="Count shelf one",
+                              expected_output="a list", memory_mode="forked", **extra)
+
+    def scheduled(**extra):
+        result = call(**extra)
+        assert not result.startswith("⚠️"), result
+        event = parent.event_queue.get_nowait()
+        return build_scheduled_task_payload({**event, "tid": event["task_id"], "parent_id": parent.task_id,
+                                             "text": event["objective"], "desc": event["objective"]})
+
+    def born(payload):
+        messages, cap = build_llm_messages(env=env, memory=memory, task=payload)
+        return messages[0]["content"][-1]["text"], cap["memory_view"]["spec"]
+
+    def refusals():
+        rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        return [row for row in rows if row.get("type") == "context_memory_view_spec_refused"]
+
+    plain = scheduled()
+    assert "memory_view" not in plain and "memory_view" not in plain["metadata"]  # omitted: nothing carried
+    widened = scheduled(memory_view={"knowledge": True})
+    assert widened["memory_view"] == {"knowledge": True} == widened["metadata"]["memory_view"]
+    assert mv.view_spec_for_task(widened, root) == dataclasses.replace(mv.view_spec_for_task(plain, root), knowledge=True)
+    changing, spec = born(widened)
+    assert spec["knowledge"] is True and "WHOLE_INDEX_SUMMARY" in changing and "## Knowledge base" in changing
+    assert "## Knowledge outline" not in changing and "knowledge (overview, index, project journal and workpad)" in changing
+    assert refusals() == []
+    # The other direction: a value the view does not know rides the same way and is refused where it is read.
+    malformed = scheduled(memory_view={"knowledge": "yes"})
+    assert malformed["memory_view"] == {"knowledge": "yes"}  # carried as given: the start, not the schedule, judges it
+    assert mv.view_spec_for_task(malformed, root) == mv.view_spec_for_task(plain, root)
+    assert [(row["task_id"], row["reason"]) for row in refusals()] == [(malformed["id"], "knowledge is true or false")]
+    changing, spec = born(malformed)
+    assert spec == born(plain)[1] and "## Knowledge outline" in changing and "## Knowledge base" not in changing
+    assert len(refusals()) == 2 and refusals()[-1]["task_id"] == malformed["id"]  # the start: one more event, no more
+    # Refused where the field enters: a view that turns my human's words or the marks off (they are never turned off), or
+    # names a field the description does not offer (a role, a room, a work room level); nothing is queued by any of them.
+    for view, reason in (({"owner_words": False}, "only widens a child's view; it keeps my human's words and the marks"),
+                         ({"marks": "none"}, "only widens"), ({"work_room_levels": "two"}, "fields are story, room_page")):
+        refused = call(memory_view=view)
+        assert refused.startswith("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view") and reason in refused, view
+        assert parent.event_queue.empty(), view
+    changing, spec = born(plain)  # a plain call births a child holding the words and the marks in force
+    assert spec["owner_words"] is True and spec["marks"] == "room_and_global" and "OWNER_ASKED" in changing, spec
+    assert len(refusals()) == 2
 
 
 def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_path, monkeypatch):
@@ -106,7 +191,6 @@ def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_pa
 @pytest.mark.parametrize("overrides", [
     {"delegation_role": "root"},
     {"configured_subagent": {"route": {"kind": "weird"}}},
-    {"configured_subagent": {}},
     {"id": ""},
 ])
 def test_unsupported_builder_task_class_is_not_silently_shared(tmp_path, overrides):

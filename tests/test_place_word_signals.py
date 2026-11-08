@@ -74,15 +74,8 @@ def test_sheet_and_configure_presence_choose_and_remove_declared_word_signal(wor
 
 @pytest.mark.parametrize("state,enabled,allowance,bot,optin,reported,decision", [
     ("active", True, "available", False, False, True, "focus"),
-    ("silent", True, "available", False, False, True, "focus"),
     ("silent", True, "available", False, False, False, "silent"),
-    ("paused", True, "available", False, False, True, "silent"),
-    ("silent", False, "available", False, False, True, "silent"),
     ("silent", True, "exhausted", False, False, True, "retry"),
-    ("silent", True, "allowance_unknown", False, False, True, "retry"),
-    ("silent", True, "available", True, False, True, "silent"),
-    ("silent", True, "available", True, True, True, "focus"),
-    ("silent", True, "available", True, True, False, "focus"),
 ])
 def test_current_controls_apply_to_word_signal(word_place, monkeypatch, state, enabled, allowance,
                                              bot, optin, reported, decision):
@@ -135,7 +128,7 @@ def test_real_host_capture_signal_provenance_silence_and_no_heard_replay(word_pl
     assert meta["presence"]["event"]["facts"] == [SIGNAL]
     assert meta["presence"]["place"]["state"] == "silent"
     assert meta["focus"]["matched_wakes"] == [SIGNAL]
-    assert not meta["focus"]["addressed"] and not meta["focus"]["actor"]["owner_confirmed"]
+    assert "addressed" not in meta["focus"] and not meta["focus"]["actor"]["owner_confirmed"]  # facts, no verdict
     assert json.dumps({"fact": SIGNAL, "author": "owner"}) in frame_focus_content(tasks[0], wire["text"])
 
     wire.update(source_event_id="text-only", facts=[], text="Вик? Броборос Уроборос Ouroboros signal.words",

@@ -260,7 +260,6 @@ def _configured_managed_install(root: pathlib.Path):
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s18_carrier_conflict_resolves_to_official_version_and_transfers_carriers(
         tmp_path_factory, monkeypatch):
     require_lane(LANE_MOCK)
@@ -379,7 +378,6 @@ def _seed_exhausted_budget(data_root: pathlib.Path, limit_usd: float) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s19_conflicting_update_refused_typed_with_tree_intact(
         tmp_path_factory, monkeypatch):
     require_lane(LANE_MOCK)
@@ -615,7 +613,6 @@ print(json.dumps(report))
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s20_crash_mid_apply_boot_finalize_and_rollback_are_honest(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s20")
@@ -680,7 +677,6 @@ S21_PROJECT_NAME = "s21 lineage"  # a file-less project: its thread IS the linea
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s21_chat_lineage_cancel_delivers_receipt_to_outbox_and_chat(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -870,6 +866,40 @@ def _cycle_outcome_checkpoints(data_root: pathlib.Path) -> list:
     return rows
 
 
+S22_FIXTURE_SUITE = "tests/test_system_e2e_s22_fixture.py"
+
+
+def _s22_one_failing_test_suite(clone: pathlib.Path) -> None:
+    """The private clone's whole suite becomes ONE failing test, committed beneath the cycle.
+
+    Evolution forces the full post-commit battery even under skip_tests (tools/git.py: evolution
+    publication requires a full run), and the cycle settles only after the commit tool returns.
+    Since the test diet (owner 5A, #2825) a full run has no total budget at all: it ends by its
+    own tests, and ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` bounds a selected run only
+    (``preflight_runner._resolve_preflight_timeout``), so the knob that once ended this battery
+    red at once left the whole suite running past the settle wait (CI run 42197878988). S22's
+    subject is the absorb crash window, not qualification: here the battery runs the suite this
+    clone carries, one test that fails at once, and the browser suite goes with the rest (no
+    Node lane), so the red post-commit run ends within seconds on every host and withholds only
+    the push, keeping the commit and the open transaction. The commit is the cycle's base, so
+    the evolution commit itself touches only its note and HEAD~1 still carries a tests/ tree.
+    """
+    from ouroboros.preflight_node import TESTS_GLOB, WEB_DIR
+
+    browser_suite = (pathlib.PurePosixPath(WEB_DIR) / pathlib.PurePosixPath(TESTS_GLOB).parent).as_posix()
+    _git(["rm", "-r", "-q", "tests", browser_suite], clone)
+    fixture = clone / S22_FIXTURE_SUITE
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text(
+        '"""system_e2e S22: the post-commit battery of this clone ends red at once."""\n\n\n'
+        "def test_s22_post_commit_battery_ends_red_at_once():\n"
+        '    raise AssertionError("system_e2e S22 fixture: red by design")\n',
+        encoding="utf-8")
+    _git(["add", S22_FIXTURE_SUITE], clone)
+    _git(["commit", "-q", "--no-verify", "-m", "system_e2e S22 fixture: a one-test suite that fails at once"],
+         clone)
+
+
 def _sigkill_server_tree(server) -> None:
     pids = process_tree_pids(server.proc.pid)
     os.killpg(os.getpgid(server.proc.pid), signal.SIGKILL)
@@ -882,7 +912,6 @@ def _sigkill_server_tree(server) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux",
                     reason="process-group SIGKILL + /proc scans are Linux-only")
 def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
@@ -890,6 +919,7 @@ def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s22")
     clone = clone_repo(root)          # PRIVATE clone: this scenario moves HEAD
+    _s22_one_failing_test_suite(clone)  # the forced post-commit battery ends red at once (see there)
     data_root = pathlib.Path(root) / "data"
     seed_owner_state(data_root, evolution_enabled=True)
     campaign_seed = _campaign(data_root)
@@ -902,15 +932,6 @@ def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
     # writes are separate atomic files, so the scenario shapes that state
     # deterministically by removing the marker after the kill.
     monkeypatch.setenv("OUROBOROS_EVOLUTION_AUTO_RESTART", "false")
-    # Evolution forces the full post-commit test battery even under skip_tests (tools/git.py:
-    # evolution publication requires a full run), and the cycle settles only after the commit
-    # tool returns. S22's subject is the absorb crash window, not qualification, so the
-    # product's own lane budget ends that battery red at once on every host: a red post-commit
-    # run withholds only the push and keeps the commit and the open transaction. Unbounded, the
-    # settle wait below held only while the battery's Node lane failed fast (CI, 18 Oct: three
-    # date-bound Node tests, red after 125 s); once the Node suite passed, the pytest lanes
-    # started and the 300 s wait ran out with the battery still running (CI, 19 Oct).
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "5")
 
     settings_kwargs = dict(
         OUROBOROS_RUNTIME_MODE="cyber_pro",  # explicit in-place authoring is Cyber Pro only (#1620)
@@ -1099,7 +1120,6 @@ S23_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s23_interactive_delegated_run_pauses_answers_and_resumes(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)

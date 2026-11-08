@@ -23,6 +23,7 @@ transition of an exact reviewed candidate commit into the serving checkout.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -138,6 +139,75 @@ def context_fact(owner: str = "", data_dir: Optional[Any] = None, *, limit: int 
     return shown
 
 
+# One wall-clock bound for all open neighbours' lock-free Git reads at a bind: a transport bound, never a judgment.
+_NEIGHBOUR_READ_SECONDS = 3.0
+
+
+def _changed_now(row: Dict[str, Any], deadline: float) -> str:
+    """One neighbour's changed paths at this moment against its base (committed, staged, unstaged, untracked),
+    read without its index lock; a failure or the time bound reads as such, never as nothing changed."""
+    from ouroboros.git_observation import host_git_env
+
+    path, base = str(row.get("path") or ""), str(row.get("base_sha") or "")
+    if not os.path.isdir(path):
+        return "its checkout is missing"
+    names: set = set()
+    for argv in (["status", "--porcelain=v1", "-z", "--no-renames"],
+                 *([["diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--"]] if base else [])):
+        try:
+            if (left := deadline - time.monotonic()) <= 0:
+                raise subprocess.TimeoutExpired(argv, 0)
+            out = subprocess.run(["git", *argv], cwd=path, capture_output=True, env=host_git_env(), check=True,
+                                 timeout=left).stdout
+        except subprocess.TimeoutExpired:
+            return "changed paths not read (time bound)"
+        except Exception as exc:
+            return f"changed paths unreadable ({type(exc).__name__})"
+        entries = out.decode("utf-8", "surrogateescape").split("\0")
+        names.update(entry[3:] if argv[0] == "status" else entry for entry in entries if entry)
+    shown = sorted(names)
+    return (f"changed {', '.join(shown[:8])}" + (f" (+{len(shown) - 8} more in that path)" if len(shown) > 8 else "")
+            if shown else "nothing changed yet")
+
+
+def neighbour_note(ctx: Any, *, with_ended: bool = False) -> str:
+    """Other body candidates at a bind, read now and never stored: open owners in full with this moment's changed
+    paths, ended owners as a count (``with_ended``; the Runtime ``body_candidates`` fact lists them). Without an
+    open neighbour or ``with_ended`` it says nothing. Never raises into the write it accompanies."""
+    try:
+        owner = owner_id(ctx)
+        rows = [row for row in list_candidates() if not row.get("retiring") and row.get("task_id") != owner]
+        try:
+            from ouroboros.task_store import task_drive_status
+
+            stored = {task_id: status for task_id, (status, _drive) in task_drive_status(
+                _wt._data_dir(_results_root(ctx)), [str(row.get("task_id") or "") for row in rows]).items()}
+        except Exception:
+            stored = None  # unknown stays unknown: only a stored final status counts as ended
+        from ouroboros.task_status import FINAL_STATUSES
+
+        rows.sort(key=lambda row: max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), reverse=True)
+        unknown = "status unreadable" if stored is None else "no task record"
+        open_rows = [(row, state) for row in rows
+                     if (state := (stored or {}).get(str(row.get("task_id") or ""), unknown)) not in FINAL_STATUSES]
+        ended = len(rows) - len(open_rows)
+        if not open_rows and not (with_ended and ended):
+            return ""
+        deadline = time.monotonic() + _NEIGHBOUR_READ_SECONDS
+        lines = [f"- {row.get('candidate_id')}: task {row.get('task_id')} ({state}), branch {row.get('branch')}, "
+                 f"base {str(row.get('base_sha') or '')[:12]}, path {row.get('path')}: {_changed_now(row, deadline)}"
+                 for row, state in open_rows[:8]]
+        if len(open_rows) > 8:
+            lines.append(f"- {len(open_rows) - 8} more open: state/private_copies/*.json (kind=body_candidate records)")
+        if with_ended and ended:
+            lines.append(f"- {ended} more belong to ended tasks: retained work, listed in the Runtime body_candidates "
+                         "fact; prepare_self_change(resume=<id>) continues one.")
+        return "Other body candidates, read now (never stored):\n" + "\n".join(lines)
+    except Exception as exc:
+        log.debug("body candidate neighbour note failed", exc_info=True)
+        return f"Other body candidates: unreadable now ({type(exc).__name__})."
+
+
 def _select(selector: str, data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     selector = str(selector or "").strip()
     for row in _rows(data_dir) if selector else []:
@@ -234,12 +304,13 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
-    """Positive lifecycle evidence only: an unreadable or missing record is not terminal."""
+    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row)."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-
-        record = load_effective_task_result(_wt._data_dir(results_root), task_id, materialize_artifacts=False) or {}
-        return record.get("status") in FINAL_STATUSES
+        from ouroboros.task_store import exists
+        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)
         return False
@@ -260,11 +331,17 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
     The installation's indexed ownership set is the bounded address, not a disk walk.
     A terminal task can still own a kept service. Unknown ownership/exit evidence
     on a matching record retains its checkout; unrelated records do not block it.
+    A ledgered launch (a local executor service is one too) comes from the one selection of all
+    custody stores (``launch_custody.read_custody``) and is read by its whole recorded reach, in
+    one census for all of them: an owed or marker-only member outlives its leader, and a reused
+    leader pid is not the launch.
     """
     try:
-        from ouroboros.owned_shutdown import owned_records
+        from ouroboros.launch_custody import read_custody, unsettled_selection
         from ouroboros.platform_layer import pid_provably_gone
-        from ouroboros.process_custody import _fingerprint_matches, _service_group_survives_leader
+        from ouroboros.process_custody import (
+            _fingerprint_matches, _owned_service_row, _service_group_survives_leader, custody_record_id,
+        )
         from ouroboros.task_status import load_effective_task_result
         from ouroboros import workspace_executor as executor
 
@@ -274,24 +351,31 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
         owners.update(str(row.get("task_id") or "") for row in effective.get("retry_lineage", []))
         owners.discard("")
         lineage: Dict[str, str] = {}
-        active: List[int] = []
-        for entry in owned_records(root, strict=True):
-            member = str(entry.get("owner_task") or entry.get("task_id") or "")
+
+        def ours(member: str, attributed_root: str = "") -> bool:
             if not member:
-                continue  # no known task attribution to this candidate
-            if member not in owners and str(entry.get("root_task_id") or "") not in owners:
-                if member not in lineage:
-                    lineage[member] = str(load_effective_task_result(
-                        root, member, materialize_artifacts=False).get("root_task_id") or "")
-                if lineage[member] not in owners:
-                    continue
+                return False  # no known task attribution to this candidate
+            if member in owners or attributed_root in owners:
+                return True
+            if member not in lineage:
+                lineage[member] = str(load_effective_task_result(
+                    root, member, materialize_artifacts=False).get("root_task_id") or "")
+            return lineage[member] in owners
+
+        custody = read_custody(root, every_drive=True)
+        active: List[int] = [-1] if custody.blind or not custody.readable else []
+        stamped = set()
+        for entry in custody.records:
+            if not ours(str(entry.get("owner_task") or entry.get("task_id") or ""), str(entry.get("root_task_id") or "")):
+                continue
             pid = int(entry.get("host_pid") or 0)
             if entry.get("unconfirmed_since"):
                 active.append(pid or -1)
+                stamped.add(entry.get("record_id"))
                 continue
             ledger = entry.get("ledger_entry")
             if isinstance(ledger, dict):
-                if _fingerprint_matches(ledger) or _service_group_survives_leader(ledger):
+                if not _owned_service_row(ledger) and (_fingerprint_matches(ledger) or _service_group_survives_leader(ledger)):
                     active.append(pid or -1)
                 continue
             if entry.get("kind") not in {"foreground", "service"}:
@@ -313,6 +397,10 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
                 continue
             else:
                 active.append(pid or -1)  # Docker backend may live despite host_pid=0
+        launches = [row for row in custody.rows if _owned_service_row(row) and ours(str(row.get("owner_task") or ""))
+                    and custody_record_id(row) not in stamped]
+        active += [(int(row.get("pid") or 0) or -1) if state == "live" else -1
+                   for row, state in (unsettled_selection(root, launches, custody) if launches else ())]
         return active
     except Exception:
         log.debug("ownership set unavailable for %s", task_id, exc_info=True)
@@ -360,7 +448,7 @@ def _transfer(ctx: Any, row: Dict[str, Any], owner: str, *, via: str) -> Dict[st
     return moved
 
 
-def bind(ctx: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+def bind(ctx: Any, row: Dict[str, Any], *, fresh: bool = False) -> Dict[str, Any]:
     """Make the candidate this context's body root; the serving root stays addressable."""
     if getattr(ctx, "serving_repo_dir", None) is None:
         ctx.serving_repo_dir = pathlib.Path(row.get("repo_dir") or serving_repo_dir_for(ctx))
@@ -369,44 +457,148 @@ def bind(ctx: Any, row: Dict[str, Any]) -> Dict[str, Any]:
     ctx.branch_dev = str(row.get("branch") or getattr(ctx, "branch_dev", ""))
     bound = {key: row.get(key) for key in ("candidate_id", "path", "branch", "base_sha", "repo_dir")}
     _metadata(ctx)["body_candidate"] = bound
-    _attribute_surface(ctx, candidate, row)
+    attribution = _attribute_surface(ctx, candidate, row, fresh=fresh)
     if time.time() - float(row.get("used_at") or 0) > 3600:
         # Retention counts from last use, so a long-lived owner keeps a clean candidate.
         try:
             _update_row(row, lambda entry: entry.__setitem__("used_at", time.time()))
         except Exception:
             log.debug("candidate last-use stamp failed", exc_info=True)
-    return bound
+    return {**bound, "attribution": attribution}
 
 
-def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any]) -> None:
-    """Append the candidate to this lineage's mutation baseline as a late surface (evidence only).
+def _identity(row: Dict[str, Any]) -> Dict[str, Any]:
+    """What makes a checkout this candidate: a path or branch name reused after a loss is another copy."""
+    return {key: row.get(key) for key in ("candidate_id", "branch", "base_sha", "created_at")}
 
-    The commit gate stages what the task's own baseline attributes to it, on the
-    candidate exactly as on the serving checkout; a candidate taken over from an
-    ended owner names that owner as the predecessor whose quiescent changes this
-    lineage adopts. Without a host baseline (a direct turn, a manual context) the
-    legacy explicit/whole-tree staging contract applies, as it does unbound.
+
+def _recorded_surface(results_root: Any, task_id: str, candidate: pathlib.Path) -> Dict[str, Any]:
+    from ouroboros.task_results import load_task_result
+
+    evidence = (load_task_result(results_root, task_id) or {}).get("mutation_evidence") or {}
+    root = str(candidate.expanduser().resolve(strict=False))
+    return next((dict(row) for row in (evidence.get("baseline") or {}).get("surfaces") or []
+                 if isinstance(row, dict) and row.get("canonical_root") == root and isinstance(row.get("git"), dict)), {})
+
+
+def _carried_basis(results_root: Any, row: Dict[str, Any], lineage: str, candidate: pathlib.Path) -> Dict[str, Any]:
+    """The previous owner's positively established row for this copy, copied into this lineage's own baseline."""
+    from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id
+
+    owners = [str(entry) for entry in (row.get("owners") or []) if str(entry)]
+    source = attribution_task_id(results_root, (owners[-2],)) if owners[-1:] == [lineage] and len(owners) > 1 else ""
+    surface = _recorded_surface(results_root, source, candidate) if source else {}
+    git, basis = surface.get("git") or {}, surface.get("basis") or {}
+    stamped = surface.get("candidate") == _identity(row) and basis.get("kind") in ESTABLISHED_BASES
+    # An earlier row (no basis) that later joined this copy's identity is still that legacy observation.
+    clean_legacy = (not basis and surface.get("candidate") in (None, _identity(row)) and not git.get("dirty_paths")
+                    and git.get("base_commit")
+                    and git["base_commit"] in {row.get("base_sha"), *(row.get("reviewed_commits") or [])})
+    if not (stamped or clean_legacy) or git.get("dirty_overflow"):
+        return {}
+    return {"git": dict(git), "basis": {"kind": "carried", "source": f"task {source}", "task_id": source,
+                                         "from_basis": str(basis.get("kind") or "unrecorded")}}
+
+
+def _creation_basis(row: Dict[str, Any], candidate: pathlib.Path) -> Dict[str, Any]:
+    """``_provision``/``_populate`` hand a copy out only clean at ``base_sha``: that creation is a clean basis."""
+    base = str(row.get("base_sha") or "")
+    try:
+        tree = _git(candidate, "rev-parse", "--verify", f"{base}^{{tree}}").stdout.strip() if row.get("ready") else ""
+    except Exception:
+        tree = ""
+    return {"base_commit": base, "base_tree": tree, "dirty_paths": [], "dirty_fingerprints": {}} if base and tree else {}
+
+
+def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *, fresh: bool = False) -> Dict[str, Any]:
+    """Record the candidate in this lineage's mutation baseline (evidence only) and say what was established.
+
+    A freshly prepared copy is observed clean before its first edit (``original``). A lineage attaching it
+    later — a direct turn continued in a worker, a retry, a transfer from an interrupted owner — records
+    the previous owner's established row (``carried``), else the copy's clean creation (``derived``), never
+    today's files as its start: changes made in the copy since then are this continued work, which does
+    not prove who wrote each line. A dirty row recorded later for the same creation base is superseded (it
+    stays whole in history); any other recorded row is kept, its dirt uncertain for an explicit selection,
+    and joins this copy's identity when it lacks one.
+    Without a host baseline (a direct turn, a manual context) the explicit/whole-tree contract applies.
     """
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id or str(_metadata(ctx).get("delegation_role") or "").lower() == "subagent":
-        return
+        return {}
     try:
-        from ouroboros.mutation_attribution import attribution_task_id, capture_mutation_baseline
+        from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id, capture_mutation_baseline
 
-        results_root = _results_root(ctx)
-        evidence_task_id = attribution_task_id(results_root, (owner_id(ctx), task_id))
+        results_root, lineage = _results_root(ctx), owner_id(ctx)
+        evidence_task_id = attribution_task_id(results_root, (lineage, task_id))
         if not evidence_task_id:
-            return
+            return {"state": "no_baseline"}
+        existing = _recorded_surface(results_root, evidence_task_id, candidate)
+        recorded = existing.get("candidate")
+        kept_dirt = list((existing.get("git") or {}).get("dirty_paths") or [])
+        if existing and not fresh and (recorded == _identity(row) if recorded else (
+                not kept_dirt or existing["git"].get("base_commit") != row.get("base_sha"))):
+            if not recorded:  # it names this copy from now on, so no reader mistakes it for the serving checkout
+                capture_mutation_baseline(results_root, evidence_task_id, [{
+                    "surface_type": "system_repo", "host_root": str(candidate), "candidate": _identity(row)}],
+                    owner_kind="task_root", owner_id=lineage)
+            basis = existing.get("basis") or {"kind": "unrecorded"}
+            return {"state": "attached", "basis": basis,
+                    "uncertain": 0 if basis.get("kind") in ESTABLISHED_BASES else len(kept_dirt)}
+        surface: Dict[str, Any] = {"surface_type": "system_repo", "host_root": str(candidate),
+                                   "candidate": _identity(row), "supersede": bool(existing)}
         owners = [str(entry) for entry in (row.get("owners") or []) if str(entry)]
-        predecessor = owners[-2] if len(owners) >= 2 and owners[-1] == owner_id(ctx) else ""
-        capture_mutation_baseline(
-            results_root, evidence_task_id,
-            [{"surface_type": "system_repo", "host_root": str(candidate)}],
-            owner_kind="task_root", owner_id=owner_id(ctx),
-            predecessor_source={"task_id": predecessor} if predecessor else None)
-    except Exception:
+        predecessor = owners[-2] if len(owners) >= 2 and owners[-1] == lineage else ""
+        if fresh:
+            surface["basis"] = {"kind": "original", "source": "preparation"}
+        elif carried := _carried_basis(results_root, row, lineage, candidate):
+            surface.update(carried)
+        elif created := _creation_basis(row, candidate):
+            surface.update(git=created, basis={"kind": "derived", "source": f"its clean creation at {created['base_commit'][:12]}"})
+        else:
+            surface["basis"] = {"kind": "observed", "source": "a later observation; its clean creation is not established"}
+        evidence = capture_mutation_baseline(
+            results_root, evidence_task_id, [surface], owner_kind="task_root", owner_id=lineage,
+            predecessor_source={"task_id": predecessor} if predecessor and surface["basis"]["kind"] == "observed" else None)
+        written = next((entry for entry in evidence["baseline"]["surfaces"] if entry.get("candidate") == _identity(row)), {})
+        uncertain = 0 if surface["basis"]["kind"] in ESTABLISHED_BASES else len((written.get("git") or {}).get("dirty_paths") or [])
+        return {"state": surface["basis"]["kind"], "basis": surface["basis"], "superseded": bool(existing), "uncertain": uncertain}
+    except Exception as exc:
         log.warning("candidate %s was not added to the mutation baseline", row.get("candidate_id"), exc_info=True)
+        return {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def attach_attribution(ctx: Any) -> Dict[str, Any]:
+    """Re-establish the bound candidate's surface before a commit consumer reads it (idempotent)."""
+    bound = descriptor(ctx)
+    if not bound or not is_bound(ctx):
+        return {}
+    try:
+        row = find(owner_id(ctx))
+    except Exception as exc:
+        return {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    if not row or row.get("path") != bound.get("path"):
+        return {"state": "failed", "error": "this context's candidate record is not owned by its lineage"}
+    return _attribute_surface(ctx, pathlib.Path(str(bound["path"])), row)
+
+
+def attribution_note(attribution: Optional[Dict[str, Any]]) -> str:
+    """The prepare receipt's sentence about commit attribution: a typed fact, not a log line."""
+    state, basis = str((attribution or {}).get("state") or ""), (attribution or {}).get("basis") or {}
+    uncertain = int((attribution or {}).get("uncertain") or 0)
+    if state == "no_baseline":
+        return " This task has no host mutation baseline, so commit_reviewed keeps the explicit/whole-tree staging contract."
+    if state == "failed":
+        return (f" Commit attribution was not recorded ({attribution.get('error')}); commit_reviewed "
+                "records it again before staging.")
+    if uncertain:
+        return (f" Commit attribution: {uncertain} changed path(s) of this copy were recorded by a later observation "
+                "and stay out of automatic staging; name them in commit_reviewed(paths=...) to send them to review "
+                "with that gap disclosed.")
+    if basis.get("kind") in {"derived", "carried"}:
+        return (f" Commit attribution: this lineage's baseline records the copy as {basis['kind']} from "
+                f"{basis.get('source')}; changes made in it since then count as this continued work, which does "
+                "not prove that each line was written by this task.")
+    return " Its clean start is recorded for commit attribution." if state == "original" else ""
 
 
 def restore(ctx: Any) -> Dict[str, Any]:
@@ -478,7 +670,7 @@ def _forget_missing(row: Dict[str, Any]) -> None:
 
 def _prepare_locked(ctx: Any, resume: str) -> Dict[str, Any]:
     if is_bound(ctx) and not resume:
-        return {**descriptor(ctx), "state": "bound"}
+        return {**descriptor(ctx), "state": "bound", "attribution": attach_attribution(ctx)}
     refusal = _refusal_before_prepare(ctx)
     if refusal is not None:
         raise refusal
@@ -517,8 +709,8 @@ def _prepare_locked(ctx: Any, resume: str) -> Dict[str, Any]:
         if row is None:
             row, state = _provision(serving, owner, None), "new"
         if lost_branch:
-            return {**bind(ctx, row), "state": state, "previous_branch": lost_branch}
-    return {**bind(ctx, _populate(row)), "state": state}
+            return {**bind(ctx, row, fresh=True), "state": state, "previous_branch": lost_branch}
+    return {**bind(ctx, _populate(row), fresh=state == "new"), "state": state}
 
 
 def choose_in_place(ctx: Any) -> None:
@@ -541,9 +733,9 @@ def _targets_body(ctx: Any, root: str) -> bool:
         return False
 
 
-def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> Optional[CandidateRefused]:
+def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefused | str | None:
     """Bind the candidate BEFORE an ordinary body write, a PR-integration verb or an acting
-    body child resolves a target.
+    body child resolves a target; the bind that prepared or resumed it returns the neighbour note.
 
     Process tools are deliberately absent: no command text is classified. The
     mind prepares explicitly before process-first work. A refusal that the
@@ -571,12 +763,12 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> Optional[Candid
     try:
         if _git(serving_repo_dir_for(ctx), "rev-parse", "--is-inside-work-tree", check=False).returncode != 0:
             return None  # no Git body (wheel/image install): the legacy in-place contract, disclosed in the map
-        prepare(ctx)
+        bound = prepare(ctx)
     except CandidateRefused as exc:
         return exc
     except Exception as exc:
         return CandidateRefused("CANDIDATE_UNAVAILABLE", f"the candidate could not be prepared: {type(exc).__name__}: {exc}")
-    return None
+    return None if bound.get("state") == "bound" else neighbour_note(ctx) or None
 
 
 def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dict[str, str]]:
@@ -615,7 +807,8 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
             if (env_root / SCRATCH_MARKER).is_file() and not (env_root / SCRATCH_MARKER).is_symlink():
                 (env_root / SCRATCH_MARKER).touch()
         else:
-            declare_scratch(env_root, "body-process")
+            declare_scratch(env_root, "body-process", owner=json.dumps({
+                "task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""), "copy": str(candidate)}))
         return isolated_environment(env_root, candidate,
                                     source=runtime_environ() if source is None else source)
     except Exception as exc:
@@ -776,34 +969,44 @@ def unreviewed_commits(row: Dict[str, Any], candidate_sha: str) -> List[str]:
 def unique_work(row: Dict[str, Any]) -> Dict[str, Any]:
     """What only this candidate holds: dirty/untracked/ignored files and unadopted commits.
 
-    Env/cache/junk paths (the patch-capture static rules) are reproducible
-    scratch. A failed read is reported as unique: unknown never means empty.
+    Env/cache/junk paths (the patch-capture static rules) are not part of a capture; they are
+    listed as ``excluded``, since those rules decide transport and no producer declared them
+    disposable. A failed read is reported as unique: unknown never means empty.
     """
     from ouroboros.workspace_patch_rules import _patch_exclude_reason
 
     path = pathlib.Path(str(row.get("path") or ""))
     try:
-        env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
-        status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
-        ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
-        tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                   if chunk and not chunk.startswith(b"??")]
-        loose = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
-                 if chunk.startswith(b"??")]
-        loose += [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk]
+        raw = checkout_work(path)
         # The static rules name env/cache DIRECTORIES and runtime junk tails; a plain file that
         # merely carries such a directory's name ("env", "venv") is the author's own and unique.
-        loose = [rel for rel in loose
+        files = [*raw["untracked"], *raw["ignored"]]
+        loose = [rel for rel in files
                  if not _patch_exclude_reason(rel) or ("/" not in rel and not (path / rel).is_dir()
                                                        and _patch_exclude_reason(rel).startswith("top-level"))]
-        tip = _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
         serving = pathlib.Path(str(row["repo_dir"]))
         # Only the serving checkout establishes adoption. Another candidate or a
         # temporary child's branch can retain this tip without ever having adopted it.
-        ahead = _git(serving, "rev-list", "--count", tip, "--not", "HEAD").stdout.strip()
-        return {"readable": True, "tracked": tracked, "loose": loose, "tip": tip, "unadopted_commits": int(ahead or 0)}
+        ahead = _git(serving, "rev-list", "--count", raw["tip"], "--not", "HEAD").stdout.strip()
+        return {"readable": True, "tracked": raw["tracked"], "loose": loose, "tip": raw["tip"],
+                "unadopted_commits": int(ahead or 0), "excluded": sorted(set(files) - set(loose))}
     except Exception as exc:
         return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def checkout_work(path: pathlib.Path) -> Dict[str, Any]:
+    """A checkout's raw state beyond its HEAD, no path judged by its name: changed tracked paths,
+    untracked and ignored files, and its tip. A failed read raises."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    status = _wt._git_env(path, "status", "--porcelain", "-z", "--untracked-files=all", env=env).stdout
+    ignored = _wt._git_env(path, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", env=env).stdout
+    tracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+               if chunk and not chunk.startswith(b"??")]
+    untracked = [chunk[3:].decode("utf-8", "surrogateescape") for chunk in status.split(b"\0")
+                 if chunk.startswith(b"??")]
+    return {"tracked": tracked, "untracked": untracked,
+            "ignored": [chunk.decode("utf-8", "surrogateescape") for chunk in ignored.split(b"\0") if chunk],
+            "tip": _git(path, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()}
 
 
 def has_unique_work(work: Dict[str, Any]) -> bool:
@@ -841,9 +1044,11 @@ def _work_signature(row: Dict[str, Any], work: Dict[str, Any]) -> str:
 def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
     """Capture the candidate's whole unique state on a private pin; ``""`` unless COMPLETE.
 
-    A temporary index stages tracked changes plus every unique loose file,
-    ignored ones included. The capture counts only when each loose path became
-    a blob entry and the whole staged tree still equals the files on disk;
+    A temporary index refreshes the tracked and staged paths, then adds every unique loose file by
+    its exact name, ignored ones included. The ``excluded`` paths are never staged, nor written as
+    objects: they reach a capture only as the owner's accepted loss (``retention_verdict``'s
+    ``discard_excluded``), and would carry whole caches into Git. The capture counts only when each
+    loose path became a blob entry and the whole staged tree still equals the files on disk;
     anything Git cannot hold (a nested repository, an unreadable file) leaves it
     incomplete, and the caller then keeps the original directory.
     """
@@ -860,12 +1065,12 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
         if real_index.strip(b"\0"):
             _wt._git_env(path, "update-index", "-z", "--index-info", env=env, input_bytes=real_index)
         staged_tree = _wt._git_env(path, "write-tree", env=env).stdout.decode().strip()
-        _wt._git_env(path, "add", "-A", "--", ".", env=env)
+        _wt._git_env(path, "add", "-u", "--", ".", env=env)  # modified, deleted and staged paths; no untracked one
         loose = [str(rel) for rel in work.get("loose") or []]
-        if loose:
+        if loose:  # each by its exact name: a pattern ("*") would sweep in the excluded paths too
             spec = b"\0".join(rel.encode("utf-8", "surrogateescape") for rel in loose) + b"\0"
-            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul", env=env,
-                         input_bytes=spec)
+            _wt._git_env(path, "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul",
+                         env={**env, "GIT_LITERAL_PATHSPECS": "1"}, input_bytes=spec)
             staged = _wt._git_env(path, "ls-files", "-s", "-z", env=env).stdout
             blobs = {chunk.partition(b"\t")[2].decode("utf-8", "surrogateescape")
                      for chunk in staged.split(b"\0") if chunk and not chunk.startswith(b"160000")}
@@ -898,12 +1103,15 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
             pass
 
 
-def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None) -> Dict[str, Any]:
+def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None,
+                      discard_excluded: bool = False) -> Dict[str, Any]:
     """Whether the worktree GC may delete this candidate's checkout, and with what kept.
 
     ``{"remove": bool, "keep_branch": bool, "reason": str, "pin": str}``. Age alone
     never removes unique work: it is first captured COMPLETELY on a private pin,
-    and an incomplete capture retains the original directory.
+    and an incomplete capture retains the original directory. ``discard_excluded`` is the
+    owner's explicit discard alone (``copy_capture_proof.discard_unsaved_copy``): the paths
+    the capture leaves out are the accepted loss, everything else is still captured first.
     """
     path = pathlib.Path(str(row.get("path") or ""))
     if not path.is_dir():
@@ -919,6 +1127,9 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
     if _retained_scratch(row, classify=True, data_dir=data_dir):
         return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     work = unique_work(row)
+    if work.get("excluded") and not discard_excluded:
+        # No evidence these are temporary or saved, and a pin would copy whole caches into Git.
+        return {"remove": False, "keep_branch": True, "reason": "unproven_excluded_inputs", "pin": ""}
     if not has_unique_work(work):
         return {"remove": True, "keep_branch": False, "reason": "no_unique_work", "pin": "", "work": work,
                 "owner": _owner_stamp(row)}
@@ -960,7 +1171,7 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     seen = verdict.get("work") or {}
     now = unique_work(row)
     if not (bool(now.get("readable")) and all(now.get(key) == seen.get(key)
-                                                for key in ("tip", "tracked", "loose"))):
+                                                for key in ("tip", "tracked", "loose", "excluded"))):
         return False
     if verdict.get("reason") == "preserved_on_pin":
         if not verdict.get("signature") or _work_signature(row, now) != verdict["signature"]:
@@ -968,8 +1179,9 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     return True
 
 
-def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=None) -> bool:
-    """Keep a candidate's one quiescent scratch observation on its existing row."""
+def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=None, record_witness: bool = True) -> bool:
+    """Keep a candidate's one quiescent scratch observation on its existing row
+    (``record_witness=False``: the same answer for a reader that must write nothing)."""
     from ouroboros.test_environment import scratch_retention
 
     path = pathlib.Path(str(row.get("path") or ""))
@@ -980,7 +1192,7 @@ def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=N
     observed = scratch_retention(env_root, previous=previous.get("observation")
                                  if previous.get("owner") == owner else None, classify=classify)
     record = {"owner": owner, "observation": observed}
-    if classify and row.get("kind") == KIND and record != previous:
+    if record_witness and classify and row.get("kind") == KIND and record != previous:
         # The walk is outside the lock. Publish only against its exact preview,
         # including retirement/ownership; update that preview for GC's same-row check.
         with _wt._record_lock(path, data_dir, op="record_scratch_retention"):
@@ -992,7 +1204,7 @@ def _retained_scratch(row: Dict[str, Any], *, classify: bool = False, data_dir=N
 
 
 def discard_scratch(row: Dict[str, Any]) -> None:
-    """Delete reproducible scratch only when no nested teardown retained it."""
+    """Delete declared disposable scratch only when no nested teardown retained it."""
     path = pathlib.Path(str(row.get("path") or ""))
     env_root = path.with_name(path.name + ".env")
     if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(

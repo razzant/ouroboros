@@ -59,7 +59,6 @@ def settings_server(request, tmp_path, monkeypatch):
     return request.getfixturevalue("direct_server_with_data")
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
 def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width, free_tcp_port):
@@ -95,6 +94,13 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
                 expect(page.locator('#btn-save-settings')).to_be_enabled(timeout=30_000)
                 expect(page.locator('#settings-status')).to_contain_text('saved', timeout=30_000)
 
+            def reconnect():
+                # The same body reconnects, which keeps this document only once the page remembered the served
+                # SHA: dropped before its first read after open, ws.js reloads it as unknown (#2432).
+                page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30_000)
+                page.evaluate("window.__testSockets[0].close()")
+                page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+
             open_settings()
             # Worker application is published only after its real pool starts.
             page.wait_for_function("""async () => {
@@ -111,8 +117,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             page.wait_for_function('window.restartSent === true')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 3)  # preserve a draft over reconnect metadata
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+            reconnect()
             expect(page.locator('#s-workers')).to_have_value('3')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 1)
@@ -146,8 +151,7 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             expect(page.locator('#settings-restart-status')).to_contain_text('Restart may apply')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             fill_value('#s-workers', 3)
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+            reconnect()
             expect(page.locator('#s-workers')).to_have_value('3')
             expect(page.locator('#btn-restart-now')).to_be_visible()
             page.locator('#settings-restart-status').scroll_into_view_if_needed()

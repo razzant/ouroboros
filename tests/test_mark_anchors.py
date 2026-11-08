@@ -80,7 +80,7 @@ def test_released_and_foreign_room_marks_stay_silent_and_a_new_mark_acts_next_ca
     assert foreign["ok"] and glob["ok"]
     seen = anchored_note(ctx, "read_file", {"path": "docs/ARCHITECTURE.md"})
     assert "Global: docs are English." in seen and "Only for room two." not in seen
-    released = json.loads(_memory_mark(ctx, release_id=glob["mark_id"], reason="no longer holds"))
+    released = json.loads(_memory_mark(ctx, release_ids=[glob["mark_id"]], reason="no longer holds"))
     assert released["ok"], released
     later = ctx_for(tmp_path, task_id="root0003")
     assert anchored_note(later, "read_file", {"path": "docs/ARCHITECTURE.md"}) == ""
@@ -263,3 +263,27 @@ def test_an_anchored_publication_keeps_its_receipt_and_its_pass(tmp_path, monkey
     assert outcome["outcome_axes"]["objective"]["status"] == "pass"
     # The mark itself is still shown to the mind with that call.
     assert "Check the license field before publishing." in anchored_note(ctx, "submit_skill_to_hub", {"skill": "demo"})
+
+
+def test_a_mark_on_an_mcp_tool_meets_its_gateway_call(tmp_path):
+    """Main calls an on-demand MCP tool through call_mcp_tool: the executor runs the MCP call the envelope names, so
+    a mark tied to that MCP tool meets the call; another MCP tool through the same gateway does not."""
+    from types import SimpleNamespace
+
+    from ouroboros.loop_tool_execution import process_tool_results
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    from tests._tool_result_delivery_shared import measured_fit
+
+    ctx = ctx_for(tmp_path)
+    assert mark(ctx, "GMAIL_LESSON: confirm the recipient.", {"tool": "mcp_gmail__send_email"})["ok"]
+    rows = []
+    for call_id, name in (("c1", "mcp_slack__history"), ("c2", "mcp_gmail__send_email")):
+        call = resolve_gateway_call({"id": call_id, "function": {"name": "call_mcp_tool", "arguments": json.dumps(
+            {"name": name, "arguments": {"to": "a"}})}})
+        rows.append({"fn_name": call["function"]["name"], "tool_call_id": call_id, "result": "done", "is_error": False,
+                     "tool_args": json.loads(call["function"]["arguments"]), "args_for_log": {}, "result_meta": {},
+                     "tool_result": ToolResult(status="ok", code="OK", text="done")})
+    messages, trace = [], {"tool_calls": []}
+    process_tool_results(rows, messages, trace, lambda *_a: None, SimpleNamespace(_ctx=ctx),
+                         fit_candidate=measured_fit(window=200_000, reserve=1_000), tool_schemas=[])
+    assert "GMAIL_LESSON" not in messages[0]["content"] and "GMAIL_LESSON" in messages[1]["content"]

@@ -223,11 +223,9 @@ def _cascade_descendant_rows(drive_root: pathlib.Path, task_id: str, *, strict: 
     target = str(task_id or "").strip()
     queued = []
     try:
-        from ouroboros.utils import read_json_dict
+        from ouroboros.queue_observation import load_queue_document
 
-        snapshot = read_json_dict(
-            pathlib.Path(drive_root) / "state" / "queue_snapshot.json",
-        ) or {}
+        snapshot = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
         for group, status in (("pending", "scheduled"), ("running", "running")):
             for item in snapshot.get(group) or []:
                 if not isinstance(item, dict):

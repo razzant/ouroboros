@@ -5,7 +5,8 @@ result and the queue snapshot — never a second ledger or scheduler:
 
 - row ``occurrence``: ``{token, task_id, due_at, fingerprint, phase: claimed|admitted}``;
 - row ``hold``: ``{reason, detail, since, retry_after}`` — a typed WAIT (capacity,
-  a missing or broken folder, an unknown fact). A wait mints no failed root, no
+  a broken or protected folder, an unknown fact; a known folder that is only absent
+  starts instead, with ``workspace_availability``). A wait mints no failed root, no
   ``failure_count`` and no room message; ``manage_schedules`` and the Activity
   schedule list show it, and the mind decides whether to say anything;
 - task result ``schedule_admission``: ``{schedule_id, token, due_at, status,
@@ -296,15 +297,18 @@ def deletion_settled(record: Dict[str, Any], *, drive_root: Optional[pathlib.Pat
     return relation_kind(record) == "independent" or work_settled(record, drive_root=drive_root, reads=reads)
 
 
-def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwnershipRead] = None) -> bool:
+def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwnershipRead] = None,
+                            relations: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
     """Supervisor-only convergence of a resolved, already fired, unrun occurrence.
 
     The canonical frozen receipt commits before the live row and
     snapshot. Unqueued work is rebound by prepare and its admission write instead.
     A partial publication stays non-dispatchable at bound_task; another
     tick completes the SAME identity. No missing/possible receipt buys a rebind.
-    The caller holds queue/table and origin control locks.
+    The caller holds queue/table and origin control locks; ``relations`` is what
+    ``prepare_relations`` proved before them, never read here.
     """
+    from ouroboros.dialogue_provenance import presence_relation_metadata
     from supervisor.followup_policy import bind_task, relation_kind
 
     q = _queue()
@@ -332,6 +336,7 @@ def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwner
             return False
         rebound = copy.deepcopy(frozen)
         bind_task(q.DRIVE_ROOT, rebound, record)
+        _adopt_relation(rebound, (relations or {}).get(tid) or {})
         if rebound != frozen or any((stored.get(key) or {}) != (rebound.get(key) or {}) for key in ("metadata", "deadline_at", "task_contract")):
             item = {"task": rebound, "occurrence": {"token": token, "task_id": tid,
                     "due_at": receipt.get("due_at")}, "schedule_id": record["id"]}
@@ -340,7 +345,8 @@ def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwner
         if live is not None:
             before = copy.deepcopy(live)
             bind_task(q.DRIVE_ROOT, live, record)
-            if live != before and q.persist_queue_snapshot(reason="followup_binding_repaired") is not True:
+            _adopt_relation(live, presence_relation_metadata(rebound["metadata"]))  # follows its committed receipt
+            if live != before and q.publish_queue_snapshot(reason="followup_binding_repaired") is not True:
                 live.clear()
                 live.update(before)
                 return False
@@ -447,6 +453,7 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
             bind_task(_queue().DRIVE_ROOT, task, claimed["record"])
         except ValueError as exc:
             return {**claimed, "task": task, "hold": ("followup_binding_unavailable", str(exc))}
+        _adopt_relation(task, _origin_relation(task, claimed["record"]))
         return {**claimed, "task": task, "project_admission": task.get("_project_admission")}
     from supervisor.queue_schedules import _task_from_schedule
 
@@ -477,9 +484,72 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
         hold, basis = resolve_resource(task, record)
     except Exception as exc:
         hold, basis = ("resource_resolution_failed", f"{type(exc).__name__}: {exc}"), None
+    _adopt_relation(task, _origin_relation(task, record))  # after the resource decision its saved row recorded
     return {**claimed, "task": task, "hold": hold, "binding_basis": basis,
             "project_admission": task.get("_project_admission")}
 
+
+def _handed_relation(task_id: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """The effective record of ``task_id`` (a forked root's door stamp lies on its child drive until copy-back) and the
+    relation it would hand work it starts, in the order a producer decides it: a carrier of its own first, then that."""
+    from ouroboros.dialogue_provenance import presence_record_metadata, presence_root_carrier, presence_root_relation
+    from ouroboros.task_status import load_effective_task_result
+
+    result = load_effective_task_result(_queue().DRIVE_ROOT, task_id, materialize_artifacts=False)
+    source = presence_record_metadata(result)
+    return result, {} if presence_root_carrier(source, task_contract=result.get("task_contract")) else presence_root_relation(source)
+
+
+def _origin_relation(task: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    """The relation new work of a follow-up recorded before it existed (#2482) proves, else ``{}``. Off Q.
+
+    Its template, and a receipt accepted then, keep the binding authority the scheduling work held. An occurrence, or a
+    new Continue of one that already ran (``continuation_admission``), is the owner's related work only when the record
+    the host-written ``followup_origin`` names would hand the same binding's relation to work it starts. That source may
+    itself be an old run still holding the carrier: a root of this binding with no ceiling or speaker of its own. Then
+    the origin its own host facts retained is read next, under the same checks (``recorded_origin``), until a record hands
+    the relation or stops the proof: missing, unreadable, foreign, a child, a speaker, under a ceiling, with no host
+    source, or an id already read (a corrupt cycle ends there, unread). The binding alone proves nothing, and a queued
+    occurrence reads again.
+
+    Cost, off Q and no O(1): one effective-record read per unresolved generation. What proves carries the relation by
+    value, so its later generations read one record or none. A chain that never proves, like a place's own acting
+    follow-ups, is read to its end by each new occurrence, and again on each pass while that occurrence stays queued.
+    """
+    from ouroboros.dialogue_provenance import (
+        PRESENCE_BINDING_AUTHORITY_KEY,
+        presence_metadata_relation,
+        presence_related_work,
+    )
+    from ouroboros.schedule_continuation import recorded_origin
+
+    meta, contract = task.get("metadata") or {}, task.get("task_contract") or {}
+    origin, binding = str((record.get("followup_origin") or {}).get("task_id") or ""), presence_metadata_relation(meta)
+    if (not origin or not binding or "presence" in meta or PRESENCE_BINDING_AUTHORITY_KEY not in meta
+            or "capability_ceiling" in contract):
+        return {}
+    seen: set = set()
+    try:
+        while origin and origin not in seen:
+            seen.add(origin)
+            result, relation = _handed_relation(origin)
+            if relation:
+                return relation if presence_metadata_relation(relation) == binding else {}
+            stops = ("presence" in (result.get("metadata") or {}) or "capability_ceiling" in (result.get("task_contract") or {})
+                     or not presence_related_work(binding, result))
+            origin = "" if stops else recorded_origin(result)
+    except Exception:
+        pass  # unread proves nothing either way
+    return {}
+
+
+def _adopt_relation(task: Dict[str, Any], relation: Dict[str, Any]) -> None:
+    """Only the carrier moves: resources, custody and the saved row stay as recorded."""
+    from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY
+
+    if relation:
+        task["metadata"].pop(PRESENCE_BINDING_AUTHORITY_KEY, None)
+        task["metadata"].update(relation)
 
 
 def _window(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -527,12 +597,21 @@ def resolve_resource(task: Dict[str, Any], record: Dict[str, Any]) -> tuple[Opti
 
     ``room_default``: the room's CURRENT folder (a folderless room stays folderless:
     task scratch is only its default cwd). ``explicit_resource``: the recorded folder,
-    revalidated; if gone the row waits — another folder is never substituted.
+    revalidated. A known folder that is merely absent now is still bound: the ordinary
+    occurrence starts with that address and its availability fact (#1799, owner choice
+    A), so another folder is never substituted; a broken or forbidden address waits.
     ``explicit_none``: folderless even if the room has a folder now. ``system_repo``
     and owner/skill templates: unchanged. Returns ``(hold, binding_basis)``."""
     from ouroboros.dialogue_provenance import presence_metadata_binding
-    from ouroboros.workspace_admission import resolve_room_workspace
+    from ouroboros.workspace_admission import resolve_room_workspace, unavailable_workspace_address
     from supervisor import workers
+
+    def bind_or_hold(root: str, error: str, address: str) -> Optional[tuple]:
+        missing = unavailable_workspace_address(address, system_repo_dir=workers.REPO_DIR,
+                                                drive_root=_queue().DRIVE_ROOT) if error else ""
+        if error and not missing:
+            return ("workspace_unusable", error)
+        return _bind(task, missing or root, unavailable=error if missing else "")
 
     template = record.get("task") if isinstance(record.get("task"), dict) else {}
     meta = task["metadata"]
@@ -541,7 +620,7 @@ def resolve_resource(task: Dict[str, Any], record: Dict[str, Any]) -> tuple[Opti
     intent = template.get("metadata", {}).get("resource_intent") if isinstance(template.get("metadata"), dict) else None
     intent = dict(intent) if isinstance(intent, dict) and intent.get("kind") else _origin_intent(template, record)
     if intent is None:
-        return ("resource_intent_unknown", "the follow-up predates recorded resource intent and its "
+        return ("resource_intent_unknown", "the follow-up carries no recorded resource intent and its "
                 "origin record does not prove one; reschedule it from the work it continues"), None
     meta["resource_intent"] = intent
     kind = str(intent.get("kind") or "")
@@ -565,18 +644,22 @@ def resolve_resource(task: Dict[str, Any], record: Dict[str, Any]) -> tuple[Opti
             return None, ""  # folderless (task scratch as default cwd); a closed room meets the admission fence
         root, error = resolve_room_workspace(drive_root=_queue().DRIVE_ROOT, system_repo_dir=workers.REPO_DIR,
                                              project_id=project_id, project_admission=task["_project_admission"])
-        return (("workspace_unusable", error), basis) if error else (_bind(task, root), basis)
+        return bind_or_hold(root, error, basis), basis
     if kind == "explicit_resource":
+        address = str(intent.get("root") or "")
+        if not address:
+            return ("workspace_unusable", "the recorded explicit_resource intent names no folder"), None
         root, error = resolve_room_workspace(drive_root=_queue().DRIVE_ROOT, system_repo_dir=workers.REPO_DIR,
-                                             project_id="", explicit_workspace=str(intent.get("root") or ""))
-        return (("workspace_unusable", error), None) if error or not intent.get("root") else (_bind(task, root), None)
+                                             project_id="", explicit_workspace=address)
+        return bind_or_hold(root, error, address), None
     return None, None  # explicit_none, system_repo, template: nothing to bind
 
 
-def _bind(task: Dict[str, Any], root: str) -> None:
+def _bind(task: Dict[str, Any], root: str, *, unavailable: str = "") -> None:
     """The same external-workspace admission promotion performs (folder, forked
     memory drive, bounded preflight, the workspace block). This occurrence's deferred
-    preparation (``_DEFERRED``) lends its existing fork only to the same folder and Project."""
+    preparation (``_DEFERRED``) lends its existing fork only to the same folder and Project.
+    ``unavailable`` is why a kept address is absent: it rides the metadata and the block."""
     if not root:
         return None
     from ouroboros.headless import prepare_task_drive
@@ -601,9 +684,13 @@ def _bind(task: Dict[str, Any], root: str) -> None:
         task.update(drive_root=str(child), budget_drive_root=str(q.DRIVE_ROOT))
     preflight = bounded_workspace_preflight(root)
     task["metadata"].update(workspace_root=root, workspace_preflight=preflight)
+    if unavailable:
+        task["metadata"]["workspace_availability"] = {"state": "missing", "observed_at": utc_now_iso(),
+                                                      "detail": unavailable[:500]}
     task["text"] = (f"{task['text']}\n\n[HEADLESS_WORKSPACE]\n"
                     + compose_workspace_block(workspace_root=root, workspace_mode="external",
-                                              memory_mode="forked", workspace_preflight=preflight)
+                                              memory_mode="forked", workspace_preflight=preflight,
+                                              unavailable=unavailable)
                     + "[END_HEADLESS_WORKSPACE]")
     return None
 
@@ -765,7 +852,7 @@ def admit(prepared: List[Dict[str, Any]], *, stop: Optional[Callable[[], bool]] 
             _unqueue(admitted)  # the receipts stand; the rows' claims reconcile next pass
             log.error("Scheduled task store write failed after admission; admitted tasks withdrawn", exc_info=True)
             return
-        if admitted and q.persist_queue_snapshot(reason="scheduled_tasks") is not True:
+        if admitted and q.publish_queue_snapshot(reason="scheduled_tasks") is not True:  # durable or withdrawn
             _unqueue(admitted)  # not durable in the queue: republished from their receipts next pass
             log.error("Queue snapshot failed after scheduled admission; %d task(s) withdrawn", len(admitted))
 
@@ -874,6 +961,26 @@ def prepare_receipts(records: List[Dict[str, Any]], *, drive_root: pathlib.Path)
         except Exception:
             pass  # TaskOwnershipRead retains the exact failure, never an absent row.
     return reads
+
+
+def prepare_relations(records: List[Dict[str, Any]], reads: TaskOwnershipRead) -> Dict[str, Dict[str, Any]]:
+    """Beside the receipts and off Q: what the origin of each accepted, unstarted occurrence proves (``_origin_relation``).
+
+    Binding repair consumes this under Q. Only a receipt still keeping the old carrier costs reads (the walk that proof
+    describes, each pass while it stays queued), and contention proves nothing: the next pass reads it again."""
+    from ouroboros.store import acquisition_budget
+
+    relations: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        tid = str((record.get("occurrence") or {}).get("task_id") or record.get("last_task_id") or "")
+        stored = reads.rows.get(tid) or {}
+        receipt = stored.get("schedule_admission") or {}
+        if stored.get("status") == "scheduled" and receipt.get("dispatch") == "none" and isinstance(receipt.get("task"), dict):
+            with acquisition_budget(0):
+                relation = _origin_relation(receipt["task"], record)
+            if relation:
+                relations[tid] = relation
+    return relations
 
 
 def _read_back(task_id: str, *, drive_root: Optional[pathlib.Path] = None,

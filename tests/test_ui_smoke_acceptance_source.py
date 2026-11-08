@@ -27,7 +27,6 @@ def _run(task_id):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_old_applied_review_download_appears_when_its_reference_refreshes_the_card(direct_server_with_data):
     from playwright.sync_api import sync_playwright
 

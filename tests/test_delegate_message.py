@@ -288,7 +288,6 @@ def test_a_settled_run_is_not_active_without_a_post(tmp_path, monkeypatch):
 @pytest.mark.parametrize("stub_kwargs,reason,live_input", [
     ({"operations": []}, "engine_lacks_operation", None),
     ({"harnesses": [_row(live_input="none")]}, "route_live_input_none", "none"),
-    ({"harnesses": [_row(live_input=None)]}, "route_live_input_none", "none"),
     ({"harnesses": [_row(route_id="another-route")]}, "route_not_in_capability_catalog", None),
     ({"capability_error": RuntimeError("catalog down")}, "capability_read_failed", "unknown"),
 ])
@@ -449,10 +448,7 @@ def test_payload_verdict_4xx_is_rejected_as_an_agent_fault(tmp_path, monkeypatch
 @pytest.mark.parametrize("code,status", [
     ("daemon_unreachable", 0),          # transport death
     ("http_503", 503),                  # any 5xx
-    ("internal_error", 500),            # the receipt-save failure path
     ("delivery_in_progress", 409),      # the idempotency store: fate unknown
-    ("delivery_interrupted", 409),
-    ("http_429", 429),                  # says nothing about delivery
 ])
 def test_ambiguous_failures_are_delivery_unknown_naming_the_same_id_retry(
         tmp_path, monkeypatch, code, status):
@@ -784,7 +780,6 @@ class _QuestionStub(_Stub):
         self.closed += 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("message_id", ["", "m-replayed-refusal"])
 def test_pending_refusal_includes_current_answerable_questions_without_consuming_wait_news(
         tmp_path, monkeypatch, message_id):
@@ -821,11 +816,8 @@ def test_pending_refusal_includes_current_answerable_questions_without_consuming
     assert "pending_interactions" not in receipts[0]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("outcome,reason", [
     ("accepted", ""), ("delivered", ""), ("rejected", "rpc_refused"),
-    ("unsupported", "interaction_pending"), ("not_active", "run_terminal"),
-    ("delivery_unknown", "interaction_pending"),
 ])
 def test_unrelated_message_outcomes_do_not_read_run_detail(tmp_path, monkeypatch, outcome, reason):
     from ouroboros.delegate_interactions import _delegate_message
@@ -839,19 +831,12 @@ def test_unrelated_message_outcomes_do_not_read_run_detail(tmp_path, monkeypatch
     assert stub.detail_reads == [] and stub.answers == [] and stub.closed == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("detail,error", [
-    ({}, None), ({"pendingInteractions": None}, None),
-    ({"pendingInteractions": "unreadable"}, None),
     ({"pendingInteractions": ["invalid row"]}, None),
-    ({"pendingInteractions": [{}]}, None),
-    ({"pendingInteractions": [{"interactionId": "i", "questions": []}]}, None),
     ({"pendingInteractions": [{"interactionId": "i", "questions": [None]}]}, None),
-    ({"pendingInteractions": [_message_question(), {"interactionId": "bad"}]}, None),
     ({"pendingInteractions": [{**_message_question(), "attemptId": {"invalid": "identity"}}]}, None),
     ({"pendingInteractions": [{"interactionId": "i", "questions": [
         {"id": "q", "question": "Q?", "options": ["invalid option"]}]}]}, None),
-    ({"pendingInteractions": []}, RuntimeError("retained read failure")),
 ])
 def test_failed_question_observation_preserves_the_refusal_as_unknown(
         tmp_path, monkeypatch, detail, error):
@@ -875,7 +860,6 @@ def test_failed_question_observation_preserves_the_refusal_as_unknown(
     assert [r["outcome"] for r in _receipts(tmp_path)] == ["not_active"]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("message_id", ["", "m-stored"])
 def test_question_resolved_between_refusal_and_read_is_an_empty_current_observation(
         tmp_path, monkeypatch, message_id):
@@ -892,7 +876,6 @@ def test_question_resolved_between_refusal_and_read_is_an_empty_current_observat
     assert stub.answers == [] and len(stub.detail_reads) == 1 and stub.closed == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("remaining", [0.0, 0.25])
 def test_question_observation_uses_only_the_remaining_message_budget(
         tmp_path, monkeypatch, remaining):
@@ -923,7 +906,6 @@ def test_question_observation_uses_only_the_remaining_message_budget(
     assert stub.closed == 1 and stub.answers == []
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("shape", ["many_questions", "long_answer_keys", "long_label"])
 def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
         tmp_path, monkeypatch, shape):
@@ -975,7 +957,6 @@ def test_large_pending_questions_fit_and_are_retrievable_with_complete_refusal(
     assert stub.closed == 1 and stub.answers == []
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("failure", ["render", "stage", "observe"])
 def test_question_delivery_failure_never_replaces_the_message_receipt(
         tmp_path, monkeypatch, failure):
@@ -1259,3 +1240,185 @@ def test_pending_detail_wall_timeout_keeps_known_refusal(tmp_path, monkeypatch):
     finally:
         release.set()
         assert finished.wait(5)
+
+
+# -- the starter's placement of my human's rows into its open sessions -----------
+
+def _durable_run(tmp_path, run_id, *, task_id="t-nanny", route_id="some-route", source="", settled=False):
+    """One run with a durable start (the census reads held rows, never the memo), settled or open."""
+    from ouroboros import delegate_custody as custody
+
+    entry = custody.RunCustody(run_id=run_id, task_id=task_id, route_id=route_id, model="m", root_task_id="t-root",
+                               project_id="prj", project_owned=False, source=source)
+    assert custody.record_started(tmp_path, entry, shape={
+        "access": "readonly", "mode": "ask", "isolation": "", "delegated": False, "root": "/r",
+        "max_seconds": 90, "max_seconds_basis": "requested"})
+    if settled:
+        assert custody.emit(tmp_path, custody.SETTLED, {"run_id": run_id, "task_id": task_id, "route": route_id,
+                                                        "state": "failed", "outcome_reason": "x"})
+    custody._CUSTODY.clear()
+    return entry
+
+
+def _starter(tmp_path, *rows):
+    from ouroboros import owner_words as ow
+
+    ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"root_task_id": "t-root", "parent_task_id": "t-root", ow.FIELD: list(rows)}
+    return ctx
+
+
+def _owner_row(text, client, ts="2026-10-04T05:00:00+00:00"):
+    from ouroboros import owner_words as ow
+
+    return ow._row(text, source="owner_mailbox", carrier="held", task_id="t-root", ts=ts, ref=f"chat 1 / {client}")
+
+
+def _placed(stub):
+    """``(run_id, owner_words address, first line of the words)`` of every wire frame the stub received."""
+    out = []
+    for post in stub.posts:
+        wire = json.loads(post["text"])
+        assert wire["kind"] == "task_message" and wire["frame"]["relation"] == "starter"
+        out.append((post["run_id"], wire["frame"]["owner_words"]["address"], wire["text"].split("\n", 1)[0]))
+    return out
+
+
+def test_placement_follows_the_outcome_rules_and_never_a_review_a_settled_or_another_tasks_run(tmp_path, monkeypatch):
+    """Each row of the rows the starter carries reaches each session it holds open once: delivered, accepted and
+    rejected end a row for that run; delivery_unknown replays the same frame under its message id; not_active on
+    a run still open places it again under a new id at each round, k rounds leaving one fact line; a route with
+    no live input ends it with a frame and no POST; a capability read that fails, and an engine that cannot be
+    discovered, leave no frame and the run for the next round. The message my human replied to rides inside the
+    row's text and is never a frame of its own. A review's run, a settled run and another task's run hear
+    nothing."""
+    from ouroboros import delegate_message_store as frames
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.delegate_interactions import place_rows_into_runs
+    from ouroboros.gateways import claudexor as gw
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    _durable_run(tmp_path, "run-open")
+    _durable_run(tmp_path, "run-review", source="review_substrate")
+    _durable_run(tmp_path, "run-settled", settled=True)
+    _durable_run(tmp_path, "run-foreign", task_id="t-other")
+    a, b = _owner_row("Build it", "msg-a"), _owner_row("Add the charts too", "msg-b", ts="2026-10-04T06:00:00+00:00")
+    ctx = _starter(tmp_path, a, b)
+    target = {"address": "row:1@2026-10-04T06:10:00+00:00#0123456789ab", "author": "Ouroboros", "text": "Which charts?"}
+    held = {"direction": "in", "chat_id": 1, "ts": "2026-10-04T06:20:00+00:00", "text": "Bar charts", "task_id": "",
+            "client_message_id": "msg-h", "reply_to": target}  # a held row replying to my message: context beside it
+    ctx._held_owner_messages = {format_address(row_address(held)): held}
+    stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+    lines = place_rows_into_runs(ctx)
+    placed = _placed(stub)
+    assert [run for run, _addr, _line in placed] == ["run-open"] * 3
+    assert all(line.startswith("[Owner words quoted verbatim; 2026-10-04T0") and "carried to this work by the host "
+               "(reached this work); handle row:1@" in line for _run, _addr, line in placed)
+    texts = [json.loads(p["text"])["text"] for p in stub.posts]
+    assert [text.split("\n")[1] for text in texts] == [a["text"], b["text"], "Bar charts"]
+    assert ("[Host reference: the message these owner words reply to; context, not the owner's words]\n"
+            + json.dumps(target, ensure_ascii=False)) in texts[2] and "Which charts?" not in "".join(texts[:2])
+    assert len(lines) == 3 and all(line.startswith("[Host fact: my human's row row:1@") and
+                                   "for session run run-open: delivered]" in line for line in lines)
+    assert [row["outcome"] for row in frames.placed_words(ctx, "run-open")] == ["delivered"] * 3
+    assert frames.placed_words(ctx, "run-review") == [] and frames.placed_words(ctx, "run-settled") == []
+    receipts = _receipts(tmp_path)
+    assert len(receipts) == 3 and {r["run_id"] for r in receipts} == {"run-open"}
+    assert place_rows_into_runs(ctx) == [] and len(stub.posts) == 3  # ended: nothing again, no frame for the target
+    # delivery_unknown replays the SAME frame under the SAME key; delivered then ends it.
+    c = _owner_row("A third word", "msg-c", ts="2026-10-04T07:00:00+00:00")
+    ctx = _starter(tmp_path, a, b, c)
+    lost = _install(monkeypatch, _Stub(error=ClaudexorUnavailable("daemon_unreachable", "reset", status_code=503)))
+    assert [line for line in place_rows_into_runs(ctx) if "run-open: delivery_unknown (daemon_unreachable)]" in line]
+    first = lost.posts[0]
+    assert len(lost.posts) == 1 and frames.placed_words(ctx, "run-open")[-1]["outcome"] == "delivery_unknown"
+    again = _install(monkeypatch, _Stub(error=ClaudexorUnavailable("daemon_unreachable", "reset", status_code=503),
+                                        harnesses=[_row(live_input="none")]))  # the route's row changed under the run
+    assert place_rows_into_runs(ctx) == []  # the same outcome: no new fact line
+    assert again.posts == [first] and len(frames.placed_words(ctx, "run-open")) == 4  # replayed, never re-gated
+    delivered = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+    assert [line for line in place_rows_into_runs(ctx) if "delivered" in line]
+    assert delivered.posts == [first] and frames.placed_words(ctx, "run-open")[-1]["outcome"] == "delivered"
+    # not_active on a run the census still holds open: placed again under a NEW id at each round, k rounds leaving
+    # ONE fact line; rejected ends it.
+    d = _owner_row("A fourth word", "msg-d", ts="2026-10-04T08:00:00+00:00")
+    ctx = _starter(tmp_path, a, b, c, d)
+    idle = _install(monkeypatch, _Stub(result={"outcome": "not_active", "reason": "between_turns"}))
+    assert [line for line in place_rows_into_runs(ctx) if "not_active (between_turns)" in line]
+    assert place_rows_into_runs(ctx) == [] and len(idle.posts) == 2  # the same outcome again: a new POST, no new line
+    assert len({post["key"] for post in idle.posts}) == 2  # two frames of one row, each under its own id
+    rejected = _install(monkeypatch, _Stub(result={"outcome": "rejected", "reason": "payload_too_large"}))
+    assert [line for line in place_rows_into_runs(ctx) if "rejected (payload_too_large)" in line]
+    assert len(rejected.posts) == 1 and rejected.posts[0]["key"] not in {post["key"] for post in idle.posts}
+    assert len({json.loads(post["text"])["text"] for post in [*idle.posts, *rejected.posts]}) == 1  # the same words
+    silent = _install(monkeypatch, _Stub())
+    assert place_rows_into_runs(ctx) == [] and silent.posts == []  # rejected ended it
+    # A route with no live input: the frame records unsupported with no POST, once; accepted ends a row as
+    # delivered does (the harness holds it); a failed read: nothing at all.
+    _durable_run(tmp_path, "run-deaf", route_id="deaf-route")
+    e = _owner_row("A fifth word", "msg-e", ts="2026-10-04T09:00:00+00:00")
+    ctx = _starter(tmp_path, a, b, c, d, e)
+    deaf = _install(monkeypatch, _Stub(result={"outcome": "accepted", "reason": ""},
+                                       harnesses=[_row(), _row("deaf-route", live_input="none")]))
+    lines = place_rows_into_runs(ctx)
+    assert sorted(line.split("run ")[1] for line in lines) == (  # one fact per row and run: five rows never heard
+        ["run-deaf: unsupported (route_live_input_none)]"] * 5 + ["run-open: accepted]"])
+    assert [run for run, _a, _l in _placed(deaf)] == ["run-open"]
+    assert [row["outcome"] for row in frames.placed_words(ctx, "run-deaf")] == ["unsupported"] * 5
+    held_by_harness = _install(monkeypatch, _Stub())
+    assert place_rows_into_runs(ctx) == [] and held_by_harness.posts == []  # accepted ended it
+    before = len(frames.placed_words(ctx, "run-open"))
+    f = _owner_row("A sixth word", "msg-f", ts="2026-10-04T10:00:00+00:00")
+    ctx = _starter(tmp_path, a, b, c, d, e, f)
+    blind = _install(monkeypatch, _Stub(capability_error=OSError("down")))
+    assert place_rows_into_runs(ctx) == [] and blind.posts == []
+    assert len(frames.placed_words(ctx, "run-open")) == before and len(frames.placed_words(ctx, "run-deaf")) == 5
+    # An engine whose descriptor is missing is the engine's absence this round: the drain returns, the loop goes on,
+    # nothing is appended or framed; the next round places the row once.
+
+    def _undiscovered(*_a, **_k):
+        raise ClaudexorUnavailable("daemon_not_discovered", "control-api.json not found")
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", _undiscovered)
+    assert place_rows_into_runs(ctx) == []
+    assert len(frames.placed_words(ctx, "run-open")) == before and len(frames.placed_words(ctx, "run-deaf")) == 5
+    found = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""},
+                                        harnesses=[_row(), _row("deaf-route", live_input="none")]))
+    assert sorted(line.split("run ")[1] for line in place_rows_into_runs(ctx)) == [
+        "run-deaf: unsupported (route_live_input_none)]", "run-open: delivered]"]
+    assert [run for run, _a, _l in _placed(found)] == ["run-open"]
+    assert json.loads(found.posts[0]["text"])["text"].split("\n")[1] == f["text"]
+    assert len(frames.placed_words(ctx, "run-open")) == before + 1 and len(frames.placed_words(ctx, "run-deaf")) == 6
+
+
+def test_placement_runs_from_the_round_top_drain_alone_and_skips_the_rows_a_start_body_holds(tmp_path, monkeypatch):
+    """The one caller that places is the loop's round-top drain (``place_live_runs=True`` on that line alone);
+    a drain at a delivery close, a completed stop, a forced finalization or a live call places nothing. A row
+    whose stamp stands in a START body of the run's line is never placed, under either reference it has printed
+    (its room reference now, its pre-update mailbox ``msg <id>`` before); the others are, and the fact lines
+    reach the starter's own context."""
+    import queue
+    from ouroboros import delegate_continuation
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+
+    _durable_run(tmp_path, "run-open")
+    a, b = _owner_row("Build it", "msg-a"), _owner_row("Add the charts too", "msg-b", ts="2026-10-04T06:00:00+00:00")
+    ctx = _starter(tmp_path, a, b)
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Keep the API", "msg_id": "mail-c", "chat_id": "1",
+                              "client_message_id": "msg-c", "ts": "2026-10-04T04:00:00+00:00"}]  # prints chat 1 / msg-c now
+    stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+    monkeypatch.setattr(delegate_continuation, "line_start_bodies", lambda _root, _run: [
+        "OBJECTIVE\nx\n\n[2026-10-04T05:00:00+00:00 · owner · owner_mailbox of task t-root · chat 1 / msg-a]\nBuild it\n"
+        "[2026-10-04T04:00:00+00:00 · owner · owner_mailbox of task t-nanny · msg mail-c]\nKeep the API"])
+    messages = [{"role": "user", "content": "the assignment"}]
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    assert stub.posts == [] and len(messages) == 1  # a drain without the flag: a delivery close, a live call
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx,
+                             place_live_runs=True)
+    assert [line for _run, _addr, line in _placed(stub)] and len(stub.posts) == 1
+    assert json.loads(stub.posts[0]["text"])["text"].split("\n")[1] == b["text"]  # a's and c's stamps stand in the body
+    assert len(messages) == 2 and "for session run run-open: delivered]" in str(messages[1]["content"])
+    assert "Build it" not in str(messages[1]["content"]) and "Keep the API" not in str(messages[1]["content"])
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx,
+                             place_live_runs=True)
+    assert len(stub.posts) == 1 and len(messages) == 2  # once

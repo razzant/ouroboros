@@ -4,8 +4,9 @@
 # were the official homes before 2026-05-31. They stay archived, but old links,
 # clones, the first Colab badge and desktop apps installed before v6.8.0 still
 # reach them. Stable promotion advances main only after the release is
-# published, so each push to main runs scripts/sync_legacy_mirrors.py: it checks
-# that the commit carries the published v<VERSION> tag, unarchives the mirrors
+# published, so each push to main runs scripts/sync_legacy_mirrors.py (a push that
+# only re-renders Casks/ does not): it reads main's promotion commit through to its
+# tag, checks that the tag is the published v<VERSION>, unarchives the mirrors
 # for a minute, fast-forwards their update branches, refreshes main and the
 # "moved" release, and archives them again; the last step re-archives them even
 # when the refresh failed or was cancelled (owner decisions 2026-10-11 №1=B,
@@ -18,6 +19,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "Casks/**"
   workflow_dispatch:
 
 permissions:

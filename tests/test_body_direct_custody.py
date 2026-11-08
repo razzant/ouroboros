@@ -10,7 +10,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _supervisor_ctx
 from tests.test_cold_external_custody import _setup
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

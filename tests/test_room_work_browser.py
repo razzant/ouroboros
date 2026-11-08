@@ -14,6 +14,7 @@ facts read in the page go to ``OUROBOROS_UI_EVIDENCE_DIR`` when it is set.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import time
 from pathlib import Path
@@ -21,11 +22,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # The facts one room's control and list expose to the owner, read in one frame.
 ROOM_FACTS = """(scope) => {
@@ -202,7 +205,7 @@ class Transport:
                 if msg.type in {"error", "warning"} else None)
         page.route_web_socket("**/ws", self._connect)
         page.route("**/api/state*", self._state)
-        page.route("**/api/projects*", lambda route: route.fulfill(json={"projects": self.projects}))
+        page.route("**/api/projects*", lambda route: answer_projects(route, self.projects))
         page.route("**/api/chat/history*", self._history)
         page.route("**/api/tasks/**", self._tasks)
         page.route("**/api/decisions*", self._decision)
@@ -226,8 +229,10 @@ class Transport:
                 fences.setdefault(item.get("root_task_id") or task_id, {
                     "state": "requested" if pausing else "paused", "parked_members": [] if pausing else [task_id]})
         # Consciousness facts show each bar's chip: one more neighbour no word may move (DESIGN bible 6).
+        next_wake = datetime.now(timezone.utc) + timedelta(hours=1)
         return {"sha": "room-work-fixture", "supervisor_ready": ready, "active_chat_activities": rows,
-                "bg_consciousness_enabled": True, "bg_consciousness_state": {"status": "sleeping", "next_wake_at": "2026-10-25T14:20:00"},
+                "bg_consciousness_enabled": True, "bg_consciousness_state": describe_consciousness_state(
+                    {"next_wake_at": next_wake.isoformat()}, True),
                 "active_chat_activities_complete": self.complete, "projects": self.projects,
                 "project_chat_ids": [p["chat_id"] for p in self.projects],
                 **work_fields(rows, raw, results=self.results, fences=fences, complete=self.complete)}
@@ -458,14 +463,14 @@ def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui)
         "rw-pausing": ("Pausing…", "", "held"),
         "rw-failfin": ("Failed", "Finalizing…", "failed"),
         "rw-unknown": ("Activity unconfirmed", "", "unknown"),
-        "rw-queued": ("Queued", "Waiting for a free worker", "queued"),
+        "rw-queued": ("Queued", "", "queued"),
         "rw-ask": ("Waiting for your answer", "", "wait"),
     }
     for task_id, (word, secondary, tone) in expect.items():
         assert (by[task_id]["word"], by[task_id]["secondary"], by[task_id]["tone"]) == (word, secondary, tone), by[task_id]
     focus_lines = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('#page-chat .rw-row')]
         .map(r => [r.dataset.id, (r.querySelector('.rw-focus:not([hidden])')?.textContent || '').trim()]))""")
-    assert focus_lines["rw-live"] == focus_text and focus_lines["rw-queued"] == "", focus_lines
+    assert focus_text in focus_lines["rw-live"] and focus_lines["rw-queued"] == "", focus_lines
     # An access wait is not an answer wait: only the waited question offers View question.
     assert [item["id"] for item in opened["rows"] if item["question"]] == ["rw-ask"]
     assert by["rw-ask"]["name"].startswith("Reply to “Please check which evidence"), by["rw-ask"]
@@ -1043,9 +1048,19 @@ def test_project_shade_hold_outside_press_switch_and_latest_root(room_ui):
     # Switching rooms takes the control along; the new room shows only its own.
     open_project(page, OTHER_PROJECT)
     switched = wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
-    assert switched["disabled"] and switched["rows"] == [], switched
+    assert switched["rows"] == [], switched
     assert page.locator("#panel-pchat-rw-proj").count() == 0
     assert page.locator("#project-panel .rw-trigger").count() == 1
+    # With nothing listed the title still opens the list: the room's whole name heads it and it says so (DESIGN
+    # "Room work status"; the name's one line in the bar may be cut).
+    assert not switched["disabled"], switched
+    page.locator("#project-panel .app-page-title").click()
+    empty = wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the empty Project's list")
+    assert empty["rows"] == [] and empty["note"] == "Nothing running or queued.", empty
+    assert page.locator("#project-panel .rw-shade:not(.cx-shade) .rw-title").inner_text() == OTHER_PROJECT["name"]
+    assert page.locator("#project-panel .app-page-title").get_attribute("title") == OTHER_PROJECT["name"]
+    page.keyboard.press("Escape")
+    wait_facts(page, "project", lambda f: f["surfaceHidden"], "the empty list closed")
     page.locator("#project-panel-close").click()
     main = wait_facts(page, "main", lambda f: f["exists"], "Main's control")
     assert main["disabled"], "Main keeps no finished list"

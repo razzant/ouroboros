@@ -336,6 +336,55 @@ def attachment_manifest_projection(drive_root: Any, task_id: str, manifest: Any)
     return projection
 
 
+def render_attachment_lines(attachments: Any) -> str:
+    """Render the complete staged/rejected attachment report.
+
+    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
+    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
+    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
+    remain readable; new rows carry ordinal/status/reason and rejected rows are
+    rendered without source paths or secret contents."""
+    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
+    if isinstance(attachments, dict):
+        attachments = attachments.get("attachment_manifest")
+    if not isinstance(attachments, list):
+        return ""
+    lines: List[str] = []
+    if ref:
+        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ordinal = int(item.get("ordinal"))
+        except (TypeError, ValueError):
+            ordinal = len(lines)
+        status = str(item.get("status") or "staged")
+        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
+        if status == "rejected":
+            reason = str(item.get("reason") or "staging_failed").strip()
+            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
+            continue
+        relpath = str(item.get("relpath") or "").strip()
+        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
+        label = label or pathlib.Path(relpath).name
+        if not relpath:
+            continue
+        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
+        # v6.54.3: also surface the REAL staged path for process tools — scripts
+        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
+        # models GUESS wrong absolute paths that tripped light-mode path guards.
+        # The staged path lives inside this task's own artifact_store, so both
+        # forms address the same file.
+        abs_path = str(item.get("abs_path") or "").strip()
+        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
+        lines.append(
+            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
+            f"{script_hint} [status=staged, ordinal={ordinal}]"
+        )
+    return "\n".join(lines)
+
+
 def resolve_attachment_manifest(drive_root: Any, task_id: str, authority: Any) -> List[Dict[str, Any]]:
     """Resolve complete captured inputs under the actual owner, never preview fallback.
 
@@ -565,6 +614,46 @@ def materialize_inherited_attachment_manifest(
         return [], f"{type(exc).__name__}: {exc}"
 
 
+def held_attachment_manifest(drives: Iterable[Any], task_id: str, authority: Any) -> List[Dict[str, Any]]:
+    """TASK's complete declared inputs as its own stores hold them now, ready for another task's own copy
+    (``materialize_inherited_attachment_manifest``). ``drives`` are TASK's drive roots in reading order: the
+    manifest resolves from the first one that reads it (``resolve_attachment_manifest``; none raises
+    ``ValueError``), and each staged row names the first ``attachments/`` file there that verifies against its
+    captured identity. A staged row that no store holds becomes ``rejected``/``source_missing`` with its label
+    and recorded identity: a gap, never other bytes."""
+    roots = [pathlib.Path(drive) for drive in drives]
+    for drive in roots:
+        try:
+            rows = resolve_attachment_manifest(drive, task_id, authority)
+            break
+        except (OSError, ValueError, TypeError):
+            continue
+    else:
+        raise ValueError(f"no store of {task_id} reads its attachment manifest")
+    held: List[Dict[str, Any]] = []
+    for row in rows:
+        rel, source = pathlib.PurePosixPath(str(row.get("relpath") or "")), None
+        if (row["status"] == "staged" and len(rel.parts) == 2 and rel.parts[0] == _ATTACHMENTS_SUBDIR
+                and ".." not in rel.parts):
+            for drive in roots:
+                store = task_artifact_dir_path(drive, task_id)
+                path = store.joinpath(*rel.parts)
+                try:
+                    if not path.is_symlink() and path.resolve(strict=True).is_relative_to(store.resolve(strict=False)):
+                        stream_artifact_file(path, expected=row)
+                        source = path
+                        break
+                except OSError:
+                    continue
+        if source is not None:
+            row = {**row, "abs_path": str(source)}
+        elif row["status"] == "staged":
+            row = {**{key: row[key] for key in ("ordinal", "label", "mime", "size", "sha256") if key in row},
+                   "status": "rejected", "reason": "source_missing"}
+        held.append(row)
+    return held
+
+
 def artifact_store_path_block_reason(
     path: pathlib.Path,
     *,
@@ -606,6 +695,75 @@ def task_artifact_dir_path(drive_root: Union[pathlib.Path, str], task_id: str, *
     return task_artifacts_dir(pathlib.Path(drive_root), validate_task_id(task_id), create=create)
 
 
+def actor_source_reference(*, category: str, source_id: str, data: bytes, extension: str,
+                           measured: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Price an exact actor-source address without creating a directory or writing bytes
+    (``measured``: the ``size``/``sha256`` of streamed bytes, which are then not passed)."""
+    normalized_category = str(category or "").strip()
+    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
+        raise ValueError(f"unsupported source-handle category: {normalized_category}")
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
+    safe_id = safe_id[:160] or "source"
+    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
+    digest, size = (str(measured["sha256"]), int(measured["size"])) if measured else (sha256(data).hexdigest(), len(data))
+    relative = pathlib.PurePosixPath(
+        _SOURCE_HANDLES_SUBDIR,
+        normalized_category,
+        f"{safe_id}-{digest}.{safe_extension}",
+    )
+    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
+    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": size,
+            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+
+
+class _HashingSink:
+    """What a producer streams, hashed and counted as it is written."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle, self.digest, self.size = handle, sha256(), 0
+
+    def write(self, chunk: bytes) -> int:
+        self._handle.write(chunk)
+        self.digest.update(chunk)
+        self.size += len(chunk)
+        return len(chunk)
+
+
+def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, category: str, source_id: str,
+                        extension: str, fill: Any, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``store_actor_source_bytes`` for bytes too large to hold: ``fill(sink)`` streams them into a temporary
+    sibling, hashed here, and the file is published write-once under its digest name only when the measured
+    bytes match ``expected`` (``size``/``sha256`` where given); a mismatch or a failed ``fill`` publishes nothing."""
+    folder = task_artifact_dir_path(drive_root, task_id, create=True) / _SOURCE_HANDLES_SUBDIR / str(category)
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_sibling(folder / f"{validate_task_id(task_id)}.stream")
+    try:
+        with temporary.open("xb") as handle:
+            sink = _HashingSink(handle)
+            fill(sink)
+            handle.flush()
+            os.fsync(handle.fileno())
+        measured = {"size": sink.size, "sha256": sink.digest.hexdigest()}
+        for key in ("size", "sha256"):
+            if (expected or {}).get(key) not in (None, "") and (expected or {})[key] != measured[key]:
+                raise ArtifactIdentityError(f"streamed source failed {key} verification: {source_id}",
+                                            source_path=None, source_stamp=())
+        ref = actor_source_reference(category=category, source_id=source_id, data=b"", extension=extension,
+                                     measured=measured)
+        target = task_artifact_dir_path(drive_root, task_id).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
+        try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
+            present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
+        except OSError:
+            present = False
+        if not present:
+            fence_publication()  # a closed publication generation writes no new source
+            temporary.replace(target)  # a new name over the old, never a write into a published inode
+        return ref
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+
 def store_actor_source_bytes(
     drive_root: Union[pathlib.Path, str],
     task_id: str,
@@ -614,22 +772,14 @@ def store_actor_source_bytes(
     source_id: str,
     data: bytes,
     extension: str,
+    fsync: bool = False,
 ) -> Dict[str, Any]:
-    """Persist exact bytes inside this task's existing actor-readable artifact root."""
+    """Persist exact bytes inside this task's existing actor-readable artifact root (``fsync``: flushed to disk
+    before publication, for a caller about to let its only other copy go)."""
 
-    normalized_category = str(category or "").strip()
-    if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
-        raise ValueError(f"unsupported source-handle category: {normalized_category}")
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
-    safe_id = safe_id[:160] or "source"
-    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
-    digest = sha256(data).hexdigest()
+    ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
+    relative = pathlib.PurePosixPath(ref["path"])
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
-    relative = pathlib.PurePosixPath(
-        _SOURCE_HANDLES_SUBDIR,
-        normalized_category,
-        f"{safe_id}-{digest}.{safe_extension}",
-    )
     target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
     # these bytes IS this handle: rewriting would republish identical content while racing another
@@ -641,10 +791,8 @@ def store_actor_source_bytes(
         already_stored = handle_info(drive_root, task_id, relative.as_posix()) is not None
     if not already_stored:
         fence_publication()  # a closed publication generation writes no new source
-        write_bytes_atomic(target, bytes(data))
-    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
-    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
-            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+        write_bytes_atomic(target, bytes(data), fsync=fsync)
+    return ref
 
 
 def read_actor_source_bytes(

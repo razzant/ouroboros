@@ -191,7 +191,9 @@ def register(api):
     assert response.body_complete is False
 
 
-def test_child_uses_selected_roots(tmp_path):
+def test_child_uses_selected_roots(tmp_path, monkeypatch):
+    selected_app = tmp_path / 'explicit-app-root'
+    monkeypatch.setenv('OUROBOROS_APP_ROOT', str(selected_app))
     _, spec, root = prepare_route(tmp_path, '''import os, sys, pathlib, ouroboros
 def stream(request):
     return {'finder': any('__editable___ouroboros_' in getattr(f, '__module__', '') for f in sys.meta_path),
@@ -207,7 +209,7 @@ def register(api):
     assert pathlib.Path(body['module']).resolve().is_relative_to(pathlib.Path(__file__).resolve().parents[1])
     assert body['roots']['OUROBOROS_DATA_DIR'] == str(root)
     assert body['roots']['OUROBOROS_SETTINGS_PATH'] == str(root / 'settings.json')
-    assert body['roots']['OUROBOROS_APP_ROOT'] == str(root.parent)
+    assert body['roots']['OUROBOROS_APP_ROOT'] == str(selected_app), 'a separately selected data root does not replace APP_ROOT'
 
 
 def test_disconnect_before_headers_reaps_the_child(tmp_path):
@@ -434,7 +436,6 @@ def register(api):
     asyncio.run(run())
 
 
-@pytest.mark.serial
 def test_real_http_second_route_and_module_respond_during_child_startup(widget_server, monkeypatch):
     import threading
     import httpx
@@ -491,7 +492,6 @@ def test_real_http_second_route_and_module_respond_during_child_startup(widget_s
     assert not _active_subprocesses
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("startup_fails", [False, True])
 def test_real_http_startup_cancel_retains_spawned_child_until_cleanup(widget_server, monkeypatch, startup_fails):
     import threading

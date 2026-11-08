@@ -69,8 +69,8 @@ def _exhausted_window(gateway: Any, route_id: str, route_model: str = "",
     """Read exact engine scope; no host aliases, prefix table or monetary admission.
 
     A legacy/unhonored selector supplies observations, not exact availability.
-    A stale/missing subject stays unknown and fail-open; a healthy sibling cannot
-    rescue a strict pin. Unsupported embedded gateways likewise prove nothing.
+    A stale/missing subject without a live dated block stays unknown and fail-open;
+    a healthy sibling cannot rescue a strict pin. Unsupported gateways prove nothing.
     """
     from ouroboros.claudexor_observations import quota_availability, read_quota
     from ouroboros.gateways.claudexor import ClaudexorUnavailable

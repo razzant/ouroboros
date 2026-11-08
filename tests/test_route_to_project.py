@@ -32,7 +32,7 @@ def test_start_is_separate_and_retains_callers_obligations(tmp_path, monkeypatch
                           task_metadata={"force_plan": True}, task_contract={}, project_id="",
                           pending_events=[], event_queue=None, unconfirmed_routing_acts=[])
     result = _start_task(ctx, "Separate experiment", title="Experiment", reasoning_effort="")
-    assert result.startswith("Accepted, waiting to start:")
+    assert result.startswith("Not confirmed yet:")
     [event] = ctx.pending_events
     assert event["task_id"] != "caller" and event["type"] == "promote_chat_to_task"
     assert not {"predecessor_task_id", "predecessor_authority_source", "force_plan_transferred_from"} & event.keys()

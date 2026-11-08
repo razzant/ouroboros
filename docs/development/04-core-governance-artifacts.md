@@ -16,7 +16,7 @@ The context-delivery registry:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | full tier-0 in every mode | full in Max; book navigation in Low/Nano and for a subagent child | Max: a stable block after the governance prefix for body work (`development_resident`; unknown keeps it), else the chapter map; book navigation in Low/Nano and for a subagent child |
+| Main task context (`context.py`) | full tier-0 in every mode | full in Max; navigation in Low/Nano or for a child | Max: a stable block after the governance prefix for body/unknown work (`development_resident`), else its map; else as ARCHITECTURE; a task's requirement (`development_required`) adds it anywhere |
 | Change review, Part 1 (`tools/review.py`) | full (API preamble or retrieving task) | tier 3 navigation; packet rows also get sections naming touched files within the inline share | tier 2 within the share: the review protocol and chapters naming touched files |
 | ↳ `review_change` by layer (`review_body_fact.layer_for`) | body: as Part 1; core: `not_applicable`, the preamble names no constitution (`review_prompt_text.review_preamble("core")`) | body: as Part 1; core: `not_applicable`, the navigation indexes the subject's documents (`subject_root`) | body: as Part 1; core: the universal `Change Review Checklist` alone, with an empty-by-rule required-source manifest |
 | Background consciousness wake-up (`consciousness.py` → `handle_wake_direct`) | = Main task context | = Main task context | = Main task context |
@@ -28,15 +28,15 @@ The context-delivery registry:
 
 `tools/scope_required_sources.py` sets minimum body reading, never its ceiling. Core manifests stay empty and staged diffs complete. Coverage changes no findings, quorum or permission and buys no repeat; the mind decides further reads. The window sizes delivery, never authority.
 
-Planning resolves targets against `active_repo_dir_for(ctx)`, attachments against the task's readable roots, governance against the system repository; external plans never fall back to reviewing Ouroboros. Exact user-managed installed-skill paths are a classification-only exception: never self-modification or attachable evidence (`denied_path`).
+`plan_ask.planning_roots` gives planning its subject and governance roots, `read_admission` admits attachments (of data roots only own task stores); external plans never fall back to reviewing Ouroboros. Exact user-managed installed-skill paths only classify: never self-modification or attachable evidence (`denied_path`).
 
-Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `tests/test_review_local_accounts.py`, `tests/test_review_cold_history.py`, `tests/test_review_view_integration.py`. Plan objections: ARCHITECTURE §6 "Plan construction and review".
+Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `ouroboros/review_history_view.py`. Plan objections: ARCHITECTURE §6 "Plan construction and review".
 
-**Context mode (Nano / Low / Max).** Use the Main row. Max binds Development to the active repository, keeping books until recovery's earlier steps fall short. Known-window no-result-room predictions and provider refusals share recovery; unknown windows send full. Preserve owner Low/Nano sizing, lower starts, tier-0 and P3. Targets cut no chosen read or owner words; rebinds re-cut no fitting sent view (`tests/test_context_economy_window.py`). Mechanism: ARCHITECTURE §6 “Context fitting, retry, and compaction”.
+**Context mode (Nano / Low / Max).** Use the Main row. Max binds Development to the active repository, keeping books until recovery's earlier steps fall short. Unknown windows send full. Preserve owner Low/Nano sizing, lower starts, tier-0 and P3. Targets cut no chosen read or owner words; rebinds re-cut no fitting sent view (`tests/test_context_economy_window.py`). Mechanism: ARCHITECTURE §6 “Context fitting, retry, and compaction”.
 
 ### Invariant: Exact premises with explicit source ownership
 
-Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode of a message. Enforcement: `tests/test_plan_dialogue_review_regressions.py`.
+Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode of a message. Enforcement: `ouroboros/plan_dialogue.py`.
 
 ### Invariant: Compaction must earn its rewrite
 
@@ -54,13 +54,13 @@ When a core governance artifact does not fit the available budget:
 - Bound strings through `utils.truncate_review_artifact` (display previews) or `utils.truncate_within_limit` (a strict wire/prompt bound), never a hand-rolled `text[:cap] + marker`, which loses the anti-waste floor and can return a value longer than its input.
 - A list obeys the same rule: a `[:N]` slice carries the omitted count and, where downstream compares an identity, a durable hash or reference for the full set (`_outcome_receipts.receipt_identity_projection`). Bounding a set is allowed; hiding that it was bounded is the P1 violation.
 
-Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_delegated_result_delivery.py` and `tests/test_owner_facing_honesty.py`.
+Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_owner_facing_honesty.py`.
 
-### Invariant: Owner-facing surfaces show the full text
+### Invariant: What a person reads whole stays whole
 
-Disclosed truncation (the `⚠️ OMISSION NOTE` marker) protects **LLM context budgets**; it never licenses shortening what the owner reads.
+Disclosed truncation (the `⚠️ OMISSION NOTE` marker) protects **LLM context budgets**; it never licenses cutting what a person reads whole.
 
-- **Owner/UI-bound surfaces** (chat, task_results projections, review verdicts shown to a person) present the complete text or a reference to a durable full copy (an observability `response_ref`): reviewer rationale is a cognitive artifact (BIBLE P1), and truncating it beside an unreferenced full copy is partial memory loss. Terminal text asserts only recovery facts the round record carries, never a route mechanism the selected transport cannot perform.
+- **Artifacts a person reads whole** (reviewer rationale, an answer) stay reachable in full, in details or via a durable copy (an observability `response_ref`): rationale is a cognitive artifact (BIBLE P1); cutting it beside an unreferenced copy is partial memory loss. A status, label or card line follows DESIGN principle 7. Terminal text asserts only recovery facts the round record carries, never a route mechanism the selected transport cannot perform.
 - **Model-bound projections** (review packs, context sections, tool-result transport) keep their disclosed-truncation budgets.
 - **A cut cheaper than its own marker is forbidden everywhere** (the shared primitive's floor).
 

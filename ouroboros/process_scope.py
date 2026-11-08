@@ -12,7 +12,9 @@ under the pgid-reuse rule (every candidate born at or after the recorded leader,
 ``pid == G`` carrying the recorded leader birth; otherwise the id was reused and the group
 is skipped entirely; disclosed residual: a group that emptied and whose id was recycled as
 a new, leaderless group born after the recorded leader passes both rules; a recorded leader
-the table omits is read by name, and an unreadable one keeps its group owed, never gone); and
+the table omits is read by name, and an unreadable one keeps its group owed, never gone).
+Tracked commands retain their waitable leader until whole-tree retirement, preventing reuse
+while their custodian lives; and
 individually recorded descendants — the engine's captured pids, and every KNOWN member an
 earlier pass left unverified or surviving, each checked by pid AND birth.
 
@@ -33,6 +35,7 @@ stay the truth.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -48,6 +51,7 @@ from ouroboros.process_census import (
     IDENTITY_ABSENT,
     IDENTITY_ALIVE,
     IDENTITY_UNREADABLE,
+    IDENTITY_ZOMBIE,
     INSTALL_SCOPE_PREFIX,
     RUN_SCOPE_PREFIX,
     SCOPE_NAME_RE,
@@ -101,6 +105,8 @@ UNVERIFIED_IDENTITY = "identity_unreadable"
 UNVERIFIED_DENIED = "signal_denied"
 UNVERIFIED_FAILED = "signal_failed"
 UNVERIFIED_CENSUS = "census_unreadable"  # the table itself could not be read: a known identity stays owed
+UNVERIFIED_SPARE_UNKNOWN = "spared_roots_unknown"  # only the parent chain reached it, and daemon roots are unreadable
+UNVERIFIED_UNPUBLISHED = "custody_unwritten"  # a launch's chain-only member no custody could name: nothing signalled
 
 # The disclosure the installation census cannot resolve itself (owner decision
 # 2026-10-12, accepted and disclosed): on macOS a system binary started with ``&`` by a
@@ -186,7 +192,9 @@ def initialize_installation_scope(data_dir: Any) -> str:
 
 def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterable[str] = (),
                   groups: Iterable[Mapping[str, Any]] = (), captured: Iterable[Mapping[str, Any]] = (),
-                  scope_start_epoch: float = 0.0, exclude: Iterable[int] = ()) -> Dict[str, Any]:
+                  scope_start_epoch: float = 0.0, exclude: Iterable[int] = (),
+                  descendants: bool = False, marker_targets: Optional[Mapping[str, Any]] = None,
+                  spared: Iterable[int] = ()) -> Dict[str, Any]:
     """The scope's live members from one snapshot: marker members ∪ members of the
     recorded groups that pass the pgid-reuse rule ∪ individually recorded descendants
     whose birth still matches (a recorded pid missing from the snapshot is read by the typed
@@ -195,31 +203,57 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
     read the same way, in the same batch: unreadable leaves the group unjudged and the leader
     unverified, never gone and never a group signalled on a guess; alive with that birth it
     is a member wherever its group went, like a captured descendant. A recorded floor that
-    cannot be read as an instant leaves its group unjudged too. Births compare canonically
-    (``canonical_birth``). Returns ``{"members": {pid: row}, "groups_reused": [pgid],
-    "groups_gone": [pgid], "captured_gone": [{pid, birth}], "captured_unverified": [{pid,
-    birth, reason}]}`` (an unverified recorded leader or group included)."""
+    cannot be read as an instant leaves its group unjudged too. ``descendants`` adds every
+    row of the same snapshot whose parent chain reaches a member, whatever its group; an
+    excluded pid is never a member, so its subtree is entered only through other members.
+    Births compare canonically (``canonical_birth``). Bookkeeping for one pass that ends
+    several owned processes: each member's ``origins`` are the ``target`` of every group or
+    captured entry and of every marker in ``marker_targets`` that reached it (a descendant
+    inherits its parent's); ``descended`` holds the members only the parent chain reached.
+    A ``held`` captured identity (one a chain reached while the daemon roots were unknown) is
+    ``descended`` too, and a member only while its present parent chain stays clear of every
+    ``spared`` root: below one it is that root's and no longer owed; a chain the snapshot cannot
+    show keeps it unverified as ``spared_roots_unknown``, never a member on a guess.
+    Returns ``{"members": {pid: row}, "groups_reused": [pgid], "groups_gone": [pgid],
+    "captured_gone": [{pid, birth}], "captured_unverified": [{pid, birth, reason}],
+    "origins": {pid: {target}}, "descended": {pid}}`` (an unverified recorded leader or
+    group included; these lists keep the entry's ``target`` when it had one)."""
     excluded = {int(pid) for pid in exclude} | {0, 1}
+    spared_roots = {int(pid) for pid in spared}
     names = {str(name) for name in [marker, *markers] if name}
+    by_marker = dict(marker_targets or {})
     members: Dict[int, _Row] = {}
+    origins: Dict[int, set] = {}
+
+    def tag(item: Dict[str, Any], target: Any) -> Dict[str, Any]:  # an untagged entry keeps its shape
+        return item if target is None else {**item, "target": target}
+
+    def own(pid: int, target: Any) -> None:
+        if target is not None:
+            origins.setdefault(int(pid), set()).add(target)
+
     for row in rows.values():
         if row.pid not in excluded and row.markers and names & row.markers:
             members[row.pid] = row
-    known = [(int(item.get("pid") or 0), canonical_birth(item.get("birth"))) for item in captured]
-    known = [(pid, birth) for pid, birth in known if pid > 1 and pid not in excluded and birth]
+            for name in names & row.markers:
+                own(row.pid, by_marker.get(name))
+    known = [(int(item.get("pid") or 0), canonical_birth(item.get("birth")), item.get("target"), bool(item.get("held")))
+             for item in captured]
+    known = [entry for entry in known if entry[0] > 1 and entry[0] not in excluded and entry[1]]
     recorded = [(int(group.get("pgid") or 0), canonical_birth(group.get("leader_birth")), group) for group in groups]
     # A pid the snapshot omits (gone, or a row a partial table could not read) is asked by
     # name in ONE batch: each recorded descendant and each recorded leader rule 2 must vouch for.
     omitted = {pgid for pgid, leader_birth, _ in recorded
                if pgid > 1 and leader_birth and pgid not in rows and pgid not in excluded}
-    asked = {pid for pid, _ in known if pid not in rows} | omitted
-    identities = read_identities(asked) if asked else {}
+    asked = {entry[0] for entry in known if entry[0] not in rows} | omitted
+    identities = _read_identities(asked) if asked else {}
     unverified: List[Dict[str, Any]] = []
     reused: List[int] = []
     gone: List[int] = []
     for pgid, leader_birth, group in recorded:
         if pgid <= 1:
             continue
+        target = group.get("target")
         candidates = [row for row in rows.values() if row.pgid == pgid]
         leader = rows.get(pgid)
         if pgid in omitted:
@@ -227,7 +261,7 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
             # and floor; a live or dead pid == G is judged as its row would be.
             answer = identities.get(pgid) or _Identity(IDENTITY_UNREADABLE)
             if answer.state == IDENTITY_UNREADABLE:
-                unverified.append({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY})
+                unverified.append(tag({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY}, target))
                 continue  # owed: the next pass judges this group again
             if answer.state != IDENTITY_ABSENT:
                 leader = _Row(pgid, 0, answer.pgid, answer.birth, birth_epoch(answer.birth), answer.state, set())
@@ -236,6 +270,7 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
         if (leader is not None and leader_birth and leader.birth == leader_birth
                 and leader.state == IDENTITY_ALIVE and pgid not in excluded):
             members[pgid] = leader  # the recorded leader itself, whatever group it is in now: never discharged
+            own(pgid, target)
         if not candidates:
             gone.append(pgid)  # an emptied group is simply gone
             continue
@@ -247,7 +282,7 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
         source = leader_birth or str(group.get("floor") or "")
         floor = birth_epoch(source) if source else float(scope_start_epoch or 0.0)
         if source and not floor:
-            unverified.append({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY})
+            unverified.append(tag({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY}, target))
             continue
         floor -= 1.0
         # A live pid == G must carry the recorded leader birth. An unrecorded leader birth
@@ -264,30 +299,67 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
         for row in candidates:
             if row.pid not in excluded:
                 members[row.pid] = row
+                own(row.pid, target)
     captured_gone: List[Dict[str, Any]] = []  # identities: a pid is resolved per recorded birth, never as a number
-    missing: Dict[int, List[str]] = {}
-    for pid, birth in known:
+    missing: Dict[int, List[Tuple[str, Any, bool]]] = {}
+    descended: set = set()
+
+    def below_spared(pid: int) -> Optional[bool]:
+        seen, parent = {pid}, rows[pid].ppid
+        while parent > 1:
+            if parent in spared_roots:
+                return True
+            if parent in seen or parent not in rows:
+                return None  # a parent this snapshot does not show
+            seen.add(parent)
+            parent = rows[parent].ppid
+        return False
+
+    for pid, birth, target, held in known:
         row = rows.get(pid)
         if row is None:
-            missing.setdefault(pid, []).append(birth)  # not in this snapshot: asked for by name above, never read as gone
-        elif row.birth == birth:
+            missing.setdefault(pid, []).append((birth, target, held))  # not in this snapshot: asked for by name above
+        elif row.birth != birth:
+            captured_gone.append(tag({"pid": pid, "birth": birth}, target))  # the pid names another process now
+        elif not held or below_spared(pid) is False:
             members[pid] = row
-        else:
-            captured_gone.append({"pid": pid, "birth": birth})  # the pid names another process now
+            own(pid, target)
+            if held:
+                descended.add(pid)
+        elif below_spared(pid) is None:
+            unverified.append(tag({"pid": pid, "birth": birth, "reason": UNVERIFIED_SPARE_UNKNOWN}, target))
     # A partial table (Linux: a ``/proc/<pid>/stat`` the census could not read) must not call a
     # known pid gone; the typed reader answers absent, reused, alive or unreadable, and that
-    # one answer judges every birth recorded for the pid.
-    for pid, births in missing.items():
+    # one answer judges every birth recorded for the pid. A held one alive there has no chain to judge.
+    for pid, recorded_births in missing.items():
         identity = identities.get(pid) or _Identity(IDENTITY_UNREADABLE)
-        for birth in births:
-            if identity.state == IDENTITY_UNREADABLE:
-                unverified.append({"pid": pid, "birth": birth, "reason": UNVERIFIED_IDENTITY})
-            elif identity.state == IDENTITY_ALIVE and identity.birth == birth:
+        for birth, target, held in recorded_births:
+            alive = identity.state == IDENTITY_ALIVE and identity.birth == birth
+            if identity.state == IDENTITY_UNREADABLE or (held and alive):
+                reason = UNVERIFIED_SPARE_UNKNOWN if held else UNVERIFIED_IDENTITY
+                unverified.append(tag({"pid": pid, "birth": birth, "reason": reason}, target))
+            elif alive:
                 members[pid] = _Row(pid, 0, identity.pgid, birth, birth_epoch(birth), IDENTITY_ALIVE, set())
+                own(pid, target)
             else:
-                captured_gone.append({"pid": pid, "birth": birth})  # confirmed absent, a corpse, or another process now
+                captured_gone.append(tag({"pid": pid, "birth": birth}, target))  # absent, a corpse, or reborn
+    if descendants:
+        children: Dict[int, List[_Row]] = {}
+        for row in rows.values():
+            children.setdefault(row.ppid, []).append(row)
+        pending = list(members)
+        while pending:
+            parent = pending.pop()
+            for row in children.get(parent, ()):
+                if row.pid not in excluded:
+                    for target in origins.get(parent, ()):
+                        own(row.pid, target)
+                if row.pid not in members and row.pid not in excluded:
+                    members[row.pid] = row
+                    descended.add(row.pid)
+                    pending.append(row.pid)
     return {"members": members, "groups_reused": reused, "groups_gone": gone, "captured_gone": captured_gone,
-            "captured_unverified": unverified}
+            "captured_unverified": unverified, "origins": origins, "descended": descended}
 
 
 def _await_exit(targets: Mapping[int, str], deadline: float) -> Tuple[Dict[int, str], Dict[int, str]]:
@@ -298,7 +370,7 @@ def _await_exit(targets: Mapping[int, str], deadline: float) -> Tuple[Dict[int, 
     remaining = dict(targets)
     unverified: Dict[int, str] = {}
     while remaining:
-        identities = read_identities(remaining)
+        identities = _read_identities(remaining)
         alive: Dict[int, str] = {}
         unverified = {}
         for pid, birth in remaining.items():
@@ -319,7 +391,9 @@ def _await_exit(targets: Mapping[int, str], deadline: float) -> Tuple[Dict[int, 
 def end_scope(*, marker: str = "", markers: Iterable[str] = (), groups: Iterable[Mapping[str, Any]] = (),
               captured: Iterable[Mapping[str, Any]] = (), scope_start_epoch: float = 0.0,
               exclude: Iterable[int] = (), grace_sec: float = TASK_END_GRACE_SEC, term_first: bool = True,
-              rescans: int = 2) -> Dict[str, Any]:
+              rescans: int = 2, descendants: bool = False, marker_targets: Optional[Mapping[str, Any]] = None,
+              env_rows: Any = None, hold_descended: bool = False, spared: Iterable[int] = (),
+              census_timeout: Optional[float] = None, before_signal: Any = None) -> Dict[str, Any]:
     """End every live member of a scope by measured identity; report what is left, typed.
 
     ``ended``: members gone after our signal. ``already_gone``: members confirmed absent or
@@ -332,7 +406,12 @@ def end_scope(*, marker: str = "", markers: Iterable[str] = (), groups: Iterable
     another birth on the same pid keeps its own. ``census_failed``: the table could not be
     read and NOTHING is claimed clean. ``settled`` requires readable requested discovery,
     no survivors and no unverified member other than a denied signal (EPERM), which no later
-    pass of this installation can change: final, disclosed.
+    pass of this installation can change: final, disclosed. ``env_rows`` narrows the marker
+    read and ``census_timeout`` bounds it (``census``); ``hold_descended`` leaves members only
+    the parent chain reached, held identities included, unsignalled, ``unverified`` as
+    ``spared_roots_unknown`` (``spared``: ``scope_members``). ``before_signal(view)`` runs on each
+    scan before any signal and returns the pids to leave unsignalled, ``unverified``. With tagged
+    entries the outcome also carries ``origins``, ``{pid: [target]}``.
     """
     outcome: Dict[str, Any] = {
         "coverage": COVERAGE_UNSUPPORTED if _pl.IS_WINDOWS else COVERAGE_POSIX,
@@ -349,32 +428,58 @@ def end_scope(*, marker: str = "", markers: Iterable[str] = (), groups: Iterable
     excluded = set(int(pid) for pid in exclude)
     seen: Dict[int, str] = {}
     resolved: set = set()  # every (pid, birth) this pass ended or confirmed gone: resolution is per identity
+    origins: Dict[int, set] = {}
+
+    def own(pid: int, targets: Iterable[Any]) -> None:
+        for target in targets:
+            if target is not None:
+                origins.setdefault(int(pid), set()).add(target)
+
     for scan in range(max(1, int(rescans) + 1)):
         names = [name for name in [marker, *markers] if name]
-        rows = census(names) if names or groups else {}  # saved identities use the addressed reader below
+        # saved identities alone use the addressed reader below
+        share = _grace_share() if census_timeout is not None else None  # each scan: half of what is left
+        reading = {**({"env_rows": env_rows} if env_rows is not None else {}),
+                   **({"timeout": census_timeout if share is None else min(census_timeout, share)}
+                      if census_timeout is not None else {})}
+        rows = census(names, **reading) if (names or groups or descendants) else {}
         if rows is None:
             outcome["census_failed"] = True
             # The table could not be read: every recorded identity this pass has not resolved
             # stays owed, including a group leader known before this census. Otherwise the
             # next known-only startup could forget it merely because discovery failed.
             judged = resolved | {(int(item["pid"]), str(item["birth"])) for item in outcome["survivors"]}
-            leaders = [{"pid": group.get("pgid"), "birth": canonical_birth(group.get("leader_birth"))}
-                       for group in groups]
+            leaders = [{"pid": group.get("pgid"), "birth": canonical_birth(group.get("leader_birth")),
+                        "target": group.get("target")} for group in groups]
             for item in [*captured, *leaders]:
                 pid, birth = int(item.get("pid") or 0), str(item.get("birth") or "")
                 if pid > 1 and pid not in excluded and birth and (pid, birth) not in judged:
-                    _add_unverified(outcome, pid, birth, UNVERIFIED_CENSUS)
+                    _add_unverified(outcome, pid, birth, UNVERIFIED_SPARE_UNKNOWN if item.get("held") else UNVERIFIED_CENSUS)
+                    own(pid, [item.get("target")])
             break
         outcome["scans"] = scan + 1
         view = scope_members(rows, markers=names, groups=groups, captured=captured,
-                             scope_start_epoch=scope_start_epoch, exclude=excluded)
+                             scope_start_epoch=scope_start_epoch, exclude=excluded, descendants=descendants,
+                             marker_targets=marker_targets, spared=spared)
+        for pid, targets in view["origins"].items():
+            own(pid, targets)
         for key in ("groups_reused", "groups_gone"):
             outcome[key] = sorted(set(outcome[key]) | set(view[key]))
         for item in view["captured_gone"]:
             _add_gone(outcome, resolved, "captured_gone", item["pid"], item["birth"])
+            own(item["pid"], [item.get("target")])
         for item in view["captured_unverified"]:
             _add_unverified(outcome, item["pid"], item["birth"], item["reason"])
+            own(item["pid"], [item.get("target")])
         fresh = {pid: row.birth for pid, row in view["members"].items() if pid not in seen}
+        if hold_descended:  # nothing tells such a member from a spared root: never signalled on a guess
+            for pid in [pid for pid in fresh if pid in view["descended"]]:
+                _add_unverified(outcome, pid, fresh.pop(pid), UNVERIFIED_SPARE_UNKNOWN)
+                seen[pid] = view["members"][pid].birth
+        if before_signal is not None:
+            for pid in before_signal(view).intersection(fresh):
+                _add_unverified(outcome, pid, fresh.pop(pid), UNVERIFIED_UNPUBLISHED)
+                seen[pid] = view["members"][pid].birth
         if not fresh:
             break  # nothing in the scope, or a quiet rescan after the kill pass
         seen.update(fresh)
@@ -398,6 +503,8 @@ def end_scope(*, marker: str = "", markers: Iterable[str] = (), groups: Iterable
     outcome["unverified"] = [item for item in outcome["unverified"] if (item["pid"], item["birth"]) not in resolved]
     outcome["settled"] = not outcome["census_failed"] and not outcome["survivors"] and all(
         item["reason"] == UNVERIFIED_DENIED for item in outcome["unverified"])
+    if origins:
+        outcome["origins"] = {pid: sorted(targets, key=str) for pid, targets in origins.items()}
     return outcome
 
 
@@ -407,7 +514,7 @@ def _signal_pass(targets: Mapping[int, str], outcome: Dict[str, Any], resolved: 
     Returns the members whose signal was accepted. A target found absent, a corpse or
     reborn lands in ``gone_bucket`` (``already_gone`` before any signal of ours, ``ended``
     after our TERM); an unreadable identity, a denied or a failed signal is UNVERIFIED."""
-    identities = read_identities(targets)
+    identities = _read_identities(targets)
     accepted: Dict[int, str] = {}
     for pid, birth in targets.items():
         identity = identities.get(pid) or _Identity(IDENTITY_UNREADABLE)
@@ -449,6 +556,395 @@ def _add_unverified(outcome: Dict[str, Any], pid: int, birth: str, reason: str) 
 def _note_unverified(outcome: Dict[str, Any], unverified: Mapping[int, str], signalled: Mapping[int, str]) -> None:
     for pid, reason in unverified.items():
         _add_unverified(outcome, pid, signalled.get(pid, ""), reason)
+
+
+# --------------------------------------------------------------------------- one owned process
+
+_CLEANUP_FACT_KEYS = ("coverage", "reach", "exit_confirmed", "ended", "already_gone", "survivors", "unverified",
+                      "census_failed", "custody")
+ORPHANS_UNKNOWN_RESIDUAL = ("its leader had exited before this stop: a process that left its group and parent chain "
+                            "showing no launch marker (none was recorded, or its binary hides its environment) "
+                            "cannot be ruled out")
+
+
+def end_owned_processes(targets: Iterable[Mapping[str, Any]], *, spared: Optional[Iterable[int]] = (),
+                        graceful: bool = True) -> Dict[Any, Dict[str, Any]]:
+    """End several owned processes and everything each started, in ONE pass, by measured identity.
+
+    The stop of recorded processes (services, executor records), never of a task or an
+    installation: a target is ``{key, pid, birth, floor, markers, known, custody}``, and only its
+    own launch ``markers`` are read, so what another launch of the same task carries is never
+    reached. Each scan reads one census for all targets and waits once: its members come from
+    ``scope_members``, the target's own group under rule 2 (``birth`` vouches for a live
+    leader; without it the ISO ``floor`` bounds a leaderless group's members), the process and
+    ``known`` identities by pid AND birth (a ``held`` one: ``scope_members``), its markers (on
+    macOS read only below launchd's children born since the earliest start: whatever left a
+    chain was reparented to one, whichever ancestor hides its environment; every environment
+    while ``spared`` is unknown) and every process whose parent chain reaches a member,
+    whatever group it moved to. What is left is attributed to the targets whose membership
+    holds it (an unattributable leftover to every target). With nothing to judge a target is
+    unverified, never signalled, and a pid naming the caller, its parent or its group (a stale
+    record's reused pid) is never a target, group or member. ``spared`` daemon roots, and
+    held identities below them, are never members; ``None`` (unreadable) holds every member
+    only a parent chain reached. ``graceful``: TERM, ``TASK_END_GRACE_SEC``, then KILL;
+    otherwise KILL at once, one rescan, its table read bounded inside a running shutdown's
+    grace (``_grace_share``). ``exit_confirmed``
+    (everything still traceable to the target ended) is stricter than ``settled``: a denied signal
+    is final for a scope record, never proof that this work ended. A target's ``custody``, ``(drive
+    root, row)`` of its launch, makes this pass the launch's one publication: what could outlive its
+    signals is durable before any of them (``_write_ahead``), and its ``exit_confirmed`` holds
+    only once what the pass judged was reconciled (``process_custody.settle_launch``). Windows:
+    ``unsupported``, its native paths stay the truth."""
+    from ouroboros.process_custody import custody_lock_budget, settle_launch
+
+    blind, prepared, terms = _owned_reach(targets, spared)
+    judged = {key: _owned_outcome({"coverage": COVERAGE_POSIX, "census_failed": False, "scans": 0,
+                                   "unverified": [{"pid": pid, "birth": "", "reason": UNVERIFIED_IDENTITY}]}, reach)
+              for key, (pid, reach) in blind.items()}
+    if not prepared:
+        return judged
+    lock_wait = custody_lock_budget()
+    outcome = end_scope(**terms, grace_sec=TASK_END_GRACE_SEC if graceful else 0.0, term_first=graceful,
+                        rescans=2 if graceful else 1, hold_descended=spared is None,
+                        census_timeout=None if graceful else _grace_share(),
+                        before_signal=_write_ahead(prepared, spared is None, lock_wait))
+    origins, every = outcome.get("origins") or {}, [item["key"] for item in prepared]
+    leaders = _unmeasured_leaders(prepared, spared)
+
+    def mine(key: Any, pid: Any) -> bool:
+        return key in (origins.get(int(pid)) or every)
+
+    for item in prepared:
+        key = item["key"]
+        part = {
+            "coverage": outcome["coverage"], "census_failed": outcome["census_failed"], "scans": outcome["scans"],
+            **{bucket: [pid for pid in outcome[bucket] if mine(key, pid)]
+               for bucket in ("ended", "already_gone", "captured_gone")},
+            **{bucket: [entry for entry in outcome[bucket] if mine(key, entry["pid"])]
+               for bucket in ("survivors", "unverified")},
+            "groups_reused": [pid for pid in outcome["groups_reused"] if pid == item["pid"]],
+            "groups_gone": [pid for pid in outcome["groups_gone"] if pid == item["pid"]]}
+        named = {entry["pid"] for entry in part["survivors"] + part["unverified"]}
+        if item["pid"] in leaders and item["pid"] not in named:
+            part["unverified"].append({"pid": item["pid"], "birth": "", "reason": UNVERIFIED_IDENTITY})
+        judged[key] = _owned_outcome(part, item["reach"])
+        if item["custody"]:
+            settle_launch(item["custody"], judged[key], item["judged"], lock_wait)
+    return judged
+
+
+def _write_ahead(prepared: List[Dict[str, Any]], held: bool, lock_wait: Any) -> Any:
+    """``end_scope``'s ``before_signal``: what could outlive THIS pass's signals is durable in its launch's custody
+    before any of them, so no stop loses what it knows. That is every member only a parent chain reached, as this pass
+    would owe it (``held`` while the daemon roots are unknown), and every identity the pass was handed: being judged is
+    not being persisted, since a retained input may come from a stop whose every write failed. Only a successful write
+    counts (nothing is appended for what the ledger already names), and only for this launch; its leader needs none,
+    as its row names it, and neither does what the table shows dead. What no custody can name yet (a launch still
+    registering, every write failed) holds its whole launch back: nothing of it is signalled, so the chain stays for
+    the retry. This orders one stop's write against that stop's own signal only: a stop that never observed a member
+    (started after its last table read) can confirm what it saw before another stop's write lands; custody names the
+    member from that write on. What was newly written counts as judged by this pass (``settle_launch``)."""
+    from ouroboros.process_custody import write_ahead
+
+    every = [item["key"] for item in prepared]
+
+    def name(entry: Mapping[str, Any]) -> Tuple[int, str]:
+        return int(entry.get("pid") or 0), canonical_birth(entry.get("birth"))
+
+    def publish(view: Mapping[str, Any]) -> set:
+        withheld: set = set()
+        dead = {name(entry) for entry in view["captured_gone"]} | {
+            name({"pid": pid, "birth": row.birth}) for pid, row in view["members"].items() if row.state != IDENTITY_ALIVE}
+        for item in prepared:
+            def mine(pid: int, key: Any = item["key"]) -> bool:
+                return key in (view["origins"].get(pid) or every)
+
+            chain = [{"pid": pid, "birth": view["members"][pid].birth, **({"held": True} if held else {})}
+                     for pid in sorted(view["descended"]) if pid in view["members"] and mine(pid)]
+            owed = {name(entry): entry for entry in [*chain, *item["known"]]}  # a retained identity keeps its own flags
+            spoken = dead | item["durable"] | {(item["pid"], item["birth"])}
+            unwritten = [entry for key, entry in owed.items() if key not in spoken]
+            if not unwritten or not item["custody"]:
+                continue
+            if write_ahead(item["custody"], unwritten, lock_wait()):
+                item["durable"].update(name(entry) for entry in unwritten)
+                judged = {name(entry) for entry in item["judged"]}
+                item["judged"] += [entry for entry in unwritten if name(entry) not in judged]
+            else:
+                withheld.update(pid for pid in view["members"] if mine(pid))
+        return withheld
+
+    return publish
+
+
+def gone_identities(items: Iterable[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    """Those of ``items`` whose exact process is provably gone, by one batched read: absent, a corpse or another birth.
+    An unreadable identity is not gone."""
+    items = list(items)
+    answers = _read_identities({int(item["pid"]) for item in items})
+
+    def gone(item: Mapping[str, Any]) -> bool:
+        answer = answers.get(int(item["pid"])) or _Identity(IDENTITY_UNREADABLE)
+        return answer.state != IDENTITY_UNREADABLE and not (
+            answer.state == IDENTITY_ALIVE and answer.birth == canonical_birth(item.get("birth")))
+
+    return [item for item in items if gone(item)]
+
+
+def _unmeasured_leaders(prepared: List[Dict[str, Any]], spared: Optional[Iterable[int]]) -> set:
+    """The recorded leader pids, never measured, that a live (or unreadable) process still holds: one batched
+    read. Each may be its leader hiding its marker, so its target is never confirmed while it lives; nothing
+    measured it, so nothing signals it."""
+    roots = {int(pid) for pid in spared or ()}
+    asked = [item["pid"] for item in prepared if item["unmeasured"] and item["pid"] not in roots]
+    return {pid for pid, identity in (_read_identities(asked) if asked else {}).items()
+            if identity.state in (IDENTITY_ALIVE, IDENTITY_UNREADABLE)}
+
+
+def _owned_reach(targets: Iterable[Mapping[str, Any]], spared: Optional[Iterable[int]]) -> Tuple[
+        Dict[Any, Tuple[int, List[str]]], List[Dict[str, Any]], Dict[str, Any]]:
+    """The one reach of ``end_owned_processes`` and ``observe_owned_processes``: targets with nothing to
+    judge (``{key: (pid, reach)}``), the prepared rest and their ONE scope's membership terms."""
+    own = {os.getpid(), os.getppid(), _pl.current_process_group_id()}
+    blind: Dict[Any, Tuple[int, List[str]]] = {}
+    prepared: List[Dict[str, Any]] = []
+    for target in targets:
+        key, pid = target["key"], int(target["pid"])
+        birth, known = canonical_birth(target.get("birth")), list(target.get("known") or ())
+        markers = [name for name in target.get("markers") or () if is_scope_name(str(name))]
+        floor = target.get("floor") or ""
+        mine = pid not in own
+        if not mine:  # a reused pid naming this process, its parent or its group: never a target or a group
+            birth, floor = "", ""
+        floor_text = "" if birth else _iso_floor(floor)
+        reach = [*(["group"] if birth or floor_text else []), "descendants", *(["marker"] if markers else []),
+                 *(["owed"] if known else [])]
+        if not (birth or floor_text or known or markers) and not _pl.IS_WINDOWS:
+            blind[key] = (pid, reach)
+            continue
+        prepared.append({"key": key, "pid": pid, "birth": birth, "floor": floor_text, "markers": markers,
+                         "known": known, "reach": reach, "custody": target.get("custody"),
+                         # the exact input this pass measures: all it can discharge, with what it writes ahead
+                         "judged": [*known, *([{"pid": pid, "birth": birth}] if birth else [])], "durable": set(),
+                         "unmeasured": mine and pid > 1 and not birth and not target.get("exited")})
+    starts = [birth_epoch(item["birth"] or item["floor"]) for item in prepared]
+    since = min(starts) if prepared and all(starts) else 0.0
+    marker_targets = {name: item["key"] for item in prepared for name in item["markers"]}
+    return blind, prepared, dict(
+        groups=[{"pgid": item["pid"], "leader_pid": item["pid"], "leader_birth": item["birth"], "target": item["key"],
+                 **({"floor": item["floor"]} if item["floor"] else {})} for item in prepared
+                if item["birth"] or item["floor"]],
+        captured=[entry for item in prepared for entry in (
+            [{"pid": item["pid"], "birth": item["birth"], "target": item["key"]}] if item["birth"] else []) + [
+            {**known, "target": item["key"]} for known in item["known"]]],
+        markers=list(marker_targets), marker_targets=marker_targets, spared=spared or (),
+        exclude={1, *own, *(int(pid) for pid in spared or ())}, descendants=True,
+        # Only what lies below a launchd child born since the launch needs its environment read for a marker,
+        # unless the hold must tell a marker carrier from a chain-only member: then every one is read.
+        env_rows=(lambda rows: _orphaned_since(rows, since - 1.0))
+        if marker_targets and since and spared is not None else None)
+
+
+def observe_owned_processes(targets: Iterable[Mapping[str, Any]], *,
+                            spared: Optional[Iterable[int]] = ()) -> Dict[Any, str]:
+    """What is left of several owned processes, read for custody readers: no signal, no wait, at most
+    ONE census.
+
+    The same targets and reach as ``end_owned_processes``. Each key answers ``live`` (a member its
+    reach names is alive: leader by birth, group under rule 2, an owed identity, a marker carrier or
+    a descendant of one), ``unknown`` (the table or an identity could not be read, the daemon roots
+    are unknown (``spared=None``) for a member only a parent chain reached, or nothing was recorded to
+    judge by) or ``settled``. A reused leader pid is another process, never this target's member.
+    A leader measured alive with its recorded birth (one batched identity read) already answers
+    ``live``; only the other targets need the table."""
+    targets = list(targets)
+    blind, prepared, _ = _owned_reach(targets, spared)
+    states = {key: "unknown" for key in blind}
+    if not prepared:
+        return states
+    if _pl.IS_WINDOWS:
+        return {**states, **{item["key"]: "unknown" for item in prepared}}
+    roots = {int(pid) for pid in spared or ()}  # a spared daemon root is never a member, on either path
+    leaders = read_identities(item["pid"] for item in prepared if item["birth"] and item["pid"] not in roots)
+    for item in prepared:
+        identity = leaders.get(item["pid"])
+        if (item["birth"] and identity is not None and identity.state == IDENTITY_ALIVE
+                and identity.birth == item["birth"]):
+            states[item["key"]] = "live"
+    _, prepared, terms = _owned_reach([target for target in targets if target["key"] not in states], spared)
+    if not prepared:
+        return states
+    rows = census(terms["markers"], **({"env_rows": terms["env_rows"]} if terms["env_rows"] is not None else {}))
+    if rows is None:
+        return {**states, **{item["key"]: "unknown" for item in prepared}}
+    view = scope_members(rows, markers=terms["markers"], groups=terms["groups"], captured=terms["captured"],
+                         exclude=terms["exclude"], descendants=True, marker_targets=terms["marker_targets"],
+                         spared=terms["spared"])
+    origins, every = view["origins"], [item["key"] for item in prepared]
+    held = view["descended"] if spared is None else set()
+    unmeasured = _unmeasured_leaders(prepared, spared)
+    for item in prepared:
+        def mine(pid: Any, key: Any = item["key"]) -> bool:
+            return key in (origins.get(int(pid)) or every)
+
+        live = any(mine(pid) for pid in view["members"] if pid not in held)
+        unsure = any(mine(pid) for pid in held if pid in view["members"]) or any(
+            mine(entry["pid"]) for entry in view["captured_unverified"]) or item["pid"] in unmeasured
+        states[item["key"]] = "live" if live else "unknown" if unsure else "settled"
+    return states
+
+
+def _orphaned_since(rows: Mapping[int, _Row], floor: float) -> List[int]:
+    """Every pid below (or being) a launchd child born at or after ``floor``. macOS has no
+    subreaper: a process whose parent chain broke was reparented to launchd, so whatever still
+    carries a launch's marker lies in such an orphan's subtree, whichever ancestor hides its
+    environment."""
+    top: Dict[int, int] = {}
+    for pid in rows:
+        path, current = [], pid
+        while current not in top:
+            parent = rows[current].ppid
+            if parent <= 1 or parent not in rows or len(path) > len(rows):
+                top[current] = current  # launchd's child, or the highest ancestor the table shows
+                break
+            path.append(current)
+            current = parent
+        top.update(dict.fromkeys(path, top[current]))
+    return [pid for pid, head in top.items() if rows[head].epoch >= floor]
+
+
+def _read_identities(pids: Iterable[int]) -> Dict[int, _Identity]:
+    """``read_identities`` bounded by a running shutdown's grace share (``_grace_share``); its own bound otherwise."""
+    share = _grace_share()
+    return read_identities(pids) if share is None else read_identities(pids, timeout=share)
+
+
+def _grace_share() -> Optional[float]:
+    """Half of what is left of a running shutdown's one grace (``owned_shutdown``), for each table
+    and identity read a stop makes inside it: reads that never answer still leave the native kill
+    and its confirmation inside that grace. ``None`` outside a shutdown: each read's own bound."""
+    from ouroboros.owned_shutdown import stop_deadline
+
+    deadline = stop_deadline()
+    return None if deadline is None else max(0.2, (deadline - time.monotonic()) / 2)
+
+
+def _owned_outcome(part: Dict[str, Any], reach: List[str]) -> Dict[str, Any]:
+    for bucket in ("ended", "already_gone", "captured_gone", "survivors", "unverified", "groups_reused",
+                   "groups_gone"):
+        part.setdefault(bucket, [])
+    part["reach"] = reach
+    part["exit_confirmed"] = (part["coverage"] == COVERAGE_POSIX and not part["census_failed"]
+                              and not part["survivors"] and not part["unverified"])
+    part["known_members"] = _known_members(part)
+    return part
+
+
+def process_cleanup_facts(outcome: Mapping[str, Any]) -> Dict[str, Any]:
+    """The bounded typed facts of one owned stop a result carries: pids and births, never environment."""
+    return {key: outcome.get(key) for key in _CLEANUP_FACT_KEYS if key != "custody" or outcome.get(key)}
+
+
+def end_held_processes(held: Iterable[Mapping[str, Any]], *, others: Iterable[Mapping[str, Any]] = (),
+                       others_spared: Optional[Iterable[int]] = (), graceful: bool = True) -> Dict[Any, Dict[str, Any]]:
+    """End children this process still holds (``Popen``) and everything each started, in one pass.
+
+    ``held``: ``{key, proc, birth, started_at, markers, known, drive_root, custody}``; ``others``: recorded-only
+    targets of ``end_owned_processes`` joining the same pass (their keys answer with its outcome;
+    ``others_spared`` adds their daemon roots, ``None`` when unreadable). POSIX:
+    ``end_owned_processes`` over each leader the Popen identifies (``birth``, else read now:
+    an unreaped pid cannot be reused), sparing the installation's daemon roots. A failed table
+    or an unmeasurable live leader stays unconfirmed: an immediate (shutdown) stop then still
+    sends the held child's own group the native kill, once what the pass owes is durable (that kill
+    breaks a chain like any signal), a graceful one signals nothing so a retry can find the whole tree. A leader gone before the stop leaves its chain broken: an orphan
+    with no readable marker is beyond any retry, so the stop confirms what it still reaches and
+    ``residual`` names that gap. Windows: the native tree
+    kill, and only the leader's exit is confirmed (``unsupported``). Returns ``{key: {"facts",
+    "birth", "known"}}``: the facts a stop result carries, the leader's birth and the identities
+    the next attempt must check."""
+    held, others = list(held), list(others)
+    answers: Dict[Any, Dict[str, Any]] = {}
+    if _pl.IS_WINDOWS:
+        if others:
+            answers.update(end_owned_processes(others, spared=others_spared, graceful=graceful))
+        for item in held:
+            proc = item["proc"]
+            if proc.poll() is None:
+                _pl.kill_process_tree(proc)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+            answers[item["key"]] = {"birth": item.get("birth") or "", "known": [], "facts": {
+                "coverage": COVERAGE_UNSUPPORTED, "reach": ["native tree"], "exit_confirmed": proc.poll() is not None,
+                "residual": "the native tree kill ended it; a descendant that left that tree is not verified"}}
+        return answers
+    from ouroboros.process_custody import custody_lock_budget, spared_daemon_roots
+
+    targets, gone, roots_of = [], {}, {}
+    spared = None if others_spared is None else set(others_spared)
+    unread = [item["proc"].pid for item in held if not item.get("birth") and item["proc"].returncode is None]
+    # One read for every held leader with no recorded birth.
+    births = _read_identities(unread) if unread else {}
+    for item in held:
+        proc, birth = item["proc"], item.get("birth") or ""
+        if not birth and proc.returncode is None and births.get(proc.pid) is not None:
+            identity = births[proc.pid]
+            birth = identity.birth if identity.state in (IDENTITY_ALIVE, IDENTITY_ZOMBIE) else ""
+        gone[item["key"]] = proc.poll() is not None
+        started = float(item.get("started_at") or 0.0)
+        targets.append({"key": item["key"], "pid": proc.pid, "birth": birth, "markers": item.get("markers") or (),
+                        "known": item.get("known") or (), "exited": gone[item["key"]], "custody": item.get("custody"),
+                        "floor": _dt.datetime.fromtimestamp(started, _dt.timezone.utc).isoformat() if started else ""})
+        drive = str(item.get("drive_root") or "")
+        if drive not in roots_of:  # one ledger read per installation, not per service
+            roots_of[drive] = spared_daemon_roots(item.get("drive_root"))
+        spared = None if roots_of[drive] is None or spared is None else spared | roots_of[drive]
+    outcomes = end_owned_processes([*targets, *others], spared=spared, graceful=graceful)
+    answers.update({target["key"]: outcomes[target["key"]] for target in others})
+    lock_wait = custody_lock_budget()
+    for item, target in zip(held, targets):
+        key, proc, outcome = item["key"], item["proc"], outcomes[item["key"]]
+        measured = bool(target["birth"]) or gone[key]
+        if not graceful and (outcome["census_failed"] or not measured) and _owed_is_durable(target, outcome, lock_wait):
+            # Shutdown/update keep their old native group kill when nothing could be measured; a stop that
+            # can be retried signals nothing, so a later readable table still finds the whole tree.
+            _pl.request_process_tree_kill(proc)  # refused once the held child exited
+        if not measured:  # alive but unmeasured: nothing above could judge it
+            _add_unverified(outcome, proc.pid, "", UNVERIFIED_IDENTITY)
+            outcome["exit_confirmed"] = False
+        facts = process_cleanup_facts(outcome)
+        if gone[key]:
+            facts["residual"] = ORPHANS_UNKNOWN_RESIDUAL  # disclosed: no later stop could trace further either
+        answers[key] = {"facts": facts, "birth": target["birth"], "known": outcome["known_members"]}
+        if facts["exit_confirmed"] and outcome.get("row"):
+            # Beside a record step of the same launch, each retires the row it left: whichever publishes last, it goes.
+            from ouroboros.owned_shutdown import forget_ledgered_rows
+            from ouroboros.process_custody import _lock_wait
+
+            with contextlib.suppress(Exception):  # a record left behind only costs the next stop a look
+                forget_ledgered_rows(item["drive_root"], [outcome["row"]], timeout_sec=_lock_wait())
+    for item in held:  # a confirmed leader is a corpse to reap; any other is polled, never waited for
+        with contextlib.suppress(Exception):
+            item["proc"].wait(timeout=5) if answers[item["key"]]["facts"]["exit_confirmed"] else item["proc"].poll()
+    return answers
+
+
+def _owed_is_durable(target: Mapping[str, Any], outcome: Mapping[str, Any], lock_wait: Any) -> bool:
+    """May a native kill break this launch's chain: its pass reconciled, or what else it owes is written now."""
+    from ouroboros.process_custody import write_ahead
+
+    leader = (int(target["pid"]), canonical_birth(target.get("birth")))
+    owed = [item for item in outcome["known_members"] if (int(item["pid"]), canonical_birth(item.get("birth"))) != leader]
+    return not target.get("custody") or not owed or bool(outcome.get("row")) or write_ahead(target["custody"], owed, lock_wait())
+
+
+def held_item(record: Any, proc: Any) -> Dict[str, Any]:
+    """One service record's ``end_held_processes`` item: a copy of what it still owes, its launch's identity and the
+    custody of that launch, found by its marker even while its registration has not returned its row yet."""
+    marker = record.scope_marker
+    return {"key": record.service_id, "proc": proc, "birth": record.leader_birth, "started_at": record.started_at,
+            "markers": [marker] if marker else [], "known": list(record.known_members), "drive_root": record.drive_root,
+            "custody": (record.drive_root, getattr(proc, "_ouroboros_custody", None)
+                        or {"pid": proc.pid, "scope_marker": marker}) if record.drive_root and marker else None}
 
 
 # --------------------------------------------------------------------------- task scopes
@@ -701,9 +1197,13 @@ def _unsettled_reason(outcome: Mapping[str, Any]) -> str:
 def _known_members(outcome: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """The members this pass could not end or confirm, by pid AND birth: inputs of the next
     pass, checked like a captured descendant — losing marker visibility never discharges
-    one; confirmed absence, a corpse or another birth does."""
-    return [{"pid": int(item["pid"]), "birth": str(item["birth"])}
-            for item in [*(outcome.get("survivors") or []), *(outcome.get("unverified") or [])] if item.get("birth")]
+    one; confirmed absence, a corpse or another birth does. A member held because nothing
+    told it from a daemon root is carried ``held``: no signal authority of its own, judged
+    again by its parent chain once the roots are known (``scope_members``)."""
+    return [{"pid": int(item["pid"]), "birth": str(item["birth"]),
+             **({"held": True} if item.get("reason") == UNVERIFIED_SPARE_UNKNOWN else {})}
+            for item in [*(outcome.get("survivors") or []), *(outcome.get("unverified") or [])]
+            if item.get("birth")]
 
 
 def _saved_members(record: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -1078,14 +1578,15 @@ def complete_pending_panic_sweep(data_dir: Any, *, exclude: Optional[Iterable[in
 
 
 __all__ = [
-    "COVERAGE_POSIX", "COVERAGE_UNSUPPORTED", "ENGINE_RUN_SCOPES_FILE", "INSTALL_SCOPE_PREFIX",
-    "RUN_SCOPE_PREFIX", "SCOPE_NAME_RE", "SCOPE_VALUE", "TASK_END_GRACE_SEC", "TASK_SCOPE_PREFIX",
-    "birth_epoch", "birth_text", "census", "complete_pending_panic_sweep", "end_scope", "engine_scope_index",
-    "initialize_installation_scope", "installation_marker", "installation_scope_entries", "is_scope_name",
-    "leader_facts", "lstart_text", "measure_birth", "mint_marker", "note_task_terminal_transition",
+    "COVERAGE_POSIX", "COVERAGE_UNSUPPORTED", "ENGINE_RUN_SCOPES_FILE", "INSTALL_SCOPE_PREFIX", "RUN_SCOPE_PREFIX",
+    "SCOPE_NAME_RE", "SCOPE_VALUE", "TASK_END_GRACE_SEC", "TASK_SCOPE_PREFIX", "birth_epoch", "birth_text",
+    "census", "complete_pending_panic_sweep", "end_held_processes", "end_owned_processes", "end_scope",
+    "engine_scope_index", "initialize_installation_scope", "installation_marker", "installation_scope_entries",
+    "is_scope_name", "leader_facts", "lstart_text", "measure_birth", "mint_marker", "note_task_terminal_transition",
+    "observe_owned_processes",
     "outcome_digest", "panic_census_exclusions", "panic_scope_census", "panic_sweep_pending_path",
-    "parse_proc_stat", "plant_installation_scope", "read_identities", "record_task_group", "scope_entries",
-    "scope_members", "settle_task_scope", "settle_task_scopes", "shed_scopes", "task_scope_env",
+    "parse_proc_stat", "plant_installation_scope", "process_cleanup_facts", "read_identities", "record_task_group",
+    "scope_entries", "scope_members", "settle_task_scope", "settle_task_scopes", "shed_scopes", "task_scope_env",
     "task_scope_marker", "task_scope_record", "task_scope_records", "task_scope_terminal_evidence",
     "wait_for_cleanups",
 ]

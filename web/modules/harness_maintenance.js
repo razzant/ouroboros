@@ -4,13 +4,16 @@
 // Accounts' existing visible status tick drives poll(); there is no second timer.
 import { apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
+import { errorWords } from './ui_primitives.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
 // Survives Settings remounts, including a lost POST reply. A full page reload
 // recovers accepted operation handles from the engine's inventory instead.
 const sessionIntents = new Map();
+// The whole-inventory read's slot among them: its failure survives a remount like a row's.
+const WHOLE_INVENTORY = '*';
 
 export function maintenanceOperationPending(operation) {
     return Boolean(operation?.id) && (!TERMINAL.has(operation.state)
@@ -27,22 +30,28 @@ export function maintenanceVersionLine(entry, { unknownCurrent = false, inspecti
     const selected = entry.selection || {};
     const managed = selected.kind === 'managed';
     const version = unknownCurrent ? null : selected.version;
-    const ownership = managed ? 'Managed' : selected.kind === 'missing' ? 'Not installed' : 'External install';
+    const missing = selected.kind === 'missing';
+    const ownership = managed ? 'Managed' : missing ? 'Not installed' : 'External install';
     const latest = entry.available?.version
         ? `Latest ${entry.available.version}` : 'Latest not checked';
-    return [`Program ${version || 'version unknown'}`, ownership, latest,
-        ...(inspectionError ? ['Last known'] : [])].join(' · ');
+    // The row's own observation: the inventory's top-level time is minted by every read, cached included.
+    const observed = absoluteTime(entry.observedAt);
+    // A program that is not there has no version to name: the row says so once.
+    return [...(missing ? [] : [`Program ${version || 'version unknown'}`]), ownership, latest,
+        ...(inspectionError ? [observed ? `Last known ${observed}` : 'Last known'] : [])].join(' · ');
 }
 
-export function maintenanceOperationLine(operation) {
+/** The operation's state line; for a program that is not installed the operation is an install, not an update. */
+export function maintenanceOperationLine(operation, { missing = false } = {}) {
     if (!operation) return '';
     const version = operation.target?.version || operation.targetVersion;
     const target = version ? ` ${version}` : '';
+    const verb = missing ? 'Install' : 'Update';
     const labels = {
-        queued: `Update queued${target}`,
-        running: operation.phase === 'installing' ? `Installing${target}…` : `Preparing update${target}…`,
+        queued: `${verb} queued${target}`,
+        running: operation.phase === 'installing' ? `Installing${target}…` : `Preparing ${verb.toLowerCase()}${target}…`,
         succeeded: `Operation completed${operation.after?.version ? ` · Version ${operation.after.version}` : ''}`,
-        failed: 'Update failed', cancelled: 'Update cancelled', interrupted: 'Update interrupted',
+        failed: `${verb} failed`, cancelled: `${verb} cancelled`, interrupted: `${verb} interrupted`,
     };
     let line = labels[operation.state] || 'Operation status unknown';
     if (operation.termination === 'unconfirmed') line += ' · Installer may still be running';
@@ -77,6 +86,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     const pending = Boolean(view.request) || maintenanceOperationPending(operation);
     const busy = Boolean(view.busy);
     const targets = entry?.maintainable && !view.inspectionError ? (entry.targets || []) : [];
+    const missing = entry?.selection?.kind === 'missing';
     const canAct = !pending && !busy && !view.inspectionPending;
     const actions = [];
     if (view.request && !operation) {
@@ -87,7 +97,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     } else {
         const checkLabel = entry?.canCheckLatest ? 'Check latest' : 'Check version';
         actions.push(button('inspect', view.inspectionPending ? 'Checking…' : checkLabel, busy || view.inspectionPending));
-        if (targets.includes('latest')) actions.push(button('latest', 'Update', !canAct));
+        if (targets.includes('latest')) actions.push(button('latest', missing ? 'Install' : 'Update', !canAct));
     }
     const extraActions = [];
     if (targets.includes('version')) extraActions.push(button('version', 'Install exact version…', !canAct));
@@ -100,11 +110,12 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     // This view's own sentences (an unconfirmed acceptance, an unavailable inspection) say what to do next and stay
     // on the row; the engine's exact problem text is a diagnostic, shown under Details. Only a typed source gets a
     // short visible cause: the inventory's problem with the latest version is about the latest version.
-    const error = view.operationError || view.inspectionError;
+    // The engine-wide missing-executable fact is said once by the section's service banner, never per family.
+    const error = view.operationError || (view.inspectionProblem ? '' : view.inspectionError);
     const engineProblem = problemText(operation?.problem) || problemText(entry?.availableProblem);
     const notice = error || engineProblem;
     const cause = !error && !problemText(operation?.problem) && engineProblem ? 'Latest version not determined' : '';
-    const status = `${view.operationError && operation ? 'Last observed: ' : ''}${maintenanceOperationLine(operation)}`;
+    const status = `${view.operationError && operation ? 'Last observed: ' : ''}${maintenanceOperationLine(operation, { missing })}`;
     const tone = notice || ['failed', 'interrupted'].includes(operation?.state) ? 'warn' : 'muted';
     const selected = entry?.selection || {};
     const facts = [
@@ -145,7 +156,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
 
 /** View controller. reads/presses coalesce; dispose releases only the view. */
 export function createHarnessMaintenanceController({
-    api = apiClient, host = () => null, onInventory = () => {}, onSettled = () => {},
+    api = apiClient, host = () => null, onInventory = () => {}, onInspectionProblem = () => {}, onSettled = () => {},
     visible = () => true, dialog = openConfirmDialog, intents = sessionIntents,
     newKey = () => globalThis.crypto?.randomUUID?.()
         || `maintenance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
@@ -153,15 +164,42 @@ export function createHarnessMaintenanceController({
     const rows = new Map();
     const reads = new Map();
     let disposed = false;
-    let inventoryError = '';
+    // Answers can cross: the later-asked read stands, whichever answers last. `observed` keeps, per slot,
+    // the newest applied failure or proved success (a cached success proves nothing current, so it marks
+    // nothing); `engineObserved` the newest current observation of the engine-wide fact. A released view
+    // applies nothing, so its successor, whose reads are all asked later, starts empty.
+    let asked = 0;
+    let engineObserved = 0;
+    const observed = new Map();
 
     function record(harness) {
         if (!intents.has(harness)) intents.set(harness, { operation: null, request: null, expanded: false, revision: 0 });
         return intents.get(harness);
     }
 
+    function inspectionProblem() {
+        for (const state of intents.values()) if (state.inspectionProblem) return state.inspectionProblem;
+        return null;
+    }
+
+    function clearInspectionFailure(state) {
+        state.inspectionError = '';
+        state.inspectionNeedsFresh = false;
+        state.inspectionProblem = null;
+    }
+
+    function forgetMissingExecutable() {
+        for (const state of intents.values()) if (state.inspectionProblem) clearInspectionFailure(state);
+    }
+
+    // "Checking…" answers a check the owner asked for: this card's own, or a fresh read of every program (Refresh);
+    // the cached read a mount starts changes no card's words (U106).
+    const inspectionPending = (harness) => reads.has(harness) || Boolean(reads.get(WHOLE_INVENTORY)?.current);
+
     function render() {
         if (disposed) return;
+        const problem = inspectionProblem();
+        const whole = record(WHOLE_INVENTORY);
         host()?.querySelectorAll('[data-family-maintenance]').forEach((element) => {
             const harness = element.dataset.familyMaintenance;
             const state = record(harness);
@@ -171,8 +209,9 @@ export function createHarnessMaintenanceController({
                 ? (active.dataset?.maintenanceAction ? `[data-maintenance-action="${active.dataset.maintenanceAction}"]`
                     : active.hasAttribute?.('data-maintenance-details') ? '[data-maintenance-details]' : '') : '';
             element.innerHTML = harnessMaintenanceMarkup(rows.get(harness), {
-                ...state, harness, inspectionError: state.inspectionError || inventoryError,
-                inspectionPending: reads.has(harness) || reads.has('*'),
+                ...state, harness, inspectionProblem: problem,
+                inspectionError: state.inspectionError || whole.inspectionError || problem?.message || '',
+                inspectionPending: inspectionPending(harness),
             });
             if (focused) element.querySelector(focused)?.focus?.();
             element.querySelector('[data-maintenance-details]')?.addEventListener('click', (event) => {
@@ -210,14 +249,43 @@ export function createHarnessMaintenanceController({
 
     function refresh({ harness = '', fresh = false, checkLatest = false } = {}) {
         if (disposed) return Promise.resolve(null);
-        const key = harness || '*';
-        if (reads.has(key)) return reads.get(key);
+        const key = harness || WHOLE_INVENTORY;
+        // A running read answers only a request no stronger than itself: joining a cached
+        // read would report its success as the fresh inspection this caller asked for.
+        const asksCurrent = fresh || checkLatest;
+        const running = reads.get(key);
+        if (running) {
+            return (running.current || !asksCurrent) && (running.checkLatest || !checkLatest)
+                ? running.promise : running.promise.then(() => refresh({ harness, fresh, checkLatest }));
+        }
         const revisions = new Map([...intents].map(([id, state]) => [id, state.revision]));
+        const order = ++asked;
+        const older = (slot) => (observed.get(slot) || 0) > order;
+        const claim = (slot) => {
+            if (older(slot)) return false;
+            observed.set(slot, order);
+            return true;
+        };
+        const claimEngine = () => {
+            if (engineObserved > order) return false;
+            engineObserved = order;
+            return true;
+        };
         let superseded = false;
         const promise = Promise.resolve().then(() => api.harnessMaintenanceInventory({ harness, fresh, checkLatest }))
             .then((inventory) => {
+                // A released view's late answer is older than anything its successor reads.
+                if (disposed) return null;
                 if (!Array.isArray(inventory?.harnesses)) throw new Error('Program inventory was not returned.');
-                inventoryError = '';
+                // Only a child that really ran proves anything current: a cached answer keeps
+                // a failed fresh inspection standing, and an empty one spawned nothing.
+                const proved = asksCurrent && inventory.harnesses.length > 0;
+                if (proved && claimEngine()) forgetMissingExecutable();
+                const settle = (slot) => {
+                    const state = record(slot);
+                    if (proved ? claim(slot) : !older(slot) && !state.inspectionNeedsFresh) clearInspectionFailure(state);
+                };
+                settle(WHOLE_INVENTORY);
                 for (const entry of inventory.harnesses) {
                     const state = record(entry.harness);
                     if (state.revision !== (revisions.get(entry.harness) || 0)) {
@@ -225,7 +293,7 @@ export function createHarnessMaintenanceController({
                         continue;
                     }
                     rows.set(entry.harness, entry);
-                    state.inspectionError = '';
+                    settle(entry.harness);
                     state.unknownCurrent = (ACTIVE.has(state.operation?.state) && state.operation?.phase === 'installing')
                         || (state.operation?.mutation === 'unknown' && !inspectedAfterOperation(entry, state.operation));
                     // Inventory offers a handle, not the full result. Do not
@@ -240,16 +308,32 @@ export function createHarnessMaintenanceController({
                 if (!disposed) onInventory([...rows.keys()]);
                 return inventory;
             }).catch((error) => {
-                const message = `Program inspection unavailable: ${error.message || error}`;
-                if (harness) record(harness).inspectionError = message;
-                else inventoryError = message;
+                // A late answer to a released view cannot overwrite what its successor has since read.
+                if (disposed) return null;
+                const problem = error.body?.error;
+                const missing = problem?.context?.observation === 'reported_executable_missing' ? problem : null;
+                const current = Boolean(asksCurrent || missing);
+                const state = record(key);
+                // A newer observation of this slot stands, a failed cached read cannot replace a current
+                // failure, and only the newest engine-wide observation may say the file is missing.
+                if (older(key) || (!current && state.inspectionNeedsFresh) || (missing && engineObserved > order)) return null;
+                const before = inspectionProblem();
+                claim(key);
+                if (current && claimEngine()) forgetMissingExecutable();
+                // A transport failure is said in owner words (a TypeError with no response: errorWords); an engine's own
+                // sentence stays on the row (an unclassified failure keeps its exact sentence).
+                const reason = error instanceof TypeError && error.response === undefined ? errorWords(error).text : error.message || error;
+                state.inspectionError = `Program inspection unavailable: ${reason}`;
+                state.inspectionNeedsFresh = current;
+                state.inspectionProblem = missing;
+                if (inspectionProblem() !== before) onInspectionProblem();
                 return null;
             }).finally(() => {
                 reads.delete(key);
                 render();
                 if (superseded) void refresh({ harness, fresh: true });
             });
-        reads.set(key, promise);
+        reads.set(key, { promise, current: asksCurrent, checkLatest });
         render();
         return promise;
     }
@@ -355,7 +439,11 @@ export function createHarnessMaintenanceController({
     return {
         refresh, render, start, cancel, act, readOperation,
         get harnesses() { return [...rows.keys()]; },
-        view(harness) { return { ...record(harness), entry: rows.get(harness), inventoryError }; },
+        get inspectionProblem() { return inspectionProblem(); },
+        view(harness) {
+            return { ...record(harness), entry: rows.get(harness), inspectionPending: inspectionPending(harness),
+                inventoryError: record(WHOLE_INVENTORY).inspectionError || '' };
+        },
         poll() {
             if (disposed || !visible()) return;
             for (const [harness, state] of intents) {

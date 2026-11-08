@@ -20,7 +20,7 @@ from tests import test_room_work_browser as rw
 
 room_ui = rw.room_ui
 subscription_ui = rw.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # One mark as painted: its shape and hue, the size of each part it shows, their motion, its colour beside its word's,
 # and the colours the tokens it may take resolve to on this page.

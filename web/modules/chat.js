@@ -1,17 +1,18 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown } from './chat_markdown.js';
+import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown, linkify } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
-import { strokeIcon } from './page_icons.js';
+import { renderSkillIcon, strokeIcon } from './page_icons.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { tx } from './i18n.js';
-import { hostRowDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, replayConcludesTask } from './chat_row_placement.js';
 import { appendProjectRow, decorateProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
+import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, decorateContactSource, showTaskIncidentToast } from './chat_media.js';
 import { attachmentCaption, attachmentViews, createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
@@ -21,14 +22,16 @@ import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
-import { syncSettledItems } from './settled_card.js';
+import { closingLine, syncClosingSentence, syncSettledItems } from './settled_card.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
 import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
-import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset } from './project_read_state.js';
+import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
+import { createSharedReadTracker } from './read_ahead.js';
 import { mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
+import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
 import {
     childReportLabel,
@@ -103,6 +106,7 @@ import {
     syncLiveCardToggle,
     timelineScroll,
     updateLiveTimelineItem,
+    childProgressKey,
     upsertToolFoldRow,
 } from './chat_render_batch.js';
 import { measure } from './layout_batch.js';
@@ -110,6 +114,8 @@ import { placeCheckRow, placeReplayedEvidence } from './verification_presentatio
 import {
     COLLAPSED_ACTIVITY_MAX,
     boundActivityPreview,
+    authoredLine,
+    authoredTitle,
     buildTimelineItemHtml,
     buildMessageKey,
     chatLogThreadAccepts,
@@ -156,6 +162,7 @@ import {
     readCandidateRemainder,
     renderLiveCardMeta as renderCardMeta,
     ensureLiveActionsEl,
+    dockChildReviewDoor,
     cardRowEvidenceRef,
     cardRowSummary,
     evidenceLinkHtml,
@@ -190,6 +197,8 @@ const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
 const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 'completed_warn', 'failed',
     'cancelled', 'rejected', 'interrupted']);  // a helper's narration is `progress`
 const CHAT_STORAGE_KEY = 'ouro_chat';
+// Details and Reviews use the shared control glyph; ::after remains the touch hit area.
+const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
 export function initChat(ctx) {
     // Back-compat main-chat entry: one full-page instance bound to chat 1.
@@ -235,7 +244,7 @@ export function createChatInstance({
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <div class="chat-input-wrap">
-                <button class="chat-scroll-bottom-btn" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
+                <button class="chat-scroll-bottom-btn ui-hit-area" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
                     ${strokeIcon('<path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/>', 16)}
                     <span class="chat-scroll-activity-dot" aria-hidden="true" hidden></span>
                 </button>
@@ -277,7 +286,6 @@ export function createChatInstance({
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
         navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible() });
     const chatMedia = createChatMedia({
-        chatSessionId,
         durableChatMediaUrl,
         formatMsgTime,
         insertMessageNode,
@@ -391,6 +399,7 @@ export function createChatInstance({
         if (!preserveWaits) modelWaits.forget(id);
         const record = liveCardRecords.get(id);
         record?.timelineDispose?.();
+        record?.regions?.forEach((dispose) => dispose());
         record?.episodeDisclosureDispose?.();
         if (record?.episodeDisclosure) releaseMessageNode(record.episodeDisclosure);
         if (record?.root) releaseMessageNode(record.root);
@@ -557,7 +566,7 @@ export function createChatInstance({
             missing: observeMissingManagedTask, summary: appendTaskSummaryToLiveCard,
             collapse: (record) => (explicitCardExpansion.delete(record.groupId), record.root.dataset.expanded === '1'
                 && setLiveCardExpanded(record, false)) } });
-    const episodes = createTaskEpisodes({ records: liveCardRecords, reanchor: reanchorTaskCard, renamed: portals.relabel,
+    const episodes = createTaskEpisodes({ records: liveCardRecords, reanchor: reanchorTaskCard, renamed: (record) => (portals.relabel(record), syncCardHeadline(record)),
         activity: (record) => currentActivity(record), follow: portals.follow,
         expand: (record) => { setLiveCardExpanded(record, true); hydrateCardReviews(record.groupId); } });
     const rowMenu = createChatRowMenu({ feed: messagesDiv, replies, cardOf: (id) => liveCardRecords.get(id),
@@ -602,6 +611,7 @@ export function createChatInstance({
         workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false);
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
         applyCardWorkViews(liveCardRecords, workState);
+        chatDecision.syncWorks(workState);
         changedOffers(liveCardRecords, before, workState).forEach(syncCancelRunButton);
         syncHeaderControlState(data ?? { accounting: { available: false } });
         portals.sync(data);
@@ -627,14 +637,7 @@ export function createChatInstance({
     async function refreshHeaderControlState(force = false) {
         if (!force && state.activePage !== 'chat') return;
         const request = await stateSnapshots.gate(force);
-        if (!request) return;
-        try {
-            const resp = await apiFetch(request.path || '/api/state', { cache: 'no-store' });
-            if (!resp.ok) throw new Error(`State read failed: HTTP ${resp.status}`);
-            stateSnapshots.apply(request, await resp.json());
-        } catch {
-            stateSnapshots.fail?.(request);
-        }
+        if (request) await readStateSnapshot(stateSnapshots, request);
     }
 
     function persistVisibleHistory() {
@@ -782,18 +785,16 @@ export function createChatInstance({
     // root with work takes its newest narration, `Task activity` once ended (#1369).
     function cardTitle(record, work = blockHasWork(record)) {
         return record.isSubagent ? childTitle(record) : record.suggestedName
-            || (work ? record.lastHumanHeadline || (record.finished ? 'Task activity' : '') : '');
+            || (work ? authoredTitle(record) || (record.finished ? 'Task activity' : '') : '');
     }
 
-    // Write only on change: a rewrite would destroy a selection being copied. A finished root's own sentence is its
-    // line under an authored title; a wake's sentence is its title, so its last narration stays the line; a host cause
-    // holding the line stays.
+    // Change only (a rewrite loses a copy selection). A finished root's own sentence, not narration, is its line
+    // or its sole head (owner 01.11, A); a held cause stays.
     function syncCardHeadline(record) {
         const title = cardTitle(record);
-        const own = record.finished && !record.isSubagent && !record.causeHeld && record.wakeSummary;
-        const line = own && own !== title ? own : record.collapsedActivity;
+        const line = record.finished && !record.isSubagent && record.wakeSummary ? closingLine(record, title) : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
-        renderCollapsedActivity(record, projectCollapsedActivity({ isSubagent: record.isSubagent, suggestedName: title, headline: line, body: line }));
+        return renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
 
     // Fold host facts; absent counters stay absent.
@@ -837,7 +838,7 @@ export function createChatInstance({
     // card exists, so it lives beside the card records rather than on them.
     const cancelableTaskIds = new Set();
 
-    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '', rawTs = '') {
+    function queueTaskLiveUpdate(summary, taskId, rawTs) {
         return withStableViewport(() => {
             // Explicit task/review identity owns a card; viewport position never does.
             if (!taskId) return false;
@@ -850,7 +851,7 @@ export function createChatInstance({
                 changed = Boolean(record.root?.isConnected);
                 disposeLiveCard(taskId);
             }
-            return Boolean(applyLiveCardState(summary, taskId, ts, dedupeKey, { rawTs }) || changed);
+            return Boolean(applyLiveCardState(summary, taskId, rawTs) || changed);
         });
     }
 
@@ -917,7 +918,7 @@ export function createChatInstance({
         const btn = document.createElement('button');
         btn.type = 'button';
         // Neutral trigger: Resume or Continue stays the card's one primary.
-        btn.className = 'btn btn-sm btn-default';
+        btn.className = 'btn btn-sm btn-default ui-hit-area';
         btn.dataset.cancelRun = '1';
         btn.textContent = TASK_CONTROL_TRIGGER_LABEL;
         // Pending cancel offers only hard escalation; dismiss keeps the run.
@@ -1102,15 +1103,16 @@ export function createChatInstance({
     // Refresh files/history and a Swarm root's receipt line; retain lifecycle.
     function noteTaskDetails(record, detail) {
         const files = syncSettledItems(record, detail, { write: withStableViewport });
-        const words = record && detail && 'wake_summary' in detail && record.wakeSummary !== detail.wake_summary;
-        if (words) { record.wakeSummary = detail.wake_summary; syncCardHeadline(record); }  // live and replay meet here: the sentence is also the finished card's line
+        const words = syncClosingSentence(record, detail);
+        if (words) syncCardHeadline(record);
         const origin = record && detail?.schedule_name && record.scheduleName !== detail.schedule_name;
         if (origin) record.scheduleName = detail.schedule_name;
         const history = syncHistoryRetentionItem(record, detail);
         const candidate = syncCandidateRemainderItem(record, detail);
         const chain = episodes.note(record, detail);
         const receipt = syncSwarmReceipt(record, detail);
-        return Boolean((words || origin || files || history || candidate) && (renderLiveCardMeta(record), updateLiveCardCount(record), renderLiveCardTimeline(record), true))
+        const money = syncCostBreakdown(record, detail);  // a root's "Spent on" / "Ran on" rows in its Details
+        return Boolean((words || origin || files || history || candidate || money) && (renderLiveCardMeta(record), updateLiveCardCount(record), renderLiveCardTimeline(record), true))
             || chain || receipt;
     }
 
@@ -1185,8 +1187,9 @@ export function createChatInstance({
             updateLiveCardCount(record);
             reanchorTaskCard(record, rawTs, { suppressDomInsert });
             ensureLiveCardVisible(record, { suppressDomInsert });
-            // Only new review rows trigger a read.
+            // Only new review rows trigger a read; a live receipt on a settled card re-reads its stored line.
             if (fresh && placement === 'reviews') hydrateCardReviews(taskId);
+            if (fresh && !msg.history_id && record.finished && msg.terminal_receipt) scheduleHistorySync();
             return Boolean(changed || liveCardProjectionChanged(before, record));
         });
     }
@@ -1253,24 +1256,23 @@ export function createChatInstance({
                         <span class="chat-live-phase working" data-live-phase role="status" aria-live="polite" aria-atomic="true" aria-label="${options.isSubagent ? 'Subagent' : 'Task'} status: Working">Working</span>
                         <span class="chat-live-phase-secondary" data-live-phase-secondary hidden></span>
                         <span class="chat-live-hurry" data-live-hurry role="img" hidden></span>
+                        <span class="chat-live-when" data-live-when hidden></span>
                     </div>
                     <span class="chat-live-title" data-live-title>Waiting for work</span>
+                    <div class="chat-live-doors">
+                    <button type="button" class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden>${CHEVRON}</button>
                     <button type="button" class="chat-live-summary-side ui-hit-area" data-live-disclosure aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                         <span class="chat-live-count" data-live-count hidden></span>
                         <span class="chat-live-toggle" data-live-toggle>Details</span>
-                        <svg class="chat-live-chevron" width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                            <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                    </button>
+                        ${CHEVRON}
+                    </button></div>
                 </div>
                 <div class="chat-live-episodes" data-live-episodes hidden></div>
                 <div class="chat-live-activity" data-live-activity></div>
             </div>
             <div class="chat-live-foot" data-live-foot>
                 <div class="chat-live-meta" data-live-meta></div>
-                <div class="chat-live-foot-end" data-live-foot-end>
-                    <button type="button" class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden></button>
-                </div>
+                <div class="chat-live-foot-end" data-live-foot-end></div>
             </div>
             <div data-live-reviews-host></div>
             <div class="chat-live-details">
@@ -1346,6 +1348,9 @@ export function createChatInstance({
                 }
             }
         });
+        // While a part Details opens scrolls inside (style.css) it is a named region the keyboard reaches.
+        record.regions = [['.chat-live-details', 'Scrollable task details'], ['.chat-live-timeline', 'Scrollable task notes']]
+            .map(([part, region]) => bindScrollFade(root.querySelector(part), { region }));
         liveCardRecords.set(normalizedGroupId, record);
         liveCardBound.observe(liveCardRecords.size);
         // apply a name that arrived (task_named) before this card existed.
@@ -1421,7 +1426,10 @@ export function createChatInstance({
             container.dataset.subagentsFor = parentId;
             parentRecord.subagentsEl = container;
         }
-        const anchor = parentRecord.reviewsHostEl || parentRecord.timelineEl;
+        // Children follow what the card's Details opens (its facts and notes), so it opens under the card's own lines,
+        // never behind them; earlier episodes follow the children. An episode's disclosure keeps them after its Reviews.
+        const own = parentRecord.timelineEl?.parentNode === parentRecord.root;
+        const anchor = own ? parentRecord.timelineEl : parentRecord.reviewsHostEl || parentRecord.timelineEl;
         if (container.parentNode !== parentRecord.root || container.previousElementSibling !== anchor) {
             anchor?.insertAdjacentElement('afterend', container);
         }
@@ -1455,6 +1463,7 @@ export function createChatInstance({
         record.isSubagent = true;
         record.parentGroupId = parentId;
         record.subagentRole = role || record.subagentRole || '';
+        dockChildReviewDoor(record);
         if (promoted) {
             record.root.classList.add('subagent');
             record.root.dataset.subagent = '1';
@@ -1481,6 +1490,7 @@ export function createChatInstance({
 
     function resetLiveCardRecord(record) {
         record.updates = 0;
+        record.wakeSummary = '';
         record.finished = false;
         record.items = [];
         record.lastHumanHeadline = '';
@@ -1551,7 +1561,12 @@ export function createChatInstance({
 
     function updateLiveCardCount(record) {
         if (!record?.countEl) return;
-        const bits = liveCardCountBits(record.items.length, directSubagentCount(record));
+        const children = directSubagentCount(record);
+        // Children keep the card's opened facts and notes short (style.css), so they stay in reach below them.
+        const flagged = 'children' in record.root.dataset;
+        if (children > 0 && !flagged) record.root.dataset.children = '1';
+        else if (!children && flagged) delete record.root.dataset.children;
+        const bits = liveCardCountBits(record.items.length, children);
         const hidden = bits.length === 0;
         const text = bits.join(' · ');
         if (record.countEl.hidden !== hidden) record.countEl.hidden = hidden;
@@ -1621,10 +1636,8 @@ export function createChatInstance({
         }),
     });
 
-    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', options = {}) {
-        return withStableViewport(() => applyLiveCardStateMutation(
-            summary, groupId, ts, dedupeKey, options,
-        ));
+    function applyLiveCardState(summary, groupId, rawTs, options) {
+        return withStableViewport(() => applyLiveCardStateMutation(summary, groupId, rawTs, options));
     }
 
     // Authored naming has its own clock: newer execution or a terminal outcome
@@ -1634,7 +1647,7 @@ export function createChatInstance({
         if (!summary.human || !summary.headline) return;
         const previous = record.lastHumanHeadlineSource, shown = previous?.preview || '';
         const incoming = { time: Date.parse(rawTs), position: _historyRow?.history_position,
-            preview: boundActivityPreview(summary.activityPreview ?? summary.headline) || shown };
+            preview: authoredLine(record, summary) || shown };
         if (Number.isFinite(previous?.time) && (!Number.isFinite(incoming.time) || incoming.time < previous.time)) return;
         if (incoming.time === previous?.time && (compareHistoryPosition(incoming.position, previous.position) < 0
                 || previous.position && !incoming.position)) return;
@@ -1644,7 +1657,8 @@ export function createChatInstance({
         return true;
     }
 
-    function applyLiveCardStateMutation(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false, rawTs = '' } = {}) {
+    function applyLiveCardStateMutation(summary, groupId, rawTs, { suppressDomInsert = false } = {}) {
+        const ts = normalizeLogTs(rawTs);
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const before = captureLiveCardProjection(record);
@@ -1701,7 +1715,7 @@ export function createChatInstance({
         if (summary.terminal && typeof summary.quietEffective === 'boolean') record.quietEffective = summary.quietEffective;
         // Empty frames name nothing (#1369).
         const headline = summary.headline || record.lastHumanHeadline || '';
-        const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
+        const syntheticKey = summary.dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
         // Failure/timeout update one row; success feeds the fold.
         const inPlaceByKey = isLegacyParentSubagentKey
@@ -1748,7 +1762,7 @@ export function createChatInstance({
         }
         updateLiveCardCount(record);
         // Cost does not move the activity clock.
-        if (ts && (summary.human || activityCandidate)) record.latestActivityTs = ts, record.latestActivityRaw = rawTs || '';
+        if (ts && (summary.human || summary.reasoning || activityCandidate)) record.latestActivityTs = ts, record.latestActivityRaw = rawTs || '';
         if (summary.executorChip
                 && !keepStickyExecutorChip(record.executorChip, summary.executorChip)) {
             record.executorChip = summary.executorChip;
@@ -1805,14 +1819,14 @@ export function createChatInstance({
         if (!record) return false;
         const before = captureLiveCardProjection(record);
         const typingBefore = typingEl.style.display;
-        if (setHistoricalUnavailable(record, false)) renderLiveCardMeta(record);
+        setHistoricalUnavailable(record, false);
         markReviewAnchor(record);
         const wasFinished = record.finished;
         record.finished = true;
         record.finalizingHold = false;
         const presentation = taskPresentation(phase || 'done', record.quietEffective ?? record.historicalTerminal?.quiet_effective);
         setLiveCardPhase(record, presentation.phase, presentation.headline);
-        syncCardHeadline(record);
+        syncCardHeadline(record); renderLiveCardMeta(record);
         settleLiveCard(record, wasFinished);
         ensureLiveCardVisible(record);
         if (activeLiveGroupId === record.groupId) activeLiveGroupId = '';
@@ -1842,7 +1856,7 @@ export function createChatInstance({
         if (finalizing && !record.finished) record.finalizingHold = true;
         changed = applyLiveCardState(
             { ...summary, costProjection: taskCostProjection(msg, rawTs) },
-            taskId, normalizeLogTs(rawTs), summary.dedupeKey, { suppressDomInsert, rawTs },
+            taskId, rawTs, { suppressDomInsert },
         ) || changed;
         if (finalizing) return changed;
         changed = finishLiveCard(taskId, summary.phase) || changed;
@@ -1957,10 +1971,7 @@ export function createChatInstance({
             role: msg.role, system_type: msg.system_type, narration: msg.narration,
         });
         if (!summary) return changed;
-        const presented = withTaskCostMeta(summary, msg, { rawTs });
-        changed = queueTaskLiveUpdate(
-            presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs,
-        ) || changed;
+        changed = queueTaskLiveUpdate(withTaskCostMeta(summary, msg, { rawTs }), taskId, rawTs) || changed;
         // History carries task_named's title.
         if (msg.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         // Outcome survives a lost summary even while post-work keeps controls live.
@@ -1997,13 +2008,7 @@ export function createChatInstance({
         if (summary.terminal) subagentTerminalChildren.add(childId);
         stampNodeTimestamp(getSubagentCardRecord(childId, parentId, role, rawTs)?.root, rawTs, { anchor: true });
         const reviewsChanged = attachTaskDetailReviews(childId, evt);
-        const updated = queueTaskLiveUpdate(
-            summary,
-            childId,
-            normalizeLogTs(rawTs),
-            summary.dedupeKey,
-            rawTs,
-        );
+        const updated = queueTaskLiveUpdate(summary, childId, rawTs);
         return Boolean(reviewsChanged || updated);
     }
 
@@ -2027,13 +2032,18 @@ export function createChatInstance({
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
-        // Same frame adopts one speech occurrence; progress replaces a line.
-        if (!summary.activity) summary.dedupeKey = ownLine ? `subagent-line:${childId}:${rawTs}:${content}` : `subagent-progress:${childId}`;
+        // One frame is one source occurrence, live or saved; only a live note's row is a line the next note replaces.
+        const occurrence = `${childId}:${rawTs}:${content}`;
+        if (summary.reasoning) summary.dedupeKey = `reasoning:${occurrence}`;
+        else if (!summary.activity) {
+            summary.occurrenceKey = `subagent-line:${occurrence}`;
+            summary.dedupeKey = ownLine || _historyRow?.history_id ? summary.occurrenceKey : childProgressKey(record, summary.occurrenceKey);
+        }
         if (preserveTerminal && !_historyReplayActive) {
             summary.phase = String(record.phaseEl?.dataset?.phase || 'done');
             summary.terminal = true;
         }
-        return queueTaskLiveUpdate(summary, childId, normalizeLogTs(rawTs), summary.dedupeKey, rawTs);
+        return queueTaskLiveUpdate(summary, childId, rawTs);
     }
 
     function routeSubagentFinalMessageToCard(taskId, msg) {
@@ -2057,9 +2067,7 @@ export function createChatInstance({
             summary.phase = priorTerminalPhase;
             summary.terminal = true;
         }
-        return queueTaskLiveUpdate(
-            summary, childId, normalizeLogTs(rawTs), summary.dedupeKey, rawTs,
-        );
+        return queueTaskLiveUpdate(summary, childId, rawTs);
     }
 
     // Resolve a child's card from the child's terminal task_done
@@ -2129,9 +2137,7 @@ export function createChatInstance({
             replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
             rawTs,
         });
-        const queued = queueTaskLiveUpdate(
-            presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs,
-        );
+        const queued = queueTaskLiveUpdate(presented, taskId, rawTs);
         if (childInfo) return Boolean(changed || queued);
         const subagentChanged = updateSubagentCardFromEvent(evt, rawTs);
         // Host-attested Stop facts also travel on tool-only turns.
@@ -2226,7 +2232,7 @@ export function createChatInstance({
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
         const stored = text;
-        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = tx(text);
+        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
         // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
         const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
         const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;
@@ -2236,7 +2242,7 @@ export function createChatInstance({
         const shown = attachments.length ? attachmentCaption(text, attachments,
             { placeholder: opts.textPlaceholder === true, composed: source === 'web' }) : text;
         const rendered = role === 'user'
-            ? escapeHtml(shown)
+            ? linkify(shown)
             : skillReview
                 ? renderSkillReviewDisclosure(text, opts.skillReview || null)
                 : role === 'system' && markdown !== true
@@ -2247,7 +2253,7 @@ export function createChatInstance({
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
         bubble.innerHTML = `
-            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta, chatSessionId))}</div>
+            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
             <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
@@ -2709,7 +2715,10 @@ export function createChatInstance({
     // joined; the sticky hydration answers a covered one (project_read_state.js).
     const newestFacts = { delivered: id => retainedHistoryIds().has(id), nodes: id => historyNodes(id),
         viewport: messagesDiv, header: pageHeader, composer: inputArea };
-    const readReceipt = createProjectReadReceipt({
+    // A message this room shares with another is read once wherever it was shown whole (read_ahead.js).
+    const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band: () => readBand(messagesDiv, pageHeader, inputArea),
+        shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
+    const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
             await (!fresh && initialHydrationPromise || historyPager.read({ whole }));
             return lastHistorySyncSucceeded;
@@ -2889,6 +2898,9 @@ export function createChatInstance({
             return changed;
         };
         const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
+        // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
+        const lane = `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`;
+        if (asPanel && page.style.getPropertyValue('--chat-feed-lane') !== lane) page.style.setProperty('--chat-feed-lane', lane);
         updateScrollButton();
         return changed;
     }
@@ -2918,6 +2930,18 @@ export function createChatInstance({
     }
 
     installChatResizeObservers();
+
+    // A Project room's feed holds the keys while it is open (app.js focusProjectRoom) and shows that focus as two
+    // corners (style.css). A pointer in the panel quiets them; a key anywhere in the room restores the cue, including
+    // Back to reading from the composer. Lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4) stay quiet.
+    const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
+    const quietFocus = () => messagesDiv.classList.add('is-quiet-focus');
+    const showFocus = ({ key, metaKey, ctrlKey, altKey }) => {
+        if (metaKey || ctrlKey || altKey ? /^(Arrow|Page|Home$|End$| $)/.test(key)
+            : !/^(Shift|CapsLock|Fn)$/.test(key)) messagesDiv.classList.remove('is-quiet-focus');
+    };
+    focusPanel?.addEventListener('pointerdown', quietFocus);
+    focusPanel?.addEventListener('keydown', showFocus);
 
     let headerControlInterval = null;
     if (asPanel) {
@@ -2978,6 +3002,7 @@ export function createChatInstance({
 
     // One retirement path per message node: media, decision views and markdown go with it.
     function releaseMessageNode(node) {
+        sharedRead.release(node);
         chatMedia.release(node); chatDecision.releaseViews(node); destroyChatMarkdown(node); node.remove();
     }
 
@@ -3009,6 +3034,7 @@ export function createChatInstance({
                 const wrapper = node.closest('.chat-bubble');
                 releaseMessageNode(node);
                 if (wrapper && wrapper !== node && !wrapper.querySelector('.chat-gallery-item, .chat-file-item, .chat-quiz-card')) {
+                    sharedRead.release(wrapper);
                     chatMedia.release(wrapper); wrapper.remove();
                 }
             }
@@ -3412,7 +3438,7 @@ export function createChatInstance({
                 systemType: msg.system_type || '', narration: msg.narration,
                 source: msg.source || '',
                 initiator: msg.initiator || '',
-                taskId: explicitTaskId, reply: msg,
+                taskId: explicitTaskId, reply: msg, projectId: msg.project_id, projectName: msg.project_name,
                 // The saved row's own name, as history keys it; this frame's client_message_id is the owner's.
                 clientMessageId: msg.row_client_message_id || '',
                 // A placed row whose card is not in this chat keeps its record link.
@@ -3566,6 +3592,7 @@ export function createChatInstance({
         refreshHistory: readReceipt.refresh,
         revealQuestion,
         revealSource: replies.reveal,
+        drawsSource: replies.draws,
         cancelHistoryPaint: readReceipt.cancel,
         // app.js fans its already-existing /api/state refresh to every open
         // thread; panels gain convergence without acquiring their own poll.
@@ -3585,6 +3612,8 @@ export function createChatInstance({
         // reading and its transients stop at once, it is neither shown nor read; `stay` is a reopen meanwhile.
         leave: () => { leaving = true; readReceipt.cancel(); reading.cancel(); roomWork?.leave(); chatMedia.closeTransient(); },
         stay: () => { leaving = false; },
+        // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
+        quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
         // Full teardown (P3): release every resource this instance acquired —
         // ws subscriptions, window/document listeners, the ResizeObserver, all
         // timers — then drop the buffered collections and remove the DOM last.
@@ -3600,6 +3629,7 @@ export function createChatInstance({
             unconfirmed.release();
             emptyWelcome?.dispose();
             readReceipt.cancel();
+            sharedRead.dispose();
             for (const dispose of wsDisposers) {
                 try { dispose(); } catch {}
             }
@@ -3618,6 +3648,8 @@ export function createChatInstance({
             window.removeEventListener('ouro:page-shown', handlePageShown);
             document.removeEventListener('visibilitychange', handlePageShown);
             header?.destroy();
+            focusPanel?.removeEventListener('pointerdown', quietFocus);
+            focusPanel?.removeEventListener('keydown', showFocus);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();

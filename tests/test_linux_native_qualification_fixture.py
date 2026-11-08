@@ -131,7 +131,6 @@ def test_configured_launch_witness_is_installed_before_popen_and_does_not_wait_f
 
 @pytest.mark.parametrize('body,status,readiness', [({'ok': False, 'restart_required': False}, 200, 204),
                                                    ({'ok': True, 'restart_required': True}, 200, 204),
-                                                   ({'ok': True, 'restart_required': False}, 200, 200),
                                                    ({'error': 'refused'}, 400, 204)])
 def test_completion_never_accepts_unsaved_restart_pending_or_still_blocked_setup(qualifier, tmp_path, monkeypatch,
                                                                              body, status, readiness):

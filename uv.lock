@@ -1535,7 +1535,7 @@ wheels = [
 
 [[package]]
 name = "ouroboros"
-version = "7.9.0"
+version = "7.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
@@ -1616,7 +1616,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "llama-cpp-python", marker = "extra == 'all'" },
     { name = "llama-cpp-python", marker = "extra == 'local-model'" },
-    { name = "mcp", specifier = ">=1.10,<2.0" },
+    { name = "mcp", specifier = ">=1.29,<2.0" },
     { name = "openai", specifier = ">=1.66.0" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pip" },
@@ -1628,7 +1628,7 @@ requires-dist = [
     { name = "pycairo", marker = "sys_platform == 'linux' and extra == 'linux-desktop'", specifier = "==1.26.1" },
     { name = "pygobject", marker = "sys_platform == 'linux' and extra == 'linux-desktop'", specifier = "==3.46.0" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.0" },
-    { name = "pypdf", specifier = ">=4.0" },
+    { name = "pypdf", specifier = ">=7.0" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-timeout", specifier = ">=2.1" },
     { name = "pytest-xdist", specifier = ">=3.5" },
@@ -2220,14 +2220,14 @@ wheels = [
 
 [[package]]
 name = "pypdf"
-version = "6.15.0"
+version = "7.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/17/17/ee75a92718ec7212de831e71454d702225aa5e474a805cce169806044453/pypdf-6.15.0.tar.gz", hash = "sha256:d39c4d955a76409284a905e2d65b40076d77ab76129e0faaeeb6612403ecfc79", size = 6993794, upload-time = "2026-08-06T13:06:49.929Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/19/3e8223d0618bd441eb2b3e105de83ce4187e76f5823d876f60a109ee9072/pypdf-7.0.0.tar.gz", hash = "sha256:061aa78dec270854c912dde80c6bc060486fa955399d643da27ea30afeb6571b", size = 7201622, upload-time = "2026-11-06T12:10:03.447Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/72/ce3067ac31e214a66388159f8462ddb8c13dd00170f24d555a1f1ae8ee91/pypdf-6.15.0-py3-none-any.whl", hash = "sha256:14e001d6504822cb1ca9c7ed9a69bccb320f59b320730f55af804361abe4d5ee", size = 378123, upload-time = "2026-08-06T13:06:47.709Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/21/e83122a25e334c718a4da67004fa94acd7215fe9f8e63a9d7c7f979eb52b/pypdf-7.0.0-py3-none-any.whl", hash = "sha256:112a2c7cbabefd8dfe498f7a13977e575e762d58cdb0d832acb8886922602c6f", size = 413949, upload-time = "2026-11-06T12:10:01.205Z" },
 ]
 
 [[package]]

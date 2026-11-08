@@ -5,6 +5,9 @@ control call; the existing fence/grant/CAS records retain who requested it.
 A call may also carry the caller's named decision to go on past held calls
 whose outcome is unknown (``accepting_unknown``); the addressed action's own
 census applies it to its tree and records it (``local_custody_repair``).
+The owner's own Resume door binds itself (``owner_door``) for the grant decisions that
+need positive owner provenance, which an unbound call never supplies. The host's
+own act unbinds all of these (``host_control``), even when a door's call reaches it.
 """
 
 from contextlib import contextmanager
@@ -68,6 +71,52 @@ def mind_control(actor_task_id: str, reason: str):
         yield
     finally:
         _ACTOR.reset(token)
+
+
+_OWNER_DOOR = ContextVar("lifecycle_owner_door", default=None)
+
+
+@contextmanager
+def owner_door(door: str):
+    """Bind, for this one call, the owner's own control door it entered through (``api_task_resume``).
+
+    A mind's doors bind ``mind_control`` and automatic paths bind nothing, or unbind it where a door's call reaches
+    them (``host_control``), so neither reads as this door.
+    Its readers: the owner's choice of 2026-11-02 (#2566), a moved Presence turn's producer allowance; who asked for a
+    Resume (``work_stop``); and who granted one (``resume_author``).
+    """
+    from ouroboros.utils import utc_now_iso
+
+    token = _OWNER_DOOR.set({"actor": "owner", "door": str(door), "at": utc_now_iso()})
+    try:
+        yield
+    finally:
+        _OWNER_DOOR.reset(token)
+
+
+def owner_door_bound() -> dict:
+    """The owner door this call entered through: ``{}`` when none is bound, or a mind's control call is."""
+    return {} if control_actor() else dict(_OWNER_DOOR.get() or {})
+
+
+def resume_author() -> dict:
+    """Who grants a Resume, recorded as its grant's ``by``: a mind's control, else the owner's own door, else nobody
+    (the host's own act); a cold Resume's notice names it (``model_sleep.resumer_words``)."""
+    return control_actor() or owner_door_bound()
+
+
+@contextmanager
+def host_control():
+    """Bind, for this one call, the host's own act: an automatic path a door's call can reach
+    (``continuation_admission.release_settled_continuations``) runs as the host, not as that door, so neither
+    the caller's authorship, the owner's door nor the caller's named decision reads through it."""
+    tokens = _ACTOR.set(None), _OWNER_DOOR.set(None), _ACCEPT_UNKNOWN.set(None)
+    try:
+        yield
+    finally:
+        _ACCEPT_UNKNOWN.reset(tokens[2])
+        _OWNER_DOOR.reset(tokens[1])
+        _ACTOR.reset(tokens[0])
 
 
 def observed_control_stop(root, task=None, *, budget=None, owner=None) -> dict:

@@ -7,17 +7,19 @@ runtime or reads live data. Synthetic CDP touch is Chromium's input pipeline, no
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT
 from tests import test_subscription_setup_browser as setup_browser
-from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle, sidebar_metrics
+from tests.test_design_system_gate_browser import (PROJECTS, open_nav, rest, save_evidence, seed_page, settle,
+                                                   sidebar_metrics)
 from tests._work_projection_shared import work_fields
 from tests.ui_motion_samples import SAMPLE_TRANSITION
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['webkit', 'chromium'])
@@ -210,6 +212,81 @@ def test_back_closes_the_topmost_dialog_before_its_layer(shell_ui, tmp_path, cas
     assert facts['second_back']['layers'] == [] and not facts['second_back']['drawer'], facts
 
 
+FILES_BACK_FACTS = """() => {
+    const shown = el => Boolean(el && el.getClientRects().length);
+    const active = document.activeElement;
+    return {layers: window.__ouroLayers?.ids() ?? 'left the app', armed: window.__ouroLayers?.historyArmed() ?? null,
+        view: document.querySelector('.files-layout')?.dataset.filesView ?? null,
+        list: shown(document.querySelector('.files-sidebar')), file: shown(document.querySelector('.files-preview')),
+        editor: document.querySelector('.files-editor')?.value ?? null,
+        unsaved: [...document.querySelectorAll('.files-entry')].filter(row => shown(row.querySelector('.files-entry-unsaved')))
+            .map(row => row.dataset.path || ''),
+        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-files-back]') ? 'back' : active?.tagName),
+        telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null};
+}"""
+
+
+@pytest.mark.parametrize('via', ['history', 'telegram'])
+def test_back_returns_a_narrow_files_page_from_its_file_to_the_list(shell_ui, tmp_path, via):
+    """#7: a file shown alone on a phone is one dismissable layer, so the system Back and Telegram's Back close it the
+    way Back to folder does: the list, focus on the file's row, its unsaved draft kept for that row. Escape in the
+    editor closes it the same way; the desk split registers no layer, and a page narrow again registers it again."""
+    page = seed_page(shell_ui, 390, 844, telegram=via == 'telegram')
+    page.route('**/api/files/read*', lambda route: route.fulfill(json={
+        'path': 'notes.md', 'name': 'notes.md', 'size': 11, 'display_path': '/workspace/notes.md',
+        'is_text': True, 'content': 'Saved text\n', 'truncated': False}))
+    facts = {'engine': shell_ui['engine'], 'via': via}
+    try:
+        boot(page, shell_ui)
+        open_nav(page, 'files')
+        row = page.locator('.files-entry', has_text='project_notes_with_a_long_descriptive_name.md')
+        facts['list'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        page.locator('.files-editor').wait_for()
+        wait_quietly(page, 'window.__ouroLayers?.historyArmed()')
+        facts['open'] = page.evaluate(FILES_BACK_FACTS)
+        page.locator('.files-editor').fill('Draft kept by Back')
+        press_back(page, via)
+        wait_quietly(page, "() => document.querySelector('.files-layout').dataset.filesView === 'list'")
+        page.wait_for_timeout(200)
+        facts['back'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        wait_quietly(page, 'window.__ouroLayers?.historyArmed()')
+        facts['reopened'] = page.evaluate(FILES_BACK_FACTS)
+        page.locator('.files-editor').press('Escape')
+        wait_quietly(page, "() => document.querySelector('.files-layout').dataset.filesView === 'list'")
+        page.wait_for_timeout(200)
+        facts['escape'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        page.set_viewport_size({'width': 1280, 'height': 860})
+        wait_quietly(page, '() => !window.__ouroLayers?.size()')
+        page.wait_for_timeout(200)
+        facts['desk'] = page.evaluate(FILES_BACK_FACTS)
+        page.set_viewport_size({'width': 390, 'height': 844})
+        wait_quietly(page, '() => window.__ouroLayers?.size() === 1')
+        page.wait_for_timeout(200)
+        facts['narrow_again'] = page.evaluate(FILES_BACK_FACTS)
+    finally:
+        evidence(tmp_path, f'shell-files-back-{via}-{shell_ui["engine"]}', facts)
+        page.close()
+    assert facts['list']['layers'] == [] and facts['list']['view'] == 'list', facts
+    opened = facts['open']
+    assert opened['layers'] == ['files-file'] and opened['armed'] and opened['file'] and not opened['list'], facts
+    assert opened['focus'] == 'back', facts
+    back = facts['back']
+    assert back['layers'] == [] and back['view'] == 'list' and back['list'] and not back['file'], facts
+    assert back['focus'] == 'notes.md' and back['unsaved'] == ['notes.md'], facts
+    assert back['editor'] == 'Draft kept by Back', facts
+    assert facts['reopened']['layers'] == ['files-file'] and facts['reopened']['editor'] == 'Draft kept by Back', facts
+    escape = facts['escape']
+    assert escape['layers'] == [] and escape['view'] == 'list' and escape['focus'] == 'notes.md', facts
+    assert escape['editor'] == 'Draft kept by Back' and escape['unsaved'] == ['notes.md'], facts
+    assert facts['desk']['layers'] == [] and facts['desk']['list'] and facts['desk']['file'], facts
+    assert facts['narrow_again']['layers'] == ['files-file'] and facts['narrow_again']['view'] == 'file', facts
+    if via == 'telegram':
+        assert (opened['telegramBack'], back['telegramBack'], facts['desk']['telegramBack']) == (True, False, False), facts
+
+
 @pytest.mark.parametrize('width,height', [(1280, 860), (390, 844)])
 def test_escape_in_a_composer_capsule_closes_only_the_capsule(shell_ui, tmp_path, width, height):
     page = seed_page(shell_ui, width, height)
@@ -382,6 +459,10 @@ def open_settings_panel_of(page, selector):
     panel = page.evaluate("s => document.querySelector(s)?.closest('[data-settings-panel]')?.dataset.settingsPanel || ''",
                           selector)
     page.locator(f'[data-settings-tab="{panel}"]').first.click()
+    # A section's copy beyond its lead lives behind its Details disclosure: open it as the owner does.
+    summary = page.locator(selector).first.locator("xpath=ancestor::details[1]/summary")
+    if summary.count():
+        summary.click()
     page.locator(selector).first.scroll_into_view_if_needed()
     settle(page)
     return panel
@@ -812,43 +893,69 @@ def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path
     assert facts['scrollLeft'] == 0 and facts['sidebarLeft'] == 0, facts
 
 
-# Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure.
+# What the panel shows: how many of its room's answers, and whether its loading row is up (chat_render_batch.js).
+PANEL_SHOWS = """(panel, answers) => ({
+    rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
+        .some(row => row.textContent.includes(answer))).length,
+    loading: [...panel.querySelectorAll('.chat-load-older[aria-busy="true"]')]
+        .some(row => !row.hidden && row.getClientRects().length > 0)})"""
+# Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure. `setOff`
+# is the time from just before the open was asked to the slide's start: the panel's own wait begins after the ask.
 PANEL_FRAMES = """({project, opening, answers}) => { const panel = document.getElementById('project-panel');
-    const sample = """ + SAMPLE_TRANSITION + """;
+    const sample = """ + SAMPLE_TRANSITION + """, shows = """ + PANEL_SHOWS + """;
+    let asked = 0, setOff = null;
     return sample({root: panel, target: () => panel, property: 'transform',
-        ready: () => panel.classList.contains('open') === opening,
-        act: () => { if (opening) window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}));
+        ready: () => { const ready = panel.classList.contains('open') === opening;
+                       if (ready && setOff === null) setOff = performance.now() - asked;
+                       return ready; },
+        act: () => { asked = performance.now();
+                     if (opening) window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}));
                      else panel.querySelector('#project-panel-close').click(); },
-        measure: () => ({left: panel.getBoundingClientRect().left, hidden: panel.hidden,
-                        rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
-                            .some(row => row.textContent.includes(answer))).length})}); }"""
-# A room's read takes 150 ms, as on a real link: a panel that set off at the click would cross the window empty.
-SLOW_HISTORY = """(() => { const real = window.fetch; window.fetch = (input, init) => { const answer = real(input, init);
-    return String(input?.url || input).includes('/api/chat/history')
-        ? answer.then((r) => new Promise((resolve) => setTimeout(() => resolve(r), 150))) : answer; }; })()"""
+        measure: () => ({left: panel.getBoundingClientRect().left, hidden: panel.hidden, ...shows(panel, answers)})})
+        .then(seen => ({...seen, setOff})); }"""
+# A room's read takes 150 ms, as on a real link: a panel that set off at the click would cross the window empty. A
+# held read lands only when the test releases it, so the panel's bounded wait for its room has to end on its own.
+HISTORY_READS = """(() => { const real = window.fetch, waiting = [];
+    window.__historyReads = {hold: false, held: () => waiting.length, release: () => waiting.splice(0).forEach(go => go())};
+    window.fetch = (input, init) => { const answer = real(input, init);
+        if (!String(input?.url || input).includes('/api/chat/history')) return answer;
+        const hold = window.__historyReads.hold;
+        return answer.then((r) => new Promise((resolve) => hold ? waiting.push(() => resolve(r))
+            : setTimeout(() => resolve(r), 150))); }; })()"""
 
 
-def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path):
-    """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted and goes
-    back there whole: samples along both real transitions show its rows, from the edge to Main and back."""
+@pytest.mark.parametrize('read', ['slow', 'held'])
+def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path, read):
+    """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted (or at
+    its read's bound, with its loading row) and goes back there whole: samples along both real transitions show where
+    it is and what it shows, from the edge to Main and back. A 150 ms read normally paints first, though a busy runner
+    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound."""
+    app_js = (setup_browser.WEB / 'app.js').read_text(encoding='utf-8')
+    bound = int(re.search(r'PANEL_ARRIVAL_BOUND_MS = (\d+);', app_js).group(1))
     page = seed_page(shell_ui, 1143, 790)
     page.emulate_media(reduced_motion='no-preference')
     rows = [{'role': 'assistant', 'text': f'Answer {i}. ' + 'Ordinary context. ' * 8,
              'content': f'Answer {i}.', 'ts': f'2026-10-14T09:{i:02d}:00Z'} for i in range(6)]
     answers = [row['content'] for row in rows]  # A startup System bubble is not the room's history.
     page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
-    page.add_init_script(SLOW_HISTORY)
-    facts = {'engine': shell_ui['engine']}
+    page.add_init_script(HISTORY_READS)
+    facts = {'engine': shell_ui['engine'], 'read': read, 'bound': bound}
+    room = f"() => ({PANEL_SHOWS})(document.getElementById('project-panel'), {json.dumps(answers)})"
     try:
         boot(page, shell_ui)
         width = page.evaluate('innerWidth')
+        page.evaluate('hold => { window.__historyReads.hold = hold; }', read == 'held')
         facts['opening'] = page.evaluate(PANEL_FRAMES, {'project': PROJECTS[0], 'opening': True, 'answers': answers})
+        facts['held'] = page.evaluate('window.__historyReads.held()')
+        page.evaluate('window.__historyReads.release()')
+        wait_quietly(page, f'() => {{ const shows = ({room})(); return shows.rows === {len(answers)} && !shows.loading; }}')
+        facts['room'] = page.evaluate(room)
         rest(page)
         page.locator('#project-panel-close').click(trial=True)
         facts['closing'] = page.evaluate(PANEL_FRAMES, {'opening': False, 'answers': answers})
         page.wait_for_function("() => document.getElementById('project-panel').hidden")
     finally:
-        evidence(tmp_path, f'shell-panel-arrival-{shell_ui["engine"]}', facts)
+        evidence(tmp_path, f'shell-panel-arrival-{read}-{shell_ui["engine"]}', facts)
         page.close()
     opening, closing = facts['opening']['values'], facts['closing']['values']
     home = opening[-1]['left']
@@ -861,7 +968,18 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     assert len(moving(opening)) >= 3, ('the arrival is seen moving', opening)
     arriving = opening + facts['opening']['live']
     leaving = closing + facts['closing']['live']
-    assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
+    # The slide's first sample is the panel as it set off: its room already painted, or not (then it waited the bound).
+    painted = opening[1]['rows'] == len(answers)
+    if read == 'held':
+        assert facts['held'] >= 1 and not painted, ('its read was still held as it came in', facts)
+    if painted:
+        assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
+    else:
+        assert facts['opening']['setOff'] >= bound, ('without its room it waits until the bound', facts['opening'])
+        seen = ''.join('R' if f['rows'] == len(answers) else 'L' if f['loading'] and not f['rows'] else '?'
+                       for f in moving(arriving))
+        assert re.fullmatch('L+R*', seen), ('at the bound it comes in with its loading row, then its room', seen, arriving)
+    assert facts['room'] == {'rows': len(answers), 'loading': False}, ('its read lands in the room', facts['room'])
     assert len(moving(closing)) >= 3, ('the way back is seen moving', closing)
     assert all(f['rows'] == len(answers) for f in leaving if not f['hidden']), ('it goes back with its room', leaving)
 

@@ -29,13 +29,13 @@ from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send
-from ouroboros.observability import _json_bytes, new_call_id, new_execution_id, persist_call
+from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
-from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
+from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
 from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
@@ -263,8 +263,9 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     transport, so retrying here only burns the transient budget. So is output
     exhaustion, an empty reply without a body error that ended on its output limit:
     the same request ends the same way. It stays an ``llm_empty_response`` (the only
-    permanent one; its kind is ``llm_output_exhausted``). Only rate_limit /
-    provider_transient body errors and a missing or null finish (a glitch) retry."""
+    permanent one; its kind is ``llm_output_exhausted``). So is the provider's own
+    content refusal: ``provider_content_refusal``, kind ``content_filter``, a route fact.
+    Only rate_limit / provider_transient body errors and a missing or null finish (a glitch) retry."""
     finish = str(response_finish_reason(usage, msg)[1] or "").strip().lower()
     if finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
         return "remote_context_overflow", False, True
@@ -276,6 +277,8 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
         return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True
+    if not body_err and finish in CONTENT_REFUSAL_FINISH_REASONS:
+        return "provider_content_refusal", False, True
     is_provider_glitch = not finish
     transient_body = isinstance(body_err, dict) and body_err.get("kind") in ("rate_limit", "provider_transient")
     permanent = bool(body_err) and not transient_body
@@ -306,11 +309,13 @@ def _record_and_emit_empty_response(
     body_error = usage.get("provider_error") if isinstance(usage, dict) and isinstance(usage.get("provider_error"), dict) else {}
     event_type, is_provider_glitch, permanent = _classify_empty_response(usage, msg)
     exhausted = event_type == "llm_empty_response" and permanent  # the classifier's output exhaustion
-    log_msg = _empty_response_log_msg(usage, is_provider_glitch, exhausted)
+    refused = event_type == "provider_content_refusal"
+    log_msg = (f"Provider refused the content (finish_reason={finish_reason})" if refused
+               else _empty_response_log_msg(usage, is_provider_glitch, exhausted))
     log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
     _emit_empty_response_events(
         event_type, event_queue=event_queue, drive_logs=drive_logs,
-        base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id,
+        base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id, **_scope_lineage(),
               "llm_call_id": llm_call_id, "round": round_idx, "attempt": attempt + 1,
               "model": model, "finish_reason": finish_reason, "task_attempt": task_attempt,
               # WHICH upstream endpoint served (or refused) this round, plus the typed class
@@ -329,7 +334,8 @@ def _record_and_emit_empty_response(
         status = "infra_failed" if (is_provider_glitch and not permanent) else "failed"
         reason = event_type
         # Cooldown signal for the F1 fallback gate (see helper; not a retry change); exhaustion never cools.
-        kind = "llm_output_exhausted" if exhausted else _cooldown_kind_for_empty_response(body_error, event_type)
+        kind = ("llm_output_exhausted" if exhausted else "content_filter" if refused
+                else _cooldown_kind_for_empty_response(body_error, event_type))
     accumulated_usage.update({
         "_last_llm_error": _short_error_text(log_msg), "execution_status": status,
         "reason_code": reason, "_last_llm_error_kind": kind, "_last_llm_attempt_custody": "",  # a response arrived
@@ -508,22 +514,36 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     context_overflow_message as _context_overflow_message,
     output_or_body_size_message as _output_or_body_size_message,
 )
+_FORCED_TOOL_FINISH_REASONS = frozenset({"tool_calls", "function_call", "tool_use"})
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
-                                     | frozenset({"tool_calls", "function_call", "tool_use"}))
+                                     | _FORCED_TOOL_FINISH_REASONS)
 
 
-def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]]) -> bool:
-    """Return whether a forced provider response is not a complete final."""
+def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, completion_request: bool = False) -> bool:
+    """Return whether a forced provider response is not a complete final. ``completion_request`` waives
+    exactly the reply's one completion call (its count and tool-call finish) and a provider length cut
+    (owner 30 Oct, A: a whole request is the author's act; its own parse refuses a cut inside it, and
+    ``forced_response_cut`` keeps the fact); an overflowed or null-finished response stays incomplete.
+    The response facts are read, never rewritten."""
     if not isinstance(response_meta, dict):
         return False
     finish_reason = response_meta.get("finish_reason")
-    return bool(response_meta.get("tool_call_count")) or (
+    reasons = _FORCED_INCOMPLETE_FINISH_REASONS - (
+        _FORCED_TOOL_FINISH_REASONS | OUTPUT_LIMIT_FINISH_REASONS if completion_request else frozenset())
+    return int(response_meta.get("tool_call_count") or 0) > int(completion_request) or (
         response_meta.get("finish_reason_present") is True
         and (
             finish_reason is None
-            or str(finish_reason).strip().lower() in _FORCED_INCOMPLETE_FINISH_REASONS
+            or str(finish_reason).strip().lower() in reasons
         )
     )
+
+
+def forced_response_cut(response_meta: Optional[Dict[str, Any]]) -> str:
+    """The provider's output-limit finish of a forced response, '' when it named none."""
+    meta = response_meta if isinstance(response_meta, dict) else {}
+    finish = str(meta.get("finish_reason") or "").strip().lower()
+    return finish if meta.get("finish_reason_present") is True and finish in OUTPUT_LIMIT_FINISH_REASONS else ""
 
 
 _NON_RETRYABLE_PROVIDER_MARKERS = {
@@ -877,12 +897,20 @@ def _transport_death_repeats(accumulated_usage: Dict[str, Any], round_id: str) -
     return 0
 
 
+def _scope_lineage() -> Dict[str, str]:
+    """The producer's own known lineage, never a history walk."""
+    scope = current_usage_scope()
+    return {key: str(getattr(scope, key)) for key in ("root_task_id", "parent_task_id") if getattr(scope, key, "")}
+
+
 def _record_llm_call_error(
     error: Exception,
     ctx: _LlmErrorContext,
 ) -> bool:
     """Classify an LLM-round exception, emit live/durable evidence and mark usage infra-failed.
     Return whether the caller must stop retrying the unchanged request."""
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
     if ctx.task_type == "presence":  # stays True only while every attempt so far provably never started
@@ -928,7 +956,7 @@ def _record_llm_call_error(
         # The granted repeat's own failure class (a grant writes no class; a later free redial finds it filled).
         ctx.accumulated_usage[TRANSPORT_DEATHS_KEY].setdefault("error_kind", classification.kind)
     identity = {
-        "task_id": ctx.task_id, "execution_id": ctx.execution_id, "round_id": ctx.round_id,
+        "task_id": ctx.task_id, "execution_id": ctx.execution_id, "round_id": ctx.round_id, **_scope_lineage(),
         "llm_call_id": ctx.llm_call_id, "round": ctx.round_idx, "attempt": ctx.attempt + 1,
         "model": ctx.model,
     }
@@ -950,6 +978,9 @@ def _record_llm_call_error(
     if (owner := canonical_owner_root(ctx.drive_logs.parent)) != ctx.drive_logs.parent.resolve(strict=False):
         append_jsonl(owner / "logs" / "events.jsonl", error_event, live=False)  # REPLICA_RULE: the drive goes, the charge stays
     failure = {"error": _short_error_text(display_error), "resource_refusal": model_wait_reason(error),
+        "operation_id": str(getattr(error, "operation_id", "") or ""),
+        "not_dispatched_provider": (getattr(getattr(error, "physical_attempt_capture", None), "provider", "")
+                                    if isinstance(error, ClaudexorModelNotDispatched) else ""),
         **{key: error_event[key] for key in ("ts", "llm_call_id", "model", "requested_profile", "observed_route", "status_code", "provider_code")},
         "failure_code": classification.kind, "reset_at": classification.reset_at, **{key: value for key, value in custody_fields.items()
             if key in ("physical_attempt_id", "attempt_custody_state", "generation_id", "explicit_timeout", "model_output_received")}}
@@ -997,20 +1028,23 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
     not-delivered burst does): permanent classes stopped earlier, so a stop here means "the same-model wall is spent"."""
     accumulated_usage = ctx.accumulated_usage
     error_kind = str(accumulated_usage.get("_last_llm_error_kind") or "")
+    failure = accumulated_usage.get("_last_llm_failure") or {}
+    daemon_not_delivered = (failure.get("not_dispatched_provider") == "claudexor"
+        and failure.get("operation_id") == "" and failure.get("provider_code") in {
+            "daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"})
     if TIMEOUT_REPEAT_KEY in accumulated_usage:
         return True  # its repeat failed, whatever the class: the no-call terminal reads the record and this row
     if error_kind == "transport_unavailable" and (
-            (accumulated_usage.get("_last_llm_failure") or {}).get("provider_code") != "transport_not_delivered"
+            (failure.get("provider_code") != "transport_not_delivered" and not daemon_not_delivered)
             or accumulated_usage.get(TRANSPORT_WAIT_REDIAL_KEY) or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):
         # One free attempt: configured routes and the round's episode own an unreachable route's recovery, an open episode
-        # paces its own redials and a held paid repeat sends nothing more. Only the engine's receipt that the request was
-        # not delivered first repeats on its route within the ordinary bound below, as an overloaded route does.
+        # paces its own redials and a held paid repeat sends nothing more. The engine's not-delivered receipt and a typed
+        # Claudexor prepare failure before create first repeat within the ordinary bound, as an overloaded route does.
         return True
     if error_kind == "provider_outcome_unknown":
         from ouroboros.loop_transport import wait_transport_repeat
         return wait_transport_repeat(ctx)
     is_transient = error_kind in _TRANSIENT_RETRY_KINDS
-    failure = accumulated_usage.get("_last_llm_failure") or {}
     timed_out = ctx.configured_api_child and failure.get("explicit_timeout") and failure.get("model_output_received")
     # Non-transient retryables: max_retries capped by the loop ceiling (primary: no-op); a timeout after output: one.
     attempt_budget = (min(ctx.transient_budget, ctx.attempt + 2) if timed_out else ctx.transient_budget if is_transient
@@ -1148,10 +1182,14 @@ def _record_round_cache_facts(
         cache_cold_restart = False if False in (low, high) else None if None in (low, high) else True
     accumulated_usage["_last_llm_round_finished_monotonic"] = now
     accumulated_usage["_last_prompt_cache_ttl"] = prompt_cache_ttl
+    from ouroboros.transcript_prefix import served_account_fields, settle_rewrite_reread
+    earlier = accumulated_usage.get("_last_round_cache_usage") or {}
     accumulated_usage["_last_round_cache_usage"] = {  # also this accepted call's own money, as its producer stated it
         "round": round_idx, "model": model, "provider": provider, "billing": (usage.get("cost_evidence") or {}).get("billing"),
         **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens", "cost", "cost_final")},
+        "finished_at": time.time(), **served_account_fields(usage, earlier, provider, model),  # wall clock: survives a restart
         REPORTED_TOKENS_KEY: reported}  # cache routing reads the billing-shaped counters above; route facts these
+    settle_rewrite_reread(accumulated_usage)  # this answer measures the history change it carried
     return prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms
 
 
@@ -1381,7 +1419,7 @@ def call_llm_with_retry(
                 drive_root, task_id=task_id, call_id=f"{llm_call_id}_request", call_type="llm_request",
                 payload={
                     "messages": messages,
-                    **({"send_messages": send_messages} if _json_bytes(send_messages) != _json_bytes(messages) else {}),
+                    "send_messages": send_messages,  # shares its equal elements with ``messages`` (stored once)
                     "tools": tools or [],
                     "model": model,
                     "reasoning_effort": effort,
@@ -1496,12 +1534,10 @@ def call_llm_with_retry(
                 _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id,
                                           model=display_model, provider=provider))
             ledger_ids = list(usage.get("ledger_attempt_ids") or [])  # the last one carried this response (#807)
-            scope = current_usage_scope()  # #1578: the producer's own known lineage, never a history walk
             _round_event = {
                 "ts": utc_now_iso(), "type": "llm_round", "record_contract_version": RECORD_CONTRACT_VERSION,
                 **{key: accumulated_usage[key] for key in ("first_request_at", "first_answer_at")},
-                "task_id": task_id, "execution_id": execution_id, **{key: str(getattr(scope, key)) for key in (
-                    "root_task_id", "parent_task_id") if getattr(scope, key, "")},
+                "task_id": task_id, "execution_id": execution_id, **_scope_lineage(),
                 "round_id": round_id, "llm_call_id": llm_call_id, "round": round_idx, "model": display_model,
                 "reasoning_effort": effort,
                 **{key: usage[key] for key in ("effort", "effort_resolution", "request_wire", "claudexor") if key in usage},

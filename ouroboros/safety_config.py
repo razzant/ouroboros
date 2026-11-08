@@ -133,3 +133,35 @@ def get_safety_mode(kind: str = "owner") -> str:
     key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if kind == "consciousness" else "OUROBOROS_SAFETY_MODE"
     default_val = str(cfg.SETTINGS_DEFAULTS[key])
     return cfg.normalize_safety_mode(cfg.runtime_setting(key, default_val) or default_val)
+
+
+OWNER_RULES_KEY = "OUROBOROS_SAFETY_OWNER_RULES"
+_RULES_ADDRESS = "Settings › Behavior › Safety Supervisor › Your rules"
+
+
+def owner_rules_section(*, session: bool = False) -> str:
+    """The owner's standing rules for an acting mind (``session``: a delegated session's start request).
+
+    The text is the Supervisor's own read (``runtime_setting``: this actor's settings snapshot), so a
+    task's context and its checks hold the same bytes; a later save reaches the next task, turn or
+    session start. Empty rules read as none; an unreadable setting is a gap, never none."""
+    from ouroboros import config as cfg
+    head = ("\n\nOWNER RULES DELIVERY (host instructions, separate from canonical work order)\n" if session
+            else "## My human's standing rules\n\n")
+    try:
+        rules = str(cfg.runtime_setting(OWNER_RULES_KEY, "") or "")
+    except Exception as exc:
+        return head + f"Unreadable now ({type(exc).__name__}); they live in {_RULES_ADDRESS}."
+    reach = ("every Safety check and delegated session reads them, while my marks reach only my own work and the "
+             "sessions it starts")
+    if not rules.strip():
+        return head + f"None set: {_RULES_ADDRESS} is empty" + ("." if session else f"; once set, {reach}.")
+    frame = (("The owner of your host set these standing rules for Ouroboros and the work it delegates, this "
+              f"session included; verbatim from {_RULES_ADDRESS} as this start was prepared. Within their scope "
+              "they outrank general defaults, as permission and as restriction; your assignment's explicit "
+              "constraints also bind.") if session else
+             (f"Verbatim from {_RULES_ADDRESS}, as this task's settings hold them; {reach}. Within their scope "
+              "they bind in every mode (BIBLE P0) and outrank general defaults, as permission and as restriction; "
+              "my human's notes in a place add rules for that place. A change in Settings reaches the next task "
+              "or turn."))
+    return head + frame + "\n\n" + rules

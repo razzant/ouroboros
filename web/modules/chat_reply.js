@@ -142,8 +142,16 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return result;
     }
 
+    const drawn = (address) => history()?.exact(address) || (!history() && rowOf(address));
+    /** Whether a reveal of `address` lands here without a read: its row is drawn and is not a portal, whose work
+     * lives in another room. */
+    const draws = (address) => {
+        const node = drawn(address);
+        return Boolean(node) && node.dataset.portal !== '1';
+    };
+
     async function seek(address, position, wanted, prepared) {
-        let target = !prepared && (history()?.exact(address) || (!history() && rowOf(address)));
+        let target = !prepared && drawn(address);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
             if (!wanted() || !result) return null;
@@ -361,6 +369,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         decorate(bubble, row) {
             const address = String(row?.row_address || '');
             if (address) bubble.dataset.rowAddress = address;
+            // Work speech another room also shows: its read is shared (read_ahead.js).
+            if (row?.room_revisions && typeof row.room_revisions === 'object') bubble.dataset.roomRevisions = JSON.stringify(row.room_revisions);
             const sender = bubble.querySelector('.sender');
             const role = ROLE_NAMES.find((name) => bubble.classList.contains(name));
             const relay = role === 'assistant' ? createRelayQuote(row?.relay, { onDomWrite, card: bubble.dataset.systemType === 'relay_entry' }) : null;
@@ -399,6 +409,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         syncCard,
         syncDerivedQuotes,
         reveal,
+        draws,
         get revealing() { return revealing !== 0; },
         /**
          * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are

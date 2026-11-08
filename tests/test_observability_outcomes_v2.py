@@ -138,6 +138,41 @@ def test_redactor_masks_compound_secret_names_without_generic_key_false_positive
     assert {"secret_key_name", "secret_literal_assignment"} <= rules
 
 
+def test_tool_schema_parameter_names_stay_readable_while_credential_values_stay_masked():
+    """P1 keeps a request's tool schemas reconstructible: a schema name map names parameters."""
+    cursor = {"type": "string", "description": "Cursor for the next page"}
+    payload = {
+        "tools": [{"type": "function", "function": {"name": "list_pages", "parameters": {
+            "type": "object", "required": ["q"],
+            "properties": {"page_token": cursor, "q": {"type": "string"}, "limit": {"type": "integer", "default": 10},
+                           "payload": {}, "strict": True, "filter": {"properties": {"next_token": cursor}},
+                           "api_key": {
+                "type": "string", "default": "DefaultSecret1234", "examples": ["ExampleSecret1234"]},
+                "password": {"anyOf": [{"type": "string", "const": "ConstSecret12345"}, {"type": "null"}]}},
+        }}}],
+        "input": {"page_token": "CursorValue123456"},
+        "listing": {"properties": {"password": "PlainSecret12345"}},
+        "malformed": {"type": "object", "properties": {"password": "PlainSecret12345", "n": {"type": "string"}}},
+        "data": {"type": "object", "properties": {"password": {"value": "DataSecret123456"}}},  # no schema kind
+        "lookalike": {"type": "object", "properties": {"api_key": {"type": "string", "value": "LookalikeSecret1"}}},
+    }
+
+    redacted = redact_projection(payload)
+
+    properties = redacted.value["tools"][0]["function"]["parameters"]["properties"]
+    assert properties["page_token"] == cursor and properties["q"] == {"type": "string"}
+    assert properties["filter"] == {"properties": {"next_token": cursor}} and properties["strict"] is True
+    assert properties["api_key"]["type"] == "string"
+    rendered = json.dumps(redacted.value)
+    assert properties["password"]["anyOf"][1] == {"type": "null"} and properties["limit"]["default"] == 10
+    for secret in ("DefaultSecret1234", "ExampleSecret1234", "CursorValue123456", "PlainSecret12345",
+                   "ConstSecret12345", "DataSecret123456", "LookalikeSecret1"):
+        assert secret not in rendered
+    paths = {item["path"] for item in redacted.manifest()["rules"]}
+    assert "$.tools[0].function.parameters.properties.page_token" not in paths
+    assert "$.tools[0].function.parameters.properties.api_key.default" in paths
+
+
 def test_redactor_masks_segmented_secret_markers_with_trailing_qualifiers():
     payload = {
         "client_secret_v2": "ClientSecretValue1234",
@@ -1309,8 +1344,8 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
     real ledger held nine entries and a failing verification receipt was
     rewritten to "0 entries / no failures / execution ok" on the record the
     owner and the parent read — the stub is a projection of the artifact file,
-    never a source. The stub's summary is now re-projected from the refreshed
-    file, and the recomputed bundle describes the bytes actually on disk.
+    never a source. The stub's summary is now computed in memory from the
+    complete file, whose captured bytes and identity stay as recorded (#2472).
     """
     from hashlib import sha256
 
@@ -1342,6 +1377,7 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
         outcome_axes={"lifecycle": {"status": STATUS_COMPLETED}, "execution": {"status": EXECUTION_OK}},
     )
 
+    captured = pathlib.Path(refs["artifact"]["path"]).read_bytes()
     for run in ("first", "second"):
         headless.finalize_task_artifacts(parent, {"id": task_id, "workspace_root": str(repo)})
         stored = load_task_result(parent, task_id)
@@ -1357,6 +1393,7 @@ def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization
             if item.get("kind") == "verification_ledger"
         )
         data = pathlib.Path(ledger_item["path"]).read_bytes()
+        assert data == captured and stub["summary_source_sha256"] == refs["artifact"]["sha256"], run
         assert ledger_item["size"] == len(data), run
         assert ledger_item["sha256"] == sha256(data).hexdigest(), run
         on_disk = json.loads(data.decode("utf-8"))

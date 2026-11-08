@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def open_app(ui, path="/"):
@@ -40,10 +41,11 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     ui = subscription_ui
     page = ui["page"]
     page.set_viewport_size({"width": width, "height": 600})
+    page.add_init_script("Date.now = () => Date.parse('2026-10-25T12:00:00Z')")
     # Consciousness sleeps until its next wake: the bar's chip says it and opens its Shade.
     page.route("**/api/state", lambda route: route.fulfill(json={
         "supervisor_ready": True, "active_chat_activities": [], "projects": [], "bg_consciousness_enabled": True,
-        "bg_consciousness_state": {"status": "sleeping", "next_wake_at": "2026-10-25T14:20:00+00:00",
+        "bg_consciousness_state": {"status": "sleeping", "detail": "Sleeping until 14:20.", "next_wake_at": "2026-10-25T14:20:00+00:00",
                                    "spent_24h_usd": 1.5, "daily_usd": 20}}))
     page.route("**/api/consciousness", lambda route: route.fulfill(json={"enabled": True, "recent_wakes": []}))
     rows = [{"role": "system", "text": text, "markdown": markdown,
@@ -223,7 +225,7 @@ def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscript
             for name, message, busy, restart in states:
                 page.evaluate("""s => {
                     document.querySelector('#settings-status').textContent=s.message;
-                    document.querySelector('#settings-unsaved-indicator').classList.toggle('is-visible',s.name==='dirty');
+                    document.querySelector('.settings-footer').dataset.draft=s.name==='dirty'?'dirty':'clean';
                     document.querySelector('#btn-save-settings').disabled=s.busy;
                     document.querySelector('#btn-restart-now').hidden=!s.restart;
                 }""", {"name": name, "message": message, "busy": busy, "restart": restart})
@@ -237,7 +239,7 @@ def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscript
                     setup_browser.capture(page, f"shell-footer-{width}-{name}")
 
 
-def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_local_table_overflow(subscription_ui):
+def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_inside(subscription_ui):
     ui = subscription_ui
     page = ui["page"]
     projects = [{"id": f"project-{i}", "name": f"Project {i} with a descriptive title", "chat_id": 100+i,
@@ -284,31 +286,32 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_local_table_over
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-confirmed').textContent==='$25.00'")
+    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
-        for card in page.locator(".costs-stats-grid > .stat-card").all():
+        for card in page.locator("#page-costs .ui-card").all():
             card.scroll_into_view_if_needed()
             box = hit_box(card)
             valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1
             if not valid:
                 setup_browser.capture(page, f"shell-cost-failure-{width}")
             assert valid, json.dumps([width, box])
-        for table in page.locator(".costs-tables-grid > div").all():
-            assert table.evaluate("el=>getComputedStyle(el).overflowX") == "auto"
+        for table in page.locator(".costs-table-card").all():
+            # The cell is the amount; a long name ends in an ellipsis inside its card, so nothing scrolls sideways.
+            assert table.evaluate("el=>el.scrollWidth<=el.clientWidth+1"), width
             assert table.evaluate("el=>el.getBoundingClientRect().right<=innerWidth+1")
-        if width == 390:
-            first = page.locator("#cost-by-model").locator("..")
-            assert first.evaluate("el => el.scrollWidth > el.clientWidth"), "long table should scroll locally"
-            first.evaluate("el=>el.scrollLeft=el.scrollWidth")
-            assert first.evaluate("el=>el.scrollLeft>0")
-        page.locator(".costs-stats-grid").scroll_into_view_if_needed()
+        name = page.locator("#cost-by-model .cost-cell-name").first
+        assert name.evaluate("el=>getComputedStyle(el).textOverflow") == "ellipsis"
+        assert name.get_attribute("title") == "provider/a-long-model-name-for-real-table-overflow"
+        page.locator("#page-costs .ui-card").first.scroll_into_view_if_needed()
         setup_browser.capture(page, f"shell-costs-{width}")
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
+    from playwright.sync_api import expect
+
     page = open_app(subscription_ui, '/#settings')
     page.locator('[data-settings-tab="advanced"]').click()
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
@@ -326,6 +329,10 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
         assert 'ui-control' in control.get_attribute('class')
         assert control.get_attribute('aria-label').startswith('MCP server ')
         assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
+    for edit in cards.locator('[data-mcp-edit]').all():  # a saved server is a row; its form opens behind Edit
+        assert not edit.evaluate('details=>details.open')
+        edit.locator(':scope > summary').click()
+        expect(edit).to_have_attribute('open', '')
     page.get_by_label('MCP server 1: Server URL', exact=True).fill('https://edited.test/mcp')
     draft=page.evaluate('mcpProof.collectMcpSettings()')
     assert draft['MCP_SERVERS'][0]['url']=='https://edited.test/mcp'
@@ -449,6 +456,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
         ws.send(json.dumps({'type': 'heartbeat'}))
     page.route_web_socket('**/ws', connect)
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [project]))
     # A stable served SHA: a reconnect re-reads history in place instead of reloading the window.
     page.route('**/api/state', lambda r: r.fulfill(json={'sha': 'browser-fixture', 'supervisor_ready': True,
         'active_chat_activities': activities, 'projects': [project], 'project_chat_ids': [42],
@@ -758,6 +766,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     mode['stale'] = False
     activities[0]['required_question'] = pointer('waiting', blocks['waiting'])
     activities[1]['required_question'].update(quiz_state='answered', answered_index=1, owner_wait_state='resumed')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads; the reconnect above stays strict
     page.reload()
     page.wait_for_selector('#chat-input', state='attached')
     card('replaced').wait_for()
@@ -794,6 +803,7 @@ def test_main_waiting_pill_reaches_each_target_and_one_tap_close(subscription_ui
               'attention_reason': 'budget', 'pause_cause': 'budget'}
     canonical, decisions = {'questions': [question]}, []
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [project]))
     page.route('**/api/state', lambda r: r.fulfill(json={'sha': 'browser-fixture', 'supervisor_ready': True,
         'active_chat_activities': [], 'projects': [project], 'project_chat_ids': [42],
         'current_questions': canonical['questions'], 'current_questions_complete': True,
@@ -940,7 +950,8 @@ def test_short_question_and_routing_cards_keep_their_width_floor(subscription_ui
 
 @pytest.mark.parametrize('width', [1440, 390])
 def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscription_ui, width):
-    """A long unbroken skill name wraps in the shared modal head; Close keeps its size inside the dialog."""
+    """A long unbroken skill name wraps in the shared modal head; the confirmation's one way out is its foot's Cancel,
+    and the dialog stands in the middle of the window (U024)."""
     page = subscription_ui['page']
     page.set_viewport_size({'width': width, 'height': 844})
     open_app(subscription_ui)
@@ -949,11 +960,14 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-head [data-confirm-cancel]').getBoundingClientRect();
-            return {inside: h.left >= d.left && h.right <= c.left && c.right <= d.right + 0.5,
-                close: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
+            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
+                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
+                cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")
-        assert box['inside'] and box['close'] > 50 and box['overflow'] <= 0, (title, box)
+        assert box['inside'] and box['headClose'] == 0 and box['centred'] and box['cancel'] > 50, (title, box)
+        assert box['overflow'] <= 0, (title, box)
         setup_browser.capture(page, f'dialog-head-{width}-{len(title)}')
         page.keyboard.press('Escape')
         page.wait_for_selector('.confirm-dialog', state='detached')
@@ -993,15 +1007,17 @@ def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscri
     page.locator('[data-dashboard-tab="evolution"]').click()
     fact = page.locator('.evo-campaign-lines p', has_text='measure-every-tagged-commit-once')
     fact.wait_for()
-    page.locator('#evo-consciousness-allowance', has_text='≥ $1.25 / $10.00 (ledger integrity degraded)').wait_for()
-    metrics = page.locator('#page-evolution .costs-scroll').evaluate("""box => {
+    metrics = page.locator('#page-evolution').evaluate("""box => {
         const card = box.querySelector('.evo-campaign').getBoundingClientRect();
         return {scroll: box.scrollWidth - box.clientWidth,
             outside: [...box.querySelectorAll('.evo-campaign p, .evo-campaign .btn')]
                 .filter(c => c.getBoundingClientRect().right > card.right + 0.5).length};
     }""")
     assert metrics == {'scroll': 0, 'outside': 0}, metrics
-    fact.scroll_into_view_if_needed()
+    # The card redraws on every state answer, so a held element handle can detach between Playwright's stability wait and
+    # its scroll (Linux CI, both attempts); the capture's scroll finds the current node in one step.
+    page.evaluate("""text => [...document.querySelectorAll('.evo-campaign-lines p')]
+        .find(p => p.textContent.includes(text)).scrollIntoView({block: 'nearest'})""", 'measure-every-tagged-commit-once')
     setup_browser.capture(page, 'evolution-facts-390')
 
 

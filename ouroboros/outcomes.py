@@ -45,6 +45,7 @@ from ouroboros._outcome_tool_errors import (  # explicit re-exports, one stateme
     _RECOVERY_TOOL_NAMES as _RECOVERY_TOOL_NAMES,
     _ROOT_WRITE_TOOLS as _ROOT_WRITE_TOOLS,
     _unresolved_tool_errors as _unresolved_tool_errors,
+    warns_without_review as warns_without_review,
     _user_file_basenames as _user_file_basenames,
 )
 from ouroboros.headless import (
@@ -209,7 +210,7 @@ ACCEPTANCE_BYPASS_REASON_BY_RAIL = {
 ACCEPTANCE_ACCEPTED = "accepted"
 ACCEPTANCE_FINALIZED_UNACCEPTED = "finalized_unaccepted"
 
-# When unresolved or cosmetic errors exist but no review of the result ran, the
+# When unresolved or cosmetic errors other than failed reads exist but no review of the result ran, the
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
 WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
@@ -218,11 +219,6 @@ WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
 # write/edit deliverable). A BINARY transparency flag that keeps the result solved
 # (never a downgrade — anti-oscillation), surfaced loudly on the objective axis.
 WARN_RECEIPT_ABSENT = "receipt_absent"
-# M2 zero-grounding: the task declared a TYPED expected_output, finished cleanly,
-# but the agent did literally no tool work and produced no structured FINAL ANSWER —
-# a structural overclaim. Advisory flag (keeps solved); conservative so a normal
-# text-answer or tool-using task is never false-flagged.
-WARN_EXPECTED_OUTPUT_UNGROUNDED = "expected_output_ungrounded"
 # Receipt statuses that count as host-attested grounding (suppress receipt_absent):
 # a verify_and_record pass, an observed artifact, or an honest no_visible_machine_contract
 # declaration. NOT a fail (that is an overclaim signal, not grounding). A trivial write/
@@ -350,18 +346,17 @@ def should_nudge_verification(
 
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, expected_output: str = "", receipts: Optional[List[Dict[str, Any]]] = None,
+    *, receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """FR3 flag (+ M2) — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
+    """FR3 flag — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
     verification ledger. Inject durable verify_and_record receipts into the trace so
     the ledger records them, then on a clean turn (execution ok — NOT best_effort/
-    degraded/failed) flag one of two structural transparency signals on the objective
-    axis: ``receipt_absent`` (real reviewable effects but no host-attested grounding)
-    or, when there were no effects at all, the M2 ``expected_output_ungrounded`` zero-
-    grounding signal (a TYPED expected_output was declared yet the agent did no tool
-    work and produced no structured FINAL ANSWER). Both are BINARY warnings that keep
-    the result solved (never a downgrade — anti-oscillation). Applied before
-    ``outcome_axes`` is normalized so the persisted axes and the ledger agree."""
+    degraded/failed) with real reviewable effects but no host-attested grounding flag
+    ``receipt_absent`` on the objective axis: a BINARY warning that keeps the result
+    solved (never a downgrade — anti-oscillation). A turn without effects is never
+    flagged: how many tools an answer used is not a judgment of the answer (plain prose
+    can itself be the deliverable). Applied before ``outcome_axes`` is normalized so the
+    persisted axes and the ledger agree."""
     receipt_rows = (
         receipts if isinstance(receipts, list)
         else read_verification_receipts(drive_root, task_id)
@@ -376,13 +371,6 @@ def apply_receipt_absent_flag(
     if str(execution.get("status") or "") != EXECUTION_OK:
         return
     if not turn_has_reviewable_effects(llm_trace):
-        # M2 zero-grounding: a declared deliverable, no tool work, no structured answer.
-        if (
-            str(expected_output or "").strip()
-            and not (llm_trace.get("tool_calls") or [])
-            and not str(loop_outcome.get("final_answer") or "").strip()
-        ):
-            _merge_objective_warning(objective, WARN_EXPECTED_OUTPUT_UNGROUNDED)
         return
     if verification_grounding_present(
         llm_trace, drive_root, task_id, receipts=receipt_rows,
@@ -893,8 +881,8 @@ def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
             normalized[key] = value
     # Delivery/deferred-work states are no review verdict. Keep the warning when
     # normalization restores their objective to not_evaluated.
-    if normalized["objective"].get("status") == OBJECTIVE_NOT_EVALUATED and (
-        normalized["execution"].get("unresolved_tool_errors") or normalized["execution"].get("cosmetic_tool_errors")
+    if normalized["objective"].get("status") == OBJECTIVE_NOT_EVALUATED and warns_without_review(
+        normalized["execution"].get("unresolved_tool_errors"), normalized["execution"].get("cosmetic_tool_errors"),
     ):
         _merge_objective_warning(normalized["objective"], WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
     return normalized
@@ -914,7 +902,7 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
                 item_key: item_value
                 for item_key, item_value in value.items()
                 if item_key not in {"result_status", "compat_result_status"}
-                and (parent is not None or item_key not in {"swarm_fanouts", "swarm_fanout_basis"})
+                and (parent is not None or item_key not in {"swarm_fanouts", "swarm_fanout_basis", "swarm_fanout_rollup"})
             }
             if parent is None:
                 public = clone
@@ -1085,8 +1073,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # host-fallback prefix table below already assigns to this exact
         # terminal text; calling it a provider failure made the two paths of
         # this one function contradict each other.
-        failure = {"kind": "runtime" if reason_code in {REASON_TASK_EXCEPTION, "context_overflow"} else "provider",
-                   "reason_code": reason_code}
+        failure = {"kind": "runtime" if reason_code in {
+            REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+        } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.
         if reason_code in {"llm_api_error", "context_overflow"} and str(usage.get("_last_llm_error_kind") or "") == "context_overflow":
@@ -1095,12 +1084,13 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         usage_status == RESULT_FAILED
         and usage_reason in BEST_EFFORT_REASON_CODES
         and bool(usage.get("_best_effort_extracted"))
-        and text.strip()
+        and (text.strip() or usage.get("wake_silent") is True)
     ):
         # Forced finalization (deadline grace / budget / round limit) that
         # actually EXTRACTED a model answer: honest best-effort, not failure.
         # Deterministic structural gate: forced reason code + the loop's typed
-        # "model answer extracted" fact + non-empty text. A model may begin
+        # "model answer extracted" fact + non-empty text or the author's typed
+        # silent selection (its words may be none). A model may begin
         # its answer with a warning or cross; typography is not provenance. Host
         # fallback strings (e.g. budget rejection notices) never set the
         # extraction fact and stay failed — no text-shape whitewashing.
@@ -1183,7 +1173,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # failure-evidence projection below), deliberately never a structural veto.
     # Unjudged objectives retain a structural tool-error warning, never an inferred
     # failure or an automatic review. Any recorded critic already judged its subject.
-    if (cosmetic_tool_errors or tool_errors) and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
+    if warns_without_review(cosmetic_tool_errors, tool_errors) and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
         _merge_objective_warning(objective, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
     final_answer_payload = selected_final_answer(text, llm_trace)
     headline_reason = reason_code
@@ -1211,8 +1201,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "reason_code": reason_code,
             "failure": failure,
             **({"resource_limit": resource_limit} if resource_limit else {}),
-            # The durable fact of a clean finish over a plan review that was only awaited.
-            **({"plan_review": AWAITING_PROJECTION} if execution_status == EXECUTION_OK and plan_gate.get("review_only_awaited") is True else ({"plan_review": plan_gate["plan_review_class"]} if plan_gate.get("plan_review_class") else {})),
+            # The durable fact of a clean finish over a plan review only awaited (an unreadable record stays unknown).
+            **({"plan_review": AWAITING_PROJECTION} if execution_status == EXECUTION_OK and plan_gate.get("review_only_awaited") is True and not plan_gate.get("unreadable") else ({"plan_review": plan_gate["plan_review_class"]} if plan_gate.get("plan_review_class") else {})),
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
@@ -1257,11 +1247,13 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
 def collect_trace_refs(usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     # Keep received responses, including incomplete ones with unavailable capture.
     # Sparse pre-response failures stay in usage/history and raw error events.
+    # A forced rail's verdict and its reply's completion request are the trace's only record of why an answer
+    # was not adopted; the trace itself is not stored, so they ride here (``loop_forced_finalization``).
     refs: Dict[str, Any] = {}
     execution_id = str(usage.get("execution_id") or "").strip()
     if execution_id:
         refs["execution_id"] = execution_id
-    for key in ("timeout_repeat", "output_recovery"):
+    for key in ("timeout_repeat", "output_recovery", "forced_finalization", "forced_completion_request"):
         if isinstance(llm_trace.get(key), dict):
             refs[key] = copy.deepcopy(llm_trace[key])
     llm_refs = [
@@ -1343,9 +1335,10 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
                       + ([str(item["copy_error"])] if item.get("copy_error") else []),
         }
         records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {}))
-    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in records):
+    current_records = [item for item in records if item["kind"] != "workspace_capture_history"]
+    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in current_records):
         status = ARTIFACT_STATUS_FAILED
-    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in records):
+    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in current_records):
         status = "missing"
     errors = []
     if result.get("artifact_error"):
@@ -1387,7 +1380,13 @@ def refresh_verification_ledger_artifacts(
         artifact_axis["status"] = artifact_status
         axes["artifacts"] = artifact_axis
     updated["outcome_axes"] = axes
-    updated["summary"] = {
+    updated["summary"] = _ledger_summary(entries)
+    return updated
+
+
+def _ledger_summary(entries: List[Any]) -> Dict[str, Any]:
+    """Entry count and failure flag; a recorded or draft task contract is no failure."""
+    return {
         "entry_count": len(entries),
         "has_failures": any(
             str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
@@ -1396,7 +1395,6 @@ def refresh_verification_ledger_artifacts(
             if isinstance(item, dict)
         ),
     }
-    return updated
 
 
 def build_verification_ledger(
@@ -1516,15 +1514,7 @@ def build_verification_ledger(
         "task_contract": task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         "outcome_axes": axes,
         "entries": entries,
-        "summary": {
-            "entry_count": len(entries),
-            "has_failures": any(
-                str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
-                and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
-                for item in entries
-                if isinstance(item, dict)
-            ),
-        },
+        "summary": _ledger_summary(entries),
     }
 
 
@@ -1535,7 +1525,7 @@ def maybe_write_verification_artifact(
     *,
     threshold_chars: int = 12_000,
 ) -> Dict[str, Any]:
-    """Inline small ledgers; write large ledgers as task artifacts."""
+    """Inline small ledgers; write a large one as a task artifact: a dated capture finalization never rewrites."""
     raw = json.dumps(ledger, ensure_ascii=False, sort_keys=True, default=str)
     if len(raw) <= threshold_chars:
         return {"inline": ledger, "artifact": None}
@@ -1562,4 +1552,25 @@ def maybe_write_verification_artifact(
             "status": ARTIFACT_STATUS_READY,
             "errors": [],
         },
+    }
+
+
+# What a reader shows beside the summary: the capture date (a published ledger file keeps those
+# bytes) and, once the host recomputed the summary with current artifact status, when and from
+# which complete file.
+_LEDGER_VIEW_FACTS = ("created_at", "omitted_to_artifact", "summary_refreshed_at", "summary_source_sha256")
+
+
+def verification_ledger_view(ledger: Any) -> Dict[str, Any]:
+    """The bounded ledger projection of parent and list readers; {} without a ledger. A stub
+    has no entries, so its summary is the count authority; for a full ledger the two agree."""
+    if not isinstance(ledger, dict) or not ledger:
+        return {}
+    summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+    entries = ledger.get("entries")
+    return {
+        "schema_version": ledger.get("schema_version"),
+        "summary": summary,
+        "entry_count": summary.get("entry_count", len(entries) if isinstance(entries, list) else 0),
+        **{key: ledger[key] for key in _LEDGER_VIEW_FACTS if ledger.get(key)},
     }

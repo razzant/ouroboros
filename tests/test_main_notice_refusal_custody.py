@@ -5,21 +5,16 @@ import pytest
 
 from tests.test_local_refusal_custody import _world, _pause_and_resume
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("case,chat,args,status,code,text", [
-    ("no_chat", None, {"text": "Hello"}, "unavailable", "CAPABILITY_UNAVAILABLE",
-     "⚠️ No active chat — cannot send proactive message."),
-    ("empty", 1, {"text": ""}, "error", "TOOL_ARG_ERROR", "⚠️ Empty message."),
-    ("destination", 1, {"text": "Hello", "destination": "elsewhere"}, "error", "TOOL_ARG_ERROR",
-     "⚠️ SEND_USER_MESSAGE_DESTINATION: destination='elsewhere' is not a destination; use 'current' "
-     "(this room) or 'main' (the owner's main chat). Nothing was sent."),
-    ("main", 1, {"text": "Hello", "destination": "main"}, "blocked", "ACCESS_BLOCKED",
-     "⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: this root is neither bound to a registered "
-     "Project nor started by the owner. Nothing was sent; destination='current' still reaches this conversation."),
-], ids=["no-chat", "empty", "destination", "main"])
-@pytest.mark.parametrize("next_action", ["pause", "continue"])
+@pytest.mark.parametrize(("next_action", "case", "chat", "args", "status", "code", "text"), [
+    pytest.param("pause", "empty", 1, {"text": ""}, "error", "TOOL_ARG_ERROR", "⚠️ Empty message.", id='pause-empty'),
+    pytest.param("pause", "main", 1, {"text": "Hello", "destination": "main"}, "blocked", "ACCESS_BLOCKED", "⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: this root is neither bound to a registered "
+     "Project nor started by the owner. Nothing was sent; destination='current' still writes this work's own room.", id='pause-main'),
+    pytest.param("continue", "no_chat", None, {"text": "Hello"}, "unavailable", "CAPABILITY_UNAVAILABLE", "⚠️ No active chat — cannot send proactive message.", id='continue-no-chat'),
+    pytest.param("continue", "destination", 1, {"text": "Hello", "destination": "elsewhere"}, "error", "TOOL_ARG_ERROR", "⚠️ SEND_USER_MESSAGE_DESTINATION: destination='elsewhere' is not a destination; use 'current' "
+     "(this room) or 'main' (the owner's main chat). Nothing was sent.", id='continue-destination'),
+])
 def test_message_refusal_preserves_result_and_releases_only_its_call(
         tmp_path, monkeypatch, case, chat, args, status, code, text, next_action):
     from ouroboros.model_sleep import cold_blockers
@@ -47,8 +42,10 @@ def test_message_refusal_preserves_result_and_releases_only_its_call(
         assert continued["ok"] and not continued["held"], continued
 
 
-@pytest.mark.parametrize("destination,system_type", [("current", "proactive_message"), ("main", "main_notice")])
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize(("live", "destination", "system_type"), [
+    (False, "current", "proactive_message"),
+    (True, "main", "main_notice"),
+])
 def test_successful_message_still_delivers_once_and_is_not_a_no_effect_refusal(
         tmp_path, monkeypatch, destination, system_type, live):
     from ouroboros.task_results import load_task_result

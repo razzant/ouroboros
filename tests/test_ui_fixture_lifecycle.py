@@ -1,7 +1,9 @@
 """The shared UI fixture owns each spawned tree through readiness, restart and teardown.
 
 The sleeper payload keeps process containment real without starting a server or
-requiring browser binaries. Real UI consumers run in their existing marker lane.
+requiring browser binaries; the separately hosted interface's real core and the
+widget ESM network server start it at the same seam. Real UI consumers run in
+their existing marker lane.
 Cases boot from an owner copy of a small synthetic source: the copy's custody is
 under test here, not the repository's bytes.
 """
@@ -9,6 +11,7 @@ under test here, not the repository's bytes.
 from __future__ import annotations
 
 from contextlib import ExitStack, nullcontext, suppress
+import io
 import json
 import os
 from pathlib import Path
@@ -22,12 +25,12 @@ import pytest
 from ouroboros import platform_layer as pl, process_containment as pc
 from ouroboros.subagent_worktrees import _force_rmtree
 from ouroboros.test_environment import RETENTION_MARKER
+from ouroboros.test_evidence import EVIDENCE_ENV
 from tests import test_ui_smoke_playwright as ui
-from tests.candidate_checkout import VERSION_PATH, CandidateError, candidate_checkout
+from tests.candidate_checkout import SENTINEL_PATH, VERSION_PATH, CandidateError, candidate_checkout
 from tests.test_candidate_checkout import source as source_fixture
 
 
-pytestmark = pytest.mark.serial
 source = source_fixture
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -44,6 +47,7 @@ import json, os, pathlib, subprocess, sys, time
 from ouroboros.platform_layer import subprocess_new_group_kwargs
 receipt, entered, ready = map(pathlib.Path, sys.argv[1:4])
 entered.write_text("entered", encoding="utf-8")
+print("fixture tree stderr", file=sys.stderr, flush=True)
 child = subprocess.Popen(
     [sys.executable, "-c",
      "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('ready', encoding='utf-8'); time.sleep(90)",
@@ -107,7 +111,17 @@ def _assert_retained_then_discard(retire, checkout):
 
 
 @pytest.fixture
-def fixture_probe(tmp_path, monkeypatch, source):
+def outer_evidence(tmp_path, monkeypatch):
+    """The run's own durable evidence root, as it stands before ``fixture_probe`` binds the case's.
+
+    ``fixture_probe`` requests this, so it is in force first whatever order a test lists them in; an export that
+    still lands here came from a case without an evidence root of its own."""
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "outer-evidence"))
+    return tmp_path / "outer-evidence"
+
+
+@pytest.fixture
+def fixture_probe(outer_evidence, tmp_path, monkeypatch, source):
     """Use a sleeper tree at the fixture's one spawn seam; keep containment real."""
     original_container = pc.ProcessContainer
     owner = ExitStack()
@@ -140,7 +154,7 @@ def fixture_probe(tmp_path, monkeypatch, source):
                     _gone(previous.proc.pid) and _gone(previous.child)
                 )
             run = SimpleNamespace(
-                index=self.index, container=self, proc=None, child=0,
+                index=self.index, container=self, proc=None, child=0, tmpdir=Path(kwargs["env"]["TMPDIR"]),
                 receipt=tmp_path / f"tree-{len(probe.runs)}.json",
                 entered=tmp_path / f"entered-{len(probe.runs)}",
                 ready=tmp_path / f"ready-{len(probe.runs)}",
@@ -169,7 +183,7 @@ def fixture_probe(tmp_path, monkeypatch, source):
             probe.events.append(("close", self.index))
             return super().close()
 
-    def health(_url):
+    def health(_url, timeout_sec=None):  # separate_ui_support's Core passes its own bound
         # The OLD bare-Popen fixture must fail without accidentally starting a
         # real server. Its direct Popen is refused below; only this container's
         # script may start.
@@ -187,7 +201,7 @@ def fixture_probe(tmp_path, monkeypatch, source):
         if probe.fail_at == "health":
             raise RuntimeError("injected health failure")
 
-    def supervisor(_url):
+    def supervisor(_url, timeout_sec=None):
         if probe.fail_at == "supervisor":
             raise RuntimeError("injected supervisor failure")
 
@@ -218,6 +232,9 @@ def fixture_probe(tmp_path, monkeypatch, source):
     monkeypatch.setattr(ui, "_wait_health", health)
     monkeypatch.setattr(ui, "_wait_supervisor_ready", supervisor)
     monkeypatch.setattr(subprocess, "Popen", no_real_server)
+    # The case's own evidence root replaces outer_evidence's: a synthetic start failure exports its log here,
+    # never into the run's.
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "evidence-owner"))
     probe.open = open_fixture
     try:
         _wait(sentinel_ready.exists, "unrelated sentinel did not start")
@@ -266,7 +283,7 @@ def test_ui_fixture_reaps_descendants_after_parent_exit_or_normal_stop(fixture_p
 
 
 @pytest.mark.parametrize("stage", ["health", "supervisor"])
-def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage):
+def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, outer_evidence, stage, capsys):
     probe = fixture_probe
     probe.fail_at = stage
     with pytest.raises(RuntimeError, match=f"injected {stage} failure"):
@@ -274,6 +291,25 @@ def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage):
     assert len(probe.runs) == 1
     _assert_stopped(probe, probe.runs[0])
     _assert_owner_deletes(probe)  # the failed start was reaped clean, so nothing pins the copy
+    # The server's own stderr outlives the case's scratch: a manager child's traceback lands nowhere else.
+    reported = [line for line in capsys.readouterr().err.splitlines() if line.startswith("SERVER_STARTUP_LOG ")]
+    assert "fixture tree stderr" in (Path(reported[0].split(" ", 1)[1]) / "server-stdio.log").read_text(encoding="utf-8")
+    assert not outer_evidence.exists(), "a synthetic failure reached the run's own evidence"
+
+
+def test_supervisor_readiness_failure_names_the_servers_own_error(monkeypatch):
+    answer = json.dumps({"supervisor_ready": False, "supervisor_error": "Supervisor init failed: boom"}).encode()
+    reads = iter([io.BytesIO(answer)])
+
+    def urlopen(*_args, **_kwargs):
+        try:
+            return next(reads)
+        except StopIteration:
+            raise TimeoutError("timed out") from None  # A later slow read must not replace the server's own words.
+
+    monkeypatch.setattr(ui.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RuntimeError, match="did not become ready: Supervisor init failed: boom"):
+        ui._wait_supervisor_ready("http://127.0.0.1:9", timeout_sec=1)
 
 
 def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixture_probe):
@@ -290,6 +326,8 @@ def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixtur
     assert second.proc.poll() is None and not _gone(second.child)
     gen.close()
     _assert_stopped(probe, second)
+    # One temp for the case's every generation; only the run's owner removes it, after the run.
+    assert first.tmpdir == second.tmpdir and second.tmpdir.is_dir()
     _assert_owner_deletes(probe)
 
 
@@ -308,6 +346,7 @@ def test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay(fi
     gen, second = probe.open()
     assert second["repo_dir"] == first["repo_dir"] == probe.owner.path
     assert second["data_dir"] != first["data_dir"] and second["candidate"] is not first["candidate"]
+    assert second["env"]["TMPDIR"] != first["env"]["TMPDIR"]
     assert second["candidate_version"] == first["candidate_version"] == probe.owner.version_text
     assert (probe.owner.path / VERSION_PATH).read_text(encoding="utf-8").strip() == probe.owner.version_text
     gen.close()
@@ -315,8 +354,10 @@ def test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay(fi
     _assert_owner_deletes(probe)
 
 
-@pytest.mark.parametrize("raises", [False, True], ids=["returned-error", "raised-error"])
-@pytest.mark.parametrize("operation", ["teardown", "restart"])
+@pytest.mark.parametrize(("operation", "raises"), [
+    pytest.param("teardown", False, id='teardown-returned-error'),
+    pytest.param("restart", True, id='restart-raised-error'),
+])
 def test_ui_fixture_surfaces_reap_failure_and_still_closes(fixture_probe, raises, operation):
     probe = fixture_probe
     gen, fixture = probe.open()
@@ -441,3 +482,187 @@ def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, mon
     # Even a clean reap is not proof while the parent never exited. The synthetic
     # process owns nothing real, so this test may discard what the fixture kept.
     _assert_retained_then_discard(owner.close, copy.path)
+
+
+# separate_ui_support's real core: its own log outlives a failed start, restart or readiness wait.
+
+def _kept_logs(capsys) -> list[Path]:
+    """The exports keep_startup_log reported since the last read."""
+    return [Path(line.split(" ", 1)[1]) for line in capsys.readouterr().err.splitlines()
+            if line.startswith("SERVER_STARTUP_LOG ")]
+
+
+@pytest.fixture
+def core_probe(fixture_probe, monkeypatch, source, tmp_path):
+    """separate_ui_support.real_core over the synthetic source, its server the sleeper tree."""
+    from tests import candidate_checkout as checkouts
+    from tests import separate_ui_support
+
+    monkeypatch.setattr(separate_ui_support, "REPO_ROOT", source)
+    monkeypatch.setattr(separate_ui_support, "_fetch_json", lambda *args, **kwargs: {})  # no port is bound
+    monkeypatch.setattr(checkouts, "require_candidate_interpreter", lambda *args: None)
+    monkeypatch.setattr(checkouts, "assert_served_candidate", lambda *args: None)
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "evidence-owner"))  # the run's, outliving the case's root
+    fixture_probe.real_core = separate_ui_support.real_core
+    return fixture_probe
+
+
+def test_separate_core_first_start_failure_keeps_its_log_once(core_probe, tmp_path, capsys):
+    probe = core_probe
+    probe.fail_at = "health"
+    with pytest.raises(RuntimeError, match="^injected health failure$"):
+        with probe.real_core(tmp_path / "core"):
+            pytest.fail("a core that never became ready was handed out")
+    _assert_stopped(probe, probe.runs[0])
+    kept = _kept_logs(capsys)
+    assert len(kept) == 1 and kept[0].is_relative_to(tmp_path / "evidence-owner"), kept  # one report, one copy
+    log = (tmp_path / "core" / "core.log").read_bytes()
+    assert b"fixture tree stderr" in log and (kept[0] / "core.log").read_bytes() == log
+
+
+@pytest.mark.parametrize("operation", ["restart", "wait_ready"])
+def test_separate_core_restart_or_readiness_failure_keeps_its_log(core_probe, tmp_path, capsys, operation):
+    probe = core_probe
+    with probe.real_core(tmp_path / "core") as core:
+        act = getattr(core, operation)
+        act()
+        assert _kept_logs(capsys) == [] and not (tmp_path / "evidence-owner").exists()  # success exports nothing
+        probe.fail_at = "supervisor"
+        with pytest.raises(RuntimeError, match="^injected supervisor failure$"):
+            act()
+        assert core.process.running  # still real_core's own teardown to stop: no second cleanup owner
+    for run in probe.runs:
+        _assert_stopped(probe, run)
+    kept = _kept_logs(capsys)
+    log = (tmp_path / "core" / "core.log").read_bytes()
+    assert len(kept) == 1 and kept[0].is_relative_to(tmp_path / "evidence-owner"), kept
+    assert (kept[0] / "core.log").read_bytes() == log
+    # Each generation appends to the one log, so the failed restart's copy carries the earlier ones too.
+    assert log.count(b"fixture tree stderr") == len(probe.runs) == (3 if operation == "restart" else 1)
+
+
+# test_batch4_owner_controls_browser's owner Restart: it waits for the next generation itself, outside start_server.
+
+def test_owner_restart_wait_keeps_the_servers_log_past_its_case(fixture_probe, tmp_path, capsys):
+    from tests import test_batch4_owner_controls_browser as batch4
+
+    probe = fixture_probe
+    gen, fixture = probe.open()
+    data_dir = fixture["data_dir"]
+    root, events = data_dir.parent, data_dir / "logs" / "events.jsonl"
+
+    def confirm():  # the owner's confirmation; the next generation then records its boot
+        events.parent.mkdir(parents=True, exist_ok=True)
+        with events.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "startup_verification"}) + "\n")
+
+    page = SimpleNamespace(locator=lambda _selector: SimpleNamespace(click=confirm),
+                           wait_for_function=lambda *args, **kwargs: None)
+    batch4._owner_restart(page, fixture["url"], data_dir)
+    assert _kept_logs(capsys) == [] and not (tmp_path / "evidence-owner").exists()  # success exports nothing
+    probe.fail_at = "supervisor"
+    with pytest.raises(RuntimeError, match="^injected supervisor failure$"):
+        batch4._owner_restart(page, fixture["url"], data_dir)
+    run = probe.runs[0]
+    # The helper stops nothing: the fixture's generator is still the tree's only owner.
+    assert run.proc.poll() is None and not _gone(run.child) and ("reap", 0) not in probe.events
+    kept = _kept_logs(capsys)
+    assert len(kept) == 1 and kept[0].is_relative_to(tmp_path / "evidence-owner"), kept
+    log = (root / "server-stdio.log").read_bytes()
+    assert b"fixture tree stderr" in log
+    gen.close()
+    _assert_stopped(probe, run)
+    _assert_owner_deletes(probe)
+    _force_rmtree(root)  # the case retires with its tree
+    assert (kept[0] / "server-stdio.log").read_bytes() == log
+
+
+# test_widget_esm_browser's network server: a state read without an answer is no verdict yet.
+
+_READY = {"supervisor_ready": True, "supervisor_error": None}
+_FAILED = {"supervisor_ready": False, "supervisor_error": "Supervisor init failed: boom"}
+
+
+@pytest.fixture
+def esm_probe(fixture_probe, monkeypatch, source, tmp_path):
+    """network_server over the synthetic source, its server the sleeper tree, on a virtual clock.
+
+    The server's HTTP answers: health once the tree is live, the copy's own proof files, the password
+    gate, and for each /api/state read the next entry of ``probe.script`` (its last one repeats)."""
+    import httpx
+
+    from tests import test_widget_esm_browser as esm
+
+    probe, root, client = fixture_probe, tmp_path / "esm", httpx.Client
+    probe.script, probe.reads, probe.now, probe.signed_in = [], [], 0.0, False
+
+    def answer(request):
+        path, repo = request.url.path, root / "repo"
+        if path == "/api/health":
+            ui._wait_health(str(request.url))  # this probe's: the sleeper tree is up and live
+            return httpx.Response(200, json={"runtime_version": (repo / VERSION_PATH).read_text().strip()})
+        if path == "/auth/login":
+            probe.signed_in = True
+        elif not probe.signed_in:
+            return httpx.Response(401)
+        if path == "/api/state":
+            probe.reads.append(probe.now)
+            step = probe.script.pop(0) if len(probe.script) > 1 else probe.script[0]
+            if step == "timeout":
+                raise httpx.ReadTimeout("no answer within the client timeout", request=request)
+            if isinstance(step, int):
+                return httpx.Response(step, json={"error": "transient"})
+            return httpx.Response(200, **({"json": step} if isinstance(step, dict) else {"content": step}))
+        if path == "/static/candidate-sentinel.txt":
+            return httpx.Response(200, content=(repo / SENTINEL_PATH).read_bytes())
+        return httpx.Response(200, json={"ui_tabs": [{}, {}, {}]} if path == "/api/widgets" else {})
+
+    def sleep(seconds):
+        probe.now += seconds
+
+    monkeypatch.setattr(esm, "candidate_checkout", lambda _repo, target, **kw: candidate_checkout(source, target, **kw))
+    monkeypatch.setattr(esm, "require_candidate_interpreter", lambda *args: None)
+    monkeypatch.setattr(esm, "time", SimpleNamespace(monotonic=lambda: probe.now, sleep=sleep))
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(transport=httpx.MockTransport(answer), **kwargs))
+    monkeypatch.setenv(EVIDENCE_ENV, str(tmp_path / "evidence-owner"))
+    request = SimpleNamespace(node=SimpleNamespace(callspec=SimpleNamespace(params={"engine": "chromium"})))
+    opened = []
+
+    def open_esm():
+        opened.append(esm.network_server.__wrapped__(root, request))
+        return opened[-1]
+
+    probe.open_esm = open_esm
+    yield probe
+    for gen in opened:  # a case that stopped early still stops its server, proxy and model stub here
+        gen.close()
+
+
+@pytest.mark.parametrize("script, outcome", [
+    ([500, _READY], "ready"), ([503], "deadline"),
+    ([_FAILED, _READY], "error"),
+], ids=["transient-500", "persistent-503", "supervisor-error"])
+def test_widget_esm_server_reads_state_until_it_answers(esm_probe, tmp_path, script, outcome):
+    probe = esm_probe
+    probe.script[:] = script
+    gen = probe.open_esm()
+    if outcome == "ready":
+        next(gen)
+        assert probe.reads == pytest.approx([0.0, 0.2])  # one interval later, the answer
+        gen.close()
+    elif outcome == "malformed":
+        with pytest.raises(json.JSONDecodeError):  # a malformed success is an error, never another try
+            next(gen)
+        assert probe.reads == [0.0]
+    else:
+        with pytest.raises(pytest.fail.Exception, match="supervisor not ready") as failure:
+            next(gen)
+        # The server's own log goes with the verdict and stays with the run's evidence.
+        retained = [*(tmp_path / "evidence-owner").rglob("server.log")]
+        assert "fixture tree stderr" in str(failure.value) and len(retained) == 1, retained
+        assert b"fixture tree stderr" in retained[0].read_bytes()
+        if outcome == "error":
+            assert "Supervisor init failed: boom" in str(failure.value) and probe.reads == [0.0]
+        else:  # the unchanged 45 s deadline, read by read
+            assert "HTTP 503" in str(failure.value) and 45 < probe.reads[-1] < 45.21
+    _assert_stopped(probe, probe.runs[0])

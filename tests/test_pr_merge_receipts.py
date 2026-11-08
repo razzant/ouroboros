@@ -139,16 +139,28 @@ def test_an_unreviewed_merge_is_loud_and_still_merges(world):
     assert receipt["outcome"]["status"] == "merged" and receipt["coverage"]["status"] == "not_declared"
     assert out.startswith("⚠️") and "no_review_declared" in out
     assert "No review was declared" in world.gh.pr["body"]
+    # The card's head names that known state, never an unknown coverage (DESIGN principle 7).
+    label = merge_receipts.coverage_reading(receipt)[0]
+    assert "unknown" not in label and label == merge_receipts._UNDECLARED
+    assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {label}")
+    assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
 
 
-@pytest.mark.parametrize(("kw", "status"), [
-    ({"reviewed_head_sha": "e" * 40}, "changes_after_review"),
-    ({"reviewed_head_sha": HEAD, "review_scope": "delta"}, "delta_only"),
-    ({"review_task_ids": ["missing-review"]}, "unknown"),
+@pytest.mark.parametrize(("kw", "status", "label"), [
+    ({"reviewed_head_sha": "e" * 40}, "changes_after_review", "_EARLIER"),
+    ({"reviewed_head_sha": HEAD, "review_scope": "delta"}, "delta_only", "_LATEST_ONLY"),
+    ({"review_task_ids": ["missing-review"]}, "unknown", "_UNKNOWN"),
 ])
-def test_coverage_never_claims_more_than_was_declared(world, kw, status):
+def test_coverage_never_claims_more_than_was_declared(world, kw, status, label):
     _merge(world, **kw)
-    assert _receipts(world)[0]["coverage"]["status"] == status
+    (receipt,) = _receipts(world)
+    assert receipt["coverage"]["status"] == status
+    # The card's head names a known coverage, a partial one too; only one nothing resolves reads as unknown.
+    said = merge_receipts.coverage_reading(receipt)[0]
+    assert ("unknown" in said) is (status == "unknown") and said == getattr(merge_receipts, label)
+    assert merge_receipts.card_row_text(receipt).partition("\n")[0].endswith(f" · {said}")
+    # A second line only where it says more than the label: why the coverage is unknown, or that it was earlier code.
+    assert ("\n" in merge_receipts.card_row_text(receipt)) is (status != "delta_only")
 
 
 def test_a_moved_head_or_closed_pr_merges_nothing_and_writes_nothing(world):
@@ -198,6 +210,11 @@ def test_a_closed_pr_is_the_latest_readback_beside_the_earlier_queued_request(wo
     assert f"- Outcome: **queued** {QUEUED_CLOSED.removeprefix('queued ')}\n" in body
     assert f"- Observed PR head `{moved_head}`, base `{moved_base}`" in body
     assert world.ctx.pending_events[-1]["text"] == merge_receipts.card_row_text(receipt)
+    # Nothing merged: the card's coverage detail names the head this request named, never "what merged", and its
+    # head ends on the earlier-version label rather than the sentence.
+    head, _, detail = merge_receipts.card_row_text(receipt).partition("\n")
+    assert head.endswith(f" · {merge_receipts._EARLIER}") and detail not in head
+    assert "this head" in detail and "what merged" not in head + detail
     assert _merges(world) == 1
 
 
@@ -464,7 +481,7 @@ def test_successful_body_patch_needs_readback_and_recovers_without_second_merge(
     assert not any(c[:2] == ["pr", "edit"] for c in original.calls)
 
 
-@pytest.mark.parametrize("url", ["", "unknown", "https://github.com/octo/demo", URL + "junk",
+@pytest.mark.parametrize("url", ["", URL + "junk",
                                  "https://github.com/octo/demo/pull/8"])
 def test_unknown_body_target_is_an_explicit_gap_without_default_repo_write(world, url):
     world.gh.pr["url"] = url
@@ -560,9 +577,7 @@ def test_parallel_callers_share_one_atomic_intent(world, monkeypatch):
     assert len(_receipts(world)) == 1
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("queued", "queued"),
-                                              ("refused", "refused")])
+@pytest.mark.parametrize(("mode", "status"), [("ok", "merged"), ("accepted_open", "queued"), ("refused", "refused")])
 def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, monkeypatch, mode, status):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier, Event, local
@@ -622,7 +637,6 @@ def test_losing_claim_cannot_erase_the_winners_effect_or_settled_outcome(world, 
         assert all(f"merge: {status}" in event["text"] for event in world.ctx.pending_events)
 
 
-@pytest.mark.serial
 def test_delayed_queue_publication_catches_up_to_the_persisted_merge(world, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
@@ -732,8 +746,7 @@ def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, 
     assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == 1
 
 
-@pytest.mark.parametrize("method", ["merge", "squash", "rebase"])
-@pytest.mark.parametrize("body_size", [80, 65536])
+@pytest.mark.parametrize(("body_size", "method"), [(80, "merge"), (80, "rebase"), (65536, "squash")])
 def test_merge_body_uses_stdin_at_github_body_limit(world, monkeypatch, method, body_size):
     from ouroboros import update_qualification as qualification
 

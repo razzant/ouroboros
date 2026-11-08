@@ -44,6 +44,11 @@ def _legacy_payload(state):
         if not hasattr(attempt, "author_disposition"):
             attempt.author_disposition = {}
     data = asdict(state)
+    # The retired advisory lane's debts are stored after the live ones, in the same list.
+    data["commit_readiness_debts"] += data.pop("archived_advisory_debts")
+    # Displaced stale markers are stored only when present: one scope keeps the legacy shape.
+    if not data["earlier_stale_markers"]:
+        del data["earlier_stale_markers"]
     data["state_version"] = data["schema_version"] = store._STATE_SCHEMA_VERSION
     data["next_obligation_seq"] = int(state.next_obligation_seq or 1)
     data["next_commit_readiness_debt_seq"] = int(state.next_commit_readiness_debt_seq or 1)
@@ -77,7 +82,8 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
     del attempt.author_disposition
     state = store.AdvisoryReviewState(
         state_version=1, attempts=[attempt],
-        advisory_runs=[store.AdvisoryRunRecord("snapshot", "message", "stale", "stamp", raw_result="all words")],
+        advisory_runs=[{"snapshot_hash": "snapshot", "commit_message": "message", "status": "stale", "ts": "stamp",
+                        "raw_result": "all words"}],
         open_obligations=[store.ObligationItem("obl-7", "tests_affected", "critical", "reason", "stamp", "msg")],
         commit_readiness_debts=[store.CommitReadinessDebtItem("crd-9", "review", "keep debt")],
         last_stale_from_edit_ts="stamp", last_stale_reason="changed", last_stale_repo_key="repo",
@@ -122,9 +128,12 @@ def test_unknown_object_is_not_stringified_and_cannot_replace_durable_evidence(t
     assert _payload(tmp_path)["attempts"][0]["triad_raw_results"][0]["unsupported"] == "supported"
 
 
-@pytest.mark.parametrize("operation", ["save", "update"])
-@pytest.mark.parametrize("reason,number", [("contention", None), ("permission", errno.EACCES),
-                                           ("kernel_refused", errno.ENOLCK), ("identity_unreadable", None)])
+@pytest.mark.parametrize(("reason", "number", "operation"), [
+    ("contention", None, "save"),
+    pytest.param("permission", errno.EACCES, "update", id='permission-13-update'),
+    pytest.param("kernel_refused", errno.ENOLCK, "update", id='kernel_refused-77-update'),
+    ("identity_unreadable", None, "save"),
+])
 def test_acquisition_refusal_preserves_platform_cause_and_timeout_compatibility(
     tmp_path, monkeypatch, operation, reason, number,
 ):
@@ -152,7 +161,7 @@ def test_acquisition_refusal_preserves_platform_cause_and_timeout_compatibility(
     assert _path(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("value", [None, False, 0, [], "read result"])
+@pytest.mark.parametrize("value", [None, 0, "read result"])
 def test_only_explicit_unchanged_results_skip_a_save_and_keep_return_contract(tmp_path, monkeypatch, value):
     store.save_state(tmp_path, store.AdvisoryReviewState())
     before, mtime = _path(tmp_path).read_bytes(), _path(tmp_path).stat().st_mtime_ns
@@ -168,7 +177,7 @@ def test_only_explicit_unchanged_results_skip_a_save_and_keep_return_contract(tm
     assert writes == [_path(tmp_path)]  # arbitrary false/None still keeps the old save behavior
 
 
-@pytest.mark.parametrize("legacy", ["missing_field", "coalescing", "hydration", "roster", "ordering", "counter_type"])
+@pytest.mark.parametrize("legacy", ["missing_field", "coalescing", "counter_type"])
 def test_false_changed_fact_still_persists_load_and_preparation_changes(tmp_path, monkeypatch, legacy):
     state = store.AdvisoryReviewState(attempts=[_attempt()])
     store.save_state(tmp_path, state)

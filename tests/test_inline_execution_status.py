@@ -55,7 +55,6 @@ print(json.dumps({'healed':healed,'status':row['status'],'observation':row['exec
     return json.loads(result.stdout)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("kind", ["direct", "presence"])
 def test_fresh_reader_never_orphans_inline_owner(tmp_path, kind):
     fields = {"_is_direct_chat": True}
@@ -70,7 +69,6 @@ def test_fresh_reader_never_orphans_inline_owner(tmp_path, kind):
     assert load_task_result(tmp_path, "inline")["status"] == "completed"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("fields", [{}, {"metadata": {"source": "presence_promote", "presence": {"binding_id": "b"}}},
                                     {"_is_direct_chat": True, "budget_pause": {"state": "resumed"}}])
 def test_genuinely_orphaned_pool_still_settles_across_processes(tmp_path, fields):
@@ -80,19 +78,20 @@ def test_genuinely_orphaned_pool_still_settles_across_processes(tmp_path, fields
     assert load_task_result(tmp_path, "pooled")["reason_code"] == "orphaned_running_after_worker_restart"
 
 
-@pytest.mark.parametrize("evidence", ["missing", "stale", "incomplete", "unreadable", "fresh"])
-def test_direct_fragment_is_only_positive_evidence(tmp_path, evidence):
+@pytest.mark.parametrize("leftover", ["missing", "fresh_listing", "unreadable"])
+def test_a_leftover_direct_fragment_is_no_evidence(tmp_path, leftover):
+    """Every live focus is a RUNNING row of the queue snapshot; the retired ``direct_roots.json`` is read by
+    nothing, so a fresh leftover of an older body listing the task proves no live turn (and an unreadable one
+    breaks nothing): the observation stays unknown, which settles no task."""
     _seed(tmp_path, "direct", "direct", _is_direct_chat=True)
     path = tmp_path / "state" / "direct_roots.json"
-    if evidence == "unreadable":
+    if leftover == "unreadable":
         path.write_text("{", encoding="utf-8")
-    elif evidence != "missing":
-        write_queue_document(path, {"ts": _stamp(time.time() - (20 if evidence == "stale" else 0)),
-                                  "incomplete": evidence == "incomplete",
-                                  "roots": [] if evidence == "incomplete" else [{"task_id": "direct"}]})
+    elif leftover == "fresh_listing":
+        write_queue_document(path, {"ts": _stamp(time.time()), "incomplete": False, "roots": [{"task_id": "direct"}]})
     row = load_effective_task_result(tmp_path, "direct", materialize_artifacts=False)
     assert row["status"] == "running"
-    assert row["execution_observation"]["state"] == ("active" if evidence == "fresh" else "unknown")
+    assert row["execution_observation"]["state"] == "unknown" and "direct_roots" not in row["execution_observation"]
     assert reconcile_orphaned_running_tasks(tmp_path) == 0
     write_task_result(tmp_path, "direct", "completed", result="done")
     assert load_effective_task_result(tmp_path, "direct")["execution_observation"]["state"] == "terminal"
@@ -275,7 +274,6 @@ def test_orphan_publication_rechecks_execution_kind(tmp_path, kind):
     assert applied == [True]
 
 
-@pytest.mark.serial
 def test_real_presence_completion_survives_foreign_orphan_sweep(tmp_path):
     from ouroboros.presence_runner import run_presence_turn
     from tests.test_presence_runner import _admission, _event

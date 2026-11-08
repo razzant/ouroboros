@@ -81,7 +81,7 @@ def _read_json_file(path: pathlib.Path) -> Tuple[str, Optional[Dict[str, Any]], 
     ENOTDIR — a file where ``state/`` belongs is not absence, on Windows too),
     ``invalid`` for bytes that are not a non-empty JSON object. No ``exists()``
     pre-check: it can fail the same way."""
-    from supervisor.state_initialization import confirm_absent
+    from ouroboros.installation_stop import confirm_absent
 
     try:
         try:
@@ -590,12 +590,16 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
         read = read_state()
         return StateRead("unavailable" if read.quality in CURRENT_QUALITIES else read.quality,
                          read.source, read.values, CONTROL_KEYS, str(exc))
+    # The completed witness is this boot's work-root basis: the admission pin read the facts
+    # before recovery or adoption, and every worker and child inherits this one (#1239).
+    from ouroboros.launch_roots import pin_basis
+
+    pin_basis(DRIVE_ROOT, evidence=witness.supervisor_evidence)
     diagnostic.start(st)
     return read_state()
 
 
 TOTAL_BUDGET_LIMIT: float = 0.0
-EVOLUTION_BUDGET_RESERVE: float = 2.0  # Stop evolution when remaining < this
 
 
 def set_budget_limit(limit: float) -> None:
@@ -1317,8 +1321,9 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             else ledger_breakdown
         )
         spent = float(ledger_projection.get("settled_usd") or 0.0)  # known: what the limit decides on
-        open_holds = float(ledger_projection.get("reserved_usd") or 0.0) + float(
-            ledger_projection.get("unresolved_upper_bound_usd") or 0.0)
+        from ouroboros.cost_projection import uncounted_money_text
+
+        open_holds = uncounted_money_text(ledger_projection)  # each uncounted part by its ledger name (P8)
         pct = (spent / TOTAL_BUDGET_LIMIT * 100.0) if TOTAL_BUDGET_LIMIT > 0 else 0.0
         budget_remaining_usd = (
             float(ledger_projection.get("remaining_known_usd") or 0.0)
@@ -1348,9 +1353,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
         else:
             lines.append(f"spent_usd: ${spent:.2f}")
-        if open_holds > 0:
-            lines.append(f"open_holds_usd: ${open_holds:.2f} (reservations and unresolved upper bounds; "
-                         "not counted as spending)")
+        if open_holds:
+            lines.append(f"not counted as spending: {open_holds}")
         lines.append(f"spent_calls: {spent_calls}")
         lines.append(
             f"prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, "

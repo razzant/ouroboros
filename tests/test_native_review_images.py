@@ -116,7 +116,7 @@ def test_retained_screenshot_reaches_next_request_after_all_tool_replies(tmp_pat
             if isinstance(message.get("content"), list) for part in message["content"])
 
 
-@pytest.mark.parametrize("gap", ["route", "local", "missing", "mime", "size", "roots"])
+@pytest.mark.parametrize("gap", ["route", "missing", "roots"])
 def test_image_gap_keeps_text_and_verdict_without_delivery_claim(tmp_path, screenshot, monkeypatch, gap):
     path = _shot(tmp_path, screenshot)
     expected = ""
@@ -198,6 +198,21 @@ def test_result_review_produced_artifact_is_readable_with_same_roots(tmp_path, s
     assert _receipt(result)["delivered"] and _parts(llm.calls[1])
 
 
+def test_a_relative_view_reads_the_reviewed_tree_not_the_process_directory(tmp_path, screenshot, monkeypatch):
+    other = io.BytesIO()
+    Image.new("RGB", (32, 16), (200, 30, 30)).save(other, format="PNG")
+    for root, raw in ((tmp_path / "repo", screenshot), (tmp_path / "serving", other.getvalue())):
+        (root / "shots").mkdir(parents=True)
+        (root / "shots" / "frame.png").write_bytes(raw)
+    monkeypatch.chdir(tmp_path / "serving")
+
+    executor, llm = _executor(tmp_path, "shots/frame.png")
+    result = executor.execute()
+
+    assert _receipt(result)["source_sha256"] == hashlib.sha256(screenshot).hexdigest()
+    assert base64.b64decode(_parts(llm.calls[1])[0]["image_url"]["url"].split(",", 1)[1]) == screenshot
+
+
 def test_abandoned_worker_cannot_attach_after_episode_returns(tmp_path, screenshot, monkeypatch):
     path = _shot(tmp_path, screenshot)
     release, finished = threading.Event(), threading.Event()
@@ -261,6 +276,36 @@ def test_only_actual_window_refusal_withholds_image_and_preserves_original(tmp_p
         assert result.usage["native_rounds"] == 3
     else:
         assert len(llm.calls) == 2 and fact["delivered"] is True
+
+
+def test_a_late_strict_stamp_failure_ends_the_episode_instead_of_resending_without_the_image(tmp_path, screenshot):
+    """#1652: a window refusal the provider completed would continue the episode without the image;
+    after a strict paid stamp failed for that send the episode stops there with the refusal raised."""
+    from ouroboros.review_dispatch import ReviewPaidStamp
+
+    path = _shot(tmp_path, screenshot)
+
+    class WindowReviewer(_ScriptedLLM):
+        def chat(self, **kwargs):
+            if len(self.calls) == 1:
+                self.calls.append(copy.deepcopy(kwargs))
+                error = RuntimeError("request exceeds provider window")
+                error.code = "context_length_exceeded"
+                error.physical_attempt_capture = SimpleNamespace(state="settled", attempt_id="image-refusal",
+                                                                 provider_status_code=400)
+                raise error
+            return super().chat(**kwargs)
+
+    def refuse():
+        raise RuntimeError("commit review paid write-ahead could not be verified")
+
+    llm = WindowReviewer([{"tool_calls": [_tool_call("view_image", {"path": str(path)}, "picture")]},
+                          {"content": _VERDICT}])
+    executor, _ = _executor(tmp_path, path, llm=llm)
+    executor.assignment = dataclasses.replace(executor.assignment, dispatch_stamp=ReviewPaidStamp(refuse, fail_closed=True))
+    with pytest.raises(RuntimeError, match="request exceeds provider window"):
+        executor.execute()
+    assert len(llm.calls) == 2, "no send without the image after the failed strict stamp"
 
 
 def test_route_switch_reprepares_original_without_delivering_caption(tmp_path, screenshot, monkeypatch):

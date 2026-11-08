@@ -26,25 +26,48 @@ def _reference_state(api) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _message_refs(api) -> dict:
-    """Bounded transport index, never authority for host routing or authorship."""
-    return _reference_state(api).get("messages", {})
+def _bot_references(state: dict, bot: str) -> tuple:
+    """Where one bot's references live, and the prefix of its keys there: a Telegram message id
+    means something only within (bot id, chat id).
+
+    ``bot`` is the numeric id of the client that polled or sent. Every named bot's references
+    share ``bots``, keyed ``<bot id>:<chat id>...``, under the map's bounds in one order, as before
+    the map named its bots: a reference stays while it is among the newest, however many bots
+    wrote after it. ``""`` (a token naming no bot, which no Bot API server accepts) is the file's
+    top level, unprefixed, where references saved before the map named its bots also stay as they
+    were: who made them is unknown, and a matching message id proves nothing, so no named bot ever
+    reads them as its own.
+    """
+    if not bot:
+        return state, ""
+    scoped = state.get("bots")
+    return (scoped if isinstance(scoped, dict) else {}), f"{bot}:"
 
 
-def _remember_message(api, chat_id: int, message_id: int, record: dict) -> None:
+def _message_refs(api, bot: str) -> dict:
+    """Bounded transport index, never authority for host routing or authorship: ``bot``'s own
+    references, keyed ``<chat id>:<message id>``, oldest first."""
+    scope, prefix = _bot_references(_reference_state(api), bot)
+    return {key[len(prefix):]: record for key, record in scope.get("messages", {}).items()
+            if key.startswith(prefix)}
+
+
+def _remember_message(api, bot: str, chat_id: int, message_id: int, record: dict) -> None:
     if not message_id:
         return
     with _MESSAGE_REFS_LOCK:
         state = _reference_state(api)
-        data = state.setdefault("messages", {})
-        key = f"{chat_id}:{message_id}"
+        scope, prefix = (state.setdefault("bots", {}), f"{bot}:") if bot else (state, "")
+        data = scope.setdefault("messages", {})
+        key = f"{prefix}{chat_id}:{message_id}"
         data.pop(key, None)
         data[key] = dict(record)
         for stale in list(data)[:-_MAX_MESSAGE_REFS]:
             data.pop(stale, None)
         if record.get("direction") == "in":
-            latest = state.setdefault("latest_owner", {})
-            latest[str(chat_id)] = max(message_id, latest.get(str(chat_id), 0))
+            latest = scope.setdefault("latest_owner", {})
+            chat = f"{prefix}{chat_id}"
+            latest[chat] = max(message_id, latest.get(chat, 0))
             for stale in list(latest)[:-_MAX_MESSAGE_REFS]:
                 latest.pop(stale, None)
         path = _state_file(api, "message_refs.json")
@@ -60,27 +83,38 @@ def _remember_message(api, chat_id: int, message_id: int, record: dict) -> None:
                                "its reply reference may be unavailable or stale.")
 
 
-def _owner_message_seen(api, chat_id: int, message_id: int) -> None:
+def _owner_message_seen(api, bot: str, chat_id: int, message_id: int) -> None:
     """Even a local command is the latest owner message in this Telegram chat."""
     if not message_id:
         return
-    record = _message_ref(api, chat_id, message_id)
-    _remember_message(api, chat_id, message_id, {
+    record = _message_ref(api, bot, chat_id, message_id)
+    _remember_message(api, bot, chat_id, message_id, {
         **record, "direction": "in", "chat_id": chat_id, "kind": "message",
     })
 
 
-def _owner_ingress_fields(api, chat_id: int, message: dict, update_id: int) -> dict:
+def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id: int) -> dict:
+    """The owner message's identity at the host, under the bot that polled it: in a private
+    chat the chat id is the owner's for every bot, and each bot numbers its own messages."""
     message_id = int(message.get("message_id") or 0)
-    client_id = f"tg:{chat_id}:{message_id or update_id}"
+    client_id = f"tg:{f'{bot}:' if bot else ''}{chat_id}:{message_id or update_id}"
     if message_id:
-        _remember_message(api, chat_id, message_id, {
-            **_message_ref(api, chat_id, message_id), "direction": "in", "chat_id": chat_id,
+        _remember_message(api, bot, chat_id, message_id, {
+            **_message_ref(api, bot, chat_id, message_id), "direction": "in", "chat_id": chat_id,
             "kind": "message", "client_message_id": client_id,
         })
     reply = message.get("reply_to_message")
-    address = _reply_reference(api, chat_id, int(reply.get("message_id") or 0)) if isinstance(reply, dict) else ""
+    address = _reply_reference(api, bot, chat_id, int(reply.get("message_id") or 0)) if isinstance(reply, dict) else ""
     return {"client_message_id": client_id, **({"reply_to": address} if address else {})}
+
+
+def _old_reference_unlinked(api, bot: str, chat_id: int, message: dict) -> bool:
+    """Whether this reply went without the link a record naming no bot holds at its number. That
+    record proves nothing about this message, so the owner is told rather than a link guessed."""
+    reply = message.get("reply_to_message")
+    target = int(reply.get("message_id") or 0) if isinstance(reply, dict) else 0
+    return bool(bot and target and not _message_ref(api, bot, chat_id, target)
+                and _reply_reference(api, "", chat_id, target))
 
 
 def _is_routing_notice(event: dict) -> bool:
@@ -89,12 +123,13 @@ def _is_routing_notice(event: dict) -> bool:
         event.get("role") == "system" and event.get("routing_notice_carrier") == "system")
 
 
-def _native_reply_id(api, chat_id: int, event: dict) -> int:
+def _native_reply_id(api, bot: str, chat_id: int, event: dict) -> int:
     """Join host-derived owner references to exact, same-chat Telegram ingress.
 
     A reply may arrive while /chat/inject is still awaiting its HTTP receipt.
     Bind pending ids here from the canonical acceptance index, never by text or
     chat order. The index already serves the shared ingress and reads only deltas.
+    Only the sending bot's own messages qualify: another bot cannot quote them.
     An answer quotes only an earlier owner message; a routing notice also quotes
     the latest one, since it says what became of that very message.
     """
@@ -105,9 +140,10 @@ def _native_reply_id(api, chat_id: int, event: dict) -> int:
     if not address:
         return 0
     with _MESSAGE_REFS_LOCK:
-        owners = [(int(key.split(":", 1)[1]), record) for key, record in _message_refs(api).items()
+        owners = [(int(key.split(":", 1)[1]), record) for key, record in _message_refs(api, bot).items()
                   if key.startswith(f"{chat_id}:") and record.get("direction") == "in"]
-        latest = _reference_state(api).get("latest_owner", {}).get(str(chat_id), 0)
+        scope, prefix = _bot_references(_reference_state(api), bot)
+        latest = scope.get("latest_owner", {}).get(f"{prefix}{chat_id}", 0)
     for mid, record in owners:
         if not record.get("row_address") and record.get("client_message_id"):
             from supervisor.message_bus import accepted_chat_message
@@ -120,7 +156,7 @@ def _native_reply_id(api, chat_id: int, event: dict) -> int:
                 continue
             if row is not None:
                 record = {**record, "row_address": format_address(row_address(row))}
-                _remember_message(api, chat_id, mid, record)
+                _remember_message(api, bot, chat_id, mid, record)
         if record.get("row_address") == address and record.get("chat_id") == reply.get("chat_id"):
             return mid if (latest and mid != latest) or _is_routing_notice(event) else 0
     return 0
@@ -137,8 +173,9 @@ def _quiet_progress(event: dict) -> bool:
         event.get("system_type") == "host_progress" and not event.get("task_incident"))
 
 
-def _mirror_options(api, event: dict, chat_id: int) -> dict:
-    """A client mirrors one host row; all of its physical parts share this fact."""
+def _mirror_options(api, bot: str, event: dict, chat_id: int) -> dict:
+    """A client mirrors one host row; all of its physical parts share this fact, and the bot of
+    the token this client is built from: a token saved during a long send never moves a part."""
     task_id = str(event.get("subagent_task_id") or event.get("task_id") or "")
     kind = str(event.get("kind") or event.get("type") or event.get("system_type") or "message")
     if (event.get("subagent_event") or kind == "task_summary"
@@ -148,18 +185,18 @@ def _mirror_options(api, event: dict, chat_id: int) -> dict:
     elif event.get("quiz_id"):
         kind = "question"
     reply = event.get("reply_to")
-    native_reply_id = _native_reply_id(api, chat_id, event)
+    native_reply_id = _native_reply_id(api, bot, chat_id, event)
     record = {"row_address": str(event.get("row_address") or ""), "chat_id": event.get("chat_id"),
               "task_id": task_id, "kind": kind,
               "reply_to": str(reply.get("address") or "") if isinstance(reply, dict) else "",
               "native_reply_id": native_reply_id}
     if _quiet_progress(event) and kind not in ("work_card", "question"):
         record["progress"] = True  # the type fact Silent mode's replacement requires
-    return {"on_message": lambda chat, mid: _remember_message(api, chat, mid, record),
+    return {"on_message": lambda chat, mid: _remember_message(api, bot, chat, mid, record),
             "reply_to_message_id": native_reply_id}
 
 
-def _replaceable_progress(api, chat_id: int, message_id: int, event: dict) -> bool:
+def _replaceable_progress(api, bot: str, chat_id: int, message_id: int, event: dict) -> bool:
     """Whether Silent mode may replace ``message_id`` with this progress note.
 
     Only a technical progress note is ever replaced, and only by the next progress
@@ -169,23 +206,24 @@ def _replaceable_progress(api, chat_id: int, message_id: int, event: dict) -> bo
     message's native reply anchor by editing its text, so a changed host reply
     origin, like a Continue episode, starts a fresh bubble.
     """
-    old = _message_ref(api, chat_id, message_id)
+    old = _message_ref(api, bot, chat_id, message_id)
     reply = event.get("reply_to")
     address = str(reply.get("address") or "") if isinstance(reply, dict) else ""
     return (old.get("progress") is True and event.get("is_progress") is True
             and str(old.get("task_id") or "") == str(event.get("task_id") or "")
             and str(old.get("reply_to") or "") == address
-            and int(old.get("native_reply_id") or 0) == _native_reply_id(api, chat_id, event))
+            and int(old.get("native_reply_id") or 0) == _native_reply_id(api, bot, chat_id, event))
 
 
-def _message_ref(api, chat_id: int, message_id: int) -> dict:
+def _message_ref(api, bot: str, chat_id: int, message_id: int) -> dict:
     with _MESSAGE_REFS_LOCK:
-        value = _message_refs(api).get(f"{chat_id}:{message_id}")
+        scope, prefix = _bot_references(_reference_state(api), bot)
+        value = scope.get("messages", {}).get(f"{prefix}{chat_id}:{message_id}")
         return dict(value) if isinstance(value, dict) else {}
 
 
-def _reply_reference(api, chat_id: int, message_id: int) -> str:
-    record = _message_ref(api, chat_id, message_id)
+def _reply_reference(api, bot: str, chat_id: int, message_id: int) -> str:
+    record = _message_ref(api, bot, chat_id, message_id)
     task_id = str(record.get("task_id") or "")
     if record.get("kind") == "work_card" and task_id:
         return f"task:{task_id}"
@@ -327,20 +365,27 @@ def _save_silent_state(api, data: Dict[str, int]) -> None:
     tmp.replace(path)
 
 
-def _get_silent_msg(api, chat_id: int) -> int:
-    return int(_load_silent_state(api).get(str(chat_id)) or 0)
+def _silent_key(bot: str, chat_id: int) -> str:
+    return f"{bot}:{chat_id}" if bot else str(chat_id)
 
 
-def _set_silent_msg(api, chat_id: int, message_id: int) -> None:
+def _get_silent_msg(api, bot: str, chat_id: int) -> int:
+    return int(_load_silent_state(api).get(_silent_key(bot, chat_id)) or 0)
+
+
+def _set_silent_msg(api, bot: str, chat_id: int, message_id: int) -> None:
     state = _load_silent_state(api)
-    state[str(chat_id)] = int(message_id)
+    state[_silent_key(bot, chat_id)] = int(message_id)
     _save_silent_state(api, state)
 
 
 def _clear_silent_msg(api, chat_id: int) -> None:
+    """A new turn or a non-text message ends this chat's progress run, whichever bot tracked it."""
     state = _load_silent_state(api)
-    if str(chat_id) in state:
-        state.pop(str(chat_id), None)
+    tracked = [key for key in state if key == str(chat_id) or key.endswith(f":{chat_id}")]
+    for key in tracked:
+        state.pop(key, None)
+    if tracked:
         _save_silent_state(api, state)
 
 
@@ -372,13 +417,17 @@ def _save_subagent_state(api, data: Dict[str, int]) -> None:
     tmp.replace(path)
 
 
-def _get_subagent_msg(api, chat_id: int, child_id: str) -> int:
-    return int(_load_subagent_state(api).get(f"{chat_id}:{child_id}") or 0)
+def _subagent_key(bot: str, chat_id: int, child_id: str) -> str:
+    return f"{bot}:{chat_id}:{child_id}" if bot else f"{chat_id}:{child_id}"
 
 
-def _set_subagent_msg(api, chat_id: int, child_id: str, message_id: int) -> None:
+def _get_subagent_msg(api, bot: str, chat_id: int, child_id: str) -> int:
+    return int(_load_subagent_state(api).get(_subagent_key(bot, chat_id, child_id)) or 0)
+
+
+def _set_subagent_msg(api, bot: str, chat_id: int, child_id: str, message_id: int) -> None:
     state = _load_subagent_state(api)
-    state[f"{chat_id}:{child_id}"] = int(message_id)
+    state[_subagent_key(bot, chat_id, child_id)] = int(message_id)
     # Bound growth: one entry per subagent ever seen would leak unbounded. Keep
     # the most recent 200 (dict preserves insertion order).
     if len(state) > 200:
@@ -497,7 +546,7 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
     if not child:
         return
     text = _subagent_card_text(event, sub_event, lang)
-    msg_id = _get_subagent_msg(api, chat_id, child)
+    msg_id = _get_subagent_msg(api, client.bot_id, chat_id, child)
     if msg_id:
         # Edit the subagent's existing bubble (plain text — no HTML parse risk).
         if await client.edit_message_text(chat_id, msg_id, text, parse_mode=""):
@@ -505,4 +554,4 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
         # Edit failed (message too old / deleted) → post a fresh bubble below.
     new_id = await client.send_message(chat_id, text, parse_mode="", **({"disable_notification": True} if quiet else {}))
     if new_id:
-        _set_subagent_msg(api, chat_id, child, new_id)
+        _set_subagent_msg(api, client.bot_id, chat_id, child, new_id)

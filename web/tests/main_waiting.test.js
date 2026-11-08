@@ -6,6 +6,7 @@ import test from 'node:test';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { createMainWaiting } from '../modules/main_waiting.js';
+import { resumeAttemptWords } from '../modules/work_status.js';
 
 const turn = () => new Promise(resolve => setTimeout(resolve, 0));
 const find = (node, predicate) => predicate(node) ? node : node.children.reduce((found, child) => found || find(child, predicate), null);
@@ -340,13 +341,48 @@ test('each owner-required action is one System message in the feed, first stampe
 
 test('the reason names what the task needs from the owner', t => {
     const main = mainPage(t);
-    const rows = [action('restart', { attention_reason: 'restart' }), action('resume', { attention_reason: 'resume' }),
+    // A plain resume pause beside its own Resume button says nothing more, even with a reason of its own (audit 05.11,
+    // U014); without that button (the owner's own Pause rides the menu) it still says what it needs.
+    const rows = [action('restart', { attention_reason: 'restart' }), action('resume', { attention_reason: 'resume', reason: 'Paused.' }),
         action('access', { attention_reason: 'model_access' }), action('own', { attention_reason: '', reason: 'A reason of its own.' }),
-        action('held', { attention_reason: '', project_admission_hold: { label: 'Waiting for a Project slot.' } })];
+        action('held', { attention_reason: '', project_admission_hold: { label: 'Waiting for a Project slot.' } }),
+        action('owner', { attention_reason: 'resume', pause_cause: 'owner' })];
     main.waiting.snapshot(census({ actions: rows }));
-    const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason')).textContent;
-    assert.deepEqual(rows.map(row => reason(row.task_id)), ['Needs Resume after the restart.', 'Needs an explicit Resume.',
-        'Needs you to restore model access.', 'A reason of its own.', 'Waiting for a Project slot.']);
+    const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason'));
+    assert.deepEqual(rows.map(row => reason(row.task_id).textContent), ['Needs Resume after the restart.', '',
+        'Needs you to restore model access.', 'A reason of its own.', 'Waiting for a Project slot.', 'Needs an explicit Resume.']);
+    assert.deepEqual(rows.map(row => reason(row.task_id).hidden), [false, true, false, false, false, false]);
+    // The row's own facts decide, not the socket: a reconnect adds and removes no line.
+    main.waiting.setConnected(false);
+    assert.equal(reason('resume').textContent, '');
+    main.waiting.setConnected(true);
+    assert.equal(reason('resume').textContent, '');
+});
+
+test('the pause row\'s Project reference does not repeat a title that already names the Project', t => {
+    // A nameless work is titled by its Project; the capsule beside that title reads `Project` (audit 05.11, U014).
+    const main = mainPage(t);
+    main.waiting.snapshot(census({ actions: [action('nameless', { task_name: '' }), action('named')] }));
+    const label = id => find(main.actionNode(id), node => node.classList.contains('chat-live-project-name')).textContent;
+    assert.equal(label('nameless'), 'Project');
+    assert.equal(label('named'), 'Build');
+});
+
+test('the message says a refused Resume as dated history and opens no message of its own for one', t => {
+    const main = mainPage(t);
+    const attempt = { at: '2026-10-17T15:05:00Z', by: { actor: 'ouroboros' }, error: 'predecessor_writers_unsettled',
+        text: 'task h1 is queued to run' };
+    const held = (id) => ({ work_id: id, confirmed: true, episode: { task_id: id, live: true }, last_resume: attempt,
+        members: { ids: [id], states: { [id]: { activity: 'paused', last_resume: attempt } } } });
+    main.waiting.snapshot({ ...census({ actions: [action('saved', { attention_reason: 'restart' })] }),
+        works: [held('saved'), held('quiet')] });
+    const reason = find(main.actionNode('saved'), node => node.classList.contains('owner-action-reason')).textContent;
+    assert.equal(reason, `Needs Resume after the restart. ${resumeAttemptWords(attempt)}.`);
+    assert.match(reason, /Resume by Ouroboros refused at .+: task h1 is queued to run\.$/);
+    assert.equal(main.actionNode('quiet'), null, 'an old refusal is no action of its own');
+    main.waiting.snapshot({ ...census({ actions: [action('saved', { attention_reason: 'restart' })] }), works: [] });
+    assert.equal(find(main.actionNode('saved'), node => node.classList.contains('owner-action-reason')).textContent,
+        'Needs Resume after the restart.', 'a body without it says the need alone');
 });
 
 test('Resume is offered only for a resumable pause the owner did not make; the task control only when cancelable', t => {
@@ -556,9 +592,10 @@ test('an owner-action message says its task\'s state as the owner\'s move, besid
     assert.deepEqual(look('resumed'), ['Paused', 'owner', 'dot/owner']);
     assert.deepEqual(look('access'), ['Waiting for access', 'owner', 'dot/owner']);
     const resume = find(main.actionNode('limit'), node => node.dataset?.resumeRun === '1');
-    assert.equal(resume.className, 'btn btn-sm btn-primary');
+    // Both keep their look and carry the one touch hit area (ui.css .ui-hit-area), like a task card's.
+    assert.equal(resume.className, 'btn btn-sm btn-primary ui-hit-area');
     const stop = find(main.actionNode('limit'), node => node.tagName === 'BUTTON' && node.textContent === 'Stop…');
-    assert.equal(stop.className, 'btn btn-xs btn-default');
+    assert.equal(stop.className, 'btn btn-sm btn-default ui-hit-area');
     main.waiting.setConnected(false);
     for (const id of ['limit', 'resumed', 'access']) assert.deepEqual(look(id), ['Activity unconfirmed', 'neutral', 'ring/ink'], id);
 });

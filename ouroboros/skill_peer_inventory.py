@@ -3,19 +3,29 @@
 Only the selected execution subject needs payload identity, review and grants.
 Peers need manifest conflicts and enablement; hashing their payloads contributes
 nothing to that decision. There is no stat/TTL cache and no partial LoadedSkill.
+
+Every observation reads each peer manifest's bytes again. Only a successful parse
+of byte-identical text is reused, as the two facts a peer keeps (``conflicts`` and
+the declared ``os``): an equal-size edit with a restored mtime is new text, an
+error is parsed again next time, and enablement, location, source class and the
+host platform are evaluated per observation. ``PEER_PARSE_REUSE_ENTRIES`` bounds
+memory, not meaning: past it a peer is parsed again. A new process starts empty.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from ouroboros.contracts.skill_manifest import SkillManifestError, parse_skill_manifest_text
+from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, parse_skill_manifest_text
 from ouroboros.skill_loader import (
     _ManifestUnreadable, _classify_skill_source, _manifest_text_for_dir, _native_platform_visible,
     _SkillLocationCandidate, _skill_location_inventory, load_enabled,
 )
+
+PEER_PARSE_REUSE_ENTRIES = 128
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,22 @@ class SkillPeer:
     manifest_error: str = ""
 
 
+@dataclass(frozen=True)
+class _PeerManifestFacts:
+    """What a peer keeps from its manifest text; never the mutable ``SkillManifest``."""
+    conflicts: tuple[str, ...]
+    os: str
+    # The manifest's own rule over ``os``, so the host platform is read at each call.
+    applies_to_platform = SkillManifest.applies_to_platform
+
+
+@lru_cache(maxsize=PEER_PARSE_REUSE_ENTRIES)
+def _peer_manifest_facts(text: str) -> _PeerManifestFacts:
+    """Parse once per exact text; a raised error is never stored."""
+    manifest = parse_skill_manifest_text(text)
+    return _PeerManifestFacts(conflicts=tuple(manifest.conflicts or ()), os=manifest.os)
+
+
 def _manifest_peer(drive_root: Path, candidate: _SkillLocationCandidate, enabled: bool | None = None) -> SkillPeer | None:
     """One unique location from fresh manifest bytes; ``None`` where discovery omits it."""
     identity = dict(name=candidate.name, location=candidate.location, skill_dir=candidate.skill_dir)
@@ -36,14 +62,14 @@ def _manifest_peer(drive_root: Path, candidate: _SkillLocationCandidate, enabled
         read = _manifest_text_for_dir(candidate.skill_dir)
         if read is None:
             return None
-        manifest = parse_skill_manifest_text(read[0])
+        facts = _peer_manifest_facts(read[0])
     except (_ManifestUnreadable, SkillManifestError) as exc:
         return SkillPeer(**identity, manifest_error=type(exc).__name__)
-    if candidate.location == "native" and not _native_platform_visible(candidate.skill_dir, manifest) and _classify_skill_source(
+    if candidate.location == "native" and not _native_platform_visible(candidate.skill_dir, facts) and _classify_skill_source(
             candidate.skill_dir, location=candidate.location, drive_root=drive_root) == "native":
         return None  # discovery hides a launcher seed for another platform
     return SkillPeer(**identity, enabled=load_enabled(drive_root, candidate.name) if enabled is None else enabled,
-                     conflicts=tuple(manifest.conflicts or ()))
+                     conflicts=facts.conflicts)
 
 
 def discover_skill_peers(

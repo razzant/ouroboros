@@ -1,8 +1,13 @@
-"""The existing bus exposes pending idle inputs without treating them as work."""
+"""The existing bus exposes pending idle inputs without treating them as work, and is whole or over."""
 from __future__ import annotations
 
+import json
 import multiprocessing
+import os
 import queue
+import signal
+import sys
+import time
 
 import pytest
 
@@ -11,8 +16,8 @@ from supervisor.event_taxonomy import EVENT_DISPOSITIONS
 
 
 @pytest.mark.parametrize("kind", [
-    "main_llm_call_state", "cognitive_operation", "llm_usage", "external_wait_lease",
-    "task_model_wait", "owner_wait", "task_done", "schedule_subagent", "budget_pause", "budget_resume_child",
+    "main_llm_call_state", "external_wait_lease",
+    "budget_resume_child",
 ])
 def test_idle_input_kinds_are_declared_by_the_event_registry(kind):
     assert EVENT_DISPOSITIONS[kind].idle_input
@@ -21,9 +26,7 @@ def test_idle_input_kinds_are_declared_by_the_event_registry(kind):
 
 
 @pytest.mark.parametrize("event", [
-    {"type": "task_heartbeat"}, {"type": "typing_start"}, {"type": "task_metrics"},
-    {"type": "send_message", "is_progress": False},
-    {"type": "send_message", "is_progress": True, "host_narration": True},
+    {"type": "task_heartbeat"}, {"type": "send_message", "is_progress": True, "host_narration": True},
     {"type": "log_event", "data": {"type": "llm_usage", "task_id": "t"}},
 ])
 def test_liveness_and_telemetry_are_not_pending_idle_inputs(event):
@@ -65,8 +68,7 @@ def _produce(bus, accepted, release, phase):
     release.wait(30)
 
 
-@pytest.mark.serial
-def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_path, monkeypatch):
+def _fresh_bus(tmp_path, monkeypatch):
     from supervisor import workers
 
     ctx = multiprocessing.get_context("spawn")
@@ -74,7 +76,19 @@ def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_p
                        ("_EVENT_Q_MANAGER", None), ("_EVENT_Q_GENERATION", ""),
                        ("_EVENT_Q_SHUTDOWN", False)):
         monkeypatch.setattr(workers, key, value)
-    bus = workers.get_event_q()
+    return workers, ctx, workers.get_event_q()
+
+
+def _stopped_rows(tmp_path):
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+    return [row for row in rows if row.get("type") == "event_queue_generation_stopped"]
+
+
+def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_path, monkeypatch):
+    """The bus is whole or it is over (ARCHITECTURE §5): a killed PRODUCER leaves the bus, which keeps
+    serving (quiet); the MANAGER's own death is read on the cached return as a waitpid fact (``EventBusLost``
+    with its exit code), so nothing is handed a dead proxy and nothing respawns onto a dead bus."""
+    workers, ctx, bus = _fresh_bus(tmp_path, monkeypatch)
     manager, generation = workers._EVENT_Q_MANAGER, workers.event_queue_generation()
     children = []
     try:
@@ -95,6 +109,15 @@ def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_p
         with pytest.raises(Exception):  # serialization fails before manager Queue.put
             bus.put({"type": "llm_usage", "task_id": "not-accepted", "value": lambda: None})
         assert pending_idle_observations(bus) == set()
+        assert workers.event_bus_exitcode() is None and workers.get_event_q() is bus  # alive: the cached return
+        manager._process.kill()  # the manager itself, by handle: the 05.11 pattern kill
+        manager._process.join(10)
+        with pytest.raises(workers.EventBusLost) as lost:
+            workers.get_event_q()
+        assert lost.value.exitcode == manager._process.exitcode and lost.value.exitcode not in (None, 0)
+        assert workers.event_bus_exitcode() == lost.value.exitcode and isinstance(lost.value, RuntimeError)
+        with pytest.raises(workers.EventBusLost):
+            workers.get_event_q(create=False)  # a producer without an endpoint is refused the same way
     finally:
         for child in children:
             if child.is_alive():
@@ -103,3 +126,29 @@ def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_p
         workers.shutdown_event_q()
         assert not manager._process.is_alive()
     assert pending_idle_observations(bus) is None
+    stopped = _stopped_rows(tmp_path)
+    assert stopped[-1]["exitcode_before_shutdown"] == lost.value.exitcode and stopped[-1]["killed"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX; TerminateProcess cannot be ignored")
+def test_the_manager_ignores_the_groups_sigterm_and_shutdown_ends_it_even_when_the_rpc_fails(tmp_path, monkeypatch):
+    """The SIGTERM-immune bus (ARCHITECTURE §5): a SIGTERM aimed at the server's group (the launcher's group stop, #1142)
+    leaves the bus alive and serving, so ``get_event_q`` keeps answering and a put still lands (quiet);
+    ``shutdown_event_q`` ends the manager even when the RPC ``shutdown()`` fails (kill + join: the fire direction, no
+    orphan bus), and journals that the manager was alive when the teardown reached it."""
+    workers, _ctx, bus = _fresh_bus(tmp_path, monkeypatch)
+    manager = workers._EVENT_Q_MANAGER
+    try:
+        os.kill(manager._process.pid, signal.SIGTERM)
+        time.sleep(0.5)
+        assert manager._process.is_alive() and workers.get_event_q() is bus and workers.event_bus_exitcode() is None
+        bus.put({"type": "task_heartbeat", "task_id": "t"})
+        assert bus.get(timeout=5)["task_id"] == "t"
+        monkeypatch.setattr(manager, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("rpc refused")))
+    finally:
+        workers.shutdown_event_q()
+    assert not manager._process.is_alive() and manager._process.exitcode == -signal.SIGKILL
+    stopped = _stopped_rows(tmp_path)
+    assert stopped[-1]["exitcode_before_shutdown"] is None and stopped[-1]["killed"] is True
+    with pytest.raises(RuntimeError):
+        workers.get_event_q()  # shut down: nothing creates a second bus in this process

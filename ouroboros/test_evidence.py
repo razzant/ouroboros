@@ -13,34 +13,82 @@ import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from ouroboros.utils import write_bytes_atomic
 
 EVIDENCE_ENV = "OUROBOROS_TEST_EVIDENCE_ROOT"
 EVIDENCE_POINTER = "OUROBOROS_TEST_EVIDENCE.txt"
+# The owner's persisted durations table (tests/ci_verdicts.py spells the same key, stdlib-only): every session
+# an owner starts reads it for its weights and folds its files' seconds into it at its end.
+TEST_DURATIONS_ENV = "OUROBOROS_TEST_DURATIONS"
+DURATIONS_FILE = "test-durations.json"
+DURATIONS_POINTER = "OUROBOROS_TEST_DURATIONS.txt"  # the gate's temp-root pointer, read into its sessions' env
+
+
+def durations_path(data_root) -> Path:
+    """The install's table, `<data root>/state/test-durations.json` (PERSISTENCE): what the gate's sessions keep
+    current and what the diff pulse and the next gate read. Operators' batteries keep theirs beside their
+    evidence parent (scripts/run_tests.py)."""
+    return Path(data_root) / "state" / DURATIONS_FILE
 # Written into every run directory this module creates: that tree is a run's
 # output, never an untracked input of a later or nested recipe (#1908).
 EVIDENCE_RUN_MARKER = "OUROBOROS_TEST_EVIDENCE_RUN.txt"
 _LISTED_GAPS = 5  # a display bound; source.json keeps every gap
 
 
-def evidence_directory(repo, *, parent=None, ctx=None) -> Path:
-    """A fresh result directory outside disposable roots, shared by descendants."""
+def _private_copy_evidence_parent(repo, data_root=None) -> Path | None:
+    """Return the registered copy owner's task evidence parent, if this is a private copy.
+
+    The private-copy record is the existing ownership source of truth. This reader does not
+    create, import or alter records; an absent, incomplete or unreadable owner leaves the
+    caller's ordinary checkout-parent destination in place.
+    """
+    data_root = data_root or os.environ.get("OUROBOROS_DATA_DIR")
+    if not data_root:
+        return None
+    try:
+        from ouroboros.artifacts import task_artifact_dir_path
+        from ouroboros.private_copy_read import record_at
+        from ouroboros.task_custody import canonical_owner_root
+
+        row = record_at(Path(repo).resolve(), data_root)
+        task_id = str(row.get("task_id") or "").strip() if row else ""
+        if not task_id:
+            return None
+        return (task_artifact_dir_path(canonical_owner_root(data_root), task_id)
+                / "source_handles" / "test-evidence")
+    except Exception:
+        # A copy without a readable owner is not a reason to invent task custody or
+        # stop a verification command. Its ordinary checkout-parent evidence remains visible.
+        return None
+
+
+def evidence_directory(repo, *, parent=None, ctx=None, owner_data_root=None) -> Path:
+    """A fresh result directory outside disposable roots, shared by descendants.
+
+    A registered private copy without an explicit destination writes beside the task's
+    other source evidence. Operator checkouts and unregistered copies retain the historic
+    checkout-parent ``.test-evidence`` location.
+    """
     if parent is None and ctx is not None:
         drive, task = getattr(ctx, "drive_root", None), getattr(ctx, "task_id", None)
         if drive and task:
             from ouroboros.task_custody import canonical_owner_root
             # Raw gate inputs/logs are sources, not thousands of deliverables.
-            # Place them with the durable owner immediately: an unregistered
-            # input subtree in the execution drive is not generic copyback work.
+            # Place them with the durable owner immediately: a standalone destination in
+            # the execution drive's store waits for ``history_retention.carry_raw_evidence``.
             parent = canonical_owner_root(drive) / "task_results" / "artifacts" / str(task) / "source_handles" / "test-evidence"
             outer = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
             if outer and parent.resolve().is_relative_to(Path(outer).resolve()):
                 # A test's synthetic ctx is reproducible too. Its outer owner
                 # already supplied the destination that outlives that scratch.
                 parent = os.environ.get(EVIDENCE_ENV)
-    parent = Path(parent or os.environ.get(EVIDENCE_ENV) or Path(repo).resolve().parent / ".test-evidence").resolve()
+    parent = (parent or os.environ.get(EVIDENCE_ENV)
+              or _private_copy_evidence_parent(repo, owner_data_root)
+              or Path(repo).resolve().parent / ".test-evidence")
+    parent = Path(parent).resolve()
     boundary = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
     if boundary and parent.is_relative_to(Path(boundary).resolve()):
         from ouroboros.test_environment import retain_tree
@@ -287,6 +335,31 @@ def diagnostics_incomplete(reason, source=None) -> None:
         retain_tree(root, f"test diagnostics incomplete: {reason}")
 
 
+@contextmanager
+def keep_startup_log(root, name):
+    """A real server that never became ready keeps why, past its case's scratch.
+
+    Its own stdio (``root/name``: a failed manager child's traceback lands nowhere else) and its data
+    logs go to the run's evidence, for a launcher releases the case's tree on red too. The failure goes on.
+    """
+    try:
+        yield
+    except Exception:
+        root, logs = Path(root), Path(root) / "data" / "logs"
+        try:
+            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup")
+            for path in (root / name, *logs.glob("*.log"), *logs.glob("*.jsonl")):
+                if path.is_file():
+                    target = kept / path.relative_to(root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
+            shown = preview_file(root / name, 8000) if (root / name).is_file() else ""
+            report_diagnostic(f"SERVER_STARTUP_LOG {kept}\n{shown}")
+        except OSError as exc:
+            diagnostics_incomplete(str(exc), root)
+        raise
+
+
 def preview_file(path, limit=200_000) -> str:
     """Bound display, not storage; retain the beginning and the failing tail."""
     with Path(path).open("rb") as stream:
@@ -357,55 +430,85 @@ class FileOutput:
 
 
 class CapturedPass(tuple):
-    """The existing three-value lane API, plus independent diagnostic status."""
-    def __new__(cls, returncode, output, containment_error, evidence_errors=()):
+    """The existing three-value lane API, plus independent diagnostic status and the lane's token."""
+    def __new__(cls, returncode, output, containment_error, evidence_errors=(), containment_token=""):
         result = super().__new__(cls, (returncode, output, containment_error))
-        result.evidence_errors = list(evidence_errors)
+        result.evidence_errors, result.containment_token = list(evidence_errors), containment_token
         return result
 
 
-def finish_gate(evidence, verdict, phase, release) -> None:
-    """Persist outcome before release; retention/evidence never rewrite a verdict."""
-    from ouroboros.test_environment import retain_tree, retention_markers
+def record_kept_scratch(ctx, root, kept, tokens) -> None:
+    """One session-scratch record (``workspace_preflight``'s shape, with what is kept and why) for a
+    run's task: the custody pass over finished tasks then holds and releases a kept root like any
+    task's scratch, with no reader, sweeper or age of its own. The root's ``obs-`` name is what
+    that shape requires. A run with no task records nothing, nor does a root an outer owner releases."""
+    from ouroboros.test_environment import default_temp_parent
+    from ouroboros.tool_access_paths import canonical_data_root
+    from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, _note_open_scratch, _owned_directory
+
+    task_id, drive = str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "drive_root", "")
+    if not task_id or not drive or root.parent != default_temp_parent().resolve():
+        return
+    owner = _owned_directory(drive, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, root.name), root)
+    seen = root.lstat()
+    write_record(owner / "scratch.json", {"schema_version": 1, "path": str(root), "identity": [seen.st_dev, seen.st_ino],
+                                          "kept": kept, "containment_tokens": tokens})
+    _note_open_scratch(canonical_data_root(ctx), task_id, root.name, owner)
+
+
+def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
+    """Persist outcome before release; retention/evidence never rewrite a verdict.
+
+    What stays is recorded with the outcome: the kept paths, why, the lanes' containment tokens
+    and, for a task's run, one session-scratch record (``record_kept_scratch``)."""
+    from ouroboros.test_environment import kept_facts, marker_text, retain_tree, retained_folders
 
     cleanup = evidence.get("cleanup")
-    reason = (cleanup[4] if cleanup else "") or evidence.get("retain_reason", "")
+    # The run's own hold keeps its whole root; a marker beneath the root keeps only its folder.
+    hold = (cleanup[4] if cleanup else "") or evidence.get("retain_reason", "")
     if cleanup and os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":
-        reason = reason or "explicit preflight debug retention"
-    if cleanup and not reason:
-        markers = retention_markers(cleanup[1])
-        if markers:
-            try:
-                reason = markers[0].read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                reason = "retention marker or unreadable subtree"
+        hold = hold or "explicit preflight debug retention"
+    kept = retained_folders(cleanup[1]) if cleanup and not hold else {}
+    if cleanup and cleanup[1] in kept:
+        hold = marker_text(kept[cleanup[1]][0])
+    reason = hold or next((marker_text(found_in[0]) for found_in in kept.values()), "")
     record = {"verdict": verdict, "phase": phase, "reused_from": evidence.get("reused_from"),
               "execution": evidence.get("reuse", evidence.get("execution", "not_run")),
               "scratch": str(cleanup[1]) if cleanup else None,
               "containment_error": cleanup[4] if cleanup else None,
-              "lanes": evidence.get("lanes", []),
+              "lanes": evidence.get("lanes", []), "workers": evidence.get("workers"),
+              "budget_seconds": evidence.get("budget_seconds"), "elapsed_seconds": evidence.get("elapsed_seconds"),
               "diagnostics_incomplete": bool(evidence.get("evidence_errors")),
               "evidence_errors": evidence.get("evidence_errors", []),
-              "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created"}
+              "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created",
+              "kept": [], "containment_tokens": []}
     try:
         write_record(evidence["path"] / "result.json", record)
     except OSError as exc:
-        reason = f"gate evidence write failed: {exc}"
+        reason = hold = f"gate evidence write failed: {exc}"
         record["diagnostics_incomplete"] = True
         record["evidence_errors"].append(reason)
         report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {exc}")
     if cleanup:
-        if reason:
-            retain_tree(cleanup[1], reason)
+        if hold:
+            retain_tree(cleanup[1], hold)
         try:
-            release(*cleanup[:4], reason)
+            release(*cleanup[:4], hold)
         except OSError as exc:
-            reason = f"scratch release failed: {exc}"
+            reason = hold = f"scratch release failed: {exc}"
             retain_tree(cleanup[1], reason)
         remains = cleanup[1].exists()
         record.update(cleanup="retained" if remains else "released", retention_reason=reason)
         if remains:
             report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
+            facts = kept_facts(kept) if kept and not hold else [
+                {"path": str(cleanup[1]), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
+            tokens = [token for token in evidence.get("containment_tokens", ()) if token]
+            record.update(kept=facts, containment_tokens=tokens)
+            try:
+                record_kept_scratch(ctx, cleanup[1], facts, tokens)
+            except (OSError, ValueError, KeyError, TypeError) as exc:  # the tree stays either way; its record is a gap
+                report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
         try:
             write_record(evidence["path"] / "result.json", record)
         except OSError as exc:

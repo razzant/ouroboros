@@ -16,7 +16,7 @@ from tests.test_dark_voice_material_contrast_browser import COMPOSITE
 
 subscription_ui = rw.subscription_ui
 room_ui = rw.room_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 PROJECT = {"id": "system-proof", "name": "Release evidence", "chat_id": 42,
            "lifecycle": "active", "visible_revision": 0}
 REMINDER = ("Reminder · Ouroboros · written 21 October 2026, 18:00 · for 22 October 2026, 09:00\n\n"

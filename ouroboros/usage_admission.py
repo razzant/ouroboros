@@ -331,9 +331,10 @@ def review_wave_admission(
         "known_usd": None,
         "accounted_usd": None,
         "reserved_usd": None,
+        "unresolved_upper_bound_usd": None,
         "slot_bounds": [],
-        **{key: None for key in ("global_limit_usd", "global_known_usd", "global_accounted_usd",
-                                 "global_remaining_usd", "global_reserved_usd", "binding_axis")},
+        **{key: None for key in ("global_limit_usd", "global_known_usd", "global_accounted_usd", "global_remaining_usd",
+                                 "global_reserved_usd", "global_unresolved_upper_bound_usd", "binding_axis")},
     }
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id or not models:
@@ -344,10 +345,11 @@ def review_wave_admission(
         if remaining_usd_override is not None:
             remaining = float(remaining_usd_override)
         else:
-            # Open holds (reserved and in-flight/unresolved bounds) are disclosed
-            # exposure beside the known spend; they do not shrink the room.
-            holds = lambda p: round(float(ua._number(p.get("reserved_usd")) or 0.0)  # noqa: E731
-                                    + float(ua._number(p.get("unresolved_upper_bound_usd")) or 0.0), 6)
+            # Reservations and the upper bound of calls without a known price are disclosed beside the
+            # known spend, each under the ledger's own name (P8); they do not shrink the room.
+            def holds(p: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+                return {f"{prefix}{key}": round(float(ua._number(p.get(key)) or 0.0), 6)
+                        for key in ("reserved_usd", "unresolved_upper_bound_usd")}
             projection = ua.usage_projection(drive_root, root_task_id=root_task_id)
             limit = (
                 max(0.0, float(root_limit_usd)) if root_limit_usd is not None
@@ -358,7 +360,7 @@ def review_wave_admission(
             if limit is not None and known is not None:
                 remaining = round(max(0.0, limit - known), 6)
                 result.update(limit_usd=limit, known_usd=known, accounted_usd=ua._number(projection.get("accounted_usd")),
-                              reserved_usd=holds(projection), binding_axis="root")
+                              **holds(projection), binding_axis="root")
             # Resolve the same task-bound durable group as a seat reservation,
             # without reserving money or pinning a binding.
             # A raised in-memory root fence alone cannot raise the original group.
@@ -377,14 +379,14 @@ def review_wave_admission(
                         remaining = group_remaining
                         result.update(limit_usd=group_limit, known_usd=group_known,
                                       accounted_usd=ua._number(group_projection.get("accounted_usd")),
-                                      reserved_usd=holds(group_projection),
+                                      **holds(group_projection),
                                       binding_axis="group", billing_group_id=group)
             # The global axis reserve_attempt checks FIRST (all roots' rows).
             gp = ua.usage_projection(drive_root, global_limit_usd=global_limit_usd, include_roots=False)
             result.update(global_limit_usd=ua._number(gp.get("limit_usd")),
                           global_known_usd=ua._number(gp.get("settled_usd")),
                           global_accounted_usd=ua._number(gp.get("accounted_usd")),
-                          global_remaining_usd=ua._number(gp.get("remaining_known_usd")), global_reserved_usd=holds(gp))
+                          global_remaining_usd=ua._number(gp.get("remaining_known_usd")), **holds(gp, "global_"))
             global_remaining = result["global_remaining_usd"]
             if global_remaining is not None and (result["binding_axis"] is None or global_remaining < remaining):
                 remaining, result["binding_axis"] = global_remaining, "global"
@@ -427,8 +429,14 @@ def review_wave_admission(
                 continue
             total += float(bound)
         result["estimated_wave_usd"] = round(total, 6)
-        # The reservation's equality: no room once known spend reached the limit.
-        result["fits"] = remaining > 1e-9
+        # The reservation's equality: no room once known spend reached the limit. A reached GLOBAL limit
+        # refuses paid admission only (``usage_accounting.paid_admission``): a wave none of whose seats
+        # needs it still fits; a root or group cap binds every seat.
+        from ouroboros.provider_models import provider_for_model
+
+        result["fits"] = remaining > 1e-9 or (result["binding_axis"] == "global" and not any(
+            ua.paid_admission(provider_for_model(str(model or "")), bound)
+            for model, bound in zip(models, result["slot_bounds"])))
         return result
     except BillingAuthorityUnavailable as exc:
         # Not money: no seat could reserve. The kind says whether rereading can help.

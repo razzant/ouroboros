@@ -12,6 +12,19 @@
  * @property {string=} post_commit_failed
  */
 /**
+ * @typedef {Object} ChatInbound
+ * @property {string=} reply_to
+ * @property {"chat"} type
+ * @property {string} content
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
+ * @property {boolean=} force_plan
+ * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
+ * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
+ * @property {string=} project_id  // per-project memory scope (v6.32.0)
+ * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
+ */
+/**
  * @typedef {Object} CommandInbound
  * @property {Object=} client_surface
  * @property {"command"} type
@@ -141,6 +154,8 @@
  * The wizard's starting values; besides these keys it carries one key per `contract.providerFields[].stateKey`
  * (a configured secret reads as `secretPlaceholder`), `contract.budgetFields[].stateKey` and `contract.modelSlots[].stateKey`.
  * @typedef {Object} SetupInitialState
+ * @property {Object[]} connections Masked OUROBOROS_CONNECTIONS rows, keyed by kind/name.
+ * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
  * @property {string} reviewEnforcement
@@ -160,6 +175,16 @@
  */
 
 /**
+ * `settings_setup_contract.consciousness_offer`: the Summary's optional, unticked Consciousness row.
+ * @typedef {Object} SetupConsciousnessOffer
+ * @property {boolean} offered  // setup has never completed on this install; a completed setup shows no row
+ * @property {?boolean} enabled  // the control as the state shows it; null = unknown
+ * @property {'observe'|'act'|'full'} autonomy
+ * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
+ * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
+ */
+
+/**
  * `settings_setup_contract.build_setup_bootstrap`: what the builtin wizard page embeds.
  * @typedef {Object} SetupBootstrap
  * @property {'web'|'desktop'} hostMode
@@ -172,6 +197,7 @@
  * @property {string} secretPlaceholder  // a prefilled credential that is configured holds this marker
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
+ * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
  */
 
 /**
@@ -253,6 +279,7 @@
  * @property {string[]} interface_paths
  * @property {ContractHttpEntry[]} http
  * @property {ContractWs} ws
+ * @property {CallSocketContract=} call_socket
  * @property {Object.<string,Object>} schemas
  */
 
@@ -316,6 +343,22 @@
  */
 
 /**
+ * A `reply_to` reference as the host resolved it; an unresolved one is `{address, unresolved: true}`.
+ * @typedef {Object} ChatReplyReference
+ * @property {string=} address
+ * @property {number=} chat_id
+ * @property {'user'|'assistant'|'system'=} role
+ * @property {string=} author_label
+ * @property {string=} kind
+ * @property {string=} snippet
+ * @property {number=} chars  // the quoted text's whole length, present when snippet cuts it
+ * @property {string=} ts
+ * @property {string=} task_id
+ * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {boolean=} unresolved
+ */
+
+/**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
@@ -325,9 +368,10 @@
  * @property {string=} wait_ended_at
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
- * @property {Object=} reply_to
+ * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
+ * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
  * @property {string} text
  * @property {'user'|'assistant'|'system'} role
  * @property {string} ts  // the stored row's time: the same string its live frame carried
@@ -449,7 +493,7 @@
  */
 
 /**
- * Bounds of one history response. `latest_message` (Project rooms) names the latest eligible
+ * Bounds of one history response. `latest_message` (Main and Project rooms) names the latest eligible
  * non-owner standalone message by stored arrival, excluding card content; null means unknown.
  * `out_of_order`: it sorts above earlier arrivals or before the recent read. With a null message,
  * `latest_before` says the bounded search found none at or after that chat offset; older pages
@@ -594,6 +638,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceStatusPayload} PlaceStatusPayload */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryAttention} PlaceHistoryAttention */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryImport} PlaceHistoryImport */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryReaction} PlaceHistoryReaction */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryFacts} PlaceHistoryFacts */
 /** @typedef {import('./place_contract_types.js').PlaceDisconnectRequest} PlaceDisconnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceOwnerAccountRequest} PlaceOwnerAccountRequest */
@@ -631,7 +676,9 @@
  */
 
 /**
- * `GET /api/projects`: active and deleting projects, at most 200, most recently active first.
+ * `GET /api/projects`: active and deleting projects, at most 200, most recently active first; `?all=1` lists
+ * every one of them. `?id=<project_id>` answers that project while active or deleting, `?chat_id=<n>` the active
+ * project of that room; either answers none otherwise.
  * @typedef {Object} ProjectListResponse
  * @property {import('./api_types.js').ProjectEntry[]} projects
  */
@@ -645,10 +692,12 @@
  */
 
 /**
- * `POST /api/projects/{project_id}/update`: name and/or pin; at least one.
+ * `POST /api/projects/{project_id}/update`: name, pin or closure; at least one.
+ * `closed`: true closes as owner; false reopens.
  * @typedef {Object} ProjectUpdateRequest
  * @property {string=} name
  * @property {boolean=} pinned
+ * @property {boolean=} closed
  */
 
 /**
@@ -843,6 +892,8 @@
  * @property {string[]=} held_siblings
  * @property {string[]=} rebound_held_siblings
  * @property {string=} released_hold
+ * @property {boolean=} held  // a Continue back in its writer wait: it starts by itself once `blockers` settle
+ * @property {Array<Object>=} blockers
  * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  * @property {string=} message
  */
@@ -867,10 +918,11 @@
  * @typedef {Object} CardOutbound
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind  // ChatReferenceFields' row kind; the card's own kind is card.kind
+ * @property {Object.<string,number>=} room_revisions
  * @property {'card'} type
  * @property {'assistant'} role
  * @property {ChatHistoryCard} card
@@ -984,6 +1036,146 @@
  */
 
 /**
+ * @typedef {Object} CallOpenRequest
+ * @property {number} chat_id
+ * @property {string} client_message_id
+ * @property {string=} feature
+ */
+/**
+ * @typedef {Object} CallOpenResponse
+ * @property {string} call_id
+ * @property {string} ws_path
+ * @property {boolean} vision
+ * @property {boolean=} joined
+ */
+/**
+ * @typedef {Object} CallRefusal
+ * @property {false} ok
+ * @property {string} code
+ * @property {string} error
+ */
+/**
+ * @typedef {Object} ConversationFinishedOutbound
+ * @property {"conversation_finished"} type
+ * @property {number} chat_id
+ * @property {string} call_id
+ * @property {string} task_id
+ * @property {string} reason
+ */
+/**
+ * Separate media socket; control schemas are in GET /api/contract.schemas.
+ * @typedef {Object} CallSocketContract
+ * @property {string} path
+ * @property {string} host_open_path
+ * @property {string} host_peer_path
+ * @property {string} host_auth
+ * @property {number} protocol
+ * @property {string} audio_header
+ * @property {number} audio_header_bytes
+ * @property {number} max_audio_payload_bytes
+ * @property {number} max_video_payload_bytes
+ * @property {number} max_control_bytes
+ * @property {Object.<string,string>} peer_messages
+ * @property {Object.<string,string>} server_messages
+ */
+/**
+ * @typedef {Object} HostCallOpenRequest
+ * @property {'meeting'} role
+ * @property {string=} call_id
+ * @property {string=} binding_id
+ * @property {Object=} event
+ * @property {string=} label
+ * @property {boolean=} mic
+ * @property {boolean=} speaker
+ * @property {boolean=} video
+ */
+/**
+ * @typedef {Object} HostCallOpenResponse
+ * @property {string} call_id
+ * @property {string} peer_path
+ */
+/**
+ * @typedef {Object} CallHello
+ * @property {'hello'} type
+ * @property {1} protocol
+ * @property {'owner'|'meeting'} role
+ * @property {boolean} mic
+ * @property {boolean} speaker
+ * @property {boolean=} video
+ * @property {number} rate
+ * @property {string=} label
+ */
+/**
+ * @typedef {Object} CallMute
+ * @property {'mute'} type
+ * @property {boolean} muted
+ */
+/**
+ * @typedef {Object} CallPlayed
+ * @property {'played'} type
+ * @property {string} item_id
+ * @property {number} played_ms
+ */
+/**
+ * @typedef {Object} CallContext
+ * @property {'context'} type
+ * @property {string} text
+ * @property {string} source
+ */
+/**
+ * @typedef {Object} CallParticipant
+ * @property {'participant'} type
+ * @property {string} label
+ * @property {boolean} speaking
+ */
+/**
+ * @typedef {Object} CallShare
+ * @property {'share'} type
+ * @property {boolean} sharing
+ * @property {'screen'|'camera'} kind
+ */
+/**
+ * @typedef {Object} CallBye
+ * @property {'bye'} type
+ * @property {string=} reason
+ */
+/**
+ * @typedef {Object} CallState
+ * @property {'state'} type
+ * @property {'preparing'|'connecting'|'live'|'reconnecting'|'closing'|'closed'} state
+ * @property {string} reason
+ * @property {string=} engine
+ * @property {string=} phase
+ * @property {string=} detail
+ * @property {'settings'|'retry'=} action
+ */
+/**
+ * @typedef {Object} CallActivity
+ * @property {'activity'} type
+ * @property {'working'|'idle'} activity
+ * @property {string} label
+ */
+/**
+ * @typedef {Object} CallTurn
+ * @property {'turn'} type
+ * @property {'awaiting'|'answering'|'idle'} turn
+ */
+/**
+ * @typedef {Object} CallCaption
+ * @property {'caption'} type
+ * @property {'owner'|'ouroboros'} speaker
+ * @property {string} text
+ * @property {boolean} final
+ * @property {string} item_id
+ * @property {boolean=} replace
+ */
+/**
+ * @typedef {Object} CallFlush
+ * @property {'flush'} type
+ * @property {number} epoch
+ */
+
+/**
  * @typedef {Object} OwnerSafetyRulesRequest
  * @property {string} rules
  */
@@ -1002,4 +1194,43 @@
 /**
  * @typedef {Object} OwnerSafetyModelResponse
  * @property {boolean} ok
+ */
+
+/**
+ * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
+ * (ROOT tasks only; computed from the physical-attempt ledger at read time,
+ * never persisted). own + children + unattributed == subtree (a null own counts
+ * as 0 there); children_usd and accounted_upper_bound_usd are null when the
+ * subtree's rows state no amount (subscription work). When the object
+ * is present every key is present; the WHOLE object is absent — never a
+ * confident $0 — when accounting is unavailable or holds no attributable row
+ * for the subtree, and on non-root task details. The root card's Details render
+ * by_purpose ("Spent on") and by_route ("Ran on"), two partitions of one subtree.
+ * @typedef {Object} TaskCostBreakdown
+ * @property {?number} own_usd  null when the root's own rows exist but none has a price
+ * @property {?number} children_usd
+ * @property {number} unattributed_usd
+ * @property {number} delegated_disclosed_usd
+ * @property {?number} accounted_upper_bound_usd
+ *   C2: the explicit subtree total under its honest name — an accounted UPPER
+ *   BOUND (own + children + unattributed), not a settled receipt.
+ * @property {number} subscription_sessions
+ * @property {number} unknown_unmetered
+ * @property {number} non_final_rows
+ * @property {boolean} cost_final
+ * @property {?import('./api_types.js').CostCustody} cost_custody
+ * @property {TaskCostSlice[]} by_purpose
+ * @property {TaskCostSlice[]} by_route
+ * @property {"physical_attempt_ledger"} authority
+ */
+
+/**
+ * One recorded value of an axis inside a root's tree (a usage category or a route): its money as the card's
+ * own carrier and its volume; tokens null when no row of the slice reported them.
+ * @typedef {Object} TaskCostSlice
+ * @property {string} key
+ * @property {?import('./api_types.js').CostPresentation} cost_presentation
+ * @property {number} model_calls
+ * @property {number} sessions
+ * @property {?number} tokens
  */

@@ -100,4 +100,4 @@ def test_tree_note_text_maxlength_comes_from_the_validator_constant():
     assert text_schema["maxLength"] == _MAX_TEXT_CHARS
     assert f"<={_MAX_TEXT_CHARS} chars" in text_schema["description"]
     payload_description = schema["parameters"]["properties"]["payload"]["description"]
-    assert "<=500 chars for a child_result_disposition" in payload_description
+    assert "tree_note text is the rationale." in payload_description and "500" not in payload_description

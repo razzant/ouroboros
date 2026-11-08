@@ -86,6 +86,10 @@ def _stage_out_of_process_surfaces(
     }
     with _lock:
         for kind, live, label in SURFACE_KINDS:
+            if kind in {"realtime_providers", "conversation_features"}:
+                if catalog.get(kind):
+                    raise ExtensionRegistrationError("realtime providers require in-process execution")
+                continue
             validate, key_field = validators[kind]
             staged = getattr(api._staged, kind)
             for raw in catalog.get(kind) or []:

@@ -30,6 +30,9 @@ from ouroboros.runtime_mode_policy import (
 )
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.workspace_patch_rules import format_patch_exclusions
+from ouroboros.tools.patch_staging import (
+    index_entries, sparse_absent, stage_applied, staging_receipt, undo_applied,
+)
 from ouroboros.tools.registry import ToolContext
 
 # The parent logger name is pinned on purpose: records moved with their code
@@ -54,26 +57,40 @@ _READY_CAPTURE_STATUSES = frozenset({
     ARTIFACT_STATUS_READY_WITH_CHANGES, ARTIFACT_STATUS_READY_NO_CHANGES})
 
 
-def _manifest_capture_status(manifest_path: pathlib.Path) -> str:
-    """The status one capture manifest reports about ITSELF; "" when unreadable."""
+def _saved_manifest(manifest_path: pathlib.Path) -> Dict[str, Any]:
+    """One capture manifest as saved; {} when absent or unreadable."""
     try:
         loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
-        return ""
-    return str(loaded.get("status") or "") if isinstance(loaded, dict) else ""
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
-def _capture_failed_refusal(rid: str, cap_status: str, note: str) -> str:
+def _manifest_capture_status(manifest_path: pathlib.Path) -> str:
+    """The status one capture manifest reports about ITSELF; "" when unreadable."""
+    return str(_saved_manifest(manifest_path).get("status") or "")
+
+
+def _drifted_no_change(manifest: Dict[str, Any]) -> bool:
+    """A failed capture whose only private fact is its authority-drift record over a snapshot known to
+    hold no child changes: a reject discards nothing, so a neighboring edit cannot wedge custody."""
+    drift = manifest.get("authority_drift")
+    return (manifest.get("status") == "failed" and isinstance(drift, dict)
+            and manifest.get("authority_drift_source_status") == ARTIFACT_STATUS_READY_NO_CHANGES
+            and bool(drift.get("paths") or drift.get("error")))
+
+
+def _capture_failed_refusal(rid: str, cap_status: str, note: str, step: str = "") -> str:
     """The ONE typed refusal for disposing over a non-usable capture (C1-R3).
     Shared by the capture-at-disposition seam and the reject branch's own guard
-    so they cannot drift; no caller records a disposition over this message."""
+    so they cannot drift; no caller records a disposition over this message. Its
+    next step follows the cause (#1651): a blind repeat heals only a transient one."""
     return (
         f"⚠️ INTEGRATE_DELEGATED_CAPTURE_FAILED: run {rid}'s changes were never "
         f"usably captured, and the capture-at-disposition attempt did not "
-        f"produce a patch (status {cap_status or 'missing'!r}: {note[:300]}). "
-        "No disposition was recorded — the obligation stays open and the "
-        "private copy (if present) is kept. Inspect it directly, then retry "
-        "this call."
+        f"produce a patch (status {cap_status or 'missing'!r}: {note[:600]}). "
+        "No disposition was recorded — the obligation stays open and the private copy (if present) is "
+        "kept. " + (step or "Repeating this call fails the same way until that cause changes; once it has, call again.")
     )
 
 
@@ -112,34 +129,32 @@ def _capture_at_disposition(
     manifest replays as not-captured, and the core is asked to re-capture. An
     exception ESCAPING the core (its internal try covers only the diff itself)
     is the same typed refusal, never a raw traceback out of the tool.
+
+    A ``missing`` capture (the core first restores what a pin holds) is loss only on
+    ``result_loss`` proof (#1651): a reject passes to its branch, which records the loss,
+    and an apply is told that reject is the exit; an unproven loss names its carrier.
     """
-    if entry.patch_captured and _manifest_capture_status(manifest_path) in _READY_CAPTURE_STATUSES:
+    reject = str(decision or "").lower() == "reject"
+    if (entry.patch_captured and _manifest_capture_status(manifest_path) in _READY_CAPTURE_STATUSES
+            or reject and _drifted_no_change(_saved_manifest(manifest_path))):
         return ""
-    if str(decision or "").lower() == "reject":
-        try:
-            saved = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            saved = {}
-        if (isinstance(saved, dict) and saved.get("status") == "failed"
-                and saved.get("authority_drift_source_status") == ARTIFACT_STATUS_READY_NO_CHANGES
-                and isinstance(saved.get("authority_drift"), dict)
-                and (saved.get("authority_drift", {}).get("paths")
-                     or saved.get("authority_drift", {}).get("error"))):
-            # The private snapshot is known to contain no child changes. A
-            # reject only discards that empty result, so it remains safe and
-            # prevents a neighboring edit from wedging custody forever.
-            return ""
-    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive, loss_refusal, result_loss
 
     try:
         block = capture_terminal_patch_for_drive(drive, entry) or {}
     except Exception as exc:
         log.warning("capture-at-disposition raised for run %s", rid, exc_info=True)
         block = {"status": "", "note": f"capture raised {type(exc).__name__}: {exc}"}
-    cap_status = str(block.get("status") or "")
+    cap_status, note = str(block.get("status") or ""), str(block.get("note") or "")
+    step = "A later call may capture it." if block.get("retry") == "transient" else ""
     if cap_status in _READY_CAPTURE_STATUSES:
         return ""
-    return _capture_failed_refusal(rid, cap_status, str(block.get("note") or ""))
+    if cap_status == "missing" and entry.authority_source != "skill_payload":  # a payload keeps its own reject
+        lost, why = result_loss(drive, entry)
+        if lost and reject:
+            return ""
+        note, step = loss_refusal(drive, entry, lost, why)
+    return _capture_failed_refusal(rid, cap_status, note, step)
 
 
 def _delegated_disposition_refusal(status: str, entry: Any, rid: str,
@@ -247,7 +262,7 @@ def _unwritten_disposition_text(rid: str, target_root: str, disposition: str,
     return (
         f"⚠️ INTEGRATE_DISPOSITION_UNWRITTEN: run {rid}'s patch was NOT applied "
         f"(disposition {disposition!r}), and the durable disposition row could not "
-        "be written. Nothing in your tree changed and the run's saved result is "
+        "be written. Nothing in your tree changed and any saved result of the run is "
         "preserved. Fix the drive/event log; this process already holds the "
         "disposition in memory (a repeat here answers ALREADY_DISPOSED), so the "
         "run reads as undisposed again only after a restart — repeat it then."
@@ -278,7 +293,7 @@ def _dispose_delegated(drive: Any, entry: Any, snapshot_key: str, reason: str,
             removed = False
         note = "" if removed else (
             " (snapshot cleanup deferred to custody GC at boot or a later custody pass, "
-            "once the owning task is proven over.)")
+            "once the owning task is proven over and the owner no longer keeps it.)")
     return True, note
 
 
@@ -429,21 +444,24 @@ def _locked_apply(
 
     Returns the FACTS the caller turns into a verdict: ``proc`` (None when
     nothing was attempted), ``drifted``/``drift_error`` from the pre-apply
-    baseline comparison, and ``staging_failure``/``reverted`` for an apply whose
-    staging failed. No verdicts, no dispositions, no messages — those belong to
-    the one caller so every exit stays visible in one place.
+    baseline comparison, ``unindexed`` (delivered new paths the target's ignore
+    rules keep out of the index, `patch_staging`), and ``staging_failure``/``reverted``
+    for an apply whose staging failed: ``reverted`` holds only when the tree, the
+    file results and the index entries the attempt changed are all back. No
+    verdicts, no dispositions, no messages — those belong to the one caller so
+    every exit stays visible in one place.
     """
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
     from ouroboros.workspace_file_outputs import prepare_file_outputs
 
     result: Dict[str, Any] = {
-        "proc": None, "drifted": [], "drift_error": "",
+        "proc": None, "drifted": [], "drift_error": "", "unindexed": [],
         "staging_failure": "", "reverted": False, "lock_error": "",
     }
     prepared = None
     temporary = ExitStack()
     try:
-        _git_lock = _acquire_git_lock(ctx)
+        _git_lock = _acquire_git_lock(ctx, repo_dir=target)
     except Exception as exc:
         result["lock_error"] = f"{type(exc).__name__}: {exc}"
         return result
@@ -474,6 +492,12 @@ def _locked_apply(
         if admission_check and (refusal := admission_check()):
             result["admission_refusal"] = refusal
             return result
+        try:  # membership before the apply decides staging and what a rollback restores
+            indexed = index_entries(target, ordered_touched)
+        except (OSError, subprocess.SubprocessError) as exc:
+            result["drift_error"] = f"the target's index could not be read: {exc}"
+            return result
+        sparse = sparse_absent(target, ordered_touched, indexed)
         # Dirty-source snapshots use working-tree apply: --3way implies index
         # binding and would reject the source's pre-existing unstaged changes.
         # A task copy recorded from clean HEAD/index instead keeps three-way
@@ -491,45 +515,17 @@ def _locked_apply(
                 prepared.apply()
             except Exception as exc:
                 result["staging_failure"] = f"file result apply failed: {type(exc).__name__}: {exc}"
-        stageable = _si()._stageable_paths(target, ordered_touched) if proc.returncode == 0 else []
-        if not stageable and not result["staging_failure"]:
-            return result
-        # NUL-delimited stdin pathspecs: byte-safe and immune to argv limits for a
-        # patch touching thousands of files.
-        add = subprocess.run(
-            ["git", "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
-            cwd=str(target), capture_output=True,
-            input=b"\0".join(
-                p.encode("utf-8", errors="surrogateescape") for p in stageable) + b"\0",
-        ) if not result["staging_failure"] else None
-        if add is not None and add.returncode == 0:
-            return result
+        if not result["staging_failure"]:
+            result["staging_failure"], result["unindexed"] = stage_applied(target, ordered_touched, indexed)
+            if not result["staging_failure"]:
+                return result
         # The APPLY SUCCEEDED — the tree is already mutated. Reporting this as a
         # conflict ("the tree moved") invited a retry over changed content and let a
-        # later reject record "not applied" over real changes. Try to put the tree
-        # back cleanly; whatever the outcome, the caller says exactly what is true.
-        if add is not None:
-            result["staging_failure"] = (add.stderr or add.stdout or b"").decode(
-                "utf-8", errors="replace").strip()
-        files_reverted = True
-        if prepared:
-            try:
-                prepared.rollback()
-            except Exception as exc:
-                files_reverted = False
-                result["staging_failure"] += f"; file rollback: {type(exc).__name__}: {exc}"
-        if not has_patch:
-            result["reverted"] = files_reverted
-            return result
-        check = subprocess.run(
-            ["git", "apply", "--check", "--reverse", str(patch_path)],
-            cwd=str(target), capture_output=True, text=True,
-        )
-        if check.returncode == 0:
-            result["reverted"] = subprocess.run(
-                ["git", "apply", "--reverse", str(patch_path)],
-                cwd=str(target), capture_output=True, text=True,
-            ).returncode == 0 and files_reverted
+        # later reject record "not applied" over real changes. Undo the whole attempt;
+        # the caller says exactly what is true.
+        result["reverted"], problems = undo_applied(
+            target, patch_path if has_patch else None, prepared, ordered_touched, indexed, sparse)
+        result["staging_failure"] += f"; {problems}" if problems else ""
         return result
     finally:
         temporary.close()
@@ -578,8 +574,18 @@ def _integrate_delegated_patch(
 
         if handover := disposition_refusal(drive, run(drive, rid)):
             return handover
-        result = _integrate_delegated_patch_locked(ctx, rid, decision, reason, acknowledge_ambiguous, paths,
-                                                   captured_before=captured_before)
+        from ouroboros.headless import native_capture_custody, refresh_native_capture
+        with native_capture_custody(drive, entry) as owner:
+            result = _integrate_delegated_patch_locked(ctx, rid, decision, reason, acknowledge_ambiguous, paths,
+                                                       captured_before=captured_before)
+            note = ""
+            if owner:
+                note = refresh_native_capture(drive, entry.task_id, locked=True,
+                    read_refusal=lambda: _si()._shared_read_refusal(ctx, pathlib.Path(entry.target_root), "read_file"))
+            elif (_si().load_task_result(drive, entry.task_id) or {}).get("workspace_mode") == "self_worktree":
+                note = "Native capture promotion refused: this run target does not match a registered native write root."
+            if note:
+                result += "\n" + note
         from ouroboros.delegate_terminal import refresh_disposed_reconciliation
 
         try:
@@ -730,37 +736,38 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                 f"recorded and nothing changed: apply or reject would release {entry.execution_root}, the last copy "
                 "of those files. Keep what you need from it (or remove what is not evidence), then repeat this call.")
 
-    def _dispose(disposition: str, cleanup: bool) -> tuple[bool, str]:
+    def _dispose(disposition: str, cleanup: bool, **row: Any) -> tuple[bool, str]:
         return _dispose_delegated(
             drive, entry, snapshot_key, reason, disposition, cleanup,
-            disposed_by=str(getattr(ctx, "task_id", "") or ""))
+            disposed_by=str(getattr(ctx, "task_id", "") or ""), **row)
 
     def _unwritten_disposition(disposition: str, applied: bool) -> str:
         return _unwritten_disposition_text(rid, str(entry.target_root), disposition, applied)
 
     capture_status = str(manifest.get("status") or "")
     if decision == "reject":
-        drifted_no_change = (
-            capture_status == "failed"
-            and manifest.get("authority_drift_source_status") == ARTIFACT_STATUS_READY_NO_CHANGES
-            and isinstance(manifest.get("authority_drift"), dict)
-            and (manifest["authority_drift"].get("paths")
-                 or manifest["authority_drift"].get("error"))
-        )
-        # A reject releases a ready capture. It may also release a failed
-        # no-change capture whose only private fact is the durable authority
-        # drift record: there are no child bytes to discard in that shape.
-        if capture_status not in _READY_CAPTURE_STATUSES and not drifted_no_change:
+        # A reject releases a ready capture, a drift-only failed no-change capture or a result proven
+        # lost (#1651, re-proven under this lock): none of them discards a child byte.
+        from ouroboros.tools.delegate_integration import lost_words, result_loss
+
+        keep = capture_status in _READY_CAPTURE_STATUSES or _drifted_no_change(manifest)
+        lost = {} if keep else result_loss(drive, entry)[0]
+        if not (keep or lost):
             return _capture_failed_refusal(
                 rid, capture_status, "a reject would release the snapshot over it")
         verdict_path = _si()._write_verdict(
-            ctx, f"run_{rid}", outcome="rejected", reason=reason, files=touched,
+            ctx, f"run_{rid}", outcome="result_lost" if lost else "rejected", reason=reason, files=touched,
             manifest=manifest, applied=False, conflicts=[], protected=[],
             target=str(entry.target_root),
         )
-        recorded, note = _dispose("rejected", cleanup=True)
+        recorded, note = _dispose("rejected", cleanup=lost.get("copy_record") != "absent",  # nothing left to clean
+                                  **({"result_lost": lost} if lost else {}))
         if not recorded:
             return _unwritten_disposition("rejected", applied=False)
+        if lost:
+            return (f"{orphan_note}🚫 Rejected delegated run {rid} as LOST: {lost_words(drive, entry, lost)}. This decision "
+                    "changed no files; what the run did outside its copy and what it cost stay as recorded, unknown where "
+                    f"unknown. Verdict: {verdict_path or '(unwritten)'}. Reason: {reason or '(none)'}.{note}")
         return (
             f"{orphan_note}🚫 Rejected delegated run {rid}'s captured patch ({len(touched)} file(s) not "
             f"applied); its private copy and pins are released. Verdict: {verdict_path or '(unwritten)'}. "
@@ -852,13 +859,21 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     # row replays as "never applied", and a later reject records a false rejection
     # over a modified, staged tree. An unlanded intent row refuses the mutation
     # outright (same doctrine as record_start_requested).
-    if not custody.record_patch_apply_started(drive, entry, target_root=str(target)):
+    from uuid import uuid4
+    if not custody.record_patch_apply_started(drive, entry, target_root=str(target), apply_idempotency_key=uuid4().hex):
         return (
             f"⚠️ INTEGRATE_INTENT_UNWRITTEN: the durable apply-intent row for run "
             f"{rid} could not be written, so a crash mid-apply would leave the "
             "tree state unaccountable. Refusing to mutate; fix the drive/event "
             "log and retry. Nothing was changed."
         )
+    from ouroboros.headless import begin_native_capture_update, record_native_capture_effect
+    try:
+        begin_native_capture_update(drive, entry)
+    except Exception as exc:
+        custody.record_patch_apply_resolved(drive, entry, reason="native_capture_unavailable")
+        record_native_capture_effect(drive, entry, {"proc": None})
+        return f"⚠️ INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE: {exc}. No target files changed."
     file_options = {}
     if file_changes:
         from ouroboros.subagent_worktrees import find_execution_snapshot
@@ -867,20 +882,22 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     outcome = _si()._locked_apply(
         ctx, target, patch_path, ordered_touched, entry.baseline_sha, baseline_entries=manifest.get("baseline_entries"),
         admission_check=admission_refusal, **file_options)
+    record_native_capture_effect(drive, entry, outcome)
     if outcome.get("admission_refusal"):
         custody.record_patch_apply_resolved(drive, entry, reason="authority_changed")
         return outcome["admission_refusal"]
     if outcome.get("lock_error"):
         custody.record_patch_apply_resolved(drive, entry, reason="lock_error")
         return (
-            "⚠️ INTEGRATE_LOCK_TIMEOUT: could not acquire the repo git lock: "
-            f"{outcome['lock_error']}."
+            f"⚠️ INTEGRATE_NOT_STARTED: run {rid} into {target}: the target is busy "
+            f"({outcome['lock_error']}). Retry later."
         )
     proc = outcome["proc"]
     drifted = outcome["drifted"]
     drift_error = outcome["drift_error"]
     staging_failure = outcome["staging_failure"]
     reverted = outcome["reverted"]
+    unindexed = outcome.get("unindexed") or []
 
     if proc is None:
         # Nothing was attempted (proven drift / unverifiable baseline): the tree
@@ -965,6 +982,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
         ctx, f"run_{rid}", outcome="applied", reason=reason, files=touched,
         manifest=manifest, applied=True, conflicts=[],
         protected=[p.path for p in protected], target=str(target),
+        observation={"unindexed": unindexed} if unindexed else None,
     )
     recorded, note = _dispose("applied", cleanup=True)
     if not recorded:
@@ -973,10 +991,10 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     prot_note = ""
     if protected:
         prot_note = f" Includes {len(protected)} protected path(s) (allowed: runtime_mode={runtime_mode})."
+    staged, delivered, closing = staging_receipt(len(touched), unindexed)
     return (
-        f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({len(touched)} file(s), staged).{prot_note}\n"
+        f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({staged}).{prot_note}{delivered}\n"
         f"{diffstat}{format_patch_exclusions(manifest)}\n"
         f"Verdict: {verdict_path or '(unwritten)'}. Its private copy and pins are released.\n"
-        "Changes are staged but NOT committed — review them yourself; you are the sole committer."
-        f"{note}"
+        f"{closing} — review them yourself; you are the sole committer.{note}"
     )

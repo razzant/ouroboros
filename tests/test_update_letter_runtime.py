@@ -32,7 +32,8 @@ def _record(root):
 
 def test_the_runtime_letter_keeps_its_text_and_summarizes_the_qualification(tmp_path):
     record = _record(tmp_path)
-    state = {"managed_update_cache": {"latest_sha": TARGET, "available": True, "checked_at": "2026-10-27T10:05:00Z"}}
+    state = {"managed_update_cache": {"latest_sha": TARGET, "available": True, "checked_at": "2026-10-27T10:05:00Z",
+                                      "checked_head_sha": BASE}}
     fact = update_letter.official_update_projection(BASE, drive_root=tmp_path, state=state)
     letter = fact["letter"]
     assert fact["status"] == "update_available" and letter["text"] == "WHAT THIS UPDATE BRINGS"
@@ -40,7 +41,8 @@ def test_the_runtime_letter_keeps_its_text_and_summarizes_the_qualification(tmp_
     assert letter["qualification"] == {
         "base_sha": BASE, "target_sha": TARGET, "commits": 40, "with_receipt": 20,
         "checks": {"full_battery": {"passed (author_declared)": 20}, "cost_contract": {"unknown (missing)": 20}},
-        "reviews": {"observed": {"pass": 20}, "declared": {"pass": 20}},
+        "reviews": [{"observed": "pass", "state": "not_recorded", "relation": "not_recorded", "declared": "pass",
+                     "count": 20}],
         "post_merge": {"read": "partial", "reason": "GitHub response page budget reached.",
                        "runs": {"success": 1, "failure": 1, "in_progress": 1}, "missing": 1},
         "full": "query_data(op='json', kind='update_letter')"}

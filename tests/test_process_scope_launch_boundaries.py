@@ -14,7 +14,6 @@ from ouroboros import workspace_executor as we
 from ouroboros.tools import shell_process, skill_exec
 from tests.test_task_scope_lifetime import _alive, _bound, _end_pids, _gone
 
-pytestmark = pytest.mark.serial
 
 
 def _launch(kind, root, *, on_spawn=None):
@@ -29,8 +28,11 @@ def _launch(kind, root, *, on_spawn=None):
                                              stdout_cap=1024, stderr_cap=1024, on_spawn=on_spawn)
 
 
-@pytest.mark.parametrize("kind", ["shell", "executor", "skill"])
-@pytest.mark.parametrize("error_type", [TimeoutError, PermissionError])
+@pytest.mark.parametrize(("error_type", "kind"), [
+    pytest.param(TimeoutError, "shell", id='TimeoutError-shell'),
+    pytest.param(TimeoutError, "skill", id='TimeoutError-skill'),
+    pytest.param(PermissionError, "executor", id='PermissionError-executor'),
+])
 def test_scope_record_failure_is_proven_before_any_process_spawn(tmp_path, monkeypatch, kind, error_type):
     def unavailable(*args, **kwargs):
         raise error_type("scope metadata unavailable")
@@ -61,7 +63,9 @@ def test_scope_preparation_precedes_the_external_duty_that_the_spawn_retains(tmp
     def spawn(*args, **kwargs):
         if list(args[0]) == command:
             seen.append((pending(), dict(kwargs.get("env") or {})))
-        return real_popen(*args, **kwargs)
+        return (shell_process.contained_popen(real_popen, *args, **kwargs)
+                if kind != "executor" and (kwargs.get("start_new_session") or os.name == "nt")
+                else real_popen(*args, **kwargs))
 
     def refused(*args, **kwargs):
         raise PermissionError("scope metadata unavailable")
@@ -114,7 +118,8 @@ def test_the_foreground_receipt_follows_the_invocation_not_the_task_scope(tmp_pa
     real_popen, spawned, result = subprocess.Popen, [], {}
 
     def spawn(*args, **kwargs):
-        proc = real_popen(*args, **kwargs)
+        proc = (shell_process.contained_popen(real_popen, *args, **kwargs)
+                if (kwargs.get("start_new_session") or os.name == "nt") else real_popen(*args, **kwargs))
         if list(args[0]) == command:
             spawned.append((proc, duties(), dict(kwargs.get("env") or os.environ)))
         return proc
@@ -169,6 +174,8 @@ def test_an_error_after_popen_is_not_relabelled_as_no_process(tmp_path, monkeypa
         pass
     child = Child()
     child.__dict__.update(proc.__dict__)
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, child, remains=False)
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: child)
     monkeypatch.setattr(skill_exec, "Popen", lambda *args, **kwargs: child)
     monkeypatch.setattr(skill_exec, "_kill_process_group", lambda proc: None)

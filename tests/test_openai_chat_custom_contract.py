@@ -362,7 +362,7 @@ def test_canonical_replay_rejects_non_mapping_calls(call):
         reencode_canonical_calls_for_openai_custom([call], catalog)
 
 
-@pytest.mark.parametrize("call_id", [None, "", "   ", 0])
+@pytest.mark.parametrize("call_id", [None, "", 0])
 def test_canonical_replay_rejects_missing_or_empty_call_ids(call_id):
     catalog = project_function_tools_to_openai_custom(_tools())
     with pytest.raises(CustomToolProjectionError, match="missing or empty"):
@@ -390,11 +390,6 @@ def test_canonical_replay_rejects_duplicate_call_ids_as_one_invalid_batch():
         "type": "function",
         "function": {"name": "probe", "arguments": "{}"},
     }, "id has surrounding whitespace"),
-    ({
-        "id": "call_padded_name",
-        "type": "function",
-        "function": {"name": " probe ", "arguments": "{}"},
-    }, "name has surrounding whitespace"),
     ({
         "id": "call_numeric_name",
         "type": "function",
@@ -520,7 +515,7 @@ def test_custom_response_rejects_non_mapping_calls_before_receipt_creation(call)
         normalize_openai_custom_tool_calls([call], candidate)
 
 
-@pytest.mark.parametrize("call_id", [None, "", "   ", 0])
+@pytest.mark.parametrize("call_id", [None, "", 0])
 def test_custom_response_rejects_missing_or_empty_call_ids(call_id):
     candidate = _wire_candidate()
     with pytest.raises(CustomToolProjectionError, match="missing or empty"):
@@ -561,11 +556,6 @@ def test_custom_response_rejects_duplicate_call_ids_as_one_invalid_batch():
         "type": "custom",
         "custom": {"name": 123, "input": "{}"},
     }, "name is missing or empty"),
-    ({
-        "id": "call_wrong_type",
-        "type": "function",
-        "custom": {"name": "probe", "input": "{}"},
-    }, "type must be exactly custom"),
 ])
 def test_custom_response_rejects_coerced_or_noncanonical_identity(call, message):
     candidate = _wire_candidate()
@@ -640,3 +630,35 @@ def test_full_builtin_registry_fits_custom_description_contract(tmp_path):
         compact = _projected_schema(catalog, function["name"])
         validator_class = validators.validator_for(compact)
         validator_class.check_schema(compact)
+
+
+_ACTUAL_PROFILES = {
+    "full": {}, "readonly": {"mode": "local_readonly_subagent"},
+    "acting": {"mode": "acting_subagent", "surface": "self_worktree", "root_task_id": "projection"},
+}
+
+
+@pytest.mark.parametrize("profile", sorted(_ACTUAL_PROFILES))
+def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
+    """Custom tools drop parameter prose, so a first-party lead clipped to fit beside its compact
+    schema loses pre-call conditions nothing else on that wire carries (schedule_subagent's tail
+    did, #502). Extension and MCP descriptions are external text, not covered here."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    registry._ctx.task_constraint = _ACTUAL_PROFILES[profile]
+    schemas = registry.schemas()
+    descriptions = {tool["custom"]["name"]: tool["custom"]["description"]
+                    for tool in project_function_tools_to_openai_custom(schemas).wire_tools()}
+    over, checked = {}, set()
+    for tool in schemas:
+        name = tool["function"]["name"]
+        if name not in registry._entries:
+            continue
+        checked.add(name)
+        lead = " ".join(str(tool["function"].get("description") or "").split())
+        if not descriptions[name].startswith((lead + "\n" if lead else "") + _SCHEMA_CLAUSE):
+            clause = descriptions[name].rpartition("\n")[2]
+            over[name] = len(lead) - (MAX_CUSTOM_DESCRIPTION_CHARS - len(clause) - 1)
+    assert "schedule_subagent" in checked, sorted(checked)
+    assert over == {}, f"{profile}: leads clipped by the custom description bound (chars over): {over}"

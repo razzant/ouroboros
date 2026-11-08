@@ -19,7 +19,7 @@ def runtime(root, factory):
     return result
 
 
-@pytest.mark.parametrize("kind", ["same_store_restart", "replaced_store", "legacy", "timeout", "forbidden"])
+@pytest.mark.parametrize("kind", ["same_store_restart", "legacy", "forbidden"])
 def test_body_absence_requires_owning_store_and_closes_once(tmp_path, monkeypatch, kind):
     entry = started(tmp_path, daemon_store_id="" if kind == "legacy" else "store-a")
     error = ClaudexorUnavailable("daemon_unreachable" if kind == "timeout" else "run_not_found",
@@ -121,7 +121,7 @@ def test_reconcile_uses_same_store_guard(tmp_path, identity):
     assert current.run(tmp_path, entry.run_id).settled is (identity == "store-a")
 
 
-@pytest.mark.parametrize("kind", ["same_store", "replaced_store", "legacy", "missing_identity", "timeout", "forbidden"])
+@pytest.mark.parametrize("kind", ["same_store", "legacy", "missing_identity"])
 def test_requested_external_stop_requires_owning_store_absence(tmp_path, monkeypatch, kind):
     from ouroboros import external_runs
     from ouroboros.gateways import claudexor

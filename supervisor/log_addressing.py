@@ -157,8 +157,8 @@ def address_task_event(running: Any, drive_root: Any, payload: Dict[str, Any]) -
     _handle_task_heartbeat), otherwise preserve an explicit chat_id already on
     the event (0 is a real session — the Skill Review panel — never "missing";
     a None value is absence, not an address), otherwise stamp the task row's
-    own chat_id, otherwise the DirectActivityRegistry entry (in-process
-    direct/ephemeral turns are never in RUNNING). Addressing is HONEST — an
+    own chat_id, otherwise the DirectActivityRegistry entry (an in-process
+    turn may have no RUNNING row). Addressing is HONEST — an
     A2A synthetic id is stamped as the row says it; the broadcast choke
     (push_log) suppresses A2A frames, so machine traffic never reaches the
     browser while the durable row keeps the true audience.
@@ -286,6 +286,13 @@ class TurnEventQueue:
     def task_id(self) -> str:
         return self._task_id
 
+    def end_turn(self) -> None:
+        """The task's body ended in this process: drop its hooks (the namer's closure holds the whole task,
+        the frame observer its execution). The small immutable late-event address stays, so a late row of
+        this task is still stamped with its own chat and lineage."""
+        self._on_first_work = None
+        self._on_frame = None
+
     def stamp_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Stamp one of this task's own task-scoped payloads in place (lineage, chat, lane fact)."""
         for key, value in self._lineage.items():
@@ -373,19 +380,29 @@ class TurnEventQueue:
 _TASK_ENDPOINTS: Dict[str, TurnEventQueue] = {}
 
 
-def task_event_queue(inner: Any, task: Dict[str, Any]) -> TurnEventQueue:
-    """The pooled task's per-task endpoint, created at task start and handed down.
+def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
+                     on_first_work: Optional[Callable[[], None]] = None,
+                     on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> TurnEventQueue:
+    """The task's per-task endpoint, created at task start and handed down.
 
     Captures the task's chat (``None`` when it carries none; 0 is the hidden
-    partition and is kept) and its lineage by value, stamps only the telemetry
-    lane, and registers itself for the process's log sink."""
+    partition and is kept) and its lineage by value, and registers itself for the
+    process's log sink. A pooled task stamps only the telemetry lane; a conversation
+    turn the lane carries (``execution_owner.lane == "conversation"``) stamps every
+    task-scoped event plus the turn-only extras — its origin label, the Stop marker
+    on work frames — with the carrier's hooks (the namer on first work, the frame
+    observer that feeds its receipt and phases), as the in-process lane once did."""
     chat_id = task.get("chat_id")
     try:
         chat_id = None if chat_id in (None, "") else int(chat_id)
     except (TypeError, ValueError):
         chat_id = None
-    endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, lineage=task,
-                              direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=True)
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    conversation = owner.get("lane") == "conversation"
+    endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, initiator if conversation else "",
+                              on_first_work if conversation else None, lineage=task,
+                              direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=not conversation,
+                              on_frame=on_frame if conversation else None)
     if endpoint.task_id:
         _TASK_ENDPOINTS[endpoint.task_id] = endpoint
     return endpoint

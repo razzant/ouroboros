@@ -13,6 +13,7 @@ import pytest
 
 from ouroboros import chat_chain as cc, dialogue_store as ds
 from tests._dialogue import import_all
+from tests._source_scan import parse
 from ouroboros.utils import jsonl_generation_signature
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -103,8 +104,8 @@ def test_moved_helpers_are_defined_once_in_chat_chain():
 
 
 def test_consolidator_keeps_no_chain_helper_after_the_writer_is_retired():
-    """The old dialogue writer bound three chain helpers; it is gone, so consolidator binds none
-    of them (no facade left behind) and reaches the chain only as the ``chat_chain`` module."""
+    """Neither the retired writer nor its removed knowledge reader leaves chain
+    bindings in the remaining Light transport."""
     import ouroboros.consolidator as cons
 
     imported = [node for node in _module_ast("ouroboros/consolidator.py").body
@@ -114,7 +115,7 @@ def test_consolidator_keeps_no_chain_helper_after_the_writer_is_retired():
                  "retain_memory_source", "_ordered_chat_generation_paths"):
         assert not hasattr(cons, name)
         assert hasattr(cc, name) == (name == "retain_memory_source")
-    assert cons.chat_chain is cc
+    assert not hasattr(cons, "chat_chain")
 
 
 def _retain_bindings(relative: str) -> tuple[list[int], list[int], int]:
@@ -134,7 +135,7 @@ def test_retain_memory_source_is_reached_as_a_module_attribute_everywhere():
     """A module-level ``from ... import retain_memory_source`` freezes a copy that a
     substitution of ``chat_chain.retain_memory_source`` would miss; function-level
     imports and attribute calls read the module at call time."""
-    top, bare, attribute = _retain_bindings("ouroboros/consolidator.py")
+    top, bare, attribute = _retain_bindings("ouroboros/memory_fallback.py")
     assert top == [] and bare == [] and attribute > 0
     importers = []
     for path in sorted((REPO / "ouroboros").rglob("*.py")):
@@ -142,7 +143,7 @@ def test_retain_memory_source_is_reached_as_a_module_attribute_everywhere():
         text = path.read_text(encoding="utf-8")
         if relative == "ouroboros/chat_chain.py" or "retain_memory_source" not in text:
             continue
-        tree = ast.parse(text)
+        tree = parse(text)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and any(a.name == "retain_memory_source" for a in node.names):
                 importers.append((relative, node.module))

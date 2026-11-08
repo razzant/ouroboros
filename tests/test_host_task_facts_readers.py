@@ -124,16 +124,16 @@ def test_a_later_terminal_row_wins_the_status_while_the_preliminary_row_stays_as
     assert render_row_text(facts) in history and PRELIMINARY in history  # the earlier row, unchanged
 
 
-def test_the_failed_work_draft_reads_the_rows_finality_and_its_stamp(tmp_path):
-    from ouroboros.memory_fallback import build_writer_input
-    from ouroboros.memory_sealing import failed_work_units
+def test_the_off_draft_keeps_the_rows_finality_in_its_stamp(tmp_path):
+    from ouroboros.memory_fallback import build_writer_input, FallbackUnit
 
     _activated(tmp_path)
     _produce(tmp_path, "t-fail", "failed", "provider_unavailable")
     store = ChronicleStore(tmp_path)
-    [unit] = failed_work_units(tmp_path, store)
+    segment = next(mi.open_segments(tmp_path, store, "1"))
+    unit = FallbackUnit("page", "1", "open:1", segment=segment)
     prompt = build_writer_input(tmp_path, store, unit, budget_tokens=None).prompt
-    assert "host facts for t-fail: status=failed; " in prompt and PRELIMINARY in prompt
+    assert PRELIMINARY in prompt
     stamp = prompt[prompt.index("## Tasks of these rows"):]
     assert "- task t-fail: status failed; " in stamp
     assert f"{PRELIMINARY}; stamp from host_task_facts" in stamp

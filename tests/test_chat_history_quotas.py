@@ -126,7 +126,8 @@ def test_task_bound_skill_review_refs_fold_before_human_quota(tmp_path):
         row for row in zero_window["messages"]
         if row.get("system_type") == "skill_review"
     ]
-    assert zero_window["window"] == {"complete": False, "truncated_by": ["quota"]}
+    # The bounds; Main's window also names its newest arrival (tests/test_project_unread_latest_arrival.py).
+    assert zero_window["window"].items() >= {"complete": False, "truncated_by": ["quota"]}.items()
 
 
 def test_task_bound_skill_review_owners_use_the_progress_window(tmp_path):
@@ -616,7 +617,8 @@ def test_window_metadata_reports_quota_truncation(tmp_path):
     )
     (logs / "progress.jsonl").write_text("", encoding="utf-8")
     payload = _run_full(tmp_path, {"n_human": "3"})
-    assert payload["window"] == {"complete": False, "truncated_by": ["quota"]}
+    # The bounds; Main's window also names its newest arrival (tests/test_project_unread_latest_arrival.py).
+    assert payload["window"].items() >= {"complete": False, "truncated_by": ["quota"]}.items()
     assert len(payload["messages"]) == 3  # the slice actually applied
 
 

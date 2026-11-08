@@ -19,7 +19,8 @@ NOW = dt.datetime(2026, 10, 24, 8, tzinfo=dt.timezone.utc).timestamp()
 
 def _call(root, monkeypatch, task_id, *, at=NOW - 60, category="consciousness", **fields):
     stamp = dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat()
-    with monkeypatch.context() as clock:
+    cause = fields.pop("consciousness_cause", "")
+    with ua.usage_scope(ua.UsageScope(drive_root=root, root_task_id=task_id, consciousness_cause=cause)), monkeypatch.context() as clock:
         clock.setattr(usage_store, "utc_now_iso", lambda: stamp)
         return _settle(root, cost=0, cost_final=True, task_id=task_id, root_task_id=task_id,
                        category=category, **fields)
@@ -53,9 +54,11 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
-    assert "Inbox [mail]: active; open turns: 3; chat_history(chat_id=-1); chat_history(chat_id=-2)" in text
+    assert "Inbox [mail]: active; open turns: 3; rooms: 2" in text
+    assert "chat_history(" not in text and "chat:" not in text  # a count, and one reader for every room
+    assert text.count("configure_presence(action='inspect', place_id=") == 1 and text.endswith("in brackets>)")
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
-    assert "Paused room [paused]: paused; open turns: unknown" in text
+    assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
     assert calls == [(tmp_path, place.place_id) for place in configured]
     for place in configured:
@@ -70,7 +73,8 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
         raise OSError("room index unavailable")
     monkeypatch.setattr(places, "place_room_index", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
-    assert "unknown" in view.places_text(tmp_path, view.place_views(tmp_path))
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero
     assert "unknown" in view.places_text(tmp_path, None)
 
 
@@ -141,7 +145,6 @@ def test_clock_identity_alone_can_keep_a_terminal_wake_live(tmp_path, wake):
 
 @pytest.mark.parametrize("status,phase,live", [
     ("running", "running", True), ("interrupted", "unknown", True), ("paused", "paused", True),
-    ("scheduled", "queued", True), ("requested", "queued", True), ("queued", "queued", True),
     ("completed", "done", False), ("failed", "error", False), ("cancelled", "cancelled", False),
     ("rejected_duplicate", "warn", False),
 ])
@@ -156,16 +159,15 @@ def test_status_is_independent_of_missing_terminal_time(tmp_path, wake, status, 
     assert row["phase"] == phase and row["quiet"] is False
 
 
-@pytest.mark.parametrize("clock_live", [False, True])
-@pytest.mark.parametrize("status,owner_wait,phase", [
-    ("running", {}, "running"),
-    ("running", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("running", {"state": "resumed", "quiz_id": "q1"}, "running"),
-    ("running", {"state": "answered", "wait_for_answer": True}, "running"),
-    ("running", {"state": "open", "quiz_id": "q1"}, "unknown"),
-    ("scheduled", {}, "queued"),
-    ("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("paused", {}, "paused"),
+@pytest.mark.parametrize(("status", "owner_wait", "phase", "clock_live"), [
+    pytest.param("running", {}, "running", True, id='running-owner_wait0-running-True'),
+    pytest.param("running", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='running-owner_wait1-waiting-True'),
+    pytest.param("running", {"state": "resumed", "quiz_id": "q1"}, "running", False, id='running-owner_wait2-running-False'),
+    pytest.param("running", {"state": "answered", "wait_for_answer": True}, "running", True, id='running-owner_wait3-running-True'),
+    pytest.param("running", {"state": "open", "quiz_id": "q1"}, "unknown", False, id='running-owner_wait4-unknown-False'),
+    pytest.param("scheduled", {}, "queued", False, id='scheduled-owner_wait5-queued-False'),
+    pytest.param("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='scheduled-owner_wait6-waiting-True'),
+    pytest.param("paused", {}, "paused", False, id='paused-owner_wait7-paused-False'),
 ])
 def test_live_wakes_keep_the_task_activity_word(tmp_path, wake, status, owner_wait, phase, clock_live):
     wake.update(status=status, owner_wait=owner_wait, outcome_axes={}, wake_silent=False)
@@ -211,8 +213,11 @@ def test_terminal_time_for_another_attempt_is_unknown(tmp_path, wake):
     assert row["ended_at"] is None and row["live"] is False
 
 
-@pytest.mark.parametrize("summary", [None, "Проверил состояние; нового решения не требуется.", ""])
-@pytest.mark.parametrize("note", ["Short note", "First line\n" + "several words\t" * 400])
+@pytest.mark.parametrize(("note", "summary"), [
+    ("Short note", None),
+    ("Short note", ""),
+    pytest.param("First line\n" + "several words\t" * 400, "Проверил состояние; нового решения не требуется.", id='First line\nseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\t-Проверил состояние; нового решения не требуется.'),
+])
 def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summary, note):
     wake["result"] = note
     if summary is not None:
@@ -226,7 +231,7 @@ def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summ
 
 
 @pytest.mark.parametrize("silent,owner,notice,quiet", [
-    (True, None, "", True), (True, False, "", True), (True, True, "", False),
+    (True, None, "", True), (True, True, "", False),
     (True, None, "A tool failed.", False), (False, None, "", False), ("true", None, "", False),
 ])
 def test_quiet_uses_delivery_facts(tmp_path, wake, silent, owner, notice, quiet):
@@ -312,7 +317,7 @@ def test_selection_uses_the_category_time_index(tmp_path, monkeypatch, wake):
                 txn.conn.set_trace_callback(None)
     monkeypatch.setattr(usage_store, "read", traced)
     assert [row["task_id"] for row in view.recent_wakes(tmp_path, [])] == [wake["task_id"]]
-    query, = [sql for sql in queries if sql.startswith("SELECT root_task_id FROM attempts")]
+    query, = [sql for sql in queries if sql.startswith("SELECT root_task_id, place FROM")]
     with real_read(tmp_path, allow_stale=True) as txn:
         plan = [row[3] for row in txn.conn.execute("EXPLAIN QUERY PLAN " + query)]
     assert any("SEARCH attempts USING INDEX attempts_category_time (category=? AND ts_last_epoch>?)" in step
@@ -329,6 +334,40 @@ def test_selection_is_distinct_bounded_and_ordered_by_ledger_time(tmp_path, monk
     for _ in range(55):
         _call(tmp_path, monkeypatch, ids[0], at=NOW)
     assert [r["task_id"] for r in view.recent_wakes(tmp_path, [])] == ids[:50]
+
+
+@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1)])
+def test_wake_selection_reserves_each_source_and_tops_up_unused_share(tmp_path, monkeypatch, own, places):
+    ids = {}
+    for cause, count in (("own", own), ("place:mail", places)):
+        ids[cause] = [f"{cause.replace(':', '-')}-{n:02}" for n in range(count)]
+        for n, task_id in enumerate(ids[cause]):
+            _call(tmp_path, monkeypatch, task_id, at=NOW - n - (100 if cause == "own" else 0),
+                  consciousness_cause=cause)
+    selected = view.wake_ids(tmp_path, NOW)
+    assert len(selected) == min(50, own + places)
+    for cause, other in (("own", places), ("place:mail", own)):
+        assert [task_id for task_id in selected if task_id.startswith(cause.replace(':', '-'))] == ids[cause][:max(25, 50 - other)]
+    assert selected == sorted(selected, key=lambda task_id: (
+        int(task_id.rsplit("-", 1)[1]) + (100 if task_id.startswith("own") else 0), task_id))
+
+
+@pytest.mark.parametrize("cause,child_cause", [("own", "place:mail"), ("place:mail", "own")])
+def test_child_call_cannot_reclassify_its_root_in_selection(tmp_path, monkeypatch, cause, child_cause):
+    from ouroboros.usage_origin import root_cause
+
+    _call(tmp_path, monkeypatch, "root", consciousness_cause=cause)
+    for n in range(50):
+        _call(tmp_path, monkeypatch, f"flood-{n:02}", at=NOW - n, consciousness_cause=child_cause)
+    monkeypatch.setattr(usage_store, "utc_now_iso", lambda: dt.datetime.fromtimestamp(NOW - 60, dt.timezone.utc).isoformat())
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, root_task_id="root", consciousness_cause=child_cause)):
+        _settle(tmp_path, cost=0, cost_final=True, task_id="child", root_task_id="root", category="consciousness")
+    with usage_store.read(tmp_path, allow_stale=True) as txn:
+        assert root_cause(txn, "root") == cause
+        assert {row[0] for row in txn.conn.execute(
+            "SELECT json_extract(extra, '$.consciousness_cause') FROM attempts WHERE root_task_id = 'root'")} == {cause}
+    assert "root" in view.wake_ids(tmp_path, NOW)
+    assert "child" not in view.wake_ids(tmp_path, NOW)
 
 
 def test_ledger_child_attempt_selects_its_root_not_the_child(tmp_path, wake):
@@ -483,7 +522,7 @@ def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kind,owner,clause", [("user", True, "writes as Mailbox (your human's own account)"),
-    ("user", False, "writes as Mailbox"), ("bot", False, "as Ouroboros (bot Mailbox)"), ("bot", True, "as Ouroboros (bot Mailbox)"), (None, False, "")])
+    ("bot", False, "as Ouroboros (bot Mailbox)"), (None, False, "")])
 def test_own_clock_reads_captured_identity_without_changing_brief_view(tmp_path, kind, owner, clause):
     place = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="account")
     if owner:

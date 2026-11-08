@@ -8,6 +8,11 @@ import { allowanceText, chipView, createConsciousnessStatus, wakeRows } from '..
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
+test.beforeEach((t) => {
+    const started = performance.now();
+    t.mock.method(Date, 'now', () => new Date(2026, 9, 25, 14, 0).getTime() + performance.now() - started);
+});
+
 const at = (hours, minutes) => new Date(2026, 9, 25, hours, minutes).toISOString();
 const answer = (bg = {}, extra = {}) => ({
     bg_consciousness_enabled: true,
@@ -18,11 +23,24 @@ const answer = (bg = {}, extra = {}) => ({
 });
 const shapeOf = (view) => `${view.mark.shape}/${view.mark.hue}`;
 
+test('a due chip names its appointment with a still mark; a held wake has a pause mark and no time', () => {
+    const due = chipView(answer({ status: 'due', detail: 'Due since 13:10; the wake-up has not started yet.',
+        next_wake_at: at(13, 50), appointment_at: at(13, 10) }));
+    assert.deepEqual([due.word, shapeOf(due)], ['since 13:10', 'still/ink']);
+    assert.equal(due.said, 'Consciousness: Due since 13:10; the wake-up has not started yet.');
+    const legacy = chipView(answer({ status: 'due', next_wake_at: at(13, 50) }));
+    assert.deepEqual([legacy.word, shapeOf(legacy)], ['due', 'still/ink']);
+    const held = chipView(answer({ status: 'wake_paused', live_wake_task_id: 'own', live_wake_held: true,
+        detail: 'Wake-up own is paused or waiting in the queue.', next_wake_at: at(13, 50), appointment_at: at(13, 10) }));
+    assert.deepEqual([held.word, shapeOf(held)], ['', 'pause/ink']);
+    assert.doesNotMatch(held.said, /13:|14:|since/);
+});
+
 test('the chip says the next wake, Off or Evolving, beside one mark of the status-mark family', () => {
     const sleeping = chipView(answer());
     assert.deepEqual([sleeping.word, shapeOf(sleeping), sleeping.off], ['14:20', 'none/ink', false]);
     assert.equal(sleeping.said, 'Consciousness: Sleeping until 14:20.', 'the host\'s own sentence (consciousness_view.py)');
-    const thinking = chipView(answer({ status: 'thinking', detail: 'Wake-up wake-1 is running as a Main turn.', live_wake_task_id: 'wake-1' }));
+    const thinking = chipView(answer({ status: 'thinking', detail: 'Wake-up wake-1 is running.', live_wake_task_id: 'wake-1' }));
     assert.deepEqual([thinking.word, shapeOf(thinking)], ['', 'moving/ink'], 'awake: the moving dots, never a breathing glyph');
     const off = chipView(answer({ status: 'disabled', detail: 'Background consciousness is off.' }, { bg_consciousness_enabled: false }));
     assert.deepEqual([off.word, shapeOf(off), off.off], ['Off', 'none/ink', true]);
@@ -36,10 +54,14 @@ test('the chip says the next wake, Off or Evolving, beside one mark of the statu
 });
 
 test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an unconfirmed state a ring', () => {
-    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5),
+    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5), next_wake_at: at(15, 5),
         detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check at 15:05.' }));
     assert.deepEqual([spent.word, shapeOf(spent)], ['15:05', 'dot/owner'], 'stopped by its spending limit: the time it frees');
     assert.match(spent.said, /next check at 15:05\. · waits for you$/);
+    const expired = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(13, 5),
+        detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05.' }));
+    assert.deepEqual([expired.word, shapeOf(expired)], ['', 'dot/owner']);
+    assert.equal(expired.said, 'Consciousness: Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05. · waits for you');
     assert.equal(shapeOf(chipView(answer({ status: 'waiting_for_first_conversation' }))), 'dot/owner');
     // A campaign that waits for the owner is the owner's move too, whatever consciousness does.
     const campaign = answer({ status: 'disabled' }, { bg_consciousness_enabled: false, evolution_enabled: true,
@@ -49,6 +71,7 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
     for (const status of ['wake_failed', 'wake_rejected', 'stopped']) {
         const view = chipView(answer({ status }));
         assert.deepEqual([shapeOf(view), view.word], ['dot/failed', '14:20'], status);
+        assert.equal(chipView(answer({ status, next_wake_at: at(13, 20) })).word, '');
     }
     for (const status of ['wake_outcome_unknown', 'allowance_unknown']) assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
     assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink');
@@ -108,6 +131,7 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         status.update(answer());
         assert.equal(bar.children.indexOf(status.chip), 1, 'right after the room\'s title and status');
         assert.equal(status.chip.querySelector('.cx-chip-word').textContent, '14:20');
+        assert.equal(status.chip.querySelector('.cx-chip-word').hidden, false);
         assert.equal(status.chip.getAttribute('aria-label'), 'Consciousness: Sleeping until 14:20.');
 
         status.chip.click();
@@ -146,6 +170,64 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         status.destroy();
         assert.equal(bar.children.includes(status.chip), false, 'its nodes go with it');
     } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('Shade keeps three own wakes and three place wakes, with independent empty sentences on the next opening', async () => {
+    const env = installDom();
+    let status;
+    try {
+        const bar = document.createElement('div');
+        let wakes = ['focus', 'own'].flatMap((cause) => Array.from({ length: 4 }, (_, n) => ({
+            cause, summary: `${cause}-${n}`, started_at: at(13, n), phase: 'done',
+        })));
+        let coverage = 'wakes that reached a model call in the last 48 h';
+        status = createConsciousnessStatus({ bar, read: async () => normalizeConsciousness({
+            recent_wakes: wakes, recent_wakes_coverage: coverage }) });
+        status.update(answer());
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(status.shade.querySelectorAll('.cx-wakes-title').map((node) => node.textContent),
+            ['Its own wakes', 'Wakes in places']);
+        const lists = status.shade.querySelectorAll('.cx-wakes');
+        assert.deepEqual(lists.map((list) => list.getAttribute('aria-label')), ['Its own wakes', 'Wakes in places']);
+        assert.deepEqual(lists.map((list) => list.querySelectorAll('.cx-wake-text').map((node) => node.textContent)),
+            [['own-0', 'own-1', 'own-2'], ['focus-0', 'focus-1', 'focus-2']]);
+        const note = status.shade.querySelector('.cx-wakes-coverage');
+        assert.equal(note.textContent, coverage);
+        assert.deepEqual(status.shade.querySelectorAll('.cx-wakes-coverage').map((node) => node.textContent), [coverage]);
+        assert.ok(note.parentElement.children.indexOf(note) < note.parentElement.children.indexOf(lists[0]));
+        status.chip.click();
+        wakes = null;
+        coverage = 'Recent wakes could not be read: dialogue store busy.';
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(status.shade.querySelectorAll('.cx-wakes-coverage').map((node) => node.textContent), [coverage]);
+        assert.ok(status.shade.querySelectorAll('.cx-wakes-note').every((node) => node.hidden));
+        assert.ok(status.shade.querySelector('.cx-wakes-coverage').hasAttribute('data-i18n-authored'));  // the host's words
+        status.chip.click();
+        coverage = '';
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const fallback = status.shade.querySelector('.cx-wakes-coverage');
+        assert.equal(fallback.textContent, 'Recent wakes could not be read.');
+        assert.equal(fallback.hasAttribute('data-i18n-authored'), false);  // the client's own sentence is translated
+        coverage = 'wakes that reached a model call in the last 48 h';
+        for (const cause of ['focus', 'own', 'none']) {
+            status.chip.click();
+            wakes = cause === 'none' ? [] : [{ cause, summary: cause, phase: 'running' }];
+            status.chip.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            assert.equal(note.textContent, coverage, 'a readable response clears the failure');
+            const notes = status.shade.querySelectorAll('.cx-wakes-note');
+            assert.equal(notes[0].hidden, cause === 'own');
+            assert.equal(notes[1].hidden, cause === 'focus');
+            if (cause !== 'own') assert.equal(notes[0].textContent, 'No own wakes with a recorded model call in the last 48 h.');
+            if (cause !== 'focus') assert.equal(notes[1].textContent, 'No wakes in places in the last 48 h.');
+        }
+    } finally {
+        status?.destroy();
         restoreDom(env.prior);
     }
 });

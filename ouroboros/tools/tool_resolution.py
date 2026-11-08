@@ -820,6 +820,9 @@ def _resolve_python_predispatch(
                 "⚠️ PYTHON_INTERPRETER_UNAVAILABLE: Ouroboros could not prove "
                 "the target interpreter for this launch surface "
                 f"({python_resolution.error_reason}). The process was not started."
+                + (" The skill's Python packages need their own environment: toggle_skill enabled=true re-points "
+                   "or reinstalls it; an explicitly named interpreter runs as written."
+                   if python_resolution.error_reason == "skill_env_python_unavailable" else "")
             ),
             meta={"reason": python_resolution.error_reason},
         )

@@ -11,15 +11,15 @@
  * and Scratchpad belong to this installation, not to a release: they are separate measures in the characters their
  * journals record, and a date with no record is a gap, never zero.
  */
-import { allowanceLabel, formatUsd2 } from './utils.js';
-import { apiFetch } from './api_client.js';
+import { formatUsd2 } from './utils.js';
+import { apiFetch, readState } from './api_client.js';
+import { readStateSnapshot } from './state_snapshots.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { chooseAndSendReview } from './review_command.js';
 import { tr } from './i18n.js';
-import { bindScrollFade } from './scroll_fade.js';
 import { showToast } from './toast.js';
 import { statusMarkHtml } from './status_mark.js';
-import { whenLabel } from './storage_format.js';
+import { formatBytes, number, whenLabel } from './storage_format.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 
 // ---- The campaign and consciousness --------------------------------------------------------------------------------
@@ -59,6 +59,7 @@ function shortStatusLabel(status, fallback = 'off') {
     if (status === 'budget_blocked' || status === 'budget_stopped') return 'budget';
     if (status === 'error_backoff') return 'retrying';
     if (status === 'stopped') return 'stopped';
+    if (status === 'starting') return 'starting';  // the boot window (consciousness_view): no alarm, a neutral tone
     return fallback;
 }
 
@@ -97,12 +98,11 @@ export function campaignView(runtime, now = new Date()) {
             : 'Improvement cycles run only during a campaign.') : String(evolution.detail || ''),
         lines: [campaign.objective ? `Objective: ${campaign.objective}` : '', campaign.progress_notes ? `Progress: ${campaign.progress_notes}` : '',
             facts.join(' · ')].filter(Boolean),
+        // One pointer to the Consciousness tab, which says the rest (its detail and allowance are that tab's facts):
+        // the neutral tone unless it works right now, or something there needs the owner or failed.
         consciousness: {
-            text: `Consciousness ${shortStatusLabel(bgStatus, 'off')}${wake ? ` until ${wake.replace(/^today at /, '')}` : ''}`,
-            tone: runtimeTone(bgStatus), detail: String(consciousness.detail || ''),
-            // Spent of the daily budget, "≥" while rows are unmetered, a degraded ledger said; absent numbers stay absent.
-            allowance: allowanceLabel(consciousness.spent_24h_usd, consciousness.daily_usd,
-                consciousness.unknown_unmetered, consciousness.integrity_degraded),
+            text: `Consciousness: ${shortStatusLabel(bgStatus, 'off')}${wake ? ` until ${wake.replace(/^today at /, '')}` : ''}`,
+            tone: runtimeTone(bgStatus) !== 'ok' || ['thinking', 'running'].includes(bgStatus) ? runtimeTone(bgStatus) : 'neutral',
         },
     };
 }
@@ -137,12 +137,11 @@ export async function promptCampaignObjective({ dialogImpl = openConfirmDialog, 
 // ---- The history: measures, words and numbers ----------------------------------------------------------------------
 
 const DAY = 86_400_000;
-const KIB = 1024;
 const MINUS = '−';
 export const MEASURES = [
     { key: 'code_lines', label: 'Code', what: 'Python lines in every tracked .py file, tests included' },
-    { key: 'bible_bytes', label: 'Constitution', what: 'BIBLE.md in KiB (1 KiB = 1024 bytes)' },
-    { key: 'system_bytes', label: 'System prompt', what: 'prompts/SYSTEM.md in KiB (1 KiB = 1024 bytes)' },
+    { key: 'bible_bytes', label: 'Constitution', what: 'the size of BIBLE.md' },
+    { key: 'system_bytes', label: 'System prompt', what: 'the size of prompts/SYSTEM.md' },
     { key: 'identity', label: 'Identity', install: true,
         what: 'characters of identity.md, as its journal records them at every write' },
     { key: 'scratchpad', label: 'Scratchpad', install: true,
@@ -162,19 +161,14 @@ const dayMonth = formatter({ day: 'numeric', month: 'short' });
 const monthShort = formatter({ month: 'short' });
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 
-function compact(n) {
-    const trim = (text) => text.replace(/\.0+$|(\.\d*?)0+$/, '$1');
-    if (n >= 1e6) return `${trim((n / 1e6).toFixed(2))}M`;
-    if (n >= 1e3) return `${trim((n / 1e3).toFixed(n >= 1e5 ? 0 : 1))}K`;
-    return String(Math.round(n));
-}
+const SIZES = new Set(['bible_bytes', 'system_bytes']);
 
-/** One measure's value as words: compact on the chart, exact in a tooltip; unknown is said, never zero. */
-export function formatMeasure(key, value, { exact = false } = {}) {
+/** One measure's value as words, in the Storage tab's formats (storage_format.js): counts grouped, sizes in decimal
+ *  units; unknown is said, never zero. */
+export function formatMeasure(key, value) {
     if (value === null || value === undefined) return MEASURE[key]?.install ? 'Not recorded' : 'Not measured';
-    if (key === 'code_lines') return `${exact ? value.toLocaleString('en-US') : compact(value)} lines`;
-    if (key === 'bible_bytes' || key === 'system_bytes') return `${(value / KIB).toFixed(1)} KiB`;
-    return exact ? `${value.toLocaleString('en-US')} characters` : `${compact(value)} chars`;
+    if (SIZES.has(key)) return formatBytes(value);
+    return `${number(value)} ${key === 'code_lines' ? 'lines' : 'characters'}`;
 }
 
 /** The change from one value to the next in the measure's own unit (lines as a percentage). */
@@ -187,11 +181,9 @@ export function formatDelta(key, value, previous) {
         if (Math.abs(pct) < 0.05) return 'no change';
         return `${sign(pct)}${Math.abs(pct) < 10 ? Math.abs(pct).toFixed(1) : Math.round(Math.abs(pct))}%`;
     }
-    if (key === 'bible_bytes' || key === 'system_bytes') {
-        const d = (value - previous) / KIB;
-        return Math.abs(d) < 0.05 ? 'no change' : `${sign(d)}${Math.abs(d).toFixed(1)} KiB`;
-    }
-    return value === previous ? 'no change' : `${sign(value - previous)}${compact(Math.abs(value - previous))} chars`;
+    if (value === previous) return 'no change';
+    const d = value - previous;
+    return `${sign(d)}${SIZES.has(key) ? formatBytes(Math.abs(d)) : `${number(Math.abs(d))} characters`}`;
 }
 
 /** The versions of one `/api/evolution-data` answer with their numbers and the installation's journals (pure). */
@@ -360,7 +352,8 @@ export function chartSvg(model, view, width) {
         }
     }
     const right = width - endPad + 8;
-    const tickText = (v) => (key === 'bible_bytes' || key === 'system_bytes' ? `${Math.round(v / KIB)} KiB` : compact(v));
+    const tickText = (v) => (SIZES.has(key) ? formatBytes(v) : number(v));
+    const axisWidth = Math.max(AXIS_LABELS, ...[0.5, 1].map((f) => tickText(max * f).length * 6.6 + 6));
     const grid = [0.5, 1].map((f) => `<line class="evo-ch-grid" x1="0" x2="${right}" y1="${y(max * f)}" y2="${y(max * f)}"/>`
         + (known.length ? `<text x="0" y="${y(max * f) - 5}">${esc(tickText(max * f))}</text>` : '')).join('');
     const rug = model.versions.map((version) => {
@@ -370,7 +363,7 @@ export function chartSvg(model, view, width) {
     const labels = axisLabels(axis).map((label) => `${label.tick ? `<line class="evo-ch-grid" x1="${fixed(label.x)}" x2="${fixed(label.x)}" y1="${base}" y2="${base + 4}"/>` : ''}`
         + `<text x="${fixed(label.anchor === 'start' ? label.x + 4 : label.x)}" y="${base + 30}" text-anchor="${label.anchor}">${esc(label.text)}</text>`).join('');
     const gapMarks = axis.gap ? `<path class="evo-ch-break" d="M${axis.gap[0] + 8},${base + 5}l6,-10M${axis.gap[1] - 14},${base + 5}l6,-10"/>`
-        + (axis.gap[1] - axis.gap[0] >= 50 ? `<text x="${(axis.gap[0] + axis.gap[1]) / 2}" y="${base + 30}" text-anchor="middle">no tags</text>` : '') : '';
+        + (axis.gap[1] - axis.gap[0] >= 50 ? `<text x="${(axis.gap[0] + axis.gap[1]) / 2}" y="${base + 30}" text-anchor="middle">no releases</text>` : '') : '';
     const pins = model.milestones.filter((version) => version.values[key] !== null)
         .map((version) => ({ version, x: axis.x(version.t), y: y(version.values[key]) }));
     const chosen = view.version;
@@ -378,11 +371,14 @@ export function chartSvg(model, view, width) {
     const end = known.at(-1);
     const endText = end ? formatMeasure(key, end.v) : '';
     // What labels may not cover: the axis values, the value at the line's end, then the chosen version's own label.
-    const taken = [0.5, 1].map((f) => ({ x0: 0, x1: AXIS_LABELS, y0: y(max * f) - 18, y1: y(max * f) }));
+    const taken = [0.5, 1].map((f) => ({ x0: 0, x1: axisWidth, y0: y(max * f) - 18, y1: y(max * f) }));
     if (end) taken.push({ x0: axis.x(end.t) + 6, x1: axis.x(end.t) + 14 + endText.length * 6.9, y0: y(end.v) - 9, y1: y(end.v) + 6 });
-    const chosenText = selected ? chosenLabel(versionWords(chosen), selected, width - endPad, [...runs.flat(), ...pins], taken) : '';
+    // The chart names versions by their numbers (the card under it says what each one is): the chosen version, and
+    // the major releases where there is room. A sliced sentence over the line said less than its number.
+    const chosenText = selected ? chosenLabel(versionNumber(chosen), selected, width - endPad, [...runs.flat(), ...pins], taken, axisWidth) : '';
     if (selected) segments.push([selected, { x: selected.x, y: base + 13 }]);
-    const named = milestoneLabels(pins.filter((pin) => pin.version !== chosen), taken, width - endPad, { segments });
+    const named = milestoneLabels(pins.filter((pin) => pin.version !== chosen && pin.version.level === 'major'), taken, width - endPad,
+        { segments, words: versionNumber });
     const svg = `${grid}<line class="evo-ch-grid" x1="0" x2="${right}" y1="${base}" y2="${base}"/>
         <path class="evo-ch-area" d="${area}"/>${bridge ? `<path class="evo-ch-bridge" d="${bridge}"/>` : ''}<path class="evo-ch-line" d="${line}"/>
         ${rug}${labels}${gapMarks}
@@ -413,12 +409,12 @@ function crosses(box, [a, b]) {
  * MAJOR, then MINOR releases, newest first within each, so the narrowest chart still names the newest changes; a wider
  * one names more. Nothing is selected or hidden by this: every version stays reachable.
  */
-export function milestoneLabels(pins, taken, right, { charWidth = 6.6, maxChars = 26, segments = [] } = {}) {
+export function milestoneLabels(pins, taken, right, { charWidth = 6.6, maxChars = 26, segments = [], words: say = versionWords } = {}) {
     const rank = (version) => (version.release?.title ? 0 : version.level === 'major' ? 1 : 2);
     const order = [...pins].sort((a, b) => rank(a.version) - rank(b.version) || b.version.t - a.version.t || b.version.i - a.version.i);
     const placed = [];
     for (const pin of order) {
-        const { title: words, authored } = versionWords(pin.version);
+        const { title: words, authored } = say(pin.version);
         const text = words.length > maxChars ? `${words.slice(0, maxChars - 1).trimEnd()}…` : words;
         const width = text.length * charWidth;
         const spot = [true, false].map((toRight) => {
@@ -433,12 +429,15 @@ export function milestoneLabels(pins, taken, right, { charWidth = 6.6, maxChars 
     return placed;
 }
 
+// A version's own number, never authored words.
+const versionNumber = (version) => ({ title: String(version?.version || ''), authored: false });
+
 // The chosen version names itself beside its dot, above every mark the label passes over and clear of the axis labels.
 const AXIS_LABELS = 48;
-function chosenLabel(said, at, right, marks, taken) {
+function chosenLabel(said, at, right, marks, taken, axisWidth = AXIS_LABELS) {
     const words = said.title;
     const toRight = at.x < right * 0.42;
-    const room = toRight ? right - at.x - 10 : at.x - 10 - AXIS_LABELS;
+    const room = toRight ? right - at.x - 10 : at.x - 10 - axisWidth;
     const max = Math.max(8, Math.floor(room / 6.9));
     const text = words.length > max ? `${words.slice(0, max - 1).trimEnd()}…` : words;
     const x0 = toRight ? at.x + 10 : at.x - 10 - text.length * 6.9, x1 = x0 + text.length * 6.9;
@@ -454,7 +453,7 @@ export function tipHtml(model, version, key) {
     const previous = version.i > 0 ? model.versions[version.i - 1].values[key] : null;
     const change = formatDelta(key, value, previous);
     const words = versionWords(version);
-    return `<b>${esc(formatMeasure(key, value, { exact: true }))}${change && change !== 'no change' ? ` <span class="evo-tip-delta">${esc(change)}</span>` : ''}</b>`
+    return `<b>${esc(formatMeasure(key, value))}${change && change !== 'no change' ? ` <span class="evo-tip-delta">${esc(change)}</span>` : ''}</b>`
         + `<span>${esc(version.version)} · ${esc(fullDate(version.t))}</span><span class="evo-tip-head"${authoredIf(words)}>${esc(words.title)}</span>`;
 }
 
@@ -480,14 +479,14 @@ export function detailHtml(model, version, full) {
     const back = model.versions[version.i - 1], next = model.versions[version.i + 1];
     return `<div class="evo-detail-top"><span class="evo-detail-version">${esc(version.version)}</span>`
         + `<span class="evo-meta">${esc(fullDate(version.t))} · ${esc(words.kind)}${version.milestone ? ' · Milestone' : ''}</span>`
-        + `<span class="evo-detail-nav"><button type="button" class="evo-quiet" data-step="-1" aria-label="Previous version"${back ? '' : ' disabled'}>${ICON_BACK}</button>`
-        + `<button type="button" class="evo-quiet" data-step="1" aria-label="Next version"${next ? '' : ' disabled'}>${ICON_NEXT}</button></span></div>`
+        + `<span class="evo-detail-nav"><button type="button" class="btn btn-ghost btn-sm evo-quiet" data-step="-1" aria-label="Previous version"${back ? '' : ' disabled'}>${ICON_BACK}</button>`
+        + `<button type="button" class="btn btn-ghost btn-sm evo-quiet" data-step="1" aria-label="Next version"${next ? '' : ' disabled'}>${ICON_NEXT}</button></span></div>`
         + `<h4 class="evo-detail-title"${authoredIf(words)}>${esc(words.title)}</h4>`
         + (words.lead ? `<p class="evo-detail-lead"${AUTHORED}>${esc(words.lead)}</p>` : '')
         + (words.body ? `<p class="evo-detail-body${full ? ' is-full' : ''}" data-body${AUTHORED}>${esc(words.body)}</p>` : '')
         + `<div class="evo-facts" aria-label="Measured at this version${previous ? `, change since ${esc(previous.version)}` : ''}">${facts}</div>`
         + `<div class="evo-detail-source"><span class="evo-meta">${previous ? `Change since ${esc(previous.version)} · ` : ''}Source: ${esc(sourceLabel(version))}</span>`
-        + (words.body ? `<button type="button" class="evo-link" data-full hidden>${full ? 'Show less' : 'Show more'}</button>` : '') + '</div>';
+        + (words.body ? `<button type="button" class="evo-link ui-hit-area" data-full hidden>${full ? 'Show less' : 'Show more'}</button>` : '') + '</div>';
 }
 
 function caption(model, key) {
@@ -513,16 +512,15 @@ function element(tag, className, attrs = {}) {
  * Mount the page. `stateSnapshots` is app.js's sequencer of every `/api/state` read on the page; app.js hands each of
  * its answers (and each failed read, as null) to the returned `hydrateStateSnapshot`.
  */
-export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog = openConfirmDialog }) {
-    const page = element('div', 'settings-embedded-content', { id: 'page-evolution' });
-    const scroll = element('div', 'costs-scroll');
-    const root = element('div', 'evo-root');
+export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog = openConfirmDialog, openDashboardTab = null }) {
+    // One Dashboard tab body is the tab's root and scroller; its two objects are its cards.
+    const page = element('div', 'dashboard-body scroll-fade-y', { id: 'page-evolution' });
 
     // The campaign object: built node by node, so its controls keep identity and focus across repaints.
     const campaign = element('section', 'evo-campaign ui-card', { 'aria-label': 'Evolution campaign' });
     const main = element('div', 'evo-campaign-main');
     const head = element('div', 'evo-campaign-line');
-    const name = element('span', 'evo-campaign-name');
+    const name = element('h3', 'dashboard-card-title');
     name.textContent = 'Evolution campaign';
     const chip = element('span', 'ui-chip evo-campaign-chip', { id: 'evo-campaign-chip', 'data-tone': 'neutral' });
     chip.hidden = true;
@@ -535,16 +533,20 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     freshness.hidden = true;
     main.append(head, note, lines, freshness);
     const side = element('div', 'evo-campaign-side');
-    const mind = element('p', 'ui-status evo-consciousness', { id: 'evo-consciousness', 'data-tone': 'neutral' });
-    const mindDetail = element('p', 'evo-meta', { id: 'evo-consciousness-detail' });
-    const allowance = element('p', 'evo-meta', { id: 'evo-consciousness-allowance' });
-    side.append(mind, mindDetail, allowance);
+    // Consciousness once, as a quiet pointer to its own tab (U071): its detail and allowance are that tab's.
+    // Its name is its visible state and the › that opens the tab (M16: a label over it would hide the state).
+    const mind = element('button', 'btn btn-ghost btn-sm ui-status evo-consciousness',
+        { id: 'evo-consciousness', type: 'button', 'data-tone': 'neutral' });
+    mind.hidden = true;
+    mind.addEventListener('click', () => openDashboardTab?.('consciousness'));
+    side.append(mind);
     const actions = element('div', 'evo-campaign-actions');
     const startBtn = element('button', 'btn btn-primary', { id: 'evo-start', type: 'button' });
     startBtn.textContent = 'Start campaign…';
+    // Pause keeps its place: offered while a campaign runs (or may), present and inactive while there is nothing to
+    // pause, so a state change never moves its neighbours (DESIGN principle 6).
     const stopBtn = element('button', 'btn btn-default', { id: 'evo-stop', type: 'button' });
     stopBtn.textContent = 'Pause';
-    stopBtn.hidden = true;
     // A deep self-review beside the campaign (owner 25.10, 5A): the one reviewer picker `/review` uses.
     const reviewBtn = element('button', 'btn btn-default', { id: 'evo-review', type: 'button' });
     reviewBtn.textContent = 'Run review…';
@@ -554,7 +556,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     const story = element('section', 'evo-story ui-card', { 'aria-labelledby': 'evo-story-title' });
     const storyHead = element('div', 'evo-story-head');
     const storyWords = element('div', 'evo-story-words');
-    const storyTitle = element('h3', 'evo-title', { id: 'evo-story-title' });
+    const storyTitle = element('h3', 'dashboard-card-title', { id: 'evo-story-title' });
     storyTitle.textContent = 'How Ouroboros changed';
     const statusLine = element('p', 'evo-story-status', { 'aria-live': 'polite' });
     storyWords.append(storyTitle, statusLine);
@@ -562,20 +564,18 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     measures.hidden = true;
     MEASURES.forEach((measure, index) => {
         if (index === 3) measures.append(element('span', 'evo-measures-sep', { 'aria-hidden': 'true' }));
-        const button = element('button', 'evo-measure', { type: 'button', 'data-measure': measure.key, 'aria-pressed': String(index === 0) });
+        const button = element('button', `ui-segment evo-measure${index === 0 ? ' active' : ''}`,
+            { type: 'button', 'data-measure': measure.key, 'aria-pressed': String(index === 0) });
         if (measure.install) button.setAttribute('aria-label', `${measure.label}, this installation`);
         button.textContent = measure.label;
         measures.append(button);
     });
     storyHead.append(storyWords, measures);
-    // On a narrow card the measures scroll sideways like a tab strip, with its fade where one hides (DESIGN.md §10).
-    // They stay pressed choices of one view, not tabs: no panels, nothing to select by arrows.
-    const disposeMeasuresFade = bindScrollFade(measures, { axis: 'x' });
+    // The measures are one single choice (the shared segments): pressed choices of one view, not tabs (no panels,
+    // nothing to select by arrows). On a narrow card they wrap onto a second line, so none hides past the edge (U125).
     const body = element('div', 'evo-story-body');
     story.append(storyHead, body);
-    root.append(campaign, story);
-    scroll.append(root);
-    page.append(scroll);
+    page.append(campaign, story);
     mount.appendChild(page);
 
     const view = { key: 'code_lines', version: null, full: false };
@@ -589,10 +589,12 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     let disposed = false;
     let commandPending = false;
     // A Start the gateway queued (or may have queued) that no state answer has shown applied yet: /api/command only
-    // queues it, so the answer read right after can still say off. Pause stays offered until the campaign is seen on
-    // or a Pause is queued after it.
-    let startUnconfirmed = false;
-    let historySeq = 0, runtimeSeq = 0, pollTimer = 0;
+    // queues it, so the answer read right after can still say off. Pause stays offered until the campaign is seen on,
+    // a Pause is queued after it, or a read taken START_WINDOW_MS after the Start still shows it off: the runtime
+    // refused it (its reason is in chat), and the chip says the state again with Start offered. The time it was sent.
+    const START_WINDOW_MS = 10000;
+    let startUnconfirmed = 0;
+    let historySeq = 0, runtimeSeq = 0, pollTimer = 0, startTimer = 0;
     let resizeObserver = null;
     let painted = '';          // what the chart and the detail show: an equal answer repaints only the status line
 
@@ -605,37 +607,35 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         freshness.hidden = !(facts && runtimeError);
         freshness.textContent = facts && runtimeError
             ? `Couldn’t read the runtime state again; this is the answer from ${whenLabel(runtimeAt)}.` : '';
+        // Off offers Start; on, Pause and a new objective (the same command re-targets a running campaign in place); an
+        // unknown control both Start and Pause: the owner may need either. So does off while a Start is unconfirmed,
+        // and then the chip says the Start, never "Off" beside an offered Pause (U072); Start stays pressable, since a
+        // Start that never applies must stay retryable.
+        const starting = Boolean(facts) && startUnconfirmed > 0 && facts.enabled !== true;
+        const pausable = Boolean(facts) && (facts.enabled !== false || startUnconfirmed > 0);
         if (!facts) {
             chip.hidden = true;
             note.textContent = runtimeError ? 'The runtime state could not be read. It is read again when this tab opens.' : 'Reading the runtime state…';
-            mind.textContent = '';
-            mindDetail.textContent = '';
-            allowance.textContent = '';
-            stopBtn.hidden = true;
+            mind.hidden = true;
         } else {
             chip.hidden = false;
-            chip.textContent = facts.chip.text;
-            chip.setAttribute('data-tone', facts.chip.tone);
+            chip.textContent = starting ? 'Starting…' : facts.chip.text;
+            chip.setAttribute('data-tone', starting ? 'neutral' : facts.chip.tone);
             note.textContent = facts.note;
             for (const text of facts.lines) {
                 const line = element('p', 'evo-meta');
                 line.textContent = text;
                 lines.append(line);
             }
-            mind.textContent = facts.consciousness.text;
+            mind.hidden = false;
+            mind.textContent = `${facts.consciousness.text} ›`;
             mind.setAttribute('data-tone', facts.consciousness.tone);
-            mindDetail.textContent = facts.consciousness.detail;
-            allowance.textContent = facts.consciousness.allowance ? `Allowance (24 h): ${facts.consciousness.allowance}` : '';
-            // Off offers Start; on, Pause and a new objective (the same command re-targets a running campaign in
-            // place); an unknown control both Start and Pause: the owner may need either. So does off while a Start is
-            // unconfirmed.
             startBtn.textContent = facts.enabled === true ? 'New objective…' : 'Start campaign…';
-            stopBtn.hidden = facts.enabled === false && !startUnconfirmed;
         }
         const lightMode = Boolean(facts?.lightMode);
         // A paid start waits for a current answer: not while the state is loading or its latest read failed.
         startBtn.disabled = lightMode || commandPending || !facts || runtimeError;
-        stopBtn.disabled = commandPending;
+        stopBtn.disabled = commandPending || !pausable;
         startBtn.title = lightMode ? "Evolution campaigns need runtime mode 'advanced' or 'pro' (currently 'light')." : '';
     }
 
@@ -647,7 +647,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             runtime = answer;
             runtimeAt = new Date().toISOString();
             runtimeError = false;
-            if (campaignView(runtime).enabled === true) startUnconfirmed = false;
+            if (campaignView(runtime).enabled === true || Date.now() - startUnconfirmed >= START_WINDOW_MS) startUnconfirmed = 0;
         } else runtimeError = true;
         paintCampaign();
     }
@@ -658,18 +658,19 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         // back null, and that read's answer reaches hydrateStateSnapshot from app.js.
         const request = stateSnapshots ? await stateSnapshots.gate(true) : ++runtimeSeq;
         if (!request) return;
+        if (stateSnapshots) {
+            await readStateSnapshot(stateSnapshots, request);
+            return;
+        }
         let answer = null;
         try {
-            const response = await apiFetch('/api/state', { cache: 'no-store' });
-            if (!response.ok) throw new Error(`State API error ${response.status}`);
-            answer = await response.json();
+            const { response, state: body } = await readState();
+            if (!response.ok || body === undefined) throw new Error(`State API error ${response.status}`);
+            answer = body;
         } catch (error) {
             console.error('Evolution runtime state error:', error);
         }
-        if (stateSnapshots) {
-            if (answer) stateSnapshots.apply(request, answer);
-            else stateSnapshots.fail(request);
-        } else if (request === runtimeSeq) hydrateStateSnapshot(answer);
+        if (request === runtimeSeq) hydrateStateSnapshot(answer);
     }
 
     // One command at a time: Start and Pause stay disabled until the gateway answers
@@ -691,10 +692,10 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
                 const answer = await resp.json().catch(() => ({}));
                 throw new Error(answer?.error || `HTTP ${resp.status}`);
             }
-            startUnconfirmed = start;  // queued: a Start waits to be seen applied; a queued Pause supersedes it
+            startUnconfirmed = start ? Date.now() : 0;  // queued: a Start waits to be seen applied; a queued Pause supersedes it
         } catch (error) {
             // A refused command was never queued; without an answer the gateway may still have queued a Start.
-            if (start && !refused) startUnconfirmed = true;
+            if (start && !refused) startUnconfirmed = Date.now();
             showToast(`Could not send ${cmd.split(' ', 2).join(' ')}: ${error?.message || error}`, 'error');
         } finally {
             commandPending = false;
@@ -703,6 +704,12 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             if (document.activeElement === document.body && !button.disabled && !button.hidden) button.focus({ preventScroll: true });
         }
         loadRuntime();
+        // The read that ends an unapplied Start's window, if nothing reads the state again before then.
+        clearTimeout(startTimer);
+        if (startUnconfirmed) {
+            startTimer = setTimeout(loadRuntime, START_WINDOW_MS);
+            startTimer?.unref?.();
+        }
     }
     startBtn.addEventListener('click', async () => {
         if (commandPending) return;
@@ -739,7 +746,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             const reason = String(refresh.unmeasured_error || '');
             parts.push(`<span class="ui-status" data-tone="warn">${esc(`${count(refresh.unmeasured, 'version')} couldn’t be measured${reason ? `: ${reason}` : ''}`)}</span>`);
         }
-        if (historyError || refresh.state === 'failed' || partial) parts.push('<button type="button" class="evo-link" data-retry>Try again</button>');
+        if (historyError || refresh.state === 'failed' || partial) parts.push('<button type="button" class="evo-link ui-hit-area" data-retry>Try again</button>');
         return parts.join('<span class="evo-meta" aria-hidden="true">·</span>');
     }
 
@@ -756,7 +763,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
                 body.innerHTML = `<figure class="evo-chart" data-chart><svg data-svg role="img"></svg>
                     <div class="evo-chart-hit" data-hit tabindex="0" role="slider" aria-label="Versions on the time line. Arrow keys move one version; Page Up and Page Down move between milestones."></div>
                     <div class="evo-tip" data-tip hidden></div></figure>
-                    <p class="evo-meta evo-caption" data-caption></p>
+                    <details class="ui-disclosure evo-method"><summary>How this is measured</summary><p class="evo-meta evo-caption" data-caption></p></details>
                     <article class="evo-detail" data-detail aria-live="polite"></article>`;
                 wireChart();
             }
@@ -893,7 +900,14 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         const button = event.target.closest?.('[data-measure]');
         if (!button) return;
         view.key = button.dataset.measure;
-        measures.querySelectorAll('[data-measure]').forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
+        measures.querySelectorAll('[data-measure]').forEach((b) => {
+            b.setAttribute('aria-pressed', String(b === button));
+            b.classList.toggle('active', b === button);
+        });
+        // A tooltip still under the resting pointer read the previous measure's value: it goes until the pointer moves.
+        const tip = body.querySelector('[data-tip]');
+        if (tip) tip.hidden = true;
+        body.querySelector('[data-svg] .evo-ch-cross')?.remove();
         draw();
     });
 
@@ -949,8 +963,8 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             historySeq += 1;
             runtimeSeq += 1;
             clearTimeout(pollTimer);
+            clearTimeout(startTimer);
             resizeObserver?.disconnect();
-            disposeMeasuresFade();
             unsubscribeOpen();
             window.removeEventListener('ouro:page-shown', onPageShown);
             window.removeEventListener('ouro:dashboard-subtab-shown', onSubtabShown);

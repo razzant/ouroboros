@@ -234,7 +234,8 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "authority_source": str(row.get("authority_source") or ""),
         # Continuation lineage and the same-tree capture identity replay too.
         **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
-        **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion") if key in row},
+        **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion",
+                                                  "input_files") if key in row},  # the selected inputs' source map
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
         "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
@@ -248,6 +249,8 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         # retry re-POSTs, so the replayed STARTED row keeps the same basis.
         "max_seconds": int(row.get("max_seconds") or 0) if str(row.get("max_seconds") or "").lstrip("-").isdigit() else 0,
         "requested_at": str(row.get("ts") or ""),  # preserve an unbound start's original window
+        # An explicit review continuation's start records the instant its window closes (``review_continuation``).
+        **({"generation_end_at": str(row["generation_end_at"])} if row.get("generation_end_at") else {}),
         "max_seconds_basis": str(row.get("max_seconds_basis") or ""),
         "work_order_source_request": (
             copy.deepcopy(row.get("work_order_source_request"))

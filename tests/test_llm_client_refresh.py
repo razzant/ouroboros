@@ -25,6 +25,12 @@ class TestLlmClientRefresh(unittest.TestCase):
     def setUp(self):
         _FakeOpenAI.created.clear()
 
+    def test_construction_does_not_read_credentials(self):
+        from ouroboros.llm import LLMClient
+
+        with patch("ouroboros.llm.runtime_setting", side_effect=AssertionError("credential read")):
+            LLMClient()
+
     def test_runtime_client_refreshes_when_env_key_changes(self):
         from ouroboros.llm import LLMClient
 

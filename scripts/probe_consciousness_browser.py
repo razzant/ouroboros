@@ -46,7 +46,7 @@ def probe(output):
                             if (telegram) { document.documentElement.dataset.host = 'telegram'; window.Telegram = { WebApp: { platform: 'ios' } }; }
                             document.head.innerHTML = ['ui', 'style', 'settings', 'cards', 'consciousness'].map(file =>
                                 `<link rel="stylesheet" href="/web/${file}.css">`).join('') +
-                                '<style>body{margin:0;display:block}#main-mount{height:100dvh}#main-mount[hidden],#mount[hidden]{display:none}#mount{height:100dvh;padding:16px;box-sizing:border-box}.costs-scroll{height:calc(100dvh - 32px);overflow:auto}</style>';
+                                '<style>body{margin:0;display:block}#main-mount{height:100dvh}#main-mount[hidden],#mount[hidden]{display:none}#mount{height:100dvh;padding:16px;box-sizing:border-box}.dashboard-body{height:calc(100dvh - 32px);overflow:auto}</style>';
                             document.body.innerHTML = '<main id="mount" class="dashboard-shell"></main><main id="main-mount" hidden></main>';
                         }""", {"telegram": telegram, "width": width})
                         page.add_script_tag(url=origin + "/web/marked.min.js")
@@ -154,7 +154,7 @@ def probe(output):
                         page.locator('[data-wake="w-summary"] summary').click()
                         page.wait_for_function("document.querySelector('[data-wake=\"w-summary\"] .consciousness-wake-note').textContent.includes('New detail on refresh.')")
                         page.locator('[data-wake="214a31b6"] summary').click()
-                        page.locator('[data-wake="214a31b6"] [data-cx-open-task]').click()
+                        page.locator('[data-wake="214a31b6"] [data-open-task]').click()
                         landed_card = page.locator('#main-mount .chat-live-card[data-task-id="214a31b6"].is-quote-target')
                         landed_card.wait_for(state='visible')
                         landing = landed_card.evaluate("""el => {
@@ -185,10 +185,14 @@ def probe(output):
                             await controller.refresh();
                         }""")
                         assert page.locator('[data-cx-wakes] [data-wake]').count() > 0
-                        assert page.locator('[data-cx-wakes] [role="status"][data-tone="warn"][data-i18n-authored]').inner_text() == 'Recent wakes could not be read: storage is busy.'
-                        for unavailable, words in [(None, 'This server does not report its recent wakes yet.'), ([], 'No wakes in the last 48 h.')]:
+                        warning = page.locator('[data-cx-wakes] [role="status"][data-tone="warn"][data-i18n-authored]')
+                        assert warning.count() == 1 and warning.inner_text() == 'Recent wakes could not be read: storage is busy.'
+                        for unavailable, sentences in [(None, ['This server does not report its recent wakes yet.']),
+                                                       ([], ['No own wakes with a recorded model call in the last 48 h.',
+                                                             'No wakes in places in the last 48 h.'])]:
                             page.evaluate("async wakes => { snapshot.recentWakes = wakes; snapshot.coverage = ''; await controller.refresh(); }", unavailable)
-                            assert words in page.locator('[data-cx-wakes]').inner_text()
+                            for words in sentences:
+                                assert words in page.locator('[data-cx-wakes]').inner_text()
                         page.evaluate("""async () => {
                             snapshot.recentWakes = [{ ...latestWakes.find(row => row.taskId === '214a31b6'), note: '~~~js\\nanswer();\\n~~~' }];
                             await controller.refresh();

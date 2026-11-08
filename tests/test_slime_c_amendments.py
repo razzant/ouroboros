@@ -98,7 +98,6 @@ class TestLiveFinalAnswerDelivery:
             observed["sealed_final"] = kwargs.get("sealed_final")
             return None
 
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", hanging_post_task)
 
         # type=evolution → the blocking post-task branch (same class as the
@@ -136,7 +135,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "dedupe1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -199,7 +197,6 @@ class TestLiveFinalAnswerDelivery:
             "task_id": "proact1", "parent_task_id": "", "root_task_id": "",
         }
         pending_events = [proactive]
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "proact1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -296,7 +293,6 @@ class TestLiveFinalAnswerDelivery:
                 raise RuntimeError("manager gone")
 
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "fallback1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -316,7 +312,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "plain1", "type": "task", "chat_id": 1, "text": "hi"}
@@ -422,7 +417,6 @@ class TestSealedFinalPackage:
         import ouroboros.agent_task_pipeline as atp
 
         observed = {}
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(
             atp, "_run_post_task_processing_async",
             lambda *a, **kw: observed.update(sealed=kw.get("sealed_final")),

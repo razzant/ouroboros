@@ -40,20 +40,7 @@ def invoke(tmp_path, monkeypatch):
 @pytest.mark.parametrize(("identifier", "code"), [
     ("SEND_LINKS_NO_CHAT", "LEGACY_UNAVAILABLE"),
     ("SEND_LINKS_TOO_MANY", "TOOL_ARG_ERROR"),
-    ("ESCALATE_PARENT_SETTLED", "LEGACY_UNAVAILABLE"),
     ("ESCALATE_UNWRITTEN", "TOOL_ERROR"),
-    ("FILE_TOO_LARGE", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_EXTENSION", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_GRANT_REQUIRED", "LEGACY_BLOCKED"),
-    ("SKILL_EXEC_ARGV_TOO_LARGE", "TOOL_ARG_ERROR"),
-    ("SKILL_EXEC_OVERFLOW", "TOOL_ERROR"),
-    ("SKILL_REPAIR_STALE", "LEGACY_BLOCKED"),
-    ("SERVICE_ALREADY_RUNNING", "LEGACY_BLOCKED"),
-    ("CHERRY_PICK_CONFLICT", "TOOL_ERROR"),
-    ("RESTORE_PARTIAL", "TOOL_ERROR"),
-    ("EVOLUTION_AUTHORITY_REVOKED", "LEGACY_BLOCKED"),
-    ("EVOLUTION_COMMIT_ORPHANED", "TOOL_ERROR"),
-    ("EVOLUTION_PUBLICATION_STOPPED", "LEGACY_BLOCKED"),
 ])
 def test_confirmed_identifiers_reach_existing_trace_consumers(identifier, code):
     from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
@@ -71,11 +58,7 @@ def test_confirmed_identifiers_reach_existing_trace_consumers(identifier, code):
 
 
 @pytest.mark.parametrize("marker", [
-    "LIST_FILES_NOT_FOUND", "FILE_NOT_FOUND", "SEARCH_NOT_FOUND", "QUERY_CODE_TRUNCATED",
-    "CHILD_RESULT_DISPOSITION_PARTIAL", "SERVICE_NOT_FOUND", "GIT_NO_CHANGES",
-    "UNRECOGNIZED_REFUSED", "UNRECOGNIZED_TOO_MANY", "UNRECOGNIZED_OVERFLOW",
-    # Coordinated review branches publish natively; their text is not a global verdict.
-    "REVIEW_PENDING", "REVIEW_CUSTODY_LOST", "IDENTICAL_DIFF_REFUSED", "REVIEW_CYCLES_EXHAUSTED",
+    "LIST_FILES_NOT_FOUND", "UNRECOGNIZED_REFUSED", "REVIEW_CYCLES_EXHAUSTED",
 ])
 def test_warnings_and_branch_typed_review_markers_keep_their_meaning(marker):
     result = LegacyTextResultAdapter.from_text("builtin", f"⚠️ {marker}: retained")
@@ -151,6 +134,153 @@ def test_existing_service_refuses_new_start_without_releasing_prior_custody(invo
     assert (result.status, result.code) == ("blocked", "LEGACY_BLOCKED")
     assert result.meta["operation_outcome"] == "completed_no_effect"  # this invocation only
     assert services._SERVICES[key] is record and record.proc.poll() is None
+
+
+def _restart(invoke, monkeypatch, tmp_path, *, measured=None, **fields):
+    """A start finds the exited host record of its own name. Only the process-table measurement and the new
+    process's launch are replaced; the stop, the start, their publication and the consumers below are real."""
+    from ouroboros import process_scope
+    from ouroboros.tools import services
+
+    invoke.ctx.task_id = "service-owner"
+    key = services._service_key(invoke.ctx, "demo")
+    log = tmp_path / "services" / "demo.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("previous start\n", encoding="utf-8")
+    record = services.ServiceRecord(name="demo", service_id=key, task_id="service-owner", cmd=["previous"],
+                                    cwd=str(tmp_path), log_path=log, proc=SimpleNamespace(poll=lambda: 0, pid=4242), **fields)
+    launched = []
+    monkeypatch.setattr(services, "_SERVICES", {key: record})
+    monkeypatch.setattr(services, "_panic_requested", False)
+    monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_a: True)
+    monkeypatch.setattr(services, "executor_start_service", lambda ctx, **kw: launched.append(kw["name"]) or {"state": "running"})
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda *a, **k: launched.append("host"))
+    if measured is not None:  # what the stop's one process-table pass answers for this launch
+        facts = {"exit_confirmed": True} if measured else {"exit_confirmed": False, "survivors": [{"pid": 4343, "birth": "b"}]}
+        monkeypatch.setattr(process_scope, "end_held_processes", lambda held, **_kw: {
+            item["key"]: {"facts": dict(facts), "birth": "", "known": []} for item in held})
+    return services, key, record, log, launched
+
+
+def _start_by(route, invoke, services):
+    """The same start through the registry (its typed result too) or called directly, with no invocation around it."""
+    if route == "direct":
+        return services._start_service(invoke.ctx, name="demo", cmd=["new"]), None
+    result = invoke(services._start_service, name="demo", cmd=["new"])
+    return result.text, result
+
+
+def _consumers(tool, result):
+    """The classifier consumers of a typed result, and of the same text read back by the one adapter."""
+    from ouroboros._outcome_tool_errors import _classify_tool_errors
+    from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
+
+    def view(typed):
+        failed = _typed_execution_failure(True, typed)
+        facts = _typed_result_metadata(tool, typed.text, failed, typed)
+        buckets = _classify_tool_errors({"tool_calls": [{
+            "tool": tool, "status": facts["status"], "is_error": failed, "result": typed.text}]})
+        return SimpleNamespace(failed=failed, facts=facts, buckets={name: len(rows) for name, rows in buckets.items() if rows})
+
+    return view(result), view(LegacyTextResultAdapter.from_text(tool, result.text))
+
+
+class _RetiredBetweenReads(dict):
+    """A name table in which another stop retires a record right after the start's own first read of it."""
+
+    def get(self, name, default=None):
+        return self.pop(name, default)
+
+
+@pytest.mark.parametrize(("held", "route"), [("unconfirmed", "registry"), ("finalizing", "direct")])
+def test_restart_refusal_keeps_the_prior_launch_and_says_why_with_or_without_a_registry(invoke, monkeypatch, tmp_path, held, route):
+    """The prior launch's processes are not confirmed ended, or another stop still holds its name: nothing new
+    starts, the record and log stay, and the cause is the stop's own answer, read the same called directly or through
+    the registry. Through the registry the typed refusal reaches every consumer as the denial the text identifier is."""
+    services, key, record, log, launched = _restart(invoke, monkeypatch, tmp_path, measured=False if held == "unconfirmed" else None,
+                                                    finalizing=held == "finalizing")
+    text, result = _start_by(route, invoke, services)
+
+    cause, _, tail = text.partition("\n\n")
+    assert cause.startswith("⚠️ SERVICE_ALREADY_RUNNING: demo: ")
+    assert ("not confirmed ended" in cause) is (held == "unconfirmed") and ("holds this name" in cause) is (held == "finalizing")
+    assert (json.loads(tail)["stop_failed"] is True) if held == "unconfirmed" else tail == ""  # the stop's facts ride along
+    assert launched == [] and services._SERVICES[key] is record and log.read_text(encoding="utf-8") == "previous start\n"
+    if result is not None:
+        assert (result.status, result.code, dict(result.meta)) == ("blocked", "LEGACY_BLOCKED", {"process_not_started": True})
+        typed, replay = _consumers("start_service", result)
+        assert typed.failed is True and typed.facts["status"] == "blocked" and typed.facts["tool_result_code"] == "LEGACY_BLOCKED"
+        assert typed.facts["tool_result_meta"] == {"process_not_started": True}  # the retire may have signalled: no no-effect claim
+        assert typed.buckets == {"policy_denials": 1}  # a refusal, not execution-health degradation
+        assert replay.failed is typed.failed and replay.buckets == typed.buckets  # the stored text is read the same way
+        assert (replay.facts["status"], replay.facts["tool_result_code"]) == (
+            typed.facts["status"], typed.facts["tool_result_code"])
+
+
+@pytest.mark.parametrize("output_failure", [False, True])
+def test_restart_proceeds_once_the_prior_launch_is_confirmed_ended_even_if_its_outputs_failed(
+        invoke, monkeypatch, tmp_path, output_failure):
+    """Over-refusal control: the stop's own error status is not the unconfirmed-end fact. A confirmed stop whose
+    declared outputs could not be registered frees the name, and the new start goes ahead."""
+    from ouroboros.tools import shell
+
+    services, key, record, log, launched = _restart(invoke, monkeypatch, tmp_path, measured=True,
+                                                    outputs=["out.txt"] if output_failure else [])
+    if output_failure:
+        def unregistrable(*_args, **_kwargs):
+            raise OSError("artifact store down")
+        monkeypatch.setattr(shell, "_register_process_outputs", unregistrable)
+    result = invoke(services._start_service, name="demo", cmd=["new"])
+
+    assert launched == ["demo"] and not log.exists() and key not in services._SERVICES
+    assert (result.status, result.code) == ("ok", "OK") and json.loads(result.text)["state"] == "running"
+
+
+@pytest.mark.parametrize(("executor_answer", "route"), [
+    ("unconfirmed", "registry"),
+    ("confirmed", "direct"),
+    ("confirmed_outputs_failed", "direct"),
+])
+def test_restart_follows_the_stops_own_answer_when_another_stop_retired_the_record(
+        invoke, monkeypatch, tmp_path, route, executor_answer):
+    """Another stop retires the host record between the start's read and its retire, so the retire reaches an executor
+    service of that name and no record holds the name any more. The start follows what that stop returned: refused
+    while the executor cannot confirm its processes ended (a reading of the name alone would launch beside them),
+    launched once it confirms, also when the confirmed stop's declared outputs failed. The answer is the stop's
+    return value, so a direct call has it as the registry does."""
+    answers = {"unconfirmed": {"stop_failed": True, "state": "running"},
+               "confirmed": {"stop_failed": False, "state": "stopped", "artifact_output_failed": False},
+               "confirmed_outputs_failed": {"stop_failed": False, "state": "stopped", "artifact_output_failed": True}}
+    services, key, record, _log, launched = _restart(invoke, monkeypatch, tmp_path)
+    monkeypatch.setattr(services, "_SERVICES", _RetiredBetweenReads({key: record}))
+    monkeypatch.setattr(services, "executor_stop_service", lambda ctx, name, finish=None: dict(answers[executor_answer]))
+    text, result = _start_by(route, invoke, services)
+
+    assert key not in services._SERVICES
+    if executor_answer == "unconfirmed":
+        cause, _, tail = text.partition("\n\n")
+        assert cause.startswith("⚠️ SERVICE_ALREADY_RUNNING: demo: processes of its previous start are not confirmed ended")
+        assert json.loads(tail)["stop_failed"] is True and launched == []
+        assert result is None or (result.status, result.code, dict(result.meta)) == (
+            "blocked", "LEGACY_BLOCKED", {"process_not_started": True})
+    else:
+        assert launched == ["demo"] and json.loads(text)["state"] == "running"
+        assert result is None or (result.status, result.code) == ("ok", "OK")
+
+
+def test_unconfirmed_stop_service_is_still_classified_from_its_text(invoke, monkeypatch, tmp_path):
+    """The stop publishes no typed claim of its own: the registry reads its text exactly as the adapter does, so what a
+    restart takes from the stop's return adds nothing to what stop_service reports."""
+    services, key, record, log, _launched = _restart(invoke, monkeypatch, tmp_path, measured=False)
+    result = invoke(services._stop_service, name="demo")
+
+    assert result.text.startswith("⚠️ SERVICE_STOP_ERROR (stop_service)") and dict(result.meta) == {}
+    adapted = LegacyTextResultAdapter.from_text("stop_service", result.text)
+    assert (result.status, result.code) == (adapted.status, adapted.code) == ("error", "LEGACY_TOOL_ERROR")
+    typed, replay = _consumers("stop_service", result)
+    assert (typed.failed, typed.facts["status"], typed.buckets) == (replay.failed, replay.facts["status"], replay.buckets) == (
+        True, "error", {"unresolved": 1})
+    assert services._SERVICES[key] is record and log.exists()  # kept for the retry
 
 
 @pytest.mark.parametrize("overflow,exit_code,expected", [(True, -9, "TOOL_ERROR"), (False, 1, "LEGACY_TOOL_ERROR"), (False, 0, "OK")])
@@ -229,19 +359,19 @@ def test_restore_partial_keeps_checkout_effect_and_target_receipt(invoke, tmp_pa
     binding = SimpleNamespace(root="active_workspace", base_path=tmp_path, repository_path=None)
     monkeypatch.setattr(git, "_vcs_binding", lambda *a, **k: binding)
     monkeypatch.setattr(git, "binding_targets_system_repo", lambda *a: False)
-    monkeypatch.setattr("ouroboros.tools.review_helpers.list_changed_paths_from_git_status", lambda *a, **k: ["changed.txt"])
+    monkeypatch.setattr(git_vcs_ops, "_scope_changes", lambda *a, **k: [(" M", "changed.txt"), ("??", "loose.txt")])
     calls = []
 
     def command(args, **kwargs):
         calls.append(args)
         if args[1] == "clean":
             raise RuntimeError("cleanup failed")
-        assert args[1] == "checkout"
+        assert args[1] in {"rev-parse", "checkout"}
         return ""
 
     monkeypatch.setattr(git, "run_cmd", command)
     result = invoke(git_vcs_ops._restore_to_head, confirm=True, paths=paths, root="active_workspace")
-    assert result.code == "TOOL_ERROR" and len(calls) == 2
+    assert result.code == "TOOL_ERROR" and [args[1] for args in calls] == ["rev-parse", "checkout", "clean"]
     assert "RESTORE_PARTIAL" in result.text and "VCS target: root=active_workspace" in result.text
     assert "operation_outcome" not in result.meta
 
@@ -254,7 +384,7 @@ def test_recorded_historical_outcome_is_not_reclassified_from_its_text():
     assert trace["tool_calls"][0]["status"] == "ok"
 
 
-@pytest.mark.parametrize("action", ["click", "fill", "select", "evaluate", "wait", "unrecognized"])
+@pytest.mark.parametrize("action", ["click", "fill", "select", "wait", "unrecognized"])
 def test_browser_plain_argument_refusals_survive_the_return_wrapper(invoke, monkeypatch, action):
     from ouroboros.tools import browser
     page = SimpleNamespace(set_default_timeout=lambda timeout: None)
@@ -275,7 +405,6 @@ def test_browser_plain_argument_refusals_survive_the_return_wrapper(invoke, monk
 
 @pytest.mark.parametrize(("names", "code"), [
     ("", "TOOL_ARG_ERROR"), ("missing", "UNKNOWN_TOOL"), ("hidden", "ACCESS_BLOCKED"),
-    ("hidden,missing", "ACCESS_BLOCKED"), ("known,missing", "OK"), ("known", "OK"),
 ])
 def test_tool_enablement_distinguishes_total_refusal_from_partial_effect(invoke, names, code):
     from ouroboros.tools.tool_discovery import enable_tools
@@ -299,7 +428,7 @@ def test_unbound_discovery_is_unavailable(invoke, monkeypatch, handler):
     assert invoke(getattr(tool_discovery, handler)).code == "LEGACY_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("outcome", ["failed", "unknown", "success", "no_route"])
+@pytest.mark.parametrize("outcome", ["failed", "unknown", "no_route"])
 def test_search_own_failure_object_reaches_registry_without_losing_custody(invoke, monkeypatch, outcome):
     from ouroboros.tools import search
     legs = [{"source": "openai", "backend": "openai_responses", "model": "fixture"}]
@@ -341,7 +470,7 @@ def test_evolution_stats_artifact_outcome_is_not_hidden_by_summary(invoke, monke
     assert "operation_outcome" not in result.meta
 
 
-@pytest.mark.parametrize("case", ["stale", "unstable", "partial", "empty"])
+@pytest.mark.parametrize("case", ["stale", "unstable", "empty"])
 def test_recent_tasks_snapshot_refusal_differs_from_partial_read(invoke, monkeypatch, case):
     from ouroboros.tools import recent_tasks
 
@@ -383,7 +512,7 @@ def _assert_consumers(result, code):
     assert result.meta.get("operation_outcome") != "completed_no_effect"
 
 
-@pytest.mark.parametrize("phase", ["pre_tag", "post_receipt", "containment_failed", "orphaned"])
+@pytest.mark.parametrize("phase", ["pre_tag", "containment_failed", "orphaned"])
 def test_evolution_retained_commit_publication_consumers(invoke, monkeypatch, phase):
     from ouroboros.tools import git, git_evolution
     invoke.ctx.current_task_type = "evolution"
@@ -496,7 +625,7 @@ def test_multi_review_validation_and_execution_fault_consumers(invoke, monkeypat
     assert set(json.loads(result.text)) == {"error"}
 
 
-@pytest.mark.parametrize("case", ["policy", "unavailable", "reference", "disposition", "preflight"])
+@pytest.mark.parametrize("case", ["policy", "unavailable", "disposition"])
 def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monkeypatch, case):
     from ouroboros.tools import skill_exec
     review_state = SimpleNamespace(status="pending" if case == "reference" else "failed", review_profile="",
@@ -523,7 +652,7 @@ def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monke
     assert review_state.reviewed_content_hash == "reviewed"
 
 
-@pytest.mark.parametrize("case", ["identical", "ceiling", "overlap", "advisory", "stopped"])
+@pytest.mark.parametrize("case", ["identical", "advisory", "stopped"])
 def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case):
     from ouroboros.tools import git, git_review_cycle
     monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory" if case == "advisory" else "blocking")

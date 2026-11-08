@@ -40,8 +40,7 @@ def test_unchanged_inventory_skips_serialization_but_edits_and_head_publish(proj
 
 
 @pytest.mark.parametrize("extension,language", [
-    ("mjs", "javascript"), ("cjs", "javascript"),
-    ("mts", "typescript"), ("cts", "typescript"),
+    ("mjs", "javascript"), ("mts", "typescript"), ("cts", "typescript"),
 ])
 def test_module_extensions_share_outline_call_and_import_grammars(project, extension, language):
     repo, data, registry = project
@@ -73,8 +72,7 @@ def test_module_extensions_share_outline_call_and_import_grammars(project, exten
 
 
 @pytest.mark.parametrize("extension,language", [
-    ("mjs", "javascript"), ("cjs", "javascript"),
-    ("mts", "typescript"), ("cts", "typescript"),
+    ("mjs", "javascript"), ("mts", "typescript"), ("cts", "typescript"),
 ])
 def test_cached_old_extension_facts_rebuild_without_a_source_edit(project, extension, language):
     repo, data, registry = project

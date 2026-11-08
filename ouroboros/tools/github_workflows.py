@@ -4,8 +4,10 @@ Internal method owner: ``github_read`` supplies arguments, paging and bounded JS
 resolves the repository from the URL GitHub returns for the run (``gh repo view`` for a bare artifact id), so a
 log or artifact is identified by repository + id, never by name. Captured bytes stream to a file under an explicit
 byte cap (``_gh_run``'s exact branch stops the process at the cap) and are retained once, write-once by digest, in
-this task's artifact store with their sha256 and a ``read_file`` address. An artifact archive is retained as the
-archive GitHub served and is never extracted here. Read-only towards GitHub: nothing is dispatched or re-run.
+this task's canonical artifact store with their sha256 and the address its readers reach: ``artifact_store``-relative
+where the execution drive is canonical, the absolute file across a fork (``_retain``). An artifact archive is
+retained as the archive GitHub served and is never extracted here. Read-only towards GitHub: nothing is dispatched or
+re-run.
 """
 
 from __future__ import annotations
@@ -82,15 +84,35 @@ def _resolve_run(ctx: ToolContext, run_id: int, attempt: int, repo: str, fields:
 
 
 def _retain(ctx: ToolContext, *, source_id: str, data: bytes, extension: str) -> Dict[str, Any] | str:
-    """Retain exact bytes once in this task's artifact store (write-once by digest), or say why not."""
-    from ouroboros.artifacts import store_actor_source_bytes, task_id_for_artifacts
-    from ouroboros.tool_access import canonical_data_root
+    """Retain exact bytes once in this task's canonical artifact store (write-once by digest), or say why not.
 
+    The source ref keeps its identity (root, relative path, size, sha256). Across a fork this task's
+    ``artifact_store`` and process cwd are the execution drive's, which does not hold these bytes, so ``read``
+    names the absolute canonical file without a root: dispatch selects the root holding it, which grants no new
+    authority (``tool_resolution._root_containing_absolute_path``)."""
+    from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
+    from ouroboros.tool_access import canonical_data_root, resource_root_path
+
+    task_id = task_id_for_artifacts(ctx)
     try:
-        return store_actor_source_bytes(canonical_data_root(ctx), task_id_for_artifacts(ctx), category="tool_results",
-                                        source_id=source_id, data=data, extension=extension)
+        root = canonical_data_root(ctx)
+        ref = store_actor_source_bytes(root, task_id, category="tool_results",
+                                       source_id=source_id, data=data, extension=extension)
     except Exception as exc:  # The bytes are then not retained; the caller says so instead of naming a path.
         return f"{type(exc).__name__}: {exc}"
+    store = task_artifact_dir_path(root, task_id).resolve(strict=False)
+    if store == resource_root_path(ctx, "artifact_store"):
+        return ref
+    reader = {key: value for key, value in ref["read"]["arguments"].items() if key != "root"}
+    return {**ref, "read": {**ref["read"], "arguments": {**reader, "path": str(store / ref["path"])}}}
+
+
+def _reader(ref: Dict[str, Any]) -> Tuple[str, str]:
+    """``(file, read_file arguments)`` of a retained ref, as ``_retain`` addressed it for this task's readers."""
+    args = ref["read"]["arguments"]
+    if args.get("root"):
+        return f"{args['root']}/{args['path']}", f"root={args['root']!r}, path={args['path']!r}"
+    return args["path"], f"path={args['path']!r}"
 
 
 def _run_line(run: dict) -> str:
@@ -142,8 +164,13 @@ def get_run(read) -> str:
             listed = ", ".join(f"{_whole(item.get('databaseId'))} {_one_line(item.get('name'), 60)}" for item in jobs[:30])
             return _refuse(ctx, f"⚠️ TOOL_ARG_ERROR: job {job_id} is not a job of run {run_id} attempt {attempt_read} in "
                                 f"{owner}/{name}; its jobs: {listed or 'none listed'}.")
+        job_status = str(job.get("status") or "unknown").lower()
+        if job_status != "completed":
+            return _refuse(ctx, f"⚠️ TOOL_ERROR: job {job_id} {_one_line(job.get('name'), 80)} in run {run_id} "
+                                f"attempt {attempt_read} in {owner}/{name} is {job_status}; GitHub serves a job log "
+                                "only after that job is completed, so no log was requested.", "TOOL_ERROR")
     status = str(run.get("status") or "unknown")
-    if status != "completed":
+    if not job_id and status != "completed":
         return _refuse(ctx, f"⚠️ TOOL_ERROR: run {run_id} attempt {attempt_read} in {owner}/{name} is {status}; GitHub "
                             "serves the log of a completed run only, so no log was requested.", "TOOL_ERROR")
 
@@ -153,6 +180,9 @@ def get_run(read) -> str:
     with tempfile.TemporaryDirectory(prefix="gh-run-log-") as tmp:
         res = _gh_run(log_args, ctx, timeout=_LOG_TIMEOUT, repo=repo, capture_to=pathlib.Path(tmp) / "log.bin", max_bytes=cap)
         if not res.ok:
+            if failed_only:
+                return _refuse(ctx, f"⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output; no REST "
+                                    f"fallback was used and the failed-step log was not captured: {res.text}", "TOOL_ERROR")
             return res.text
         capture = res.capture
         data = capture.path.read_bytes()
@@ -163,10 +193,15 @@ def get_run(read) -> str:
             _run_line(run),
             f"Source: {source}; captured {capture.size} bytes exactly" + (
                 f"; the {cap}-byte cap ended the capture: the log is longer and this is its first {capture.size} bytes"
-                if capture.truncated else "")]
+                if capture.truncated else ""),
+            "Format: gh CLI plain-text stdout; selection: "
+            + ("failed steps only (--log-failed)" if failed_only else "full run/job log (--log)")
+            + "; retained bytes are exact (the bounded preview decodes UTF-8 with replacement and normalizes CRLF)."]
     payload = {"item": item, "complete": not capture.truncated, "next_cursor": "",
                "capture": {"bytes": capture.size, "sha256": capture.sha256, "truncated": capture.truncated,
-                           "source": source, "run_id": run_id, "attempt": attempt_read, "job_id": job_id or None}}
+                           "source": source, "format": "plain_text_stdout", "failed_only": failed_only,
+                           "run_id": run_id, "attempt": attempt_read, "job_id": job_id or None,
+                           "job_status": (str(job.get("status") or "unknown").lower() if job else None)}}
     if capture.truncated:
         read.omitted.append(f"log exceeds max_bytes={cap}; retained only its first {capture.size} bytes")
     if not data:
@@ -179,9 +214,9 @@ def get_run(read) -> str:
         head[2] += f", sha256 {capture.sha256}"
         head.append(f"Retained: NOT retained ({ref}); the lines below are this call's only copy.")
     else:
-        head.append(f"Retained: artifact_store/{ref['path']} ({ref['size']} bytes, sha256 {ref['sha256']}); "
-                    f"read_file(root=\"artifact_store\", path={ref['path']!r}, start_line=1) pages the text view "
-                    "(it folds CRLF; the retained bytes keep it).")
+        where, reader = _reader(ref)
+        head.append(f"Retained: {where} ({ref['size']} bytes, sha256 {ref['sha256']}); "
+                    f"read_file({reader}, start_line=1) pages the text view (it folds CRLF; the retained bytes keep it).")
     payload["capture"]["retained"] = ref if isinstance(ref, dict) else None
     lines = data.decode("utf-8", errors="replace").splitlines()
     counts = f"Lines: {len(lines)}; showing the last {{shown}} (each clipped to {_LINE_CLIP} chars)."
@@ -246,7 +281,7 @@ def list_artifacts(read) -> str:
     if isinstance(ref, str):
         return _refuse(ctx, f"⚠️ TOOL_ERROR: artifact page could not be retained ({ref}); no incomplete listing substitutes for it.", "TOOL_ERROR")
     payload["saved_page"] = ref
-    head.append(f"Complete captured JSON page: read_file(root='artifact_store', path={ref['path']!r}); sha256 {ref['sha256']}.")
+    head.append(f"Complete captured JSON page: read_file({_reader(ref)[1]}); sha256 {ref['sha256']}.")
     room = tool_result_limit("github_read") - _RESULT_MARGIN - sum(len(line) + 1 for line in head)
     body: List[str] = []
     for index, row in enumerate(rows):
@@ -343,7 +378,7 @@ def download(read) -> str:
     if isinstance(ref, str):
         lines.append(f"Retained: NOT retained ({ref}); the archive was discarded with this call's temporary directory.")
     else:
-        lines.append(f"Retained as the archive GitHub served, not extracted: artifact_store/{ref['path']} "
+        lines.append(f"Retained as the archive GitHub served, not extracted: {_reader(ref)[0]} "
                      f"({ref['size']} bytes, sha256 {ref['sha256']}).")
     unpacked = sum(int(member.file_size) for member in members)
     lines.append(f"Members ({len(members)}, {unpacked} bytes uncompressed; names and sizes are read from the archive "

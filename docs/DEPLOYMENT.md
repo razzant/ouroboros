@@ -3,19 +3,31 @@
 ## Roots, Ports and One Server per Data Directory
 
 Paths: `OUROBOROS_REPO_DIR` (checkout), `OUROBOROS_DATA_DIR` (memory/state/settings/logs),
-`OUROBOROS_SETTINGS_PATH`, `OUROBOROS_PID_FILE` (launcher lock),
-`OUROBOROS_PORT_FILE`; `OUROBOROS_APP_ROOT` defaults to `~/Ouroboros`. Work roots
+`OUROBOROS_SETTINGS_PATH`, `OUROBOROS_PID_FILE` (launcher lock), `OUROBOROS_PORT_FILE`.
+Checkout, data root and PID file default beneath `OUROBOROS_APP_ROOT` (`~/Ouroboros`);
+the settings and port files default beneath the data root, so an explicit DATA_DIR
+supplies their defaults too. No root is inferred from another's parent. Work roots
 (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`, `OUROBOROS_SUBAGENT_WORKTREE_ROOT`,
-`OUROBOROS_DELIVERABLES_ROOT`) prefer saved settings, then environment, then
-defaults. Compose/systemd/shell may load an env file; Ouroboros does not.
-A direct server defaults to its checkout and `~/Ouroboros/data` even with APP_ROOT:
-specify DATA_DIR (ARCHITECTURE §7).
+`OUROBOROS_DELIVERABLES_ROOT`) prefer saved settings,
+then environment, then the data root's basis (`state/state.initialized.json`):
+`<APP_ROOT>/<folder>` for data first initialized by this release or later,
+`~/Ouroboros/<folder>` for older data. An unreadable basis makes a default work root
+refuse until its key is set; nothing is moved, copied or deleted. Compose/systemd/shell
+may load an env file; Ouroboros does not. A direct server uses its checkout and
+`<APP_ROOT>/data`; while DATA_DIR is unset and `~/Ouroboros/data` holds memory (or cannot
+be examined), it exits 2 naming both choices: that data with the old
+`<APP_ROOT>/data/settings.json`, or `<APP_ROOT>/data` (ARCHITECTURE §7).
 
 `OUROBOROS_SERVER_PORT` defaults to 8765; fallback skips Host Service/local-model
-ports. Source CLI, Settings, extensions and launcher use the published port.
-Desktop CLI scrubs path overrides and uses `~/Ouroboros/data`; relocated servers
-need `--url` or `OUROBOROS_URL`.
-Keep containers' published port free.
+ports. Source CLI, desktop CLI, Settings, extensions and launcher use the published
+port of the roots they resolve. Desktop `run --start` accepts a running server only when
+that data root's service binding names it (`--url` names one outright); otherwise it opens
+the app, on macOS through `open -n --env` with its resolved paths, including defaults. Keep containers'
+published port free.
+
+An older release ignores the basis: it creates new work roots under `~/Ouroboros`, and
+its direct server given only APP_ROOT keeps memory in `~/Ouroboros/data`. Set DATA_DIR
+and the three work-root keys explicitly before running one on such data.
 
 One server holds `<data>/state/server.lock` until exit, regardless of repository,
 PID file or port. A second waits briefly for Restart, then exits 2;
@@ -129,8 +141,10 @@ removing and recreating the container keeps body, packages, data, work and
 the repository itself: bootstrap refuses a mount point without a checkout and
 moves nothing. At exit 42, changed launcher helpers imported from `/app` hand off to the volume
 checkout, as at cold start; server-only changes keep the shell. A new image supplies
-the startup shell and seed for future first boots; a new Python, system package or browser build still needs a new image, and
-a venv created by another Python is refused untouched with the recovery step
+the startup shell and seed for future first boots. New Python or system dependencies
+require a new image; WebKit follows the image too. The managed body's Chromium pin
+can instead be downloaded into `/ms-playwright` on first use. A venv created by
+another Python is refused untouched with the recovery step
 (move it aside; the next start prepares a fresh one). Git rollback restores code
 and its lock, not data or the exact package set.
 
@@ -147,6 +161,30 @@ nonzero, so `on-failure` retries it with Docker's growing delay until the cause 
 fixed; a second managed container sharing the data volume loses the launcher lock
 and exits 0. `init: true` reaps orphans the launcher or server cannot. See
 Docker's [restart policy documentation](https://docs.docker.com/engine/containers/start-containers-automatically/).
+
+**Fault exit.** A ready server whose event-bus process ended (`bus_lost`) or whose task
+loop failed three times in a row (`loop_failed`) ends its generation through the ordinary
+teardown (saved work held, the cause in `shutdown_entry.json`) and comes back with the
+same code: under the launcher (the managed image, systemd, the desktop apps) it exits 1
+and the launcher's crash path restarts it (fuse: five crashes in 120 s); a direct server
+(the plain image, `ouroboros server`, Colab) re-executes itself in place after its own
+process census, and only a failed successor exits 1, which `restart: on-failure` then
+retries. After a fault boot the mind gets one recovery turn in Main with the facts (the held
+tasks, the roots cancelled without a saved point): one paid Main turn per fault boot, so a fault
+that returns after every boot costs one turn per cycle. No new turn starts when the server fell
+while the previous recovery turn was going (admitted in the generation that fell, unfinished); an
+earlier turn waiting with saved work does not block a later fault's turn. Neither path is a
+planned restart (exit 42) or Panic (99); the shared Claudexor
+daemon is untouched, while the kept tasks' own delegated runs end. A persistent cause cycles about every two minutes with a Main row
+each time until someone looks.
+
+**Browser sandbox.** Browser tools launch only the pinned Chromium (`ouroboros/chromium_runtime.py`)
+inside its own sandbox. The images run as root, for whom Chromium refuses its sandbox (Docker's
+default seccomp profile also restricts the user namespaces it uses), so by default Chromium is
+refused with `BROWSER_CHROMIUM_SANDBOX_UNAVAILABLE`; WebKit stays available. An administrator who accepts
+running web content without that sandbox sets `OUROBOROS_CHROMIUM_SANDBOX=off` in the container
+environment: each launch logs a warning, and browser-condition annotations on page, screenshot
+and evaluate observations disclose the opt-out. Unrecognized values are refused; boolean aliases are accepted. Nothing turns the sandbox off on its own.
 
 **Boot health.** Each recipe probes `GET /api/health` inside the container. The
 probe succeeds while the process is alive and `boot.phase` is not `failed`,
@@ -233,13 +271,24 @@ the last `X-Forwarded-For` entry that is not such a proxy:
 - A proxy on another machine must be listed in `FORWARDED_ALLOW_IPS`; otherwise
   the core treats the proxy itself as the client and does not see TLS, so the
   session cookie is not marked `Secure`.
-- Widget file-lease controls (`/api/widgets/asset-leases`) accept the page by
-  the browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host`
-  or terminate TLS. A browser that sends no Fetch Metadata is accepted only when
+- The core accepts a browser's requests and WebSocket handshakes by the
+  browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host` or
+  terminate TLS. A browser that sends no Fetch Metadata is accepted only when
   its `Origin` equals the scheme and host the core sees: pass `Host` through,
   plus `X-Forwarded-Proto` from a proxy in `FORWARDED_ALLOW_IPS`.
 - Visitors who are not loopback need `OUROBOROS_FILE_BROWSER_DEFAULT` for Files;
   without it the path-addressed `/api/files/*` operations refuse them.
+
+With or without a password, on loopback too, the core answers another site's
+page with 403 (a WebSocket closes with 4403). Pages and files any page may load
+(the interface, setup and login pages, their static files, extensions' reviewed
+widget files) pass this check; the password gate above still applies. A request with neither
+`Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,
+skills). Browsers send Fetch Metadata only to HTTPS, `localhost` and loopback
+addresses and omit `Origin` on simple GET/HEAD loads, so through a plain-HTTP
+hostname another site's page can still make the browser run GET/HEAD handlers,
+without reading the answers. A hostname that resolves to this machine (DNS
+rebinding) is not told apart either.
 
 ## Extra CA Certificates
 

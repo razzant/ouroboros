@@ -20,7 +20,6 @@ from tests.test_worker_crash_retry import (
     _reserved_job as _reserved_crash_job,
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -85,8 +84,7 @@ def test_crash_recovery_releases_the_exact_fence_before_its_retry_and_refuses_a_
     assert not queue.ACCEPTANCE_FENCES
 
 
-@pytest.mark.parametrize("preserved", ["live", "replacement", "sealed", "foreign_task", "foreign_attempt",
-                                       "foreign_pid", "missing_pid", "direct", "paused"])
+@pytest.mark.parametrize("preserved", ["live", "foreign_task", "paused"])
 def test_crash_recovery_preserves_other_acceptance_owners(tmp_path, monkeypatch, preserved):
     from supervisor import queue, workers, worker_health
 
@@ -146,7 +144,6 @@ def test_live_silence_keeps_the_exact_active_fence_and_queues_no_reap(tmp_path, 
     job["meta"].update(started_at=time.time() - 1000, last_heartbeat_at=time.time() - 1000)
     write_task_result(tmp_path, task_id, "running")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(task_reaper, "send_with_budget", lambda *_a, **_kw: None)

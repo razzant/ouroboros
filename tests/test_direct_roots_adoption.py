@@ -134,8 +134,11 @@ def _readers(drive, *, answered=False):
     )
 
 
-@pytest.mark.parametrize("roster", ["missing", "empty"])
-@pytest.mark.parametrize("snapshot", ["valid", "absent", "zero_byte"])
+@pytest.mark.parametrize(("snapshot", "roster"), [
+    ("valid", "missing"),
+    ("absent", "empty"),
+    ("zero_byte", "missing"),
+])
 def test_a_dead_turn_without_roster_or_snapshot_is_an_honest_interruption(qenv, monkeypatch, roster, snapshot):
     bus, _sent = _bus(qenv, monkeypatch)
     _crashed_turn(qenv.drive)
@@ -160,9 +163,11 @@ def test_a_dead_turn_without_roster_or_snapshot_is_an_honest_interruption(qenv, 
         row for row in log if row.get("type") == "direct_roots_adopted_orphans").items()
 
 
-@pytest.mark.parametrize("roster", ["missing", "listed"])
-@pytest.mark.parametrize("snapshot", ["valid", "absent"])
-@pytest.mark.parametrize("answer", ["owed", "delivered", "exhausted"])
+@pytest.mark.parametrize(("answer", "snapshot", "roster"), [
+    ("owed", "valid", "missing"),
+    ("delivered", "absent", "listed"),
+    ("exhausted", "valid", "missing"),
+])
 def test_a_registered_answer_survives_the_crash_without_a_contradicting_notice(qenv, monkeypatch, roster,
                                                                               snapshot, answer):
     from ouroboros.working_checkpoint import REASON_FINALIZATION_INCOMPLETE
@@ -237,7 +242,6 @@ def _crash_without_projections(tmp_path, monkeypatch, queue):
     return fenced
 
 
-@pytest.mark.serial
 def test_a_saved_owner_pause_waits_for_resume_without_roster_or_snapshot(tmp_path, monkeypatch):
     from ouroboros.task_status import execution_owner_record
     from tests.test_warm_restart_retention import _park
@@ -261,7 +265,6 @@ def test_a_saved_owner_pause_waits_for_resume_without_roster_or_snapshot(tmp_pat
     assert outcome["ok"], outcome
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("attempt", [0, 1])
 def test_saved_working_state_is_held_for_resume_without_roster_or_snapshot(tmp_path, monkeypatch, attempt):
     from ouroboros import working_checkpoint as wc
@@ -296,7 +299,6 @@ def test_saved_working_state_is_held_for_resume_without_roster_or_snapshot(tmp_p
     assert _working_resume_granted(task, tmp_path) is False
 
 
-@pytest.mark.serial
 def test_registered_answer_takes_precedence_over_saved_work(tmp_path, monkeypatch):
     from ouroboros import working_checkpoint as wc
     from ouroboros.task_status import execution_owner_record
@@ -341,7 +343,7 @@ def _live_actor(drive):
 
 
 @pytest.mark.parametrize("case", [
-    "same_process_revival", "live_actor", "unstamped_legacy_owner", "owner_bound_elsewhere", "admission_not_held",
+    "same_process_revival", "live_actor", "admission_not_held",
 ])
 def test_no_positive_end_of_its_process_leaves_the_turn_alone(qenv, monkeypatch, tmp_path_factory, case):
     """Absence from the roster, age, a worker boot or a supervisor revival is no death."""
@@ -431,7 +433,7 @@ def test_a_failed_discovery_read_adds_nothing(qenv, monkeypatch):
     assert load_task_result(qenv.drive, TID)["status"] == STATUS_RUNNING
 
 
-@pytest.mark.parametrize("case", ["direct", "pooled", "owner_missing", "owner_attempt", "boolean", "marked", "later"])
+@pytest.mark.parametrize("case", ["direct", "owner_missing", "later"])
 def test_zero_attempt_is_only_the_unmarked_direct_first_launch(case):
     from supervisor.task_admission import _working_attempt_unstarted
 

@@ -28,9 +28,11 @@ from typing import Any, Callable, Dict, List
 
 from ouroboros.finalization_timing import emit_post_answer_timing, finalization_child_scope
 from ouroboros.observability import timed_phase
+from ouroboros.context_timing import timed_section
 from ouroboros.settings_integrity import copy_task_settings_context
 from ouroboros.cost_projection import cost_projection, resolve_cost_pair
 from ouroboros.task_results import (
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     lifecycle_named,
@@ -79,11 +81,13 @@ from ouroboros.task_finalization import (
     set_terminal_host_notice,
     model_execution_projection,
     build_swarm_efficiency as _build_swarm_efficiency,  # moved (module ceiling); tests import it here
-    deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed, stamp_root_final_phase,
+    deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed,
+    stamp_root_final_phase,
     sealed_final_prompt_section, terminal_result_fields, terminal_notice_text,  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_fields  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
-from ouroboros.presence_runner import build_presence_result_event
+from ouroboros.presence_runner import PRESENCE_DELIVERY_KEYS, build_presence_result_event
+from ouroboros.task_finalization import PROJECT_ROOM_ADDRESS, presence_root_project_room
 
 log = logging.getLogger(__name__)
 
@@ -221,10 +225,8 @@ def _run_post_task_processing_async(
             # failed paid stage costs the card its facts; it is not a stage.
             _record_task_facts(env, task_snapshot, usage_snapshot, trace_snapshot, drive_logs)
             from ouroboros.llm import LLMClient
-            from ouroboros.memory import Memory
 
             llm_client = LLMClient()
-            task_memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
 
             def _promotion() -> str:
                 if is_presence_task(task_snapshot):
@@ -245,13 +247,12 @@ def _run_post_task_processing_async(
                 return failure
 
             # All late model work belongs to this one scoped worker.  This keeps
-            # the root checkpoint non-final until the fallback memory draft,
-            # consolidation and promotion have all stopped billing.
+            # the root checkpoint non-final until the fallback memory draft and
+            # promotion have both stopped billing. No stage rewrites the
+            # scratchpad: only a fold the mind accepts replaces its blocks (#918).
             stages: List[tuple[str, Callable[[], Any]]] = [
                 ("memory_fallback_draft", lambda: _run_memory_fallback_draft(
                     env, task_snapshot, llm_client, drive_logs, trace_snapshot)),
-                ("scratchpad_consolidation", lambda: _run_scratchpad_consolidation(
-                    env, task_memory, llm_client)),
                 ("promotion", _promotion),
             ]
             from ouroboros.post_task_synthesis import (
@@ -538,7 +539,9 @@ def _attach_host_mutation_projection(
     if task_id and task_id == root_task_id:
         try:
             if attribution_task_id(evidence_root, (task_id,)) == task_id:
-                record_terminal_mutation_candidates(evidence_root, task_id)
+                from ouroboros.body_candidate import find  # the root's own copy reads as the commit consumer reads it
+                copy = find(task_id) or {}
+                record_terminal_mutation_candidates(evidence_root, task_id, candidate_roots=[copy.get("path") or ""])
         except Exception:
             snapshot_failed = True
             log.debug("terminal mutation snapshot failed for %s", task_id, exc_info=True)
@@ -736,20 +739,32 @@ def _root_post_task_blocking(
         or bool(str(task.get("workspace_mode") or "").strip())
         or project_task
     )
-    if (is_presence_task(task) and task.get("_is_direct_chat")
-            and not in_worker_process() and not split_drive):
-        # The native adapter receives the durable result on return. Its request
-        # must not wait for synthesis; pooled/forked workers retain their custody.
+    if presence_request_waits(task) and not split_drive:
+        # A Host request waits on this turn's durable result (the admission's fact,
+        # whatever process carries the turn): it must not wait for synthesis.
+        # Pooled/forked work retains its custody.
         blocking = False
     return blocking
 
 
+def presence_request_waits(task: Dict[str, Any]) -> bool:
+    """Whether a Presence request is waiting on this turn's result: the Host's admission stamps
+    ``metadata.presence_request_waits`` on the turn it runs for a waiting connector call. A legacy
+    row carries no stamp and is read as the inline Presence turn it was."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if "presence_request_waits" in metadata:
+        return bool(metadata["presence_request_waits"])
+    return bool(is_presence_task(task) and task.get("_is_direct_chat") and not in_worker_process())
+
+
 def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pending_events: List[Dict[str, Any]],
-                          *, register: bool = False) -> bool:
+                          *, register: bool = False, undrained: bool = False) -> bool:
     """Owner 1A(1): the owed answer leaves on the live bus BEFORE cost reconstruction,
     review-evidence/input capture and ``_store_task_result``; ``task_done`` stays
     buffered after the store. The lane is the one whose post-task would run inline
     (``_root_post_task_blocking``) — the nonblocking lane returns its buffered copy.
+    ``undrained``: no drain will send that copy (an inline Presence turn's runner returns
+    its result, not its events), so the final it owes leaves here whatever its lane.
     ``register`` is for the lane that did not owe the frame itself (a presence root,
     whose result event is its own); every other root registered just before.
     True only when the live ``put`` actually succeeded (never a queue refusal)."""
@@ -759,7 +774,7 @@ def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pend
 
     budget_drive_root, split_drive, parent_env, parent_task = _root_post_task_lanes(env, task)
     project_scoped = bool(resolve_project_id(task))
-    if not _root_post_task_blocking(
+    if not undrained and not _root_post_task_blocking(
         task, split_drive=split_drive, project_scoped=project_scoped,
         project_task=project_scoped and not bool(task.get("_is_direct_chat")),
         parent_env=parent_env, parent_task=parent_task,
@@ -853,21 +868,11 @@ def emit_task_results(
     verification_receipts = task_verification_receipts(ctx, receipt_root, task)
     # Apply FR3 once so events and the durable result share the same flagged outcome.
     apply_receipt_absent_flag(
-        loop_outcome, llm_trace, receipt_root, str(task.get("id") or ""),
-        expected_output=str(task.get("expected_output") or ""), receipts=verification_receipts,
+        loop_outcome, llm_trace, receipt_root, str(task.get("id") or ""), receipts=verification_receipts,
     )
     outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
     loop_rounds = (loop_outcome.get("usage") or {}).get("total_rounds")
     execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
-    # Pre-store carriers state the status observed now, as the outbox stamp does (a later race may differ).
-    terminal_status = _durable_terminal_status(env, task, execution_status)
-    outcome_axes = lifecycle_named(outcome_axes, terminal_status)
-    failed_or_forced = (
-        execution_status in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED, EXECUTION_BEST_EFFORT}
-        or str(usage.get("execution_status") or usage.get("result_status") or "") in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED}
-    )
-    if ctx is not None and failed_or_forced:
-        ctx._presence_completion_accepted = False
     reason_code = str(loop_outcome.get("reason_code") or "")
     if reason_code == REASON_OWNER_REQUESTED_FINALIZATION:
         # Which stop the owner pressed rides the terminal it ended: this frame, the stored result
@@ -876,6 +881,15 @@ def emit_task_results(
 
         if stop_origin := owner_stop_origin(custody_root, str(task.get("id") or "")):
             usage["cancel_origin"] = stop_origin
+    # Pre-store carriers state the status observed now, as the outbox stamp does (a later race may differ).
+    terminal_status = _durable_terminal_status(env, task, execution_status, usage=usage, reason_code=reason_code)
+    outcome_axes = lifecycle_named(outcome_axes, terminal_status)
+    failed_or_forced = (
+        execution_status in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED, EXECUTION_BEST_EFFORT}
+        or str(usage.get("execution_status") or usage.get("result_status") or "") in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED}
+    )
+    if ctx is not None and failed_or_forced:
+        ctx._presence_completion_accepted = False
     if is_presence_task(task):
         _stamp_presence_terminal_facts(task, usage, llm_trace, ctx, reason_code)
     # A Stop marker already on the task suppresses paid synthesis, not the durable outbox or free facts.
@@ -883,6 +897,12 @@ def emit_task_results(
     if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
         task["_skip_post_task_synthesis"] = True
     _presence = is_presence_task(task)
+    # Its conversation hears the Presence result alone; a root that lives in an internal Project (an
+    # inline turn too, once turned into one) also answers there through the ordinary final below, as
+    # every root does (never a place room). A room the strict read cannot answer now (None) is owed
+    # unaddressed; the outbox replay decides it.
+    _local_room = presence_root_project_room(env.drive_root, task) if _presence and _root_outbox else 0
+    _ordinary, _room_owed = not _presence or bool(_local_room), _local_room is None
     _typed_routing_action = str(getattr(ctx, "_typed_routing_action_emitted", "") or "").strip()
     # The final frame's durable identity: the child lineage and the turn's
     # origin label (a wake-up's "consciousness"), so the chat row keeps both.
@@ -890,7 +910,7 @@ def emit_task_results(
     from ouroboros.post_task_synthesis import task_tool_metrics
     tool_metrics = task_tool_metrics(llm_trace)
     send_event = {
-        "type": "send_message", "chat_id": task["chat_id"],
+        "type": "send_message", "chat_id": _local_room or task["chat_id"],
         "text": published or "\u200b", "log_text": published or "",
         "format": "markdown",
         "task_id": task.get("id"), "ts": utc_now_iso(),
@@ -900,23 +920,33 @@ def emit_task_results(
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
     send_event = prepare_terminal_send_event(env.drive_root, task, published, usage, send_event,
-                                             presence=_presence, custody_audit=custody_audit)
+                                             presence=not (_ordinary or _room_owed), custody_audit=custody_audit)
     if notice:  # the host's words, never the model's: a System row with its own delivery identity
         from supervisor.terminal_delivery import project_terminal_result_event
 
         send_event = project_terminal_result_event(env.drive_root, task, str(task.get("id") or ""), result_text=notice,
                                                    terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE, base_event=send_event)
-    if not quiet or _presence:
+    if _room_owed:  # no chat until the replay's room rule reads: never the conversation's, maybe a place
+        send_event.pop("chat_id", None)
+        send_event.update(address=PROJECT_ROOM_ADDRESS, **{key: task[key] for key in ("parent_task_id", "root_task_id")
+                                                           if task.get(key)})
+    if _presence:
         pending_events.append(build_presence_result_event(
             task, text, ctx, terminal_origin=str(usage.get("terminal_origin") or ""),
-            retain_scheduled_handoff=failed_or_forced,
-        ) if _presence else send_event)
+            retain_scheduled_handoff=failed_or_forced, silent=usage.get("wake_silent") is True,
+        ))
+        # Its conversation's own delivery rides the local final this root owes: a recovery that
+        # finalizes from that final (``adopt_registered_answer``) keeps it, never the final's text.
+        send_event["presence_delivery"] = {key: task["metadata"][key] for key in PRESENCE_DELIVERY_KEYS
+                                           if key in task["metadata"]}
+    if _ordinary and not quiet:
+        pending_events.append(send_event)
     # Every root registers its full answer payload in the durable outbox BEFORE
     # the live send and the result write, including the nonblocking post-task
     # lane. After a crash, boot replays the owed row without scanning
     # task_results; reversing these writes could strand a terminal result with
     # no delivery. Registration and deduplication share ouroboros/task_finalization.py.
-    if _root_outbox and not _presence and not quiet:
+    if _root_outbox and (_ordinary or _room_owed) and not quiet:
         # The answer-time debt rides beside the cause it never replaces (#1583); replay
         # overlays the row's current list (gateway.history terminal truth).
         debt = list(custody_audit.get("unreconciled") or []) if isinstance(custody_audit, dict) else []
@@ -931,7 +961,9 @@ def emit_task_results(
         register_final_answer_owed(task, send_event, env_drive_root=env.drive_root)
     # Answer first (owner 1A(1)): the owner's answer is on the live bus before
     # the heavy tail below (cost ledger, evidence capture, the result store).
-    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(env, task, event_queue, pending_events, register=_presence)
+    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(
+        env, task, event_queue, pending_events, register=not _ordinary,
+        undrained=bool(_presence and _ordinary and task.get("_presence_turn")))
     # A failed live put keeps its owed/buffered answer and skips optional annotation.
     # Children and silent runs retain their existing buffered/no-chat lifecycle.
     if _live_delivered or not _root_outbox or quiet:
@@ -1142,13 +1174,19 @@ def _dispatch_root_post_task(
 
 def _durable_terminal_status(
     env: Any, task: Dict[str, Any], execution_status: str, *, existing: Dict[str, Any] | None = None,
+    usage: Dict[str, Any] | None = None, reason_code: str = "",
 ) -> str:
     """The status the durable task row settles to (ONE rule for the row and its outbox stamp).
 
     A failed execution axis — including the owner's "Stop now", whose forced
     finalization stamps ``execution_status="failed"`` under
     ``owner_requested_finalization`` — and an already-failed row both settle
-    ``failed``; everything else settles ``completed``.
+    ``failed``; everything else settles ``completed``. One exception: an inline
+    Presence turn that Stop now ended (the rail's reason with the immediate ``cancel_origin``
+    read from the still-open intent) settles ``cancelled``, also with a retained answer (a
+    ``best_effort`` axis), kept and never sent. No cancel custody can write that row (no
+    supervisor map holds the turn), so its runner's own terminal is the Stop's settlement
+    (#2012); Wrap up keeps ``failed``/``completed`` and other in-process turns keep their reading.
     """
     if existing is None:
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
@@ -1156,6 +1194,10 @@ def _durable_terminal_status(
         str(existing.get("status") or "") == STATUS_FAILED
         or execution_status in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED}
     )
+    origin = (usage or {}).get("cancel_origin")
+    if (task.get("_presence_turn") and reason_code == REASON_OWNER_REQUESTED_FINALIZATION
+            and isinstance(origin, dict) and origin.get("stop_policy") == "immediate"):
+        return STATUS_CANCELLED
     return STATUS_FAILED if failed else STATUS_COMPLETED
 
 
@@ -1190,13 +1232,13 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             # Apply FR3 before normalization so the persisted axes and ledger agree.
             apply_receipt_absent_flag(
                 loop_outcome, llm_trace, env.drive_root, str(task.get("id") or ""),
-                expected_output=str(task.get("expected_output") or ""),
                 receipts=task_verification_receipts(None, env.drive_root, task),
             )
         outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
         execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")
-        status = _durable_terminal_status(env, task, execution_status, existing=existing)
+        status = _durable_terminal_status(env, task, execution_status, existing=existing,
+                                          usage=usage, reason_code=reason_code)
         from ouroboros.task_finalization import build_completion_observations
 
         observations = build_completion_observations(
@@ -1334,7 +1376,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             parent_cognitive_route=task.get("parent_cognitive_route"),
             subagent_availability=task.get("subagent_availability"),
             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-            result=text or "", **terminal_result_fields(usage, existing=existing, title=task.get("title")),
+            result=text or "", **terminal_result_fields(usage, existing=existing, title=task.get("title"), metadata=task.get("metadata"), task_contract=task_contract),
             final_answer=str(loop_outcome.get("final_answer") or ""),
             trace_summary=trace_summary,
             trace_refs=loop_outcome.get("trace_refs") or {},
@@ -1361,14 +1403,17 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         log.warning("Task result stored; subagent history unavailable: %s", e)
 
 
+@timed_section("review_context")
 def build_review_context(env: Any) -> str:
     """Build a compact review continuity section for the main reasoning context."""
     try:
+        from ouroboros.context_sections import continuity_status_lines
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
             format_status_section,
             load_state,
             make_repo_key,
+            stale_marker_status,
         )
         from ouroboros.task_continuation import (
             list_review_continuations,
@@ -1385,8 +1430,7 @@ def build_review_context(env: Any) -> str:
         open_obs = state.get_open_obligations(repo_key=repo_key)
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
-            not state.advisory_runs
-            and not state.latest_attempt()
+            not state.latest_attempt()
             and not continuations
             and not corrupt
             and not open_obs
@@ -1399,13 +1443,15 @@ def build_review_context(env: Any) -> str:
         # the panel, tests, custody and binding, none of which this section decides.
         lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
 
-        stale_matches_repo = not state.last_stale_repo_key or state.last_stale_repo_key == repo_key
-        if state.last_stale_from_edit_ts and stale_matches_repo:
+        marker, look_unreadable = stale_marker_status(state, pathlib.Path(env.drive_root), repo_key)
+        if marker:
             lines.append(
-                f"- stale_marker={state.last_stale_from_edit_ts[:19]}: "
-                f"{_truncate_with_notice(state.last_stale_reason or 'worktree edit invalidated advisory freshness', 220)}"
+                f"- stale_marker={marker['ts'][:19]}: "
+                f"{_truncate_with_notice(marker['reason'] or 'worktree edit invalidated advisory freshness', 220)}"
             )
-            lines.append(f"  invalidated_by={state.stale_marker_attribution_note()}")
+            lines.append(f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}")
+            if look_unreadable:
+                lines.append(f"  preflight_unreadable={_truncate_with_notice(look_unreadable, 220)} (marker unverified)")
 
         if open_debts:
             lines.append("- retry_anchor=commit_readiness_debt")
@@ -1436,6 +1482,7 @@ def build_review_context(env: Any) -> str:
         else:
             lines.append("- open_obligations=0")
 
+        continuation_start = len(lines)
         if retired:
             lines.append(f"- {len(retired)} settled continuation(s) archived out of context "
                          "(durable under state/review_continuations/archived/): "
@@ -1512,12 +1559,16 @@ def build_review_context(env: Any) -> str:
                     f"additional corrupt entry/entries omitted."
                 )
 
+        from ouroboros.section_floor import HostSection
+
+        operative = '\n'.join(continuity_status_lines(state, repo_dir, (marker, look_unreadable)) + lines[continuation_start:]
+                              + ['Historical review ledger: review_status().'])
         history = format_status_section(state, repo_dir=repo_dir)
         if history:
             history = history.replace("## Advisory Pre-Review Status", "### Historical review ledger")
             lines.append("\n" + history)
 
-        return "\n".join(lines)
+        return HostSection('review_continuity', "\n".join(lines), operative)
     except Exception:
         log.debug("Failed to build review continuity context", exc_info=True)
         return ""
@@ -1532,5 +1583,4 @@ from ouroboros.post_task_synthesis import (  # noqa: E402, F401 -- intentional p
     _record_task_facts,
     _post_task_paid_interruption,
     _run_memory_fallback_draft,
-    _run_scratchpad_consolidation,
 )

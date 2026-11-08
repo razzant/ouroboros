@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import json
+import os
+
+import pytest
 
 from ouroboros import skill_loader
+from ouroboros import skill_peer_inventory as peer_inventory
 from ouroboros.skill_loader import save_enabled
 from ouroboros.skill_peer_inventory import discover_skill_peers
 
@@ -78,3 +83,66 @@ def test_explicit_empty_locations_do_not_repeat_discovery(tmp_path, monkeypatch)
     monkeypatch.setattr(peer_inventory, "_skill_location_inventory", unexpected)
     assert skill_loader.discover_skill_identity(tmp_path, "missing", locations=()) == []
     assert discover_skill_peers(tmp_path, locations=()) == ()
+
+
+def _counted(monkeypatch):
+    peer_inventory._peer_manifest_facts.cache_clear()
+    reads, parses = [], []
+    real_read, real_parse = peer_inventory._manifest_text_for_dir, peer_inventory.parse_skill_manifest_text
+    monkeypatch.setattr(peer_inventory, "_manifest_text_for_dir", lambda d: reads.append(d) or real_read(d))
+    monkeypatch.setattr(peer_inventory, "parse_skill_manifest_text", lambda t: parses.append(t) or real_parse(t))
+    return reads, parses
+
+
+def test_identical_peer_text_is_parsed_once_and_an_equal_size_edit_is_seen_at_once(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    (drive / "skills" / "alpha").mkdir(parents=True)
+    manifest = drive / "skills" / "alpha" / "SKILL.md"
+    manifest.write_text(_manifest("alpha", conflicts=("beta_1",)), encoding="utf-8")
+    save_enabled(drive, "alpha", True)
+    reads, parses = _counted(monkeypatch)
+
+    def conflicts():
+        (peer,) = discover_skill_peers(drive, repo_path="")
+        return peer.conflicts
+
+    assert conflicts() == conflicts() == ("beta_1",)
+    assert (len(reads), len(parses)) == (2, 1)  # the bytes are read every time
+    stat, raw = manifest.stat(), manifest.read_bytes()
+    manifest.write_bytes(raw.replace(b"beta_1", b"gamma1"))
+    os.utime(manifest, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert manifest.stat().st_size == stat.st_size and manifest.stat().st_mtime_ns == stat.st_mtime_ns
+    assert conflicts() == ("gamma1",)
+    assert (len(reads), len(parses)) == (3, 2)
+
+
+def test_a_failed_peer_parse_is_attempted_again_and_never_stored(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    (drive / "skills" / "broken").mkdir(parents=True)
+    manifest = drive / "skills" / "broken" / "SKILL.md"
+    manifest.write_text("---\nname: [\n---\n", encoding="utf-8")
+    _reads, parses = _counted(monkeypatch)
+    for _ in range(2):
+        (peer,) = discover_skill_peers(drive, repo_path="")
+        assert peer.manifest_error == "SkillManifestError" and not peer.enabled and not peer.conflicts
+    assert len(parses) == 2 and peer_inventory._peer_manifest_facts.cache_info().currsize == 0
+    manifest.write_text(_manifest("broken"), encoding="utf-8")
+    (peer,) = discover_skill_peers(drive, repo_path="")
+    assert not peer.manifest_error
+
+
+def test_reused_facts_are_frozen_bounded_and_read_the_host_platform_at_each_call(monkeypatch):
+    peer_inventory._peer_manifest_facts.cache_clear()
+    text = _manifest("seed").replace("type: instruction\n", "type: instruction\nos: darwin\n")
+    first = peer_inventory._peer_manifest_facts(text)
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "darwin")
+    assert first.applies_to_platform()
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "win32")
+    again = peer_inventory._peer_manifest_facts(text)
+    assert again is first and not again.applies_to_platform()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        first.conflicts = ("other",)
+    for index in range(peer_inventory.PEER_PARSE_REUSE_ENTRIES + 1):
+        peer_inventory._peer_manifest_facts(_manifest(f"peer_{index}"))
+    info = peer_inventory._peer_manifest_facts.cache_info()
+    assert info.currsize == info.maxsize == peer_inventory.PEER_PARSE_REUSE_ENTRIES

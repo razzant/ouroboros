@@ -42,11 +42,15 @@
     flex: 0 1000 auto; min-width: var(--touch-target-min); max-width: 100%; justify-content: center;
     margin-inline-start: 6px; padding-inline: 12px;
 }
-:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:has(> .rw-caret:not([hidden])) {
+:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:not([data-word="off"]):has(> .rw-caret:not([hidden])) {
     min-width: max(var(--touch-target-min), 60px);
 }
+/* A word that went keeps no room of its own (U117): the control closes round its mark and caret, so the name it gave
+   way to takes the freed width; the whole title capsule stays its target. */
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger[data-word="off"] {
     flex-shrink: 0;
+    min-width: 0;
+    padding-inline: var(--space-2);
 }
 html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
     margin-inline-start: 0;
@@ -54,6 +58,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .app-page-title {
     flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* A Project's name keeps one line at the controls' size and weight and ends in an ellipsis, so its capsule keeps the
+   bar's height (owner 2026-11-01, A·14). The whole name is the title's hover text and accessible name, and heads the
+   room's work list the title opens (.rw-title); on a phone a name still cut leaves the consciousness chip its brain
+   and mark (room_work.js fitWord). */
+.project-panel-bar .app-page-title-row > .app-page-title { font-size: var(--type-body); font-weight: 600; }
 :is(.chat-page-header, .project-panel-bar) > .app-page-title-block { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 /* The consciousness chip follows the title block and keeps its width (consciousness.css); the commands take the bar's
    far end, so the title yields first. */
@@ -62,7 +71,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row {
     box-sizing: border-box;
     display: inline-flex; align-items: center; gap: 0; max-width: 100%; min-width: 0;
-    height: var(--chrome-control-h); padding-inline: 14px 4px; border-radius: var(--pill-radius);
+    height: var(--control-h-float); padding-inline: 14px 4px; border-radius: var(--pill-radius);
     background: var(--chip-float); box-shadow: var(--elev-rest);
     -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
 }
@@ -103,6 +112,9 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"]) { color: var(--text-meta); }
 .rw-trigger[data-tone="unknown"] { color: var(--status-neutral-fg); }
 .rw-trigger[data-tone="online"] { color: var(--status-ok-fg); }
+/* A start that failed is the failure's word beside its red dot (host_starting_status.js), and the control stays
+   pressable: its list says why, with Restart beside it. */
+.rw-trigger[data-tone="failed"] { color: var(--status-error-fg); }
 .rw-trigger[data-tone="offline"] { color: var(--text-secondary); }
 /* The whole title capsule opens the work list; its state layer covers that same target. */
 .app-page-title-row:has(> .rw-trigger:not(:disabled):not([hidden])) { cursor: pointer; transition: var(--motion-tone); }
@@ -175,15 +187,15 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
    lie flat here, the budget saying its name and its amount, and an empty slot takes no room. */
 .rw-extras { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--space-2) var(--space-3); }
 .rw-extras:empty { display: none; }
-:root[data-theme] .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
+.rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3);
     width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
-    border-radius: var(--radius-md); background: transparent; box-shadow: none;
+    border-radius: var(--radius-inner); background: transparent; box-shadow: none;
     -webkit-backdrop-filter: none; backdrop-filter: none;
     color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
 }
 @media (hover: hover) {
-    :root[data-theme] .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control:hover { background: var(--rw-hover); }
+    .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control:hover { background: var(--rw-hover); }
 }
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
@@ -192,6 +204,20 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .chat-panel-statusbar:not(:has(> :not([hidden]))) { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */
+/* A Project's list starts with the room's whole name, which its one-line title may cut: a section title, wrapping as
+   far as it needs, its start edge on the rows' text edge (the list's 8px and a row's 8px). With nothing listed the
+   name is followed by the note's one quiet sentence, without the empty list's padding between them. */
+.rw-title {
+    margin: 0;
+    padding: var(--space-4) var(--space-4) var(--space-1);
+    font-size: var(--type-section);
+    font-weight: 500;
+    line-height: var(--line-title);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+.rw-title[hidden] { display: none; }
+.rw-shade[data-scope="project"] .rw-list:empty { display: none; }
 .rw-list { display: flex; flex-direction: column; gap: 2px; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px var(--space-2) 10px; }
 .rw-shade .rw-list { padding: var(--space-2) var(--space-2) var(--space-3); }
 .rw-group { padding: var(--space-3) 6px var(--space-1); font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
@@ -202,7 +228,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     column-gap: var(--rw-gap);
     align-items: center;
     padding-right: var(--space-1);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-inner);
     /* A calm arrival each time the list opens: rows settle 24ms apart (none under reduced motion). */
     animation: rw-row-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
     animation-delay: calc(var(--rw-i, 0) * 24ms);
@@ -217,7 +243,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     align-items: center;
     min-width: 0;
     padding: 9px var(--space-1) 9px var(--space-2);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     cursor: default;
     -webkit-user-select: text;
     user-select: text;
@@ -318,19 +344,18 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     line-height: 1;
     white-space: nowrap;
     cursor: pointer;
-    transform: none;
-    box-shadow: none;
-    transition: background 120ms ease, border-color 120ms ease;
+    transition: var(--motion-tone);
 }
-.rw-row .rw-pill:is(:hover, :active) { transform: none; box-shadow: none; }
+.rw-row .rw-pill:not(:disabled):active { filter: var(--press); }
 .rw-row .rw-pill:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-.rw-row .rw-pill:disabled { opacity: 0.55; cursor: default; }
-/* View question is warm: it is the owner's turn. It goes to the question and never answers it. */
-.rw-row .rw-pill-question { background: var(--status-warn-bg); border-color: var(--status-warn-border); color: var(--status-warn-fg); font-weight: 600; }
-.rw-row .rw-pill-question:hover { background: var(--status-warn-bg); border-color: var(--status-warn-fg); }
+.rw-row .rw-pill:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
+/* The list's controls are the shared capsule tones. View question is warm: it is the owner's turn (the amber tone).
+   It goes to the question and never answers it. */
+.rw-row .rw-pill-question { background: var(--tone-amber); color: var(--status-warn-fg); font-weight: 600; box-shadow: var(--elev-rest); }
+.rw-row .rw-pill-question:not(:disabled):hover { background: var(--tone-amber-hover); }
 /* Resume is neutral: safe, and not urgent. */
-.rw-row .rw-pill-resume { background: rgba(var(--neutral-rgb), 0.05); border-color: rgba(var(--neutral-rgb), 0.16); color: var(--text-primary); }
-.rw-row .rw-pill-resume:hover { background: rgba(var(--neutral-rgb), 0.1); border-color: rgba(var(--neutral-rgb), 0.26); }
+.rw-row .rw-pill-resume { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
+.rw-row .rw-pill-resume:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .rw-more {
     box-sizing: border-box;
     display: inline-flex;
@@ -340,7 +365,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     height: var(--rw-more);
     padding: 0;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
@@ -354,7 +379,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-detail {
     margin: 0 var(--space-1) var(--space-2) var(--space-2);
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(var(--neutral-rgb), 0.05);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
@@ -366,6 +391,12 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-detail-label { margin-right: 6px; color: var(--text-primary); font-weight: 600; }
 .rw-note { margin: 0; padding: var(--space-1) var(--space-4) 10px; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .rw-note[hidden] { display: none; }
+/* A failed start heads the list: its line and Restart in one row, the boot document's cause behind Details. The
+   narrow bar's own Restart row waits meanwhile, so the list offers Restart once. */
+.rw-failure { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
+.rw-failure[hidden], .rw-failure details[hidden] { display: none; }
+.rw-failure-lead { margin: 0; color: var(--status-error-fg); font-size: var(--type-body); font-weight: 500; }
+.rw-failure:not([hidden]) ~ .rw-extras > [data-chat-command="restart"] { display: none; }
 
 /* ---- Back to reading: the same baseline as ↓ "Scroll to latest message", both quiet navigation -------- */
 .rw-back {
@@ -377,23 +408,27 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     align-items: center;
     gap: 6px;
     padding: 6px var(--space-3);
-    border: 1px solid var(--surface-border);
+    border: 1px solid transparent;
     border-radius: var(--pill-radius);
-    background: var(--bg-secondary);
+    background: var(--surface-capsule);
     color: var(--text-primary);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
     font: inherit;
     font-size: var(--type-meta);
-    box-shadow: var(--chrome-navigation-shadow);
     cursor: pointer;
 }
 .rw-back[hidden] { display: none; }
-.rw-back:hover { background: var(--bg-hover); }
+.rw-back:not(:disabled):hover { background: var(--surface-capsule-hover); }
+.rw-back:not(:disabled):active { filter: var(--press); }
+.rw-back:disabled { box-shadow: none; }
 .rw-back:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .rw-back-glyph { display: inline-flex; }
 
 /* A coarse pointer (a phone) raises the list's own targets with the header family (ui.css). */
 @media (pointer: coarse) {
-    .rw-surface { --rw-more: var(--touch-target-min); --rw-pill-h: var(--chrome-control-h); }
+    .rw-surface { --rw-more: var(--touch-target-min); --rw-pill-h: var(--control-h-float); }
     .rw-back { min-height: var(--touch-target-min); }
 }
 @media (max-width: 900px) {
@@ -403,16 +438,3 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     .rw-shade, .rw-row { animation: none; }
     .rw-caret::before, .rw-chev::before { transition: none; }
 }
-
-/* ---- Airy dopamine (DESIGN.md design bible): the list's controls are the shared capsule tones ----------------------- */
-:root[data-theme] .rw-row { border-radius: var(--radius-inner); }
-:root[data-theme] .rw-row .rw-pill {
-    border-color: transparent; border-radius: var(--pill-radius);
-    transition: var(--motion-tone);
-}
-:root[data-theme] .rw-row .rw-pill:not(:disabled):active { transform: none; filter: var(--press); }
-:root[data-theme] .rw-row .rw-pill-question { background: var(--tone-amber); color: var(--status-warn-fg); box-shadow: var(--elev-rest); }
-:root[data-theme] .rw-row .rw-pill-question:not(:disabled):hover { background: var(--tone-amber-hover); }
-:root[data-theme] .rw-row .rw-pill-resume { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
-:root[data-theme] .rw-row .rw-pill-resume:not(:disabled):hover { background: var(--surface-capsule-hover); box-shadow: var(--elev-rest); }
-:root[data-theme] .rw-row .rw-pill:disabled { box-shadow: none; }

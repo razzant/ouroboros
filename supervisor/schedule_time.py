@@ -1,9 +1,11 @@
-"""Schedule time parsing helpers (cron + timezone) for the task queue."""
+"""Schedule time facts for the task queue: cron and timezone parsing, due instants, and the
+automatic pass's wake (``pass_due`` / ``note_pass``: when a pass has something new to decide)."""
 
 from __future__ import annotations
 
 import datetime
 import logging
+import os
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -106,3 +108,92 @@ def schedule_next_run(record: Dict[str, Any], *, base: Optional[datetime.datetim
     tz = timezone_for_schedule(record)
     base_dt = base.astimezone(tz) if base is not None else datetime.datetime.now(tz)
     return next_cron_time(expr, base_dt).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# The automatic pass's wake (cost law L9): when ``queue_schedules.check_scheduled_tasks`` has
+# something new to decide. The supervisor tick used to start it on every tick (31 passes a
+# minute on 01.11), each taking Q and the table's file lock and copying the table, though
+# nothing it decides on had changed. A completed pass records, per data root, what it decided
+# on (``note_pass``) and the tick asks ``pass_due`` before starting the next one:
+#
+# * a process with no completed pass passes first;
+# * a write of the table by any writer in any process wakes it — the file identity the pass
+#   recorded under its own table lock, so no write can land unseen between its decision and it;
+# * the earliest FUTURE instant the pass left wakes it: a cron or one-shot occurrence, a hold's
+#   ``retry_after``, a withdrawn or consumed row's retention cutoff;
+# * only while rows wait on facts the table does not revise — an occurrence in flight, an open
+#   or unobserved previous run, a follow-up's origin controls, a hold, a due row it could not
+#   start, a removal its settlement still blocks — the existing maintenance cadence
+#   (``BODY_MAINTENANCE_INTERVAL_SEC``) observes them, never a per-tick loop.
+#
+# An incomplete pass (contention, a stop, a raise) records nothing, so the next tick retries as
+# before. Process memory only: the table and the queue stay the authorities.
+# ---------------------------------------------------------------------------
+
+_WAKES: Dict[str, Dict[str, Any]] = {}
+
+
+def table_identity(path: Any) -> Any:
+    """The table file's identity: every committed write replaces it (new inode, size, mtime)."""
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return object()  # unreadable: never equal, so the pass runs and reports it
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def pass_due(root: Any, now: float) -> bool:
+    """Whether the automatic pass has anything new to decide for ``root`` at epoch ``now``."""
+    from ouroboros.runtime_limits import BODY_MAINTENANCE_INTERVAL_SEC
+    from supervisor.queue_schedules import _scheduled_tasks_path
+
+    wake = _WAKES.get(str(root))
+    if wake is None or table_identity(_scheduled_tasks_path(root)) != wake["identity"]:
+        return True
+    if wake["due_at"] is not None and now >= wake["due_at"]:
+        return True
+    return wake["observe"] and now >= wake["at"] + BODY_MAINTENANCE_INTERVAL_SEC
+
+
+def note_pass(root: Any, data: Dict[str, Any], identity: Any, cutoff: float, now_utc: datetime.datetime) -> None:
+    """Record, from the table a completed pass decided on, when the next one is due.
+
+    Only FUTURE instants wake by time: a row already due that the pass could not start (its
+    previous run still open, unknown queue state, a hold, a contended read) waits on other
+    facts, which the observation cadence re-reads. ``cutoff`` is the pass's retention cutoff
+    (epoch). Conservative by construction: a row whose timing cannot be read is observed."""
+    from supervisor.followup_policy import relation_kind
+    from supervisor.schedule_view import _is_consumed_once
+
+    utc, instants = datetime.timezone.utc, []
+    retention = datetime.timedelta(seconds=max(0.0, now_utc.timestamp() - cutoff))
+    observe = bool(data.get("followup_restart"))
+    for row in data.get("tasks") or []:
+        if not isinstance(row, dict):
+            continue
+        hold = row.get("hold") if isinstance(row.get("hold"), dict) else {}
+        withdrawn = row.get("delete_requested_at") or (row.get("completed_at") if _is_consumed_once(row) else "")
+        instants.append(parse_schedule_time(hold.get("retry_after"), utc) if hold else None)
+        if withdrawn:
+            at = parse_schedule_time(withdrawn, utc)
+            instants.append(at + retention if at is not None else now_utc)
+        observe = observe or bool(
+            isinstance(row.get("occurrence"), dict) or row.get("previous_run_open") or hold
+            or row.get("followup_hold") or row.get("followup_wait")
+            or (row.get("last_task_id") and (row.get("last_outcome") or {}).get("task_id") != row.get("last_task_id"))
+            or (row.get("enabled", True) and not withdrawn and relation_kind(row) != "independent"))
+        if withdrawn or not row.get("enabled", True) or isinstance(row.get("occurrence"), dict):
+            continue
+        trigger = row.get("trigger") if isinstance(row.get("trigger"), dict) else {}
+        kind, tz = str(trigger.get("type") or "cron").strip().lower(), timezone_for_schedule(row)
+        if kind == "cron" and str(trigger.get("expr") or row.get("cron") or "").strip():
+            instants.append(parse_schedule_time(row.get("next_run_at"), tz) or now_utc)
+        elif kind == "once" and not row.get("completed_at"):
+            instants.append(parse_schedule_time(trigger.get("run_at"), tz))  # unreadable: its error is recorded
+    future = [at for at in instants if at is not None and at > now_utc]
+    observe = observe or any(at is not None and at <= now_utc for at in instants)
+    _WAKES[str(root)] = {"identity": identity, "at": now_utc.timestamp(), "observe": observe,
+                         "due_at": min(future).timestamp() if future else None}

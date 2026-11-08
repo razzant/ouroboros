@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import cancel_intents, claudexor_daemon as owned, claudexor_runtime, config
-from ouroboros import delegate_custody as custody, process_custody, server_restart
+from ouroboros import delegate_custody as custody, server_restart
 from ouroboros.post_task_checkpoint import POST_TASK_SYNTHESIS_INFLIGHT, POST_TASK_SYNTHESIS_LOCK
 from supervisor import active_activity
 from tests.test_claudexor_startup_lifetime import startup  # noqa: F401 - fixture reuse (real fake engine)
@@ -106,6 +106,9 @@ def _restart(ctx, monkeypatch, *, gate=_gate):
 
 
 def test_restart_checks_out_first_then_stops_owned_work_in_order(owners, restart_root, monkeypatch, caplog):
+    """Checkout first, then the owned stop in order: cancel intents, the worker kill, the cancellation of
+    Ouroboros's OWN delegated runs (``reconcile``, D24) and never the daemon's ``stop_outcome``: Restart
+    restarts Ouroboros, the shared engine and other programs' runs stay (owner 3A, 2026-11-06)."""
     messages = []
     synthesis_key = (str(restart_root.resolve()), "synthesis-1")
     ctx = _ctx(owners.calls, running={"task-a": {"task": {"id": "task-a"}}}, messages=messages)
@@ -119,9 +122,9 @@ def test_restart_checks_out_first_then_stops_owned_work_in_order(owners, restart
             POST_TASK_SYNTHESIS_INFLIGHT.pop(synthesis_key, None)
     assert exits == [True]
     assert [c[0] for c in owners.calls] == [
-        "checkout", "cancel", "cancel", "cancel", "kill", "reconcile", "daemon_stop",
-    ]
-    checkout, *cancels, kill, reconcile, _ = owners.calls
+        "checkout", "cancel", "cancel", "cancel", "kill", "reconcile",
+    ], "Restart cancels its own runs and never stops the shared engine"
+    checkout, *cancels, kill, reconcile = owners.calls
     assert checkout[1] == {"reason": "owner_restart", "unsynced_policy": "rescue_and_reset"}
     assert [c[1] for c in cancels] == ["task-a", "direct-1", "synthesis-1"]
     assert all(c[2]["source"] == "owner_restart" and c[2]["requested_stop_policy"] == "immediate"
@@ -172,7 +175,7 @@ def test_a_restart_whose_flag_cannot_be_written_reopens_admission(owners, restar
 def test_assisted_update_refusal_still_refuses_before_any_stop(owners, restart_root, monkeypatch):
     from supervisor import update_merge
 
-    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda: object())
+    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda **_kw: object())
     monkeypatch.setattr(update_merge, "release_update_lock", lambda _lock: None)
     monkeypatch.setattr(update_merge, "read_update_tx_strict",
                         lambda: ("valid", {"phase": "assisted_resolution", "task_id": "resolver"}))
@@ -206,43 +209,106 @@ def test_unconfirmed_worker_shutdown_is_a_diagnostic_and_the_restart_proceeds(
     with caplog.at_level(logging.CRITICAL):
         assert _restart(_ctx(owners.calls, kill=kill, messages=messages), monkeypatch) == [True]
     assert "worker shutdown" in caplog.text.lower()
-    assert [c[0] for c in owners.calls][-2:] == ["reconcile", "daemon_stop"]
+    assert [c[0] for c in owners.calls][-1] == "reconcile" and "daemon_stop" not in [c[0] for c in owners.calls]
     from ouroboros.delegate_recovery import active_restart_transaction
     assert active_restart_transaction(restart_root)["door"] == "owner_restart"
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
 
 
-def test_unconfirmed_daemon_stop_is_reported_and_the_restart_proceeds(owners, restart_root, monkeypatch, caplog):
-    owned._write_ownership_marker()
-    # An authenticated endpoint with no ledgered root and no self-started child: stop cannot confirm.
-    monkeypatch.setattr(owners.manager, "_classify_liveness", lambda **kw: (object(), "running", ""))
-    messages = []
-    with caplog.at_level(logging.CRITICAL):
-        assert _restart(_ctx(owners.calls, messages=messages), monkeypatch) == [True]
-    assert "stop unconfirmed" in caplog.text and "custody retained" in caplog.text
-    assert "next generation attaches" in caplog.text
-    rows = _rows(restart_root)
-    assert rows[-1]["type"] == "process_stop_unconfirmed" and rows[-1]["purpose"] == owned.CUSTODY_PURPOSE
-    assert owners.calls[-1] == ("daemon_stop",)
-    assert messages == ["♻️ Restarting.", STOP_NOTICE], "one honest message; never 'deferred'"
-
-
-def test_restart_teardown_still_stops_a_newer_engine_after_an_unconfirmed_stop(owners, restart_root, monkeypatch):
-    """Planned doors keep a newer engine on a lower pin; the owner's Restart, whose own stop could not
-    confirm, still gets the teardown's attested stop (the fact its own stop sets tells the two apart)."""
+def test_the_owners_restart_teardown_takes_the_one_pin_rule(owners, restart_root, monkeypatch):
+    """Owner Restart stops no engine of its own (owner 3A); its lifespan teardown takes the one pin rule every
+    restart door takes: a newer engine on a lower checkout pin is kept (quiet), an older one is replaced by
+    the attested stop (fires)."""
     owned._write_ownership_marker()
     owned.owned_descriptor_path().parent.mkdir(parents=True, exist_ok=True)
     owned.owned_descriptor_path().write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(owners.manager, "_classify_liveness", lambda **kw: (object(), "running", ""))
     assert not server_restart._OWNER_STOP_BEGAN.is_set()
     assert _restart(_ctx(owners.calls), monkeypatch) == [True]
-    assert server_restart._OWNER_STOP_BEGAN.is_set()
+    assert server_restart._OWNER_STOP_BEGAN.is_set() and "daemon_stop" not in [c[0] for c in owners.calls]
     monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
                         lambda path=None: SimpleNamespace(version="4.3.0", build_sha="a" * 40))
     monkeypatch.setattr(owned, "read_owned_gateway", lambda: contextlib.nullcontext(
         SimpleNamespace(engine_version="4.3.1", engine_build_sha="b" * 40)))
     server_restart._stop_owned_daemon_for_new_pin()  # the lifespan teardown's check
-    assert [c[0] for c in owners.calls].count("daemon_stop") == 2
+    assert [c[0] for c in owners.calls].count("daemon_stop") == 0, "a lower pin keeps the newer engine, Restart included"
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda: contextlib.nullcontext(
+        SimpleNamespace(engine_version="4.2.0", engine_build_sha="c" * 40)))
+    server_restart._stop_owned_daemon_for_new_pin()
+    assert [c[0] for c in owners.calls].count("daemon_stop") == 1, "a forward pin replaces the engine"
+
+
+def test_the_downgrade_note_names_restart_claudexor_as_the_engine_stop():
+    """The test above in words: the header Restart keeps a newer engine, so PERSISTENCE's forward-only store note
+    names the Accounts action that does stop it, never the header Restart."""
+    import pathlib
+
+    text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "PERSISTENCE.md").read_text(encoding="utf-8")
+    text = " ".join(text.split())
+    assert "Once it stops (Restart Claudexor in Accounts, Panic, exit), the older engine refuses the store" in text
+    assert "manual Restart" not in text
+
+
+def test_the_owners_restart_ends_the_runs_of_the_work_it_returns(owners, restart_root, monkeypatch):
+    """Owner 3A: Restart restarts Ouroboros and stops only its own runs, returned work included. A task the Restart
+    returns gets no cancel intent and continues from its saved state, while its own live delegated run is cancelled
+    with the abrupt-loss verdict (``owner_task_gone``) over the attach-only gateway; a review panel's run on that task
+    stays its panel's; the engine is kept, so nothing outside Ouroboros's custody is addressed."""
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import _LiveRunStub
+
+    write_task_result(restart_root, "t-returned", "running", root_task_id="t-returned")
+    for run_id, source in (("run-returned", "delegated_subagent"), ("run-panel", "review_substrate")):
+        custody._CUSTODY.clear()
+        custody.record_started(restart_root, custody.RunCustody(
+            run_id=run_id, task_id="t-returned", route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id="t-returned", ledger_root=str(restart_root), source=source))
+    custody._CUSTODY.clear()
+    live = _LiveRunStub()  # answers every run id as running, the engine's other programs' included
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setattr(server_restart, "_prepare_owner_restart_returns", lambda ctx: ({"t-returned"}, set()))
+    try:
+        stopped = server_restart._stop_owned_work(_ctx(owners.calls, running={"t-returned": {"task": {"id": "t-returned"}}}))
+    finally:
+        custody._CUSTODY.clear()
+    assert stopped == ["direct-1"] and [c[1] for c in owners.calls if c[0] == "cancel"] == ["direct-1"]
+    assert live.cancels == [("run-returned", "owner_task_gone")], "the returned task's run ends; the panel's stays"
+    assert "daemon_stop" not in [c[0] for c in owners.calls], "the shared engine is kept"
+
+
+def test_the_owners_restart_ends_a_sleeping_tasks_own_run_and_keeps_its_sleep(restart_root, monkeypatch):
+    """Owner 3A and D24 for a task asleep on its own delegated run (a warm sleep is a saved pause, neither returned
+    nor stopped): the Restart keeps the sleep, parked under its restart hold with no cancel intent, and still ends
+    that run with the abrupt-loss verdict; a review panel's run on that task stays its panel's."""
+    from ouroboros import delegate_recovery
+    from supervisor import restart_retention
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._delegated_transport_shared import _LiveRunStub
+    from tests.test_restart_retention import _pool_events
+    from tests.test_warm_restart_retention import _park
+
+    _queue, _state, workers = _install_queue(restart_root, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _park(restart_root, workers, "sleep")
+    assert restart_retention.pause_retention(restart_root, "saved-warm", 1) == restart_retention.RETAIN_SLEEP
+    for run_id, source in (("run-sleep", "delegated_subagent"), ("run-panel", "review_substrate")):
+        custody._CUSTODY.clear()
+        custody.record_started(restart_root, custody.RunCustody(
+            run_id=run_id, task_id="saved-warm", route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id="saved-warm", ledger_root=str(restart_root), source=source))
+    custody._CUSTODY.clear()
+    live = _LiveRunStub()
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setitem(server_restart._LAST_RETURN_TX, "id",
+                        delegate_recovery.prepare_owner_restart(restart_root)["transaction_id"])
+    try:
+        stopped = server_restart._stop_owned_work(
+            SimpleNamespace(RUNNING=workers.RUNNING, PENDING=workers.PENDING, kill_workers=workers.kill_workers))
+    finally:
+        custody._CUSTODY.clear()
+    parked = next(task for task in workers.PENDING if task.get("id") == "saved-warm")
+    assert stopped == [] and "saved-warm" not in server_restart._LAST_RETURNING
+    assert parked["_budget_pause_hold"]["reason"] == "owner_restart_hold", "the sleep is kept, not stopped"
+    assert live.cancels == [("run-sleep", "owner_task_gone")], "the sleeping task's own run ends; the panel's stays"
 
 
 def test_an_abandoned_restart_does_not_keep_its_stop_fact(owners, restart_root, monkeypatch):
@@ -261,17 +327,6 @@ def test_an_abandoned_restart_does_not_keep_its_stop_fact(owners, restart_root, 
     assert reopened == ["owner_restart"] and not server_restart._OWNER_STOP_BEGAN.is_set()
 
 
-def test_raising_daemon_stop_is_recorded_like_panic_and_the_restart_proceeds(owners, restart_root, monkeypatch):
-    def fail():
-        raise RuntimeError("fixture stop failed")
-
-    monkeypatch.setattr(owners.manager, "stop_outcome", fail)
-    assert _restart(_ctx(owners.calls), monkeypatch) == [True]
-    row = _rows(restart_root)[-1]
-    assert row == {"ts": row["ts"], "type": "process_stop_unconfirmed",
-                   "purpose": owned.CUSTODY_PURPOSE, "reason": "stop raised RuntimeError"}
-
-
 def test_the_restart_notice_claims_a_stopped_task_only_when_one_was_owned(
         owners, restart_root, monkeypatch):
     """The owner is told what actually happened. With nothing owned the restart
@@ -285,7 +340,7 @@ def test_the_restart_notice_claims_a_stopped_task_only_when_one_was_owned(
     assert _restart(ctx, monkeypatch) == [True]
 
     assert messages == ["♻️ Restarting.", "New settings apply to the next message."]
-    assert [c[0] for c in owners.calls] == ["checkout", "kill", "reconcile", "daemon_stop"]
+    assert [c[0] for c in owners.calls] == ["checkout", "kill", "reconcile"]  # and no engine stop (owner 3A)
 
 
 def test_stop_outcome_types_the_two_non_stops(restart_root, monkeypatch, caplog):
@@ -343,10 +398,10 @@ def test_warmup_is_one_background_ensure_for_a_provisioned_home_only(restart_roo
     assert "live = not pytest_default_real_data_dir" in lifespan and "warm_daemon=live" in lifespan
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")
-def test_unconfirmed_daemon_stop_leaves_one_daemon_for_the_next_generation(startup, monkeypatch):  # noqa: F811
-    """After an unconfirmed stop the re-exec'd generation attaches to the live daemon; no second spawn."""
+def test_the_owners_restart_leaves_the_daemon_serving_for_the_next_generation(startup, monkeypatch):  # noqa: F811
+    """Restart restarts Ouroboros, not the engine (owner 3A): the real daemon is neither stopped nor signalled,
+    and the re-exec'd generation attaches to it; no second spawn."""
     (startup.home / "normal").touch()
     (startup.home / "publish").touch()
     manager = owned.OwnedClaudexorDaemon()
@@ -356,17 +411,11 @@ def test_unconfirmed_daemon_stop_leaves_one_daemon_for_the_next_generation(start
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: manager)
     monkeypatch.setattr(owned, "ensure_owned_gateway",
                         lambda **kw: pytest.fail("manual Restart must never ensure (start) the daemon"))
+    monkeypatch.setattr(manager, "stop_outcome", lambda: pytest.fail("manual Restart must not stop the shared engine"))
     ctx = SimpleNamespace(RUNNING={}, kill_workers=lambda **kw: True)
-    with monkeypatch.context() as patched:
-        # Controlled: the ledger root and the self-started child both stay unconfirmed, the daemon alive.
-        patched.setattr(manager, "_terminate_child", lambda: False)
-        patched.setattr(process_custody, "stop_ledgered_processes",
-                        lambda root, purposes, unconfirmed=None, **kw: (
-                            unconfirmed.append("controlled unconfirmed root") if unconfirmed is not None else None
-                        ) or [])
-        server_restart._stop_owned_work(ctx)
+    server_restart._stop_owned_work(ctx)
     assert process.poll() is None
-    assert _rows(startup.root)[-1]["type"] == "process_stop_unconfirmed"
+    assert not [row for row in _rows(startup.root) if row["type"] == "process_stop_unconfirmed"]
     successor = owned.OwnedClaudexorDaemon()  # the next server generation's manager
     monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
         pin=SimpleNamespace(version="9.9.9", build_sha="c" * 40),

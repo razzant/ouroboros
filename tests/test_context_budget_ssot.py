@@ -17,12 +17,13 @@ def _src(rel: str) -> str:
 
 def test_agent_context_budget_values_pinned():
     """Values are the SSOT; changing them is a deliberate, visible edit."""
-    # Owner choice of 2026-09-29 (Low 250K, Nano 85K); the memory view's working room
-    # is two low-water levels under a window, one under an owner Low/Nano target.
+    # Owner choice of 2026-09-29 (Low 250K, Nano 85K). The memory view's working room is two
+    # low-water levels for a root; a wake (consciousness or a Presence focus), a direct chat
+    # turn and a helper leave one (owner decision 2026-10-29, question 3 = A).
     assert cb.OWNER_LOW_TARGET_TOKENS == 250_000
     assert cb.OWNER_NANO_TARGET_TOKENS == 85_000
-    assert cb.start_room_levels("integrator") == cb.start_room_levels("consciousness") == 2
-    assert cb.start_room_levels("presence", focus_wake=True) == 2
+    assert cb.start_room_levels("integrator") == 2
+    assert cb.start_room_levels("consciousness") == cb.start_room_levels("consciousness", direct_chat=True) == 1
     assert cb.start_room_levels("integrator", direct_chat=True) == cb.start_room_levels("presence") == 1
     assert cb.start_room_levels("child") == cb.start_room_levels("nanny") == 1
     for retired in ("BG_CONTEXT_WARN_CHARS", "BG_CONTEXT_MAX_CHARS", "BG_STATE_JSON_WARN_CHARS", "BG_OBSERVATIONS_WARN_BYTES"):
@@ -41,12 +42,12 @@ def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch
     the later reply facts are APPENDED measurement fields (older readers stay positional-safe)."""
     from ouroboros import context_fit
 
-    assert "RECLAIM_LOW_WATER_DIVISOR" in _src("ouroboros/context_fit.py")
+    assert "RECLAIM_LOW_WATER_DIVISOR" in inspect.getsource(context_fit.reclaim_low_water_margin)
     assert "/ 8" not in inspect.getsource(context_fit.measure_main_fit)
-    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-12:] == [
+    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-13:] == [
         "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens", "anchor_input_tokens",
         "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "view_kind", "window_witness_bound",
-        "window_observation_fp", "window"]
+        "window_observation_fp", "window", "required_book_tokens"]
     assert context_fit.reclaim_low_water_margin(250_000, 500_000) == 31_250  # target binds
     assert context_fit.reclaim_low_water_margin(None, 70_000) == 8_750  # capacity alone
     assert context_fit.reclaim_low_water_margin(None, None) == 0  # nothing known
@@ -103,7 +104,8 @@ def test_call_sites_import_the_ssot_names():
     ):
         assert not hasattr(cb, name)
         assert name not in loop_src
-    assert "OWNER_LOW_TARGET_TOKENS" in _src("ouroboros/context_fit.py")
+    from ouroboros.context_fit import measure_main_fit
+    assert "OWNER_LOW_TARGET_TOKENS" in inspect.getsource(measure_main_fit)
 
     # The request reads no chat tail: the open conversation is the memory view's, and the
     # readers of the frozen consolidation cursor's tail are gone with it.

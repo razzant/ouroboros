@@ -3,7 +3,7 @@ import { tr, fmt } from './i18n.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 import { strokeIcon } from './page_icons.js';
 import { showToast } from './toast.js';
-import { downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
+import { copyTextToClipboard, downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
 import { MAX_LINK_ACTIONS } from './api_types.js';
 import { apiFetch, taskArtifactDownloadUrl } from './api_client.js';
 import { bindMenu } from './ui_interactions.js';
@@ -145,7 +145,8 @@ export function decorateContactSource(bubble, contact) {
     const href = safeHttpUrl(contact.url);
     const source = document.createElement(href ? 'a' : 'span');
     source.dataset.contactSource = contact.task_id;
-    source.textContent = String(contact.label || tr('Connected place'));
+    // A label stored before its connector stopped doubling its word reads once ("Telegram · Telegram · …").
+    source.textContent = String(contact.label || tr('Connected place')).split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
     source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
     if (href) {
         source.className = 'md-link';
@@ -217,7 +218,6 @@ export function bindComposerFileTargets({ page, inputArea, input, stagePendingFi
 }
 
 export function createChatMedia({
-    chatSessionId,
     durableChatMediaUrl,
     formatMsgTime,
     insertMessageNode,
@@ -269,11 +269,7 @@ export function createChatMedia({
 
     function messageSender(msg, role) {
         return role === 'user'
-            ? senderLabel('user', false, '', {
-                source: msg.source || '',
-                senderLabel: msg.sender_label || '',
-                senderSessionId: msg.sender_session_id || '',
-            }, chatSessionId)
+            ? senderLabel('user', false, '', { source: msg.source || '', senderLabel: msg.sender_label || '' })
             : 'Ouroboros';
     }
 
@@ -923,31 +919,11 @@ export function createChatMedia({
         button.innerHTML = COPY_ICON_SVG;
         button.title = tr('code.copy', 'Copy');
         button.setAttribute('aria-label', tr('media.copy_message', 'Copy message'));
-        const writeFallback = () => {
-            // Selecting the hidden field takes focus; it goes back, so a keyboard owner stays on Copy.
-            const owner = document.activeElement;
-            const area = document.createElement('textarea');
-            area.className = 'chat-copy-fallback';
-            area.value = words();
-            area.setAttribute('readonly', '');
-            document.body.appendChild(area);
-            try {
-                area.select();
-                const copied = typeof document.execCommand === 'function'
-                    && document.execCommand('copy') === true;
-                if (!copied) throw new Error('Clipboard access is unavailable');
-            } finally {
-                area.remove();
-                if (owner && owner !== document.body && owner.isConnected !== false) owner.focus?.({ preventScroll: true });
-            }
-        };
         listen(button, 'click', async () => {
             let ok = true;
             try {
-                if (navigator.clipboard?.writeText) {
-                    try { await navigator.clipboard.writeText(words()); }
-                    catch { writeFallback(); }
-                } else writeFallback();
+                // The shared write keeps a keyboard owner on Copy and finds the open modal's selection field.
+                await copyTextToClipboard(words(), { anchor: button });
             } catch {
                 ok = false;
             }

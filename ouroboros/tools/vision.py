@@ -168,35 +168,41 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
                                processing_preference: Optional[str] = None, **kwargs: Any) -> tuple[str, dict]:
     """Wait around one image call while keeping inference in a tracked child."""
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
+    from ouroboros.deadline_utils import dispatch_window_end_ts, dispatch_window_remaining_sec
     from ouroboros.tools.vision_process import run_vision_child
 
     subscription = not kwargs.get("use_local") and provider_for_model(kwargs.get("model", "")) == "claudexor"
     provider_timeout = float(kwargs.get("timeout") or get_vision_caption_timeout_sec())
-    remaining = dispatch_window_remaining_sec(deadline_at=kwargs.pop("_deadline_at", None),
-                                              deadline_ts=kwargs.pop("_deadline_ts", None),
-                                              reserve_sec=2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0))
+    # The deadline less both margins and the reserve, as an instant: the parent's remaining time and the child's
+    # send window both come from it, so time spent here cannot extend the window (#572).
+    reserve = 2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0)
+    end = dispatch_window_end_ts(deadline_at=kwargs.pop("_deadline_at", None),
+                                 deadline_ts=kwargs.pop("_deadline_ts", None), reserve_sec=reserve)
+    remaining = None if end is None else dispatch_window_remaining_sec(deadline_ts=end)
+    # A subscription call waits on its task's clocks only; ``None`` = none exists, and the
+    # child then has no timeout (its control watcher still ends it on Stop).
     operation_timeout = _vision_execution_window() if subscription else provider_timeout
     if remaining is not None:
-        operation_timeout = min(operation_timeout, remaining)
-    if operation_timeout <= 0:
+        operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
+    if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
-    child_timeout = operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
+    if end is not None:
+        # ``vision_query``'s send window: the child's sends re-check it after its start-up, image preparation and
+        # recording, reserve already taken.
+        kwargs["caller_dispatch_deadline_ts"] = end
+    child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
 
 
-def _vision_execution_window() -> float:
-    from ouroboros.config import get_task_abs_ceiling_sec, operation_window_sec
+def _vision_execution_window() -> Optional[float]:
+    from ouroboros.deadline_utils import task_execution_window_sec
 
-    context = current_model_wait()
-    remaining = context.execution_window_remaining() if context else None
-    # An owner (or task) without an absolute clock still bounds this individual image.
-    return operation_window_sec(get_task_abs_ceiling_sec()) if remaining is None else remaining
+    return task_execution_window_sec()
 
 
-def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
-    """Only a subscription image call adopts the task's existing execution cap."""
+def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> Optional[float]:
+    """Only a subscription image call adopts the task's existing execution cap (``None`` = none)."""
     from ouroboros.provider_models import provider_for_model
 
     context = current_model_wait()
@@ -208,7 +214,8 @@ def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
     )
     if provider_for_model(model) != "claudexor":
         return 0.0
-    return _vision_execution_window() + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
+    window = _vision_execution_window()
+    return None if window is None else window + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
 
 
 def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:
@@ -483,6 +490,19 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
     return _runtime_data_read_block(ctx, fp)
 
 
+def _canonical_task_source(ctx: Any, fp: "pathlib.Path", raw: bytes) -> bool:
+    """Whether ``fp`` is a digest-named source in a task's canonical store: write-once, it outlives
+    execution drives and the age sweep of ``uploads/views``, so it stays its own lasting address."""
+    from ouroboros.tool_access import canonical_data_root
+
+    try:
+        parts = fp.relative_to(canonical_data_root(ctx) / "task_results" / "artifacts").parts
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (len(parts) == 4 and parts[1] == "source_handles"
+            and f"-{hashlib.sha256(raw).hexdigest()}." in parts[3])
+
+
 def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_original: bool = False) -> Tuple[Optional[Dict[str, str]], str]:
     """Validate a LOCAL image path against the SAME trust boundary the agent already
     holds via read_file/run_command (allowed roots + protected-artifact read_bytes
@@ -490,11 +510,23 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     payload ``{"base64", "mime"}``. On any rejection returns ``(None, message)``.
     LOCAL FILES ONLY — no URL, no base64 (no new exfiltration surface). Shared by
     vlm_query(file_path=...) and view_image so both enforce identical checks.
-    A relative path resolves against the process working directory. An absent
+    A relative path means the caller's active workspace (read_file's default root), never the
+    process working directory: that is the serving checkout, whose same-named file
+    would answer for the task's. A workspace that cannot be named refuses. An absent
     path inside the admitted roots is a discovery miss (typed warning, no image),
     reported only after every admission guard; size/read/MIME failures stay errors."""
     import pathlib
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp = pathlib.Path(file_path).expanduser()
+    if not fp.is_absolute():
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            fp = pathlib.Path(active_repo_dir_for(ctx)).expanduser() / fp
+        except Exception as e:
+            return None, _refuse(ctx, (
+                f"⚠️ Relative image path {file_path!r} has no active workspace to resolve against: {e}. "
+                "Name the image by its absolute path."
+            ))
+    fp = fp.resolve()
     allowed = _allowed_file_roots(ctx)
     if not any(_path_is_under(fp, root) for root in allowed):
         return None, _refuse(ctx, (
@@ -528,7 +560,7 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     except Exception as e:
         return None, _refuse(ctx, f"⚠️ Failed to read image file: {e}")
     source_path = str(fp)
-    if retain_original:
+    if retain_original and not _canonical_task_source(ctx, fp, raw):
         # Retain the admitted bytes BEFORE decoding/conversion, even on refusal.
         from ouroboros.image_preparation import retain_original as retain
         from ouroboros.tool_access import canonical_data_root
@@ -639,7 +671,7 @@ def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
 
 
 def attach_local_image_to_context(ctx: ToolContext, path: str, *, stamp: Any = None,
-                                  observation: Optional[dict] = None) -> Tuple[bool, str]:
+                                  observation: Optional[dict] = None, capture_source: str = "") -> Tuple[bool, str]:
     """Attach a LOCAL image file to the active conversation as a native image block.
 
     The single implementation behind BOTH the agent-called ``view_image`` tool and
@@ -677,6 +709,7 @@ def attach_local_image_to_context(ctx: ToolContext, path: str, *, stamp: Any = N
             "_caption": caption,
             "_source_path": source_path,
             "_source_sha256": payload["source_sha256"],
+            **({"_capture_source": capture_source} if capture_source else {}),
         },
     ], stamp=stamp or ctx)  # a batch eviction of sent images names its origin on the live slot
     return True, (
@@ -765,7 +798,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
+                            "description": "Local image path (preferred — avoids base64 in arguments): relative to the active workspace, or absolute inside the workspace, the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot) or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
                         },
                         "image_url": {
                             "type": "string",
@@ -813,7 +846,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Local image file path inside the task workspace, uploads dir, the skill-state tree (data/state/skills), or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
+                            "description": "Local image path: relative to the active workspace (list_files' default root), or absolute inside the workspace, uploads dir, the skill-state tree (data/state/skills) or the task's artifact_store/task_drive (e.g. a frame path extract_video_frames returned).",
                         },
                     },
                     "required": ["path"],

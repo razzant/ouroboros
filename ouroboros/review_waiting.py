@@ -1,8 +1,10 @@
 """Chosen wake sources and delivery cursors of one retained review wait.
 
 Readiness never consumes a fact. A complete transcript insertion stages its
-cursor; the working checkpoint makes that acknowledgement durable. The late
-room duty has an independent lifetime and is never discharged here.
+cursor; the working checkpoint makes that acknowledgement durable. A cursor
+never discharges a room duty. ``seen_outcome_states`` retains rendered feedback
+separately in the same ledger wait: it ends unread duties here and lets the
+terminal collector distinguish a received unwaited outcome from mere settlement.
 """
 from __future__ import annotations
 
@@ -74,6 +76,13 @@ def bind_roster(ctx, rows):
         _RECEPTIVE.get().update(copy.deepcopy(state))
 
 
+def _outcome_token(identity):
+    """A seat outcome's token on delivery cursors and receipts: its full identity, digested. That identity spells
+    out the wave (with the reviewed root's path), the operation and the seat, so a wave's worth outgrows the bounded
+    metadata a receipt rides in (``ToolResult``); readers only compare tokens."""
+    return "review:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
 def review_terminals(ctx, chosen, seen=(), entries=()):
     """Only a selected, durably finalized producer outcome can end a review wait."""
     from ouroboros.observability import read_call_payload
@@ -111,10 +120,12 @@ def review_terminals(ctx, chosen, seen=(), entries=()):
                 errors.append(exc)
         outcome = (actor or {}).get("outcome") or {}
         identity = f"review:{wave}:{operation}:{slot}:{outcome.get('outcome_id', '')}"
+        token = _outcome_token(identity)
         if (outcome.get("outcome_id") and outcome.get("status") and outcome["status"] != "pending" and not outcome.get("additional")
                 and outcome.get("operation_id") == operation and outcome.get("slot_id") == slot
-                and (actor or {}).get("review_wave_id") == wave and identity not in seen):
-            ready.append({"id": identity, "reason": "review_result", "actor_id": f"review:{operation}:{slot}",
+                and (actor or {}).get("review_wave_id") == wave
+                and token not in seen and identity not in seen):  # a cursor saved before tokens holds the identity
+            ready.append({"id": token, "reason": "review_result", "actor_id": f"review:{operation}:{slot}",
                           **pin, "outcome": copy.deepcopy(outcome)})
     if not ready and errors:
         raise errors[0]
@@ -159,7 +170,7 @@ def wake_on_schema():
     return {"type": "object", "additionalProperties": False,
             "description": "End only this wait on selected mail, task/run terminals, counted reviewer outcomes or wake_at. "
                            "Explicit ids only; omitted/empty means the whole wave plus mail/control attention. "
-                           "Owner input and responsible-child questions always wake. Reviewers continue; waking grants no landing. "
+                           "Owner input, responsible-child questions and host-marked waking place arrivals bypass selectors; context-only place arrivals stay unread until a genuine wake. Reviewers continue; waking grants no landing. "
                            "Panel waves only; subject=system retains its synchronous report wait.",
             "properties": {**{key: {"type": "array", "items": {"type": "string"}, "description": description}
                               for key, description in {
@@ -175,7 +186,7 @@ def save_wait(ctx, record_id, state):
     def merge(record):
         old = record.get("waiting") or {}
         record["waiting"] = {**copy.deepcopy(state), **{key: sorted(set(old.get(key) or ()) | set(state.get(key) or ()))
-                             for key in ("seen_helpers", "seen_outcomes")}}
+                             for key in ("seen_helpers", "seen_outcomes", "seen_outcome_states")}}
         return record
     record = revise_record(ledger_root(ctx), record_id, merge)
     if record and (record.get("waiting") or {}).get("duty_id"):
@@ -184,21 +195,31 @@ def save_wait(ctx, record_id, state):
     return record
 
 
-def outcome_ids(record):
+def _closed_outcomes(record):
+    """``(identity, status)`` of each seat whose answer can no longer arrive, counted or added, in row order."""
     from ouroboros.review_ledger import seat_open
 
-    outcomes = []
     for row in record.get("rows") or ():
         if seat_open(row):
             continue
         canonical = row.get("outcome") or {}
+        status = str(canonical.get("status") or row.get("status") or "")
         if canonical.get("outcome_id") and record.get("review_wave_id"):
-            outcomes.append(f"review:{record['review_wave_id']}:{row.get('operation_id')}:{row['seat_id']}:{canonical['outcome_id']}")
+            yield f"review:{record['review_wave_id']}:{row.get('operation_id')}:{row['seat_id']}:{canonical['outcome_id']}", status
             continue
         outcome = (row.get("outcome") or {}).get("outcome_id") or row.get("outcome_id") or hashlib.sha256(json.dumps(
             {key: row.get(key) for key in ("status", "answers", "source_refs")}, sort_keys=True).encode()).hexdigest()
-        outcomes.append(f"{record['record_id']}:{row.get('operation_id') or row['seat_id']}:{outcome}")
-    return outcomes
+        yield f"{record['record_id']}:{row.get('operation_id') or row['seat_id']}:{outcome}", status
+
+
+def outcome_ids(record):
+    return [identity for identity, _status in _closed_outcomes(record)]
+
+
+def outcome_states(record):
+    """What a delivery of this record carries, ``<outcome token>#<status>`` per closed seat: a later answer of the
+    same operation (lost, then answered) is a new state; a revision that records cost or custody is not."""
+    return [f"{_outcome_token(identity)}#{status}" for identity, status in _closed_outcomes(record)]
 
 
 def delivery_ready(ctx, state):
@@ -213,8 +234,14 @@ def delivery_ready(ctx, state):
     return ready
 
 
-def publish_delivery(ctx, text, record):
-    """Publish exact receipt metadata beside the result; producing it is not an ACK."""
+def publish_delivery(ctx, text, record, rendered_rows=None):
+    """Publish exact receipt metadata beside the result; producing it is not an ACK.
+
+    A receipt names only what this response carries. ``rendered_rows`` are the record's rows as ``text`` renders
+    them (a review payload's own ``rows``): their outcomes go on the wait's cursor and their states are certified,
+    never what a later read of ``record`` holds, so a seat that settled after the text was rendered stays
+    unreceived. A response that renders no ledger rows (a commit's own report) certifies no outcome state, and its
+    cursor keeps naming ``record``'s outcomes."""
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, _published_tool_result, _classify_legacy_text
 
     record_id = str(record.get("record_id") or "")
@@ -225,9 +252,11 @@ def publish_delivery(ctx, text, record):
     helpers = delivery_ready(ctx, state)
     from ouroboros.model_sleep import question_sources
     questions = question_sources(ctx)
+    shown = record if rendered_rows is None else {**record, "rows": list(rendered_rows)}  # identity stays the record's
     receipt = {"record_id": record_id, "helpers": [row["id"] for row in helpers if not row["id"].startswith("review:")],
-               "outcomes": sorted(set(outcome_ids(record)) | {row["id"] for row in helpers if row["id"].startswith("review:")}),
-               "questions": questions}
+               "outcomes": sorted({_outcome_token(identity) for identity in outcome_ids(shown)}
+                                  | {row["id"] for row in helpers if row["id"].startswith("review:")}),
+               "questions": questions, "outcome_states": [] if rendered_rows is None else outcome_states(shown)}
     suffix = "\n\n[Selected results] " + json.dumps(helpers) if helpers else ""
     if questions:
         suffix += "\n\n[Responsible child questions] " + json.dumps(questions)
@@ -239,8 +268,18 @@ def publish_delivery(ctx, text, record):
                                 meta={**prior.meta, "review_delivery": receipt}))
 
 
+def _carries_whole(record, receipt):
+    """Whether this receipt carried all of ``record`` as it stands now: the wave settled and every current outcome
+    state is one its response rendered (``publish_delivery``). Cursor ids prove nothing here: a helper notice names
+    them and a report that renders no rows certifies none, and a seat that settled after the render leaves it short."""
+    current = set(outcome_states(record))
+    return record.get("state") == "settled" and bool(current) and current <= set(receipt.get("outcome_states") or ())
+
+
 def acknowledge_delivery(ctx, receipt):
-    """Called after complete transcript insertion, never from a readiness peek."""
+    """Called after complete transcript insertion, never from a readiness peek. Once a saved state holds it
+    (``working_checkpoint``), the cursor is durable and a whole receipt of a result record ends that record's unread
+    duty; a crash or a failed save before then acknowledges nothing."""
     from ouroboros.review_ledger import ledger_root, load_record
     from ouroboros.working_checkpoint import defer_content_ack
 
@@ -256,14 +295,24 @@ def acknowledge_delivery(ctx, receipt):
         from ouroboros.sleep_custody import record_question_notice
         record_question_notice(ctx, receipt["questions"])
     state = copy.deepcopy(record.get("waiting") or getattr(ctx, "_review_wait_selection", None) or {})
-    for target, source in (("seen_helpers", "helpers"), ("seen_outcomes", "outcomes")):
+    for target, source in (("seen_helpers", "helpers"), ("seen_outcomes", "outcomes"),
+                           ("seen_outcome_states", "outcome_states")):
         state[target] = sorted(set(state.get(target) or ()) | set(receipt.get(source) or ()))
     ctx._review_wait_selection = state
     wait = getattr(ctx, "_left_review_wait", None)
     if isinstance(wait, dict) and wait.get("record_id") == record_id:
-        wait.update({key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes")
+        wait.update({key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes", "seen_outcome_states")
                      if key in state})
-    defer_content_ack(ctx, lambda: save_wait(ctx, record_id, state))
+
+    def commit():
+        saved = save_wait(ctx, record_id, state)
+        if (saved and saved.get("surface") == "result"
+                and _carries_whole(saved, {"outcome_states": saved["waiting"]["seen_outcome_states"]})):
+            from ouroboros.review_pause import retire_unread_review
+
+            retire_unread_review(ctx, surface="result", record_id=record_id)
+
+    defer_content_ack(ctx, commit)
 
 
 def append_helper_notice(ctx, messages):

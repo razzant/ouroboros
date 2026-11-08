@@ -13,6 +13,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -333,3 +334,109 @@ def test_frozen_review_subject_survives_later_live_index_changes(author, tmp_pat
     assert (area / "f.txt").read_bytes() == b"A staged\n"
     assert (area / ".review-drive/task/view.txt").read_bytes() == original_evidence
     assert (author / "f.txt").read_bytes() == b"later candidate\n"
+
+
+def _clones_seen(monkeypatch):
+    from ouroboros import artifact_storage
+
+    seen, real = [], artifact_storage.clone_file
+
+    def observed(source, destination):
+        outcome = real(source, destination)
+        seen.append((pathlib.Path(destination), outcome))
+        return outcome
+
+    monkeypatch.setattr(artifact_storage, "clone_file", observed)
+    return seen
+
+
+def _shape(root):
+    """What a copy must keep of its folder: copy2's facts and the links and empty folders."""
+    found = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        found[path.relative_to(root).as_posix()] = (info.st_mode, os.readlink(path) if path.is_symlink() else "",
+                                                    info.st_size if path.is_file() else 0,
+                                                    info.st_mtime_ns if path.is_file() and not path.is_symlink() else 0)
+    return found
+
+
+def test_a_skill_view_and_its_seat_copy_clone_and_every_reviewer_edit_stays_in_its_copy(tmp_path, monkeypatch):
+    """The view and the seat's copy are physical copies of a folder that is read, not changed: each clones
+    where it can, the comparison the capture rests on still sees no change, and an edit in place is seen,
+    retained and never reaches the view or the author's folder."""
+    folder, data = tmp_path / "skill", tmp_path / "data"
+    (folder / "env" / "empty").mkdir(parents=True)
+    (folder / "run.sh").write_bytes(b"echo hi\n" * 1024)
+    (folder / "run.sh").chmod(0o755)
+    (folder / "locked.txt").write_bytes(b"read only\n" * 1024)
+    (folder / "locked.txt").chmod(0o440)
+    os.utime(folder / "locked.txt", ns=(1_600_000_000_000_000_001, 1_600_000_001_000_000_001))
+    (folder / "link").symlink_to("run.sh")
+    (folder / "dangling").symlink_to("nowhere")
+    seen = _clones_seen(monkeypatch)
+    source = directory_source(folder, data)
+    view = pathlib.Path(source["view"])
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    assert len(seen) == 4, "two files, a view and a copy: links and folders never reach the clone"
+    if sys.platform == "darwin":
+        assert all(outcome for _path, outcome in seen), "APFS clones them"
+    assert _shape(folder) == _shape(view) == _shape(area)
+    with (area / "run.sh").open("r+b") as handle:  # the shared blocks' own inode, in place
+        handle.write(b"EDITED")
+    evidence = rc.capture_seat_evidence(data, "task", "op-1")
+    assert evidence["changed"] == ["run.sh"] and evidence["status"] == "retained"
+    retained = pathlib.Path(evidence["evidence_dir"]) / "files" / "run.sh"
+    assert retained.read_bytes().startswith(b"EDITED")
+    for pristine in (folder / "run.sh", view / "run.sh"):
+        assert pristine.read_bytes() == b"echo hi\n" * 1024
+
+
+def test_a_refused_clone_leaves_the_same_copy_and_the_same_comparison(tmp_path, monkeypatch):
+    from ouroboros import artifact_storage
+
+    folder, data = tmp_path / "skill", tmp_path / "data"
+    folder.mkdir()
+    (folder / "run.sh").write_bytes(b"echo hi\n")
+    (folder / "run.sh").chmod(0o750)
+    monkeypatch.setattr(artifact_storage, "clone_file", lambda source, destination: False)
+    source = directory_source(folder, data)
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    assert _shape(folder) == _shape(pathlib.Path(source["view"])) == _shape(area)
+    (area / "new.txt").write_text("checked")
+    assert rc.capture_seat_evidence(data, "task", "op-1")["changed"] == ["new.txt"]
+
+
+def test_frozen_evidence_reaches_a_git_copy_through_clones_and_an_edit_stays_there(author, tmp_path, monkeypatch):
+    live = author / ".review-drive" / "task" / "view.txt"
+    os.utime(live, ns=(1_600_000_000_000_000_001, 1_600_000_001_000_000_001))
+    data = tmp_path / "data"
+    seen = _clones_seen(monkeypatch)
+    source = rc.freeze_checking_source(author, data_root=data)
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    view = pathlib.Path(source["evidence_views"][".review-drive"]) / "task" / "view.txt"
+    copied = area / ".review-drive" / "task" / "view.txt"
+    assert [path.name for path, _outcome in seen] == ["view.txt", "view.txt"], "the view, then the seat's copy"
+    assert copied.read_bytes() == b"byte-exact evidence\n" and os.lstat(copied).st_mtime_ns == os.lstat(live).st_mtime_ns
+    with copied.open("r+b") as handle:
+        handle.write(b"EDITED")
+    assert view.read_bytes() == live.read_bytes() == b"byte-exact evidence\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="real APFS clones and compression")
+def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compression_for_good(tmp_path):
+    """Why ``retain_files`` does not clone: APFS keeps a clone's may-share mark after its peer is gone, so the
+    ``record_compression`` floor would refuse this record for as long as it is kept."""
+    from ouroboros import artifact_storage
+    from ouroboros.delegate_named_evidence import retain_named_evidence
+
+    area = tmp_path / "area"
+    (area / rc.EVIDENCE_DIRNAME).mkdir(parents=True)
+    source = area / rc.EVIDENCE_DIRNAME / "out.log"
+    source.write_bytes(b"a finished test log, line after line\n" * 8192)
+    (tmp_path / "evidence").mkdir()
+    [kept] = retain_named_evidence(area, tmp_path / "evidence" / "files", [], preserve_mode=False)
+    retained = tmp_path / "evidence" / "files" / kept["path"]
+    assert artifact_storage._may_share(retained) is False
+    assert artifact_storage.compression_outcome(retained) == "compressed"
+    assert retained.read_bytes() == source.read_bytes()

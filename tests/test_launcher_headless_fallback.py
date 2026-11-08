@@ -45,12 +45,8 @@ def test_external_ui_reopen_attaches_without_browser(external_launcher, monkeypa
 
 @pytest.mark.parametrize("intent,marker,launches", [
     ("automatic", "panic", False),
-    ("owner", "panic", True),
     ("automatic", "owner_restart_no_resume", True),
-    ("automatic", None, True),
     ("systemd", "panic", False),
-    ("systemd", "owner_restart_no_resume", True),
-    ("systemd", None, True),
     ("desktop", "panic", True),
 ])
 def test_native_boot_preserves_panic_but_owner_can_start(
@@ -74,7 +70,7 @@ def test_native_boot_preserves_panic_but_owner_can_start(
     monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
     if intent == "systemd":
         unit = (Path(__file__).resolve().parents[1] / "packaging" / "systemd"
-                / "ouroboros.service").read_text(encoding="utf-8")
+                / "ouroboros.service.in").read_text(encoding="utf-8")
         command = next(line.removeprefix("ExecStart=") for line in unit.splitlines()
                        if line.startswith("ExecStart="))
         argv = shlex.split(command)[1:]

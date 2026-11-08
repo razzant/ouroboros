@@ -96,6 +96,14 @@ def _revision(data):
         return txn.revision()
 
 
+def _statistics(data):
+    """The planner tables as stored: the ``sqlite_stat1`` rows and the number of ``sqlite_stat4`` samples."""
+    with store.open_store(data, write=False) as txn:
+        stat1 = sorted(tuple(row) for row in txn.conn.execute("SELECT tbl, idx, stat FROM sqlite_stat1"))
+        stat4 = txn.conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat4'").fetchone()
+        return stat1, txn.conn.execute("SELECT COUNT(*) FROM sqlite_stat4").fetchone()[0] if stat4 else 0
+
+
 @pytest.fixture
 def data(tmp_path, monkeypatch):
     root = tmp_path / "data"
@@ -185,11 +193,95 @@ def test_planner_statistics_once_per_store_and_again_after_tenfold_growth(data):
     assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 3}
     with store.open_store(data, write=False) as txn:
         assert txn.conn.execute("SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl='tasks'").fetchone()[0] > 0
+    assert _statistics(data)[1] == 0, "row counts only, whatever the SQLite build"
     before = _revision(data)
     assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
     for index in range(3, 30):
         write_task_result(data, f"task-{index}", "completed", result="answer")
     assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 30}
+    assert _statistics(data)[1] == 0
+
+
+def test_a_store_analyzed_before_keeps_row_counts_only_from_the_childs_next_run(data):
+    """The job's plain ``ANALYZE`` of before, on a build with ENABLE_STAT4, left index samples that every new
+    connection loads with the schema. The child's next pass, whatever job it runs for, drops them and keeps the
+    ``sqlite_stat1`` rows and the tenfold base as they were; the pass after it rests. The server's look never
+    spawns the child for it."""
+    import contextlib
+    import sqlite3
+
+    from ouroboros.task_results import write_task_result
+
+    for index in range(3):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    with store.open_store(data, write=True) as txn:  # what the job wrote before its row named its statistics
+        txn.conn.execute("ANALYZE")
+        maintenance_jobs.record_in(txn, "sqlite_analyze", state="done", tasks=3)
+    for index in range(3, 9):  # grown, short of tenfold
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    stat1, samples = _statistics(data)
+    with contextlib.closing(sqlite3.connect(":memory:")) as probe:
+        sampling = "ENABLE_STAT4" in {row[0] for row in probe.execute("PRAGMA compile_options")}
+    assert (samples > 0) == sampling, (sqlite3.sqlite_version, samples)
+    assert "sqlite_analyze" not in maintenance.due(data), "never by itself a reason to spawn the child"
+    report = maintenance.run(data)
+    assert report["jobs"]["sqlite_analyze"] == {"state": "done", "items": 0}, report
+    assert _statistics(data) == (stat1, 0)
+    assert maintenance_jobs.job(data, "sqlite_analyze")["tasks"] == 3
+    before = _revision(data)
+    assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
+    for index in range(9, 30):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 30}
+    assert _statistics(data)[1] == 0
+
+
+def test_samples_an_older_body_analyzed_back_under_this_bodys_row_go_at_the_childs_next_run(data):
+    """A Restore to a body whose job was a plain ``ANALYZE`` and a merge into its row: the store this body analyzed
+    grows tenfold there and is analyzed again, so a build with ENABLE_STAT4 has its samples back while the row still
+    names ``stat1``, beside that body's tenfold base. Back on this body neither its boot nor the server's look moves
+    them; the child's next pass, whatever job it runs for, drops them and keeps the ``sqlite_stat1`` rows and the base,
+    and the pass after it rests. Without samples the row's word holds and that pass leaves the job alone."""
+    import contextlib
+    import sqlite3
+
+    from ouroboros import store_import
+    from ouroboros.task_results import write_task_result
+
+    def older_run():  # the job's run before its row named its statistics, verbatim
+        with store.open_store(data, write=True) as txn:
+            tasks = int(txn.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+            txn.conn.execute("ANALYZE")
+        maintenance_jobs.record(data, "sqlite_analyze", state="done", tasks=tasks)
+        return {"state": "done", "items": tasks}
+
+    this_body, older_body = "this-body", "older-body"
+    for index in range(3):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    store_import.ensure_current_store(data, with_children=False, body_sha=this_body)
+    assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 3}
+    store.close_connections()
+    store_import.ensure_current_store(data, with_children=False, body_sha=older_body)  # Restore: the older body boots
+    for index in range(3, 30):  # tenfold: due by the older body's own rule
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    assert older_run() == {"state": "done", "items": 30}
+    stat1, samples = _statistics(data)
+    with contextlib.closing(sqlite3.connect(":memory:")) as probe:
+        sampling = "ENABLE_STAT4" in {row[0] for row in probe.execute("PRAGMA compile_options")}
+    assert (samples > 0) == sampling, (sqlite3.sqlite_version, samples)
+    row = maintenance_jobs.job(data, "sqlite_analyze")
+    assert (row["statistics"], row["tasks"]) == ("stat1", 30), "the merge kept this body's word"
+    store.close_connections()
+    store_import.ensure_current_store(data, with_children=False, body_sha=this_body)  # the update back
+    assert _statistics(data) == (stat1, samples), "the boot leaves the statistics as they are"
+    assert "sqlite_analyze" not in maintenance.due(data), "never by itself a reason to spawn the child"
+    report = maintenance.run(data)
+    assert report["jobs"].get("sqlite_analyze") == ({"state": "done", "items": 0} if sampling else None), report
+    assert _statistics(data) == (stat1, 0)
+    row = maintenance_jobs.job(data, "sqlite_analyze")
+    assert (row["statistics"], row["tasks"]) == ("stat1", 30)
+    before = _revision(data)
+    assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
 
 
 def test_legacy_reconcile_runs_only_when_scheduled_and_tolerates_a_body_without_it(data, monkeypatch):
@@ -304,6 +396,12 @@ def _setup_job(name, data, monkeypatch):
 
         assert ChronicleStore(data).ensure_activated()["kind"] == "activation"  # its frontier at the stream's start
         dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "in", "text": "after the frontier"})
+    elif name == "room_appearances":
+        from ouroboros import dialogue_store
+
+        # An older body's notice: no appearance keys, the derivation mark left behind it.
+        dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "out", "type": "main_notice", "task_id": "t",
+                                             "text": "an older body's notice"}, feed=True, appearances=None)
     elif name == "hot_facts":
         from ouroboros import store
 

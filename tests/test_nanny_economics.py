@@ -149,7 +149,7 @@ def test_direct_start_carries_assignment_and_a_predecessor_brief(tmp_path, monke
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
     payload = request["instructions"].split(marker, 1)[1]
     normalized, end = json.JSONDecoder().raw_decode(payload)
-    # The owner's words that caused the work follow the contract.
+    # My human's words for the work follow the contract.
     assert payload[end:].startswith("\n\n") and "words of my human" in payload[end:]
 
     assert normalized["context"] == context

@@ -52,6 +52,13 @@ appearance: the room colour (``web/ui.css`` ``--bg-primary``) of the Mac's Light
 frame follows macOS and nothing waits for the page (owner decision on #1111: A). A page whose choice
 differs forces its appearance when it declares, and the same colour then follows it, live resizes
 included. The windows shown before the server have no page choice to read and keep the Mac's.
+On Windows ``paint_room`` sets that fixed colour to the room of the app mode instead; it stays put
+after the page paints. On GTK that colour reaches nothing seen: pywebview 5.4's ``GtkWindow`` style rule
+showed no effect, so the window keeps its theme's colour, and from the first load the web view's own
+surface, opaque white by default, covers it on every host until a page paints (hosted run on GTK 3.24.33
+and WebKitGTK 2.50.4; a head-blocked ``html=`` document still showed the theme's colour). ``paint_room``
+gives that surface the room of the palette the theme resolved; a subsequent hosted run observed it
+before the held URL's page painted.
 """
 
 from __future__ import annotations
@@ -62,9 +69,12 @@ import math
 import sys
 from typing import Any, Optional
 
+from ouroboros.launcher_appearance import NativeAppearance, host_palette, palette_of_background
+
 log = logging.getLogger("launcher.window_chrome")
 
 _MACOS = sys.platform == "darwin"
+_LINUX = sys.platform.startswith("linux")
 HANDLER = "ouroborosWindowChrome"
 WORLD = "ouroboros-window"
 TOOLBAR = "ouroboros-window-chrome"
@@ -182,9 +192,26 @@ def _webview_of(window: Any) -> Any:
 
 
 def paint_room(window: Any) -> None:
-    """Register ``window`` to open in the room colour of its own appearance; inert off macOS."""
-    if _MACOS and window is not None:
+    """Before ``webview.start``: ``window`` opens in the room colour of its host's appearance.
+
+    macOS: one dynamic colour, set in ``before_show``. Windows: the room of the app mode a System page
+    will paint (``launcher_appearance.host_palette``) becomes pywebview's ``background_color``, the form's,
+    its WebView2's default and the caption's first colour (a dark host's WebView2 then held a ``url=``
+    response over its own #121212), and a window made from ``html=`` has no origin, so no page choice or
+    bridge will speak for it: its caption stays with its host. GTK: ``_paint_gtk_room``, set in
+    ``before_show``. Elsewhere, or with the palette unknown, the colour does not change."""
+    if window is None:
+        return
+    if _MACOS:
         window.events.before_show += lambda: _paint_room(getattr(window, "native", None))
+        return
+    if _LINUX:
+        window.events.before_show += lambda: _paint_gtk_room(window)
+        return
+    if room := ROOM.get(host_palette()):
+        window.background_color = room
+    if getattr(window, "html", None):
+        NativeAppearance().attach(window)  # inert off Windows
 
 
 def _paint_room(native: Any) -> None:
@@ -207,6 +234,29 @@ def _paint_room(native: Any) -> None:
         native.setBackgroundColor_(AppKit.NSColor.colorWithName_dynamicProvider_(None, resolve))
     except Exception:
         log.warning("The window keeps its fixed background colour until its page paints.", exc_info=True)
+
+
+def _paint_gtk_room(window: Any) -> None:
+    """pywebview ``before_show`` on GTK (main thread, just before the first load, so WebKit carries the colour
+    into the page it creates): the web view's own background becomes the room of the palette its window's GTK
+    theme resolved. The host's meaning is that theme's ``theme_bg_color`` as GTK answers it, by luminance and
+    never by theme name; a page's own background still paints over it. A theme without that colour leaves
+    WebKit's white, as does any failure here. Another backend (Qt on Linux) is not this surface."""
+    gui = getattr(window, "gui", None)
+    if getattr(gui, "renderer", "") != "gtkwebkit2":  # pywebview's name for this backend, whose module it is
+        return
+    try:
+        known, theme = window.native.get_style_context().lookup_color("theme_bg_color")
+        room = ROOM.get(palette_of_background("#%02x%02x%02x" % tuple(
+            round(part * 255) for part in (theme.red, theme.green, theme.blue)))) if known else None
+        if room is None:
+            log.info("The GTK theme gives no readable window colour; the web view keeps WebKit's white.")
+            return
+        colour = gui.Gdk.RGBA()
+        colour.parse(room)
+        gui.BrowserView.instances[window.uid].webview.set_background_color(colour)
+    except Exception:
+        log.warning("The web view keeps WebKit's white until its page paints.", exc_info=True)
 
 
 class WindowChrome:
@@ -232,11 +282,11 @@ class WindowChrome:
         self._closed = False
 
     def attach(self, window: Any) -> None:
-        """Register on ``window`` before ``webview.start``; inert off macOS."""
+        """Register on ``window`` before ``webview.start``: its room colour everywhere, the rest on macOS only."""
+        paint_room(window)
         if not _MACOS or window is None:
             return
         self._window = window
-        paint_room(window)
         window.events.before_show += self._before_show
         window.events.before_load += self._navigation_finished
         window.events.closed += self._close

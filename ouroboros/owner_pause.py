@@ -27,9 +27,11 @@ a second pause store:
   same fence and enters the exact pause without buying a model round.
 
 The fence being closed is NOT the tree being Paused: the root's ``state``
-turns ``paused`` only when no member of the tree still runs and every parked
-member's own sent work (delegated runs included) has settled; reviewers the
-Pause lets finish never keep it pausing (the fence lists them as
+turns ``paused`` only when no member of the tree still runs and every member's
+own sent work (delegated runs included) has settled, an ended member's too: a
+terminal result is not ended execution, and nothing parks to stop what it left
+running, so the fence owns that stop (``ended_member_runs``, #2669). Reviewers
+the Pause lets finish never keep it pausing (the fence lists them as
 ``finishing_reviews``). Until then the truthful state is ``requested``.
 """
 
@@ -55,6 +57,9 @@ _HANDED_MODEL = ContextVar("owner_pause_handed_model", default="")
 # armed only by that attempt's first launch the fence admitted.
 _REVIEW_EPISODE = ContextVar("owner_pause_review_episode", default=None)
 _REVIEW_ADMISSION = ContextVar("owner_pause_review_admission", default=None)
+# ``(source, reader)``: the live call whose ordinary batch started this work, and how to read its End or drained
+# Stop. Set only in that batch's own context (``call_end_reader``); it lives in the contexts copied from there.
+_CALL_END = ContextVar("owner_pause_call_end", default=None)
 
 RAIL_OWNER_PAUSE = "owner_pause"
 REASON_OWNER = "owner"
@@ -69,8 +74,8 @@ CLOSED_FENCE_STATES = frozenset({FENCE_REQUESTED, FENCE_PAUSED})
 SETTLEMENT_EXTERNAL_RUNNING = "external_writers_running"
 SETTLEMENT_SETTLED = "settled"
 
-NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — the owner paused this task tree before this "
-                    "operation was launched. Nothing ran; it may be issued again after Resume.")
+NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — a Pause of this task tree stopped this "
+                    "operation before it was launched. Nothing ran; it may be issued again after Resume.")
 
 
 class OwnerPauseRefused(Exception):
@@ -147,6 +152,23 @@ def fence_closed(fence: Dict[str, Any]) -> bool:
     return str((fence or {}).get("state") or "") in CLOSED_FENCE_STATES
 
 
+def owner_stopped(row: Any) -> bool:
+    """A root whose own terminal is a recorded Stop (its cancel intent's ``cancel_origin``): Stop outranks Pause.
+    It owns what remains (that intent's watchdog, the sweep a closed fence would refuse), so no Pause holds over it."""
+    origin = row.get("cancel_origin") if isinstance(row, dict) else None
+    return bool(isinstance(origin, dict) and origin.get("request_id") and row.get("status") == "cancelled")
+
+
+def root_stopped(root_drive: Any, root_task_id: str) -> bool:
+    """``owner_stopped`` of the root's stored row; unreadable is False, so the census still decides."""
+    from ouroboros.task_results import load_task_result
+
+    try:
+        return owner_stopped(load_task_result(root_drive, root_task_id, strict=True))
+    except Exception:
+        return False
+
+
 def paused_gap(root_drive: Any, task_id: str) -> Dict[str, Any]:
     """``{"membership_gaps": ...}`` the task's still-closed Pause last named, as its Resume reads it,
     else ``{}``: the fence's current fact, never the episode's older notice. Never raises."""
@@ -203,7 +225,7 @@ def _resume_outstanding(current: Dict[str, Any], fence: Dict[str, Any]) -> bool:
 
 
 def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
-                  late_work: bool = False, requested_by: str = "owner",
+                  late_work: bool = False,
                   actor_id: str = "", by: Optional[dict] = None) -> Tuple[Dict[str, Any], bool]:
     """Close the root's fence durably; ``(fence, created)``.
 
@@ -217,7 +239,7 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
     terminal root refuses: a finished tree has nothing to pause — unless its
     answered task still owns late work: an open post-task checkpoint read
     under this lock (the Pause ends that upkeep at once), or a live review
-    operation or live descendants the caller attests (``late_work``). ``by`` is the author a press
+    operation, live descendants or a delegated tail the caller attests (``late_work``). ``by`` is the author a press
     declared (``control_actor.pause_author``): the fence keeps its first one,
     and a press that declared nobody claims none. Raises
     ``OwnerPauseRefused`` without any write on refusal; any write failure
@@ -262,9 +284,7 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
             return stamp_task_result_schema({**current, "owner_pause": fence})
         fence = {
             **attribution, "fence_id": uuid.uuid4().hex, "request_id": str(request_id or ""),
-            # ``owner``: this owner Pause control, whoever pressed it (``by`` is who declared the press);
-            # a stop door names itself (``server_shutdown``, ``owner_restart``): the next start reads it.
-            "state": FENCE_REQUESTED, "requested_by": str(requested_by or "owner"), "requested_at": utc_now_iso(),
+            "state": FENCE_REQUESTED, "requested_at": utc_now_iso(),
             "requested_at_ts": time.time(), "root_task_id": str(root_task_id),
             "generation": int(old.get("generation") or 0) + 1,
             # Still closed here only under outstanding Resume authority: name it.
@@ -303,11 +323,13 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
 
 
 def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state: str,
-                    expected_state: str = "", **fields: Any) -> Dict[str, Any]:
+                    expected_state: str = "", row_update: Any = None, **fields: Any) -> Dict[str, Any]:
     """Compare-and-set the fence's state on its own ``fence_id`` (never another Pause's).
 
     ``expected_state`` also binds the state its caller read: a Resume that
     released this same fence after that read refuses a stale write here.
+    ``row_update`` rewrites the root's row in this same write: what stands or falls with the transition.
+    A write that keeps the state keeps its date: ``requested_at`` is the press (``control_actor.pause_author``).
     """
     from ouroboros.task_results import (
         require_writable_task_result_schema, stamp_task_result_schema,
@@ -326,12 +348,14 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
         if str(old.get("state") or "") == state and not fields:
             written.update(old)
             return None
-        fence = {**old, **fields, "state": state, f"{state}_at": utc_now_iso()}
+        moved = {} if str(old.get("state") or "") == state else {f"{state}_at": utc_now_iso()}
+        fence = {**old, **fields, "state": state, **moved}
         written.update(fence)
         from ouroboros.pause_notices import notice_fields
         notice = (notice_fields(current, root_drive, root_task_id, fence_id, "owner", fence=fence)
                   if state == FENCE_PAUSED and old.get("state") != FENCE_PAUSED else {})
-        return stamp_task_result_schema({**current, **notice, "owner_pause": fence})
+        row = {**current, **notice, "owner_pause": fence}
+        return stamp_task_result_schema(row_update(row) if row_update else row)
 
     from ouroboros.task_store import patch_document
     patch_document(pathlib.Path(root_drive), str(root_task_id), update)
@@ -854,16 +878,23 @@ def _validate_launch(source: Any, root_resume=None):
 
 
 @contextmanager
-def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = None, wait: bool = True):
+def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = None, wait: bool = True,
+                     dispatch: bool = False):
     """Validate and submit under Pause exclusion; contention waits only BEFORE yielding.
 
     Money/queue holders pass wait=False and unwind to their existing retry owner.
-    The yielded operation is never replayed by this context manager.
+    The yielded operation is never replayed by this context manager. ``dispatch``: the
+    submission starts its own invocation's effect, so the caller's controls are read in
+    this same transaction, and a contended read waits with it, its lock released. Read and
+    waits keep the bounds the invocation inherited, not a tool's soft wait envelope; the lock,
+    its stack and the retry stay in this context.
     """
     from ouroboros.model_wait import current_model_wait
     from ouroboros._usage_wait import retry_presend
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 
     root_drive, root_id, task_id = _member_coordinates(source)
+    caller = _caller_context(source) if dispatch else None
     def enter():
         owner = current_model_wait()
         if owner is not None and owner.task_id == task_id and owner.closed:
@@ -874,6 +905,10 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
             stack.enter_context(launch_lock(root_drive, root_id, wait=False))
             with admission_acquisition():
                 controls = _validate_launch(source, root_resume)
+                if dispatch and caller is not None:
+                    caller.copy().run(require_tool_dispatch, source)
+                elif dispatch:
+                    require_tool_dispatch(source)
                 marker = _REVIEW_EPISODE.get()
                 if (isinstance(marker, dict) and not episode_armed(marker)
                         and marker.get("root_task_id") == root_id):
@@ -883,7 +918,12 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
             stack.close()
             raise
         return stack, review_admission
-    stack, admitted = retry_presend(enter, check=False) if wait else enter()
+    try:
+        stack, admitted = retry_presend(enter, check=False, controls=caller) if wait else enter()
+    except PhysicalDispatchInterrupted as refused:
+        if dispatch:
+            _start_phase(refused, source)
+        raise
     with stack, admission_acquisition():
         token = _REVIEW_ADMISSION.set(admitted)
         try:
@@ -936,6 +976,20 @@ def tree_model_requests(root_drive: Any, root_task_id: str) -> list:
     with usage_store.read(root_drive) as txn:  # captured in one step, decoded after the read closed
         captured = txn.open_attempt_rows(root_task_id=str(root_task_id))
     return usage_store.decode_attempts(captured)
+
+
+def trees_model_requests(root_drive: Any, root_task_ids: Iterable[str]) -> Dict[str, list]:
+    """``tree_model_requests`` of many roots in ONE read: a reader over every paused tree pays one
+    transaction, not one per tree. Raises when unreadable: unknown, never none."""
+    from ouroboros import usage_store
+
+    roots = sorted({str(root) for root in root_task_ids})
+    with usage_store.read(root_drive) as txn:
+        captured = txn.open_attempt_rows(root_task_ids=roots)
+    grouped: Dict[str, list] = {root: [] for root in roots}
+    for attempt in usage_store.decode_attempts(captured):
+        grouped.setdefault(str(attempt.get("root_task_id") or ""), []).append(attempt)
+    return grouped
 
 
 @contextmanager
@@ -993,12 +1047,12 @@ def current_tool_operation(source: Any, name: str) -> str:
 
 
 def record_mcp_call_returned(name: str) -> None:
-    """The host joined this open invocation's MCP call: its final response and
-    clean session/transport exit arrived. Only that caller records it, never a
-    runner still running after its timeout nor result text or provider meta;
-    it settles this claim alone, not other processes, runs or money."""
+    """This invocation's MCP runner ended: its ``asyncio.run`` returned or raised after loop
+    shutdown. Only that runner records it, also after a timeout closed the call (a nested
+    runner holds the invocation until then), never result text or provider meta. It settles
+    this local claim alone, not its remote duty, other processes, runs or money."""
     active = _TOOL_OPERATION.get()
-    if active and active[1] == name and not active[2].get("closed"):
+    if active and active[1] == name:
         active[2]["mcp_call_returned"] = True
 
 
@@ -1012,8 +1066,9 @@ def operation_start(source: Any = None):
     """
     active = _TOOL_OPERATION.get()
     source = source if source is not None else (active[0] if active else None)
-    with launch_admission(source):
-        if active and active[0] is source:
+    own = bool(active and active[0] is source)
+    with launch_admission(source, dispatch=own):
+        if own:
             _mark_tool_start(active[2])
         yield
         arm_review_episode(source)  # the submission inside succeeded under this same lock
@@ -1061,6 +1116,83 @@ def run_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
         return future.result()
 
 
+@contextmanager
+def call_end_reader(source: Any, reader: Any):
+    """Bind a live call's End/drained-Stop ``reader`` to the work its batch starts from this context.
+
+    Each invocation of the batch takes its caller context and its worker context as copies of this
+    one, and so do their nested runners: the reader lives exactly as long as that work, so a worker
+    the batch stopped waiting for still reads its own call at every later gate. ``source`` itself
+    never holds it, so work started elsewhere, ordinary or another call's, cannot inherit it.
+    """
+    token = _CALL_END.set((source, reader))
+    try:
+        yield
+    finally:
+        _CALL_END.reset(token)
+
+
+def require_tool_dispatch(source: Any) -> None:
+    """Read caller controls at an effect boundary, without claiming its custody ended.
+
+    Its strict read may meet a contended store, so it runs only inside a transaction its
+    retry owner repeats: ``launch_admission(dispatch=True)``, ``run_tool_handler`` or
+    ``admit_tool_dispatch``. An earlier local handoff stays started even when this later
+    submission is refused. A live call's End is read from the context its batch bound
+    (``call_end_reader``), the invocation's captured caller context and its worker alike.
+    """
+    from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+
+    owner = current_model_wait()
+    bound = _CALL_END.get()
+    recorded = bound[1] if bound is not None and bound[0] is source else None
+    reason = (recorded() if recorded is not None else None) or (
+        owner.control_reason(strict_current=True) if owner is not None else None)
+    remaining = dispatch_deadline_remaining_sec()
+    if reason or remaining is not None and remaining <= 0:
+        raise _start_phase(PhysicalDispatchInterrupted(reason or "deadline"), source)
+
+
+def _start_phase(refused: Any, source: Any) -> Any:
+    """A refusal before an effect keeps the invocation's actual phase: unstarted only while nothing of it began."""
+    active = _TOOL_OPERATION.get()
+    refused.invocation_not_started = active is None or (
+        active[0] is source and active[2].get("not_started") is True)
+    return refused
+
+
+def _caller_context(source: Any) -> Any:
+    """The context captured when ``source``'s own invocation was created: its caller's bounds, never a
+    tool's soft wait envelope. None outside that invocation or for an older outcome."""
+    active = _TOOL_OPERATION.get()
+    return active[2].get("admission_context") if active and active[0] is source else None
+
+
+def _caller_admission(source: Any, gate: Any) -> Any:
+    """Repeat the short unsent ``gate`` only while its read is contended, after it unwound its locks,
+    under the caller's admission context: a tool's soft wait envelope never vetoes it, and it never
+    wraps a handler or transport. A refusal, the gate's or a control seen while waiting, keeps the
+    invocation's start phase."""
+    from ouroboros._usage_wait import retry_presend
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+
+    admission = _caller_context(source)
+    try:
+        if admission is None:
+            return retry_presend(gate, check=False)
+        return admission.run(retry_presend, gate, check=False)
+    except PhysicalDispatchInterrupted as refused:
+        _start_phase(refused, source)
+        raise
+
+
+def admit_tool_dispatch(source: Any) -> None:
+    """The entry of a dynamic transport (MCP, isolated extension), which has no ``run_tool_handler``:
+    the same controls, read before any preparation."""
+    _caller_admission(source, lambda: require_tool_dispatch(source))
+
+
 def run_tool_handler(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """The prepared callable passes directly to its already-running worker.
 
@@ -1068,10 +1200,7 @@ def run_tool_handler(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     queued preparation or a row write. The next action outside is the body;
     every nested operation still has its own fresh operation_start gate.
     """
-    from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
-    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.tools.process_facts import process_facts_handoff
-    from ouroboros._usage_wait import retry_presend
 
     active = _TOOL_OPERATION.get()
     outcome = active[2] if active and active[0] is source else None
@@ -1081,22 +1210,13 @@ def run_tool_handler(source: Any, function: Any, /, *args: Any, **kwargs: Any):
                 root, tree, _task = _member_coordinates(source)
                 with (launch_lock(root, tree, wait=False) if outcome and outcome.get("handed")
                       else launch_admission(source, wait=False)):
-                    owner = current_model_wait()
-                    reason = owner.control_reason(strict_current=True) if owner is not None else None
-                    remaining = dispatch_deadline_remaining_sec()
-                    if reason or remaining is not None and remaining <= 0:
-                        raise PhysicalDispatchInterrupted(reason or "deadline")
+                    require_tool_dispatch(source)
                     if outcome is not None:
                         _mark_tool_start(outcome)
                     arm_review_episode(source)
             # Validate the inherited caller controls, not this tool's soft wait
-            # envelope. Its retry owner must use that same context. The body
-            # keeps the worker envelope for inner waits after admission returns.
-            admission = outcome.get("admission_context") if outcome is not None else None
-            if admission is None:
-                retry_presend(take, check=False)
-            else:
-                admission.run(retry_presend, take, check=False)
+            # envelope. The body keeps the worker envelope for inner waits.
+            _caller_admission(source, take)
             return invoke(*args, **kwargs)
     finally:
         if outcome is not None:
@@ -1133,8 +1253,9 @@ def submit_async_preparation(function: Any, *args: Any, source: Any = None, **kw
         return await function(*args, **kwargs)
 
     source = source if source is not None else active[0] if active else None
-    with launch_admission(source):
-        if active and active[0] is source:
+    own = bool(active and active[0] is source)
+    with launch_admission(source, dispatch=own):
+        if own:
             _mark_tool_start(active[2])  # preparation can open a process/socket
         with physical_acquisition():
             task = asyncio.create_task(invoke())

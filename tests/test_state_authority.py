@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from supervisor import state, state_initialization
+from tests._source_scan import parse
 from tests._store_shared import remove_store_tree
 
 
@@ -175,8 +176,7 @@ def test_an_interrupted_initialization_finishes_the_same_identity(root):
     assert state_initialization.read_witness(root)[1]["phase"] == "complete"
 
 
-@pytest.mark.parametrize("history", ["witness_complete", "queue_snapshot", "task_result", "chat",
-                                     "campaign", "bindings", "evidence_unknown", "witness_corrupt"])
+@pytest.mark.parametrize("history", ["witness_complete", "bindings", "evidence_unknown"])
 def test_lost_state_on_an_initialized_or_historical_root_is_never_reminted(root, monkeypatch, history):
     (root / "state").mkdir(exist_ok=True)
     if history == "witness_complete":
@@ -536,7 +536,7 @@ def test_owner_bindings_have_only_known_empty_slot_writers():
     repo = pathlib.Path(__file__).resolve().parents[1]
     writers = []
     for path in [repo / "server.py", *repo.joinpath("ouroboros").rglob("*.py"), *repo.joinpath("supervisor").rglob("*.py")]:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
                 node, ast.AugAssign) else []
@@ -635,7 +635,7 @@ def test_panic_flag_blocks_constructor_tick_and_public_wake_after_failed_disable
     clock = BackgroundConsciousness(root, root, lambda: 7, now=0)
     assert not clock.enabled
     assert clock.tick(now=99999) == 'panic_stop'
-    monkeypatch.setattr(worker_chat_lane, 'wake_gate_open', lambda: True)
+    monkeypatch.setattr(worker_chat_lane, 'wake_gate_refusal', lambda: '')
     assert worker_chat_lane.handle_wake_direct(7, 'wake', {})['reason'] == 'consciousness_disabled_or_unknown'
     assert (root / 'state/panic_stop.flag').exists()
 

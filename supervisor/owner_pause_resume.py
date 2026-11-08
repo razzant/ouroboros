@@ -5,7 +5,7 @@ import pathlib
 import time
 import uuid
 
-from ouroboros.control_actor import control_actor, observed_control_stop
+from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
 from ouroboros.utils import utc_now_iso
 from ouroboros.work_stop import release_refusal
 
@@ -64,7 +64,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
             else:
                 q.BUDGET_ROOT_FENCES[task_id] = prior_latch
 
-        grant = {"by": control_actor(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
+        grant = {"by": resume_author(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
                  "granted_at_ts": time.time(), "authority": "explicit_resume", "selected_by": "owner",
                  "generation": int(fence.get("generation") or 0), "root_resume_basis": state["basis"],
                  "tree_only": True}
@@ -78,7 +78,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
                 # Like unstarted-root Resume, publish while launch authority is
                 # still closed. A failed/raised Q write cannot release the tree.
                 try:
-                    persisted = q.persist_queue_snapshot(reason="owner_pause_tree_resumed")
+                    persisted = q.publish_queue_snapshot(reason="owner_pause_tree_resumed")  # durable while launch authority is closed
                 except Exception:
                     persisted = False
                 if not persisted:
@@ -91,7 +91,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
                                                   and (meta.get("task") or {}).get("root_task_id") == task_id])
                 except Exception:
                     rollback()
-                    q.persist_queue_snapshot(reason="owner_pause_tree_resume_held")
+                    q.publish_queue_snapshot(reason="owner_pause_tree_resume_held")
                     raise
         except Exception as exc:
             rollback()

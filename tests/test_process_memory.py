@@ -93,7 +93,6 @@ class TestEmitTaskResultsPostTaskWorkNotOnCriticalPath:
 
         with mock.patch("ouroboros.agent_task_pipeline._run_memory_fallback_draft") as mock_draft, \
              mock.patch("ouroboros.agent_task_pipeline._run_post_task_processing_async") as mock_async, \
-             mock.patch("ouroboros.agent_task_pipeline._run_scratchpad_consolidation") as mock_scratch, \
              mock.patch("ouroboros.agent_task_pipeline._store_task_result"), \
              mock.patch("ouroboros.review_evidence.collect_review_evidence",
                         return_value={}, create=True):
@@ -111,6 +110,5 @@ class TestEmitTaskResultsPostTaskWorkNotOnCriticalPath:
         # emit_task_results must not call them directly. Otherwise reply
         # latency regresses.
         mock_draft.assert_not_called()
-        mock_scratch.assert_not_called()
         # The async helper must still be invoked exactly once.
         mock_async.assert_called_once()

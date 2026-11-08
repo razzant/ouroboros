@@ -32,7 +32,7 @@ from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
 from ouroboros.project_dialogue import (
-    _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, entry_matches_source_ref,
+    _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, entry_matches_source_ref,
 )
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, is_task_card_message, subagent_message_meta
@@ -281,7 +281,10 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
         keys: list = [("chat_id", thread_id)]
         for task in bound:
             keys.extend((("task_id", task), ("parent_task_id", task), ("root_task_id", task)))
-        keys.extend(("task_id", task) for task in _descendants(data_dir, bound))
+        descendants = _descendants(data_dir, bound)
+        keys.extend(("task_id", task) for task in descendants)
+        # Rows written elsewhere that this room also shows (``room_membership.appearance_keys``).
+        shown = (("appearance", f"room:{thread_id}"), *(("appearance", f"task:{task}") for task in (*bound, *descendants)))
         owners, seqs = [], []
         for ref in source_refs:
             if not isinstance(ref, dict):
@@ -297,7 +300,7 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
                 if chat == 1:
                     candidates += ds.rows_by_identity(data_dir, None, str(ref["ts"]))
                 seqs.extend(row.seq for row in candidates if entry_matches_source_ref(row.row, [ref]))
-        return {"chat": RoomLens((*keys, *dict.fromkeys(owners)), tuple(sorted(set(seqs)))),
+        return {"chat": RoomLens((*keys, *shown, *dict.fromkeys(owners)), tuple(sorted(set(seqs)))),
                 "progress": RoomLens(tuple(keys))}
     if thread_id != 1:
         from ouroboros.place_arrivals import holds_history_import
@@ -665,7 +668,13 @@ def history_page_coverage(page, stream_gaps):
 
 
 def delivered_history_gaps(root, page, stream_gaps):
-    """Recheck narrowed import spans; projection failures have no narrower proof."""
+    """Recheck narrowed import spans; projection failures have no narrower proof. A Project page
+    reaching rows the appearance index has not derived yet (``room_appearances``: a store from
+    before it, an older body's rows) may lack a row written elsewhere: ``appearances_deriving``;
+    one reaching a Reply that could join it but whose saved target cannot be read now:
+    ``reply_target_unreadable`` (``room_appearances.read_gaps``, as memory and evidence reads name them)."""
+    from ouroboros.room_appearances import read_gaps
+
     import_gaps = {*_GAP_NAMES.values(), UNIMPORTABLE}
     for source in _SOURCES:
         if page["before"][source] == page["selections"][source][1]:
@@ -674,6 +683,10 @@ def delivered_history_gaps(root, page, stream_gaps):
                                 physical=page.get("after", False))
         stream_gaps[source] = (stream_gaps[source] - import_gaps) | reader.gaps(
             page["before"][source], page["page_ends"][source])
+    shown = [key for column, key in getattr(page["lens"]["chat"], "keys", ()) if column == "appearance"]
+    if page.get("quotas", {}).get("human", True) and shown:
+        stream_gaps["chat"] = stream_gaps["chat"] | read_gaps(root, page["chat_id"], shown, page["before"]["chat"],
+                                                              page["page_ends"]["chat"])
     return stream_gaps
 
 
@@ -697,7 +710,7 @@ def history_page_tokens(page, messages=(), reads=None):
     # Tasks whose facts the rows show: not an owner's row, a notice naming another room's task or a pointer.
     shown = {str(row.get("task_id")) for row in messages if row.get("task_id") and row.get("role") != "user"
              and row.get("system_type") not in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES,
-                                                *MAIN_PINNED_ROW_TYPES)}
+                                                *MAIN_PINNED_ROW_TYPES, *WORK_SPEECH_ELSEWHERE_TYPES)}
     lifecycle = any(row.get("lifecycle_virtual") for row in messages)
     if page.get("after") and page.get("lifecycle") and not lifecycle:
         raise HistoryCursorError("history_delta_reset")  # the shown operation ended: nothing here says so
@@ -815,11 +828,26 @@ def _stored_message(row_matches_thread, stored_chat_id, child):
     return message
 
 
+def _arrived_unread(data_dir, chat_id):
+    """Whether a message can be this room's unread arrival: one read in full in another room (its
+    revision here in the room's ``read_ahead_revisions``) or one that never counted here (its
+    ``room_revisions`` stamp names other rooms only) is not where an unread room lands."""
+    from ouroboros.gateway.ui_preferences import read_ahead_spans
+
+    spans = read_ahead_spans(data_dir, chat_id)
+
+    def arrived(row):
+        stamp = row.get("room_revisions")
+        revision = stamp.get(str(chat_id)) if isinstance(stamp, dict) else 0
+        return not isinstance(stamp, dict) or (type(revision) is int and not any(lo <= revision <= hi for lo, hi in spans))
+    return arrived
+
+
 def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, projected_gaps=frozenset(),
                    task_result=lambda _task_id: {}):
-    """``window.latest_message`` of a recent Project read (DESIGN "Unread").
+    """``window.latest_message`` of a recent Main or Project read (DESIGN "Unread").
 
-    The window is ordered and tailed by event time, but a Project message counts
+    The window is ordered and tailed by event time, but a room's message counts
     as unread when it ARRIVES: an answer the terminal outbox delivers late keeps
     its original ``ts``, so it can sort above messages that arrived before it
     (``out_of_order``) or below the window's floor, where the first older page
@@ -869,8 +897,18 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
 
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
-    feed = [row for row in rows if _feed_message(row)]
-    spoken = sorted((row for row in feed if row.get("role") != "user" and (
+    arrived = _arrived_unread(data_dir, page["chat_id"])
+    question_chat = getattr(row_matches_thread, "question_project_chat", lambda _row: 0)
+
+    def elsewhere(row):
+        # Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
+        # handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read. Both are
+        # Main's rows alone (room_membership pins the one; ``question_project_chat`` names nothing off Main).
+        kind = str(row.get("system_type") or row.get("type") or "")
+        return kind == "project_question_pointer" or bool(question_chat(row)) or (
+            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
+    feed = [row for row in rows if _feed_message(row) and not elsewhere(row)]
+    spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)
     latest = next((row for row in reversed(spoken) if not words(row)), None)
     # The newest time a message this read shows was sent: a later arrival sent before it sorts above
@@ -892,7 +930,8 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
             return {"latest_message": {"history_id": latest["history_id"], "out_of_order": True}}
         return {"latest_absent": True} if start == 0 and not gaps else {}
     if latest is None and start > 0:
-        message = _stored_message(row_matches_thread, stored_chat_id, child)
+        stored = _stored_message(row_matches_thread, stored_chat_id, child)
+        message = lambda entry: stored(entry) and arrived(entry) and not elsewhere(entry)  # noqa: E731
         entries, before, gaps = HistorySource(data_dir, "chat", page["lens"]["chat"], end).older(
             start, 1, message, min(_ARRIVAL_SEARCH_ROWS, _READ_CEILING_ROWS))
         found = next(filter(message, entries), None)  # ``older`` stops at the newest one

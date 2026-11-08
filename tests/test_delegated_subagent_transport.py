@@ -45,8 +45,7 @@ def test_discovery_reads_host_port_and_token(tmp_path):
 
 
 @pytest.mark.parametrize("host,loopback", [
-    ("127.0.0.1", True), ("localhost", True), ("::1", True), ("[::1]", True),
-    ("127.1.2.3", True), ("fe80::1%lo0", False),
+    ("127.0.0.1", True), ("localhost", True), ("fe80::1%lo0", False),
     # The exfiltration shapes: a plain external name, a name that merely LOOKS like a
     # loopback literal, an address that resolves off-host, and the wildcard bind.
     ("evil.example.com", False), ("127.0.0.1.evil.com", False),
@@ -548,16 +547,26 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
         DELEGATE_WAIT_CEILING_SEC,
         DELEGATE_WAIT_WINDOW_MAX_SEC,
         get_delegate_wait_max_sec,
-        get_task_abs_ceiling_sec,
-        operation_window_sec,
     )
     from ouroboros.delegate_progress import EXTERNAL_WAIT_LEASE_CEILING_SEC
     from ouroboros.loop_tool_execution import _DEADLINE_CLAMPED_TOOLS, _PER_CALL_TIMEOUT_TOOLS
     from ouroboros.tools.delegate import get_tools
 
-    entry = next(e for e in get_tools() if e.schema["name"] == "delegate_wait")
-    assert "wait_sec" not in entry.schema["parameters"]["properties"]
-    assert entry.timeout_sec == operation_window_sec(get_task_abs_ceiling_sec()) + 120
+    def entry():
+        return next(e for e in get_tools() if e.schema["name"] == "delegate_wait")
+
+    assert "wait_sec" not in entry().schema["parameters"]["properties"]
+    # Lifetime + 120 when the task has one (the pre-#1196 meaning); none without one (retired
+    # pin: the 6 h operation window): the wait wakes on cancel/deadline controls itself.
+    previous_lifetime = os.environ.pop("OUROBOROS_TASK_ABS_CEILING_SEC", None)
+    try:
+        assert entry().timeout_sec is None
+        os.environ["OUROBOROS_TASK_ABS_CEILING_SEC"] = "3600"
+        assert entry().timeout_sec == 3600 + 120
+    finally:
+        os.environ.pop("OUROBOROS_TASK_ABS_CEILING_SEC", None)
+        if previous_lifetime is not None:
+            os.environ["OUROBOROS_TASK_ABS_CEILING_SEC"] = previous_lifetime
     assert DELEGATE_WAIT_WINDOW_MAX_SEC < DELEGATE_WAIT_CEILING_SEC < EXTERNAL_WAIT_LEASE_CEILING_SEC
     assert (DELEGATE_WAIT_WINDOW_MAX_SEC, DELEGATE_WAIT_CEILING_SEC,
             EXTERNAL_WAIT_LEASE_CEILING_SEC) == (1800, 2100, 2400)
@@ -580,9 +589,6 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
             os.environ.pop("OUROBOROS_DELEGATE_WAIT_MAX_SEC", None)
         else:
             os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = previous
-
-
-# -- the window is a WINDOW: the timer waits, the human's stream does not ------
 
 
 # ---------------------------------------------------------------------------

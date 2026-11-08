@@ -9,9 +9,12 @@ module owns that translation and the client whose auth the library refreshes.
 
 from __future__ import annotations
 
+import contextvars
 import json
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, token_count
@@ -23,6 +26,52 @@ from ouroboros.llm_attempt import (
     attach_processing_receipt,
     bound_reply_allowance,
 )
+
+log = logging.getLogger(__name__)
+
+# True only while one accounted ``client.chat`` runs on its sender thread.
+_ACCOUNTED_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar("gigachat_accounted_send", default=False)
+
+
+def _bound_library_request(request: Any) -> None:
+    """httpx request hook: narrow each library request of an accounted send as it starts (#572).
+
+    The library takes its socket timeout (the caller's, else its own default) when
+    it builds its HTTP clients and sends none per request, while one
+    ``client.chat`` may make several requests: an OAuth token request, the chat
+    request and, after a 401, another token request and the same sealed bytes
+    again. Each keeps that timeout narrowed to the caller's bounds left as it
+    starts; a spent window or a Stop refuses it before its bytes. The value bounds
+    each socket wait (connect, write, every read), not a request's total wall time.
+    Requests outside an accounted send are untouched.
+    """
+    if not _ACCOUNTED_SEND.get():
+        return
+    import httpx
+
+    request.extensions["timeout"] = physical_dispatch_timeout(
+        httpx.Timeout(**request.extensions["timeout"])).as_dict()
+
+
+def _bind_library_requests(client: Any) -> Any:
+    """Hook the private HTTP clients the library builds lazily, ``_client`` and ``_auth_client``.
+
+    Consumer-proven on the pinned ``gigachat`` 0.2.3 only. A synthetic stand-in
+    without them keeps its construction timeout. A library client without them is
+    logged as a gap: caller deadlines then narrow none of its socket timeouts.
+    """
+    bound = 0
+    for name in ("_client", "_auth_client"):
+        http = getattr(client, name, None)
+        hooks = getattr(http, "event_hooks", None)
+        if isinstance(hooks, dict):
+            if _bound_library_request not in hooks.get("request", ()):
+                http.event_hooks = {**hooks, "request": [*hooks.get("request", ()), _bound_library_request]}
+            bound += 1
+    if bound < 2 and type(client).__module__.split(".")[0] == "gigachat":
+        log.warning("GigaChat library client %s exposes %d of 2 HTTP clients: caller deadlines do not narrow "
+                    "the socket timeouts of the rest, which keep their construction values", type(client).__name__, bound)
+    return client
 
 
 class _GigaChatLaneMixin:
@@ -89,7 +138,8 @@ class _GigaChatLaneMixin:
         it repeats the sealed bytes of the same attempt.
         A caller-supplied per-request ``timeout`` becomes part of the cache key
         (the library takes it at construction), so the safety-supervisor timeout
-        SSOT bounds this lane too (v6.54.3)."""
+        SSOT bounds this lane too (v6.54.3); each request of a send is further
+        narrowed to the caller's absolute bounds (``_bound_library_request``)."""
         credentials = str(target.get("api_key") or "")
         user = str(target.get("user") or "")
         password = str(target.get("password") or "")
@@ -102,7 +152,8 @@ class _GigaChatLaneMixin:
         cache_key = (credentials, user, password, scope, base_url, verify, timeout_key, extra_ca_bundle())
 
         if cache_key not in self._gigachat_clients:
-            self._gigachat_clients[cache_key] = self._new_gigachat_client(target, timeout=timeout, max_retries=0)
+            self._gigachat_clients[cache_key] = _bind_library_requests(
+                self._new_gigachat_client(target, timeout=timeout, max_retries=0))
         return self._gigachat_clients[cache_key]
 
     @staticmethod
@@ -270,9 +321,17 @@ class _GigaChatLaneMixin:
         # sealed bytes inside the same attempt and claims no fresher clock.
         candidate = bound_reply_allowance(target, _physical_candidate(stamp_clock_note(payload)))
         request = _attempt_request(target, candidate, source="llm.gigachat")
+
+        def send():
+            token = _ACCOUNTED_SEND.set(True)
+            try:
+                return client.chat(candidate)
+            finally:
+                _ACCOUNTED_SEND.reset(token)
+
         completion = _execute_candidate(
             request,
-            limit_physical_send(target, lambda: client.chat(candidate)),
+            limit_physical_send(target, send),
             _candidate_before_dispatch(candidate, request),
         )
         return self._normalize_gigachat_response(completion, target)

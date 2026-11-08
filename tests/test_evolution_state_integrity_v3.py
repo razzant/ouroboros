@@ -50,7 +50,6 @@ def test_pytest_fuse_blocks_state_and_campaign_writes_to_live_data(monkeypatch):
         evolution_lifecycle._write_evolution_campaign({"id": "blocked", "status": "active"})
 
 
-@pytest.mark.serial
 def test_pytest_bootstrap_rebinds_preimported_modules_away_from_fake_home(tmp_path):
     repo = pathlib.Path(__file__).resolve().parents[1]
     fake_home = tmp_path / "home"
@@ -102,7 +101,6 @@ print(json.dumps({
     assert payload["state"]["probe"] == "isolated"
 
 
-@pytest.mark.serial
 def test_pytest_scrubbed_child_keeps_disposable_state_root(tmp_path, monkeypatch):
     from tests import conftest as test_conftest
 
@@ -158,7 +156,6 @@ print(json.dumps({
         assert path.read_bytes() == content
 
 
-@pytest.mark.serial
 def test_nested_pytest_keeps_the_original_live_root_marker(tmp_path):
     repo = pathlib.Path(__file__).resolve().parents[1]
     inherited_disposable = tmp_path / "parent-pytest-data"

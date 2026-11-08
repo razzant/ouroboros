@@ -114,6 +114,7 @@ from ouroboros.request_wire_recovery import (
     prepare_wire_payload_for_send,  # noqa: F401
     request_wire_scoped,
 )
+from ouroboros.request_wire_recovery import resolve_temperature_hint
 from ouroboros.transport_custody import is_loopback_base_url  # noqa: F401
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS  # noqa: F401 -- historical public import surface
 from ouroboros.usage_accounting import (
@@ -132,7 +133,7 @@ from ouroboros.usage_accounting import (
     last_physical_attempt_capture,  # noqa: F401
     usage_scope,  # noqa: F401 -- historical public import surface
     )
-from ouroboros.utils import in_worker_process, sanitize_tool_result_for_log  # noqa: F401
+from ouroboros.utils import sanitize_tool_result_for_log, transport_no_proxy  # noqa: F401
 from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
@@ -159,6 +160,8 @@ class LLMClient(
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         self._api_key_override = api_key
+        # Route resolution owns credentials at dispatch. Constructing an ordinary
+        # actor for preparation must not fetch an unused provider key.
         self._base_url = base_url
         self._client = None
         self._client_api_key: Optional[str] = None
@@ -199,6 +202,7 @@ class LLMClient(
         caller_execution_deadline: Optional[float] = None,
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -210,12 +214,16 @@ class LLMClient(
         ``default_temperature`` is a host hint, unlike explicit ``temperature``.
         Resolve it on this invocation's effective route after any model wait:
         raw model operations defer to provider defaults; explicit values win.
+        Its origin stays on the route: a bounded value refusal may withdraw a hint
+        and no explicit value (``request_wire_recovery``).
 
         ``model_turn_state`` is the caller's optional active-turn transport slot
         (``llm_claudexor.ModelTurnState``); this seam is where a dispatch that
         leaves that transport ends the turn. ``wait_for_resources=False`` returns
         a confirmed quota/auth refusal to this caller without entering resource
-        waiting; task overrides, controls and dispatched-operation custody remain."""
+        waiting; task overrides, controls and dispatched-operation custody remain.
+        ``caller_dispatch_deadline_ts`` is a helper's send window, never a wait's end
+        (``deadline_utils.caller_deadline_scoped``)."""
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
@@ -231,12 +239,11 @@ class LLMClient(
                     messages, tools, max_tokens, tool_choice, **local_kwargs,
                 )
             else:
-                # Central worker policy: remote calls from worker processes avoid
-                # system proxy lookup without every caller remembering a flag.
-                no_proxy = no_proxy or in_worker_process()
+                # The spawner's transport policy (``utils.transport_no_proxy``): a forked child
+                # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
+                no_proxy = no_proxy or transport_no_proxy()
                 target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
-                if temperature is None and target.get("provider") != "claudexor":
-                    temperature = default_temperature
+                temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
                     target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                     no_proxy=no_proxy,
@@ -283,6 +290,7 @@ class LLMClient(
         caller_execution_deadline: Optional[float] = None,
         wait_for_resources: bool = True,
         processing_preference: str | None = None,
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
 
@@ -291,7 +299,7 @@ class LLMClient(
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
-        no_proxy = no_proxy or in_worker_process()
+        no_proxy = no_proxy or transport_no_proxy()
         if use_local:
             turn_state_for_route(model_turn_state, "local")
             from ouroboros.usage_accounting import adopt_physical_attempt_capture, last_physical_attempt_capture
@@ -316,8 +324,7 @@ class LLMClient(
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
         target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
-        if temperature is None and target.get("provider") != "claudexor":
-            temperature = default_temperature
+        temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))
         if target.get("provider") == "claudexor":
             from ouroboros.llm_claudexor import chat_claudexor_async
@@ -352,7 +359,7 @@ class LLMClient(
             with capture_attempt_ids() as attempt_ids:
                 result = await asyncio.to_thread(
                     self._chat_gigachat, target, messages, tools, reasoning_effort,
-                    max_tokens, tool_choice, temperature, no_proxy,
+                    max_tokens, tool_choice, temperature, no_proxy, timeout,
                 )
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
@@ -630,12 +637,14 @@ class LLMClient(
         model_account_override: str | None = None,
         processing_preference: str | None = None,
         purpose: str = "vlm",
+        caller_dispatch_deadline_ts: Optional[float] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Run a lightweight vision query; image dicts use url or base64+mime.
 
         ``model`` is named explicitly, so the one image policy sends its pixels
         (``purpose`` "vlm" for a VLM tool, "caption" for a send-time caption);
-        it never captions here, so a caption cannot recurse into another."""
+        it never captions here, so a caption cannot recurse into another.
+        ``caller_dispatch_deadline_ts`` is ``chat``'s send window, reserve already subtracted."""
         from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
         from ouroboros.vision_image_limits import query_image_messages
         from ouroboros.model_wait import current_model_wait
@@ -673,6 +682,8 @@ class LLMClient(
             model_operation_observer=model_operation_observer,
             model_account_override=model_account_override,
             processing_preference=processing_preference,
+            **({"caller_dispatch_deadline_ts": caller_dispatch_deadline_ts}
+               if caller_dispatch_deadline_ts is not None else {}),
         ))
         waiter = current_model_wait()
         with waiter.register_reprepare(model_role, prepare) if waiter else nullcontext():
@@ -699,13 +710,16 @@ class LLMClient(
         return models
 
 
+@caller_deadline_scoped
 def openrouter_web_search_server_tool(
 
     *, api_key: str, model: str, query: str, search_context_size: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
-    processing_preference: str | None = None,
+    processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
 ) -> Any:
-    """Keep native search tools on the shared physical-send recovery driver."""
+    """Keep native search tools on the shared physical-send recovery driver.
+
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _openrouter_web_search_server_tool(
         api_key=api_key, model=model, query=query, search_context_size=search_context_size,
         accounting_scope=accounting_scope, timeout=timeout, processing_preference=processing_preference,
@@ -713,12 +727,15 @@ def openrouter_web_search_server_tool(
     )
 
 
+@caller_deadline_scoped
 def anthropic_web_search_server_tool(
     *, api_key: str, model: str, query: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
-    processing_preference: str | None = None,
+    processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
 ) -> Any:
-    """Compose native Messages search without converting its provider-owned tool."""
+    """Compose native Messages search without converting its provider-owned tool.
+
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _anthropic_web_search_server_tool(
         api_key=api_key, model=model, query=query, accounting_scope=accounting_scope,
         timeout=timeout, processing_preference=processing_preference,

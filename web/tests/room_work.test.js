@@ -107,7 +107,7 @@ test('the mounted list holds its order while open, settles ended work and only n
         const anchor = header.children.find((child) => child.classList.contains('rw-shade-anchor'));
         const surface = anchor.children.find((child) => child.classList.contains('rw-surface'));
         assert.ok(surface.classList.contains('rw-shade'));
-        const list = surface.children[0];
+        const list = surface.querySelector('.rw-list');
         const ids = () => list.children.map((row) => row.dataset.id);
         assert.ok(trigger.contains(badge), 'the real status badge is the control’s word');
         assert.equal(trigger.dataset.tone, 'live');
@@ -184,7 +184,7 @@ test('View question reaches the asking task of a work, not its first root', asyn
         });
         const trigger = titleRow.children.find((child) => child.classList.contains('rw-trigger'));
         const list = header.children.find((child) => child.classList.contains('rw-shade-anchor')).children
-            .find((child) => child.classList.contains('rw-surface')).children[0];
+            .find((child) => child.classList.contains('rw-surface')).querySelector('.rw-list');
         const ask = async () => {
             trigger.click();
             list.children[0].children.find((child) => child.classList.contains('rw-verb')).children[0].click();
@@ -224,7 +224,7 @@ test('a pending send keeps its slot until its work is listed; the work takes the
             ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
             works: () => workState(works), liveCardRecords: records, pendingSubmissions: pending });
         const trigger = titleRow.children.find(el => el.classList.contains('rw-trigger'));
-        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const turns = () => list.children.filter(el => el.dataset.id === 'turn-1');
         trigger.click();
         const card = node('div', 'chat-live-block', messages);
@@ -266,7 +266,7 @@ test('a work the server lists but cannot confirm keeps its Stop; a work kept fro
         shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
             reading: { cancel() {}, scroll() {} }, works: () => state, liveCardRecords: new Map(), pendingSubmissions: new Map() });
         titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const row = () => list.children.find((el) => el.dataset.id === 't-unknown');
         const more = () => row().children.find((el) => el.classList.contains('rw-more-slot')).children.length;
         assert.equal(row().dataset.tone, 'unknown');
@@ -299,7 +299,7 @@ test('a row names its card\'s coined name first, then its work\'s own name; a ho
                 room('working')), liveCardRecords: new Map([['t-run', record]]), pendingSubmissions: new Map(),
             hostReady: () => ready });
         titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const row = () => list.children.find((el) => el.dataset.id === 't-run');
         const name = () => row().querySelector('.rw-name').textContent;
         const more = () => row().children.find((el) => el.classList.contains('rw-more-slot')).children.length;
@@ -441,6 +441,111 @@ test('on a phone-width bar a preparing room drops its start step before its word
     } finally { work?.destroy(); restoreDom(prior); }
 });
 
+// A Project's bar and its room, as app.js and chat.js mount them: the name in the title row, the consciousness chip,
+// and the instance's page whose status badge the room's control takes.
+function projectRoom(mount) {
+    const node = (tag, cls, parent) => {
+        const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+    };
+    const panel = node('div', 'project-panel', mount);
+    const bar = node('div', 'project-panel-bar', panel);
+    const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', bar));
+    const name = node('h2', 'app-page-title', titleRow);
+    const chip = node('button', 'cx-chip', bar);
+    const page = node('div', 'chat-instance-panel', node('div', 'project-panel-body', panel));
+    page.closest = (selector) => (selector === '.project-panel' ? panel : null);
+    const badge = node('span', 'status-badge online', node('div', 'chat-panel-statusbar', page));
+    return { bar, titleRow, name, chip, page, badge, messages: node('div', 'chat-messages', page) };
+}
+
+// DESIGN "Shell": a Project's name keeps one line and wins its bar. Where the room covers Main (a phone, a finger's docked
+// column) a name that line still cuts makes the consciousness chip show its brain alone (the chip's name keeps the whole
+// state); a desk keeps the chip's word and the name ends in an ellipsis; a name that fits leaves the chip whole.
+test('a Project bar gives its one-line name the chip\'s word where the room covers Main, only while the name is cut', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work, resized = null, relayout = null;
+    try {
+        globalThis.ResizeObserver = class { constructor(fn) { resized = fn; } observe() {} disconnect() {} };
+        globalThis.window.addEventListener = (type, fn) => { if (type === 'ouro:layout-changed') relayout = fn; };
+        const root = document.documentElement;
+        root.dataset.layout = 'stack';
+        const { bar, titleRow, name, chip, page, badge, messages } = projectRoom(mount);
+        // At 7 px a character the name's one line holds 30 characters beside the whole chip, 40 beside its brain alone;
+        // a longer name is cut (its box narrower than its text).
+        let length = 20, width = 200;
+        Object.defineProperty(name, 'scrollWidth', { get: () => 7 * length });
+        Object.defineProperty(name, 'clientWidth', { get: () => 7 * Math.min(length, chip.dataset.fit === 'mark' ? 40 : 30) });
+        Object.defineProperty(badge, 'scrollWidth', { get: () => 0 });
+        Object.defineProperty(badge, 'clientWidth', { get: () => 0 });
+        Object.defineProperty(titleRow, 'clientWidth', { get: () => width });
+        work = createRoomWork({ page, asPanel: true, statusBadge: badge, messagesDiv: messages,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(), liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const fit = () => chip.dataset.fit || 'whole';
+        const named = (chars) => { length = chars; width += 1; resized([{ target: bar }]); return fit(); };
+        assert.equal(named(20), 'whole', 'a name that fits leaves the chip whole');
+        assert.equal(named(36), 'mark', 'a name its one line would cut: the chip shows its brain alone');
+        assert.equal(named(60), 'mark', 'still cut beside the brain: the name ends in an ellipsis, the chip stays small');
+        assert.equal(named(12), 'whole', 'a short name gives the chip its word back');
+        // A desk keeps the chip's word and lets the name end in an ellipsis; a layout switch fits again.
+        length = 60;
+        root.dataset.layout = 'docked';
+        relayout();
+        assert.equal(fit(), 'whole', 'a desk keeps the chip\'s word beside a cut name');
+        root.dataset.pointer = 'coarse';
+        relayout();
+        assert.equal(fit(), 'mark', 'a finger\'s docked Project covers Main: the cut name takes the word');
+        root.dataset.pointer = 'fine';
+        relayout();
+        assert.equal(fit(), 'whole', 'a mouse again: the panel beside Main keeps the chip\'s word');
+        root.dataset.layout = 'stack';
+        relayout();
+        assert.equal(fit(), 'mark', 'back on a phone the cut name takes the word again');
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+// DESIGN "Room work status" and "Shell": a Project's list starts with the room's whole name, which its one-line title
+// may cut, so the title opens it even when the room has no work; the list then says so in Activity's words.
+test('a Project\'s list opens on its whole name, also with no work, and says when nothing is listed', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work;
+    try {
+        const { bar, titleRow, name, page, badge, messages } = projectRoom(mount);
+        const whole = 'Archive — reconcile every cited source with its appendix / Appendix B';
+        name.textContent = whole;
+        Object.assign(badge.dataset, { tone: 'online', mark: 'none', owner: '', amber: '' });
+        badge.textContent = 'Online';
+        let works = [];
+        work = createRoomWork({ page, asPanel: true, statusBadge: badge, messagesDiv: messages,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(works), liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const caret = trigger.children.find((el) => el.classList.contains('rw-caret'));
+        const surface = bar.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0];
+        const [head, list, note] = ['.rw-title', '.rw-list', '.rw-note'].map((selector) => surface.querySelector(selector));
+        assert.ok(head.classList.contains('rw-title') && list.classList.contains('rw-list'), 'the name comes first');
+        assert.equal(trigger.disabled, false, 'an empty Project\'s title still opens its list');
+        assert.equal(caret.hidden, false, 'and its caret says so');
+        titleRow.click();
+        assert.equal(work.isOpen(), true, 'a press on the name opens the list');
+        assert.deepEqual([head.textContent, head.hidden], [whole, false], 'the whole name, never cut');
+        assert.equal(list.children.length, 0);
+        assert.deepEqual([note.textContent, note.hidden], ['Nothing running or queued.', false]);
+        // With work listed the name still leads and the empty sentence goes.
+        works = [running('t-run')];
+        work.update();
+        assert.deepEqual(list.children.map((row) => row.dataset.id), ['t-run']);
+        assert.equal(surface.children[0], head);
+        assert.equal(note.hidden, true, 'nothing to say while work is listed');
+        work.close();
+        assert.equal(work.isOpen(), false);
+        assert.equal(trigger.disabled, false, 'the title stays a door once the work ends');
+        works = [];
+        work.update();
+        assert.equal(trigger.disabled, false);
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
 // DESIGN "Room work status": a row goes to its message wherever it lies in the room's history.
 test('an unloaded row reads the page around its task and lands on its card; one with no message says so', async () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
@@ -477,7 +582,7 @@ test('an unloaded row reads the page around its task and lands on its card; one 
             works: () => workState([...works.values()]), liveCardRecords: records, pendingSubmissions: new Map() });
         const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
         const anchor = header.children.find((el) => el.classList.contains('rw-shade-anchor'));
-        const list = anchor.children.find((el) => el.classList.contains('rw-surface')).children[0];
+        const list = anchor.children.find((el) => el.classList.contains('rw-surface')).querySelector('.rw-list');
         const row = (id) => list.children.find((el) => el.dataset.id === id);
         const main = (id) => row(id).querySelector('.rw-main');
         const text = (el) => [el.textContent, ...el.children.map(text)].join(' ');
@@ -596,7 +701,7 @@ test('Back reads the page it left again, stays after a failed read and takes a f
             works: () => workState([work_({ activity_id: 't-old', kind: 'direct_chat', chat_id: 1 })]),
             liveCardRecords: records, pendingSubmissions: new Map() });
         const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const main = () => list.children.find((el) => el.dataset.id === 't-old').querySelector('.rw-main');
         const back = page.children.find((el) => el.classList.contains('rw-back'));
         const live = page.children.find((el) => el.getAttribute('role') === 'status');
@@ -636,4 +741,38 @@ test('Back reads the page it left again, stays after a failed read and takes a f
         assert.deepEqual(presents, ['newest']);
         assert.equal(revisits.length, 3);
     } finally { work?.destroy(); restoreDom(prior); }
+});
+
+for (const asPanel of [false, true]) for (const [words, expected] of [
+    [{ wakeSummary: 'Export fixed.' }, 'Export fixed.'],
+    [{ wakeSummary: 'Export fixed.', suggestedName: 'Export fixed.' }, ''],
+    [{ wakeSummary: 'Export fixed.', causeHeld: true, collapsedActivity: 'The upload failed.' }, 'The upload failed.'],
+    [{}, ''],
+]) test(`settled room row keeps its closing words, never its old focus (${asPanel}, ${expected})`, () => {
+    const { prior, mount } = installDom();
+    let shade;
+    try {
+        const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+        const panel = asPanel ? node('project-panel', mount) : mount;
+        const page = node('page', panel), header = node(asPanel ? 'project-panel-bar' : 'chat-page-header', page);
+        if (asPanel) page.closest = selector => selector === '.project-panel' ? panel : null;
+        const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+        const badge = node('status-badge', node('app-page-actions', header));
+        const messages = node('chat-messages', page);
+        const record = { root: node('chat-live-card', messages), groupId: 't-run', phase: 'working',
+            collapsedActivity: 'Old activity.', ...words };
+        let works = [running('t-run', { focus: { text: 'Testing the export.', at: null } })];
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, asPanel,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(works), liveCardRecords: new Map([['t-run', record]]), pendingSubmissions: new Map() });
+        titleRow.children.find(el => el.classList.contains('rw-trigger')).click();
+        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        assert.equal(list.children[0].querySelector('.rw-focus').textContent, 'Testing the export.');
+        Object.assign(record, { finished: true, phase: words.causeHeld ? 'error' : 'done' });
+        works = [];
+        shade.update();
+        assert.equal(list.children[0].dataset.settled, '1');
+        assert.equal(list.children[0].querySelector('.rw-focus').textContent, expected);
+        assert.equal(list.children[0].querySelector('.rw-focus').hidden, !expected);
+    } finally { shade?.destroy(); restoreDom(prior); }
 });

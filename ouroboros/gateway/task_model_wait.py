@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import pathlib
 from contextlib import nullcontext
@@ -109,8 +110,8 @@ def _live_task(task_id: str) -> dict:
         return task
 
 
-def _decide(root: Any, body: dict) -> JSONResponse:
-    from ouroboros.gateway.owner_settings import CommitBoundary
+def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
+    from ouroboros.gateway.owner_settings import CommitBoundary, record_settings_change
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, write_owner_message
     from supervisor.queue import _task_drive_for_task
 
@@ -275,8 +276,9 @@ def _decide(root: Any, body: dict) -> JSONResponse:
                         return value
 
                     with settings_document_mutation():  # a chosen model is authored, the shown default included
-                        _owner_update_settings(transform, boundary=boundary,
-                                               authored_keys=model_role_setting_keys(row["role"]), allow_safety_lowering=True)
+                        record_settings_change(request, _owner_update_settings(  # the writer's receipt, as Settings
+                            transform, boundary=boundary, authored_keys=model_role_setting_keys(row["role"]),
+                            allow_safety_lowering=True))
                     if transformation_completed:
                         row = mutate(wait_id,
                                      lambda previous: {**previous, "saved_request_id": action["request_id"]})
@@ -320,9 +322,10 @@ def _decide(root: Any, body: dict) -> JSONResponse:
                           applied=applied, saved=saved())
 
 
-async def answer_model_wait_decision(root: Any, body: dict) -> tuple[int, dict]:
-    """Share the existing wait effect and settings-writer receipts across transports."""
-    decide = _decide
+async def answer_model_wait_decision(root: Any, body: dict, *, request: Any = None) -> tuple[int, dict]:
+    """Share the existing wait effect and settings-writer receipts across transports; ``request`` declares a
+    saved choice's origin (``owner_settings.record_settings_change``)."""
+    decide = functools.partial(_decide, request=request)
     if body.get("persist_role") is True:
         from ouroboros.gateway.settings import _run_settings_writer
 

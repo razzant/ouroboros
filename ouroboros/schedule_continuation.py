@@ -31,6 +31,22 @@ def admission_basis(result, task_id):
             "origin": copy.deepcopy(basis.get("origin") or meta.get("followup_origin") or receipt.get("followup_origin") or {})}
 
 
+def recorded_origin(result):
+    """The origin id the host retained for the schedule admission this record's work runs on, else "".
+
+    Its own receipt, or the basis a Continue keeps by value when the record's host admission names it: metadata alone
+    can be any caller's words. Reads nothing beyond the record it is given."""
+    from ouroboros.dialogue_provenance import presence_continue_record
+
+    basis = admission_basis(result, result.get("task_id"))
+    if basis is None and presence_continue_record(result):
+        kept = result
+        for key in ("metadata", "continuation", "owner_sources"):
+            kept = kept.get(key) if isinstance(kept.get(key), dict) else {}
+        basis = kept.get("schedule")
+    return str((basis.get("origin") or {}).get("task_id") or "") if valid_basis(basis) else ""
+
+
 def valid_basis(basis):
     return (isinstance(basis, dict) and basis.get("source") == "schedule_admission"
             and all(isinstance(basis.get(key), str) and basis[key].strip()

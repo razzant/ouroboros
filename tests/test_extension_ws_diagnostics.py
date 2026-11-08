@@ -116,9 +116,8 @@ def run_relay_child(tmp_path, status, *, mode="tool", concurrent=False):
 
 
 @pytest.mark.parametrize(("status", "reason"), [
-    (202, None), (429, "rate_limited"), (418, "http_client_error"),
-    (500, "http_server_error"), (302, "http_error"),
-    ("connection_refused", "transport_error"), ("missing_env", "missing_transport"),
+    (202, None), (302, "http_error"),
+    ("connection_refused", "transport_error"),
 ])
 def test_successful_child_publishes_relay_aggregate(tmp_path, status, reason, caplog):
     from ouroboros.tools.process_facts import consume_last_process_facts

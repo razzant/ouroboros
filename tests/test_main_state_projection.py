@@ -218,24 +218,14 @@ def _hold(reason):
 
 @pytest.mark.parametrize("row,owner_paused,expected", [
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, False, True),
-    ({"_budget_pause": {"status": "paused_before_dispatch", "reason": "budget", "replay_safe": True}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "budget"}}, True, False),
-    ({"_budget_pause": {**_EXACT, "reason": "owner"}}, False, True),
     ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}}}, False, False),
-    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}},
-      "_budget_pause_hold": _hold("saved_sleep_recovery")}, False, True),
-    ({"_budget_pause": {**_EXACT, "reason": "sleep", "sleep": {"sleep_id": "s"}},
-      "_budget_pause_hold": _hold("panic_hold")}, False, True),
-    ({"_budget_pause_hold": _hold("owner_restart_hold")}, False, True),
-    ({"_budget_pause_hold": _hold("saved_work_hold")}, False, True),
     ({"_budget_pause_hold": _hold("continuation_writer_unsettled")}, False, False),
-    ({"_budget_pause_hold": _hold("restore_refused:invalid_budget_fence_snapshot")}, False, True),
-    ({"_continuation_prepared": "sha"}, False, True),
     ({"_resume_selection": {"selected_by": "owner"}}, False, False),
     ({}, False, False),
-], ids=["exact-budget", "zero-dispatch-budget", "under-owner-fence", "owner-saved", "unheld-sleep",
-        "held-saved-sleep", "panic-held-sleep", "restart-hold", "saved-work-hold", "writer-hold",
-        "restore-refused", "continue-unconfirmed", "already-selected", "not-parked"])
+], ids=["exact-budget", "under-owner-fence", "unheld-sleep",
+        "writer-hold",
+        "already-selected", "not-parked"])
 def test_explicit_resume_follows_each_rows_release_rule(tmp_path, row, owner_paused, expected):
     """Only rows that nothing but an explicit Resume continues need the owner."""
     from ouroboros.gateway.state import _pending_resume_available
@@ -453,10 +443,7 @@ def _settle_owner_fence(root, root_task_id):
     set_fence_state(root, root_task_id, fence_id=fence["fence_id"], state=FENCE_PAUSED)
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("settled", [False, True])
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("cut", ["after_cas", "after_fence"])
+@pytest.mark.parametrize(("cut", "returning", "settled"), [("after_cas", False, False), ("after_fence", True, True)])
 def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_resume_in_main(
     host, tmp_path, monkeypatch, cut, returning, settled,  # noqa: F811
 ):
@@ -486,7 +473,8 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     assert _main_consumer([payload], CHILD) == {
         "card": True, "sender": "System", "resume": True, "enabled": True, "stop": False,
         "posted": [[f"/api/tasks/{CHILD}/resume", "POST"]],
-        "reason": "Needs an explicit Resume." if returning else "Needs Resume after the restart."}
+        # Beside its Resume button a plain resume pause says nothing more (audit 05.11, U014); a restart says why.
+        "reason": "" if returning else "Needs Resume after the restart."}
     before = read_fence(host.root, ROOT)
     response = client.post(f"/api/tasks/{CHILD}/resume")
     assert response.status_code == 200 and response.json()["ok"], response.text
@@ -503,8 +491,7 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     assert sent[0]["_project_admission"] == basis, "with the Project basis its admission froze"
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("change", ["newer_pause", "other_attempt", "revoked", "owner_pause"])
+@pytest.mark.parametrize("change", ["newer_pause", "revoked", "owner_pause"])
 def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp_path, monkeypatch, change):  # noqa: F811
     from ouroboros import budget_pause
     from ouroboros.owner_pause import read_fence
@@ -539,7 +526,6 @@ def test_main_offers_no_member_resume_beyond_its_own_interrupted_grant(host, tmp
     assert not sent
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("settled", [False, True])
 def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     host, tmp_path, monkeypatch, settled,  # noqa: F811
@@ -548,10 +534,9 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     written outside the store). The census answers from typed hot facts and never decodes bodies
     (task cards, PERSISTENCE), so that corruption reaches only the action's strict authority read:
     Resume refuses, writes no fence and sends nothing; it never invents a resumable member."""
-    import sqlite3
-
     from ouroboros.owner_pause import read_fence
     from supervisor import workers
+    from tests._store_shared import independent_writer
     from tests.test_project_hold_recovery import worker
     from tests.test_resume_handover import _stop_boot
 
@@ -561,7 +546,7 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
         _settle_owner_fence(host.root, ROOT)
     client = _member_http(host.root)
     assert _attention_rows(_member_state(client), CHILD), "offered while its facts read"
-    with sqlite3.connect(host.root / "state" / "current.sqlite") as conn:
+    with independent_writer(host.root / "state" / "current.sqlite") as conn:
         conn.execute("UPDATE task_bodies SET body = CAST(X'7B22FF' AS TEXT) WHERE task_id = ?", (ROOT,))
     with pytest.raises(Exception):
         load_task_result(host.root, ROOT, strict=True)
@@ -643,8 +628,7 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
             assert time.monotonic() < deadline and parked.is_alive(), woke
             real_sleep(0.02)
         remote["state"] = "cancelled"  # the run it sent obeyed the Pause's stop
-        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-        assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert owner_pause_control.settle_requested_owner_pauses(queue) == ["author"]
         payload = _member_state(_member_http(tmp_path))
         [census] = [row for row in payload["active_chat_activities"] if row["activity_id"] == "author"]
         assert (census["kind"], census["phase"], census["pause_cause"], census.get("can_resume", False)) == (

@@ -19,6 +19,7 @@ from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.provider_models import tool_schema_limit
 from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._cases import case_folders
 
 OPENAI = "openai::gpt-5.6-terra"
 PROFILES = ("local_readonly_subagent", "acting_subagent")
@@ -80,7 +81,7 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     registry = _child(tmp_path, monkeypatch, profile, mode, grants=extensions)
     resident = initial_tool_schemas(registry, context_mode=mode)
     assert tool_schema_limit(OPENAI) == 128 < len(resident)
-    assert "enable_tools" in _names(resident) and "compact_context" not in _names(resident)
+    assert "enable_tools" in _names(resident) and "compact_context" in _names(resident)
     loop._setup_dynamic_tools(registry, resident, [], context_mode=mode)
     first = _round(registry, resident)
     assert loop_model_call._fit_route_tool_ceiling(first)
@@ -91,7 +92,7 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     chosen = extensions[-1]  # the late-position tail: what a plain truncation would drop first
     assert chosen in left_out
     listing = registry.execute("list_available_tools", {"namespace": chosen.rsplit("_lookup", 1)[0]})
-    assert "enable_tools loads a not-loaded one" in listing and chosen in listing
+    assert "enable_tools loads or shows a not-loaded one" in listing and chosen in listing
 
     loaded = registry.execute("enable_tools", {"tools": chosen})
     assert "Call schemas loaded" in loaded and chosen in loaded
@@ -105,24 +106,27 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     assert loop_model_call._fit_route_tool_ceiling(_round(registry, resident)) is False  # within the ceiling
 
 
-@pytest.mark.parametrize("mode", ["low", "max", "nano"])
-@pytest.mark.parametrize("profile", PROFILES)
-def test_a_fitting_catalog_keeps_its_envelope_and_the_selector_grants_nothing(tmp_path, monkeypatch, profile, mode):
-    registry = _child(tmp_path, monkeypatch, profile, mode)
-    resident = initial_tool_schemas(registry, context_mode=mode)
-    assert len(resident) <= 128 and "enable_tools" in _names(resident)
-    assert ("compact_context" in _names(resident)) is (mode == "nano")
-    before = list(resident)
-    loop._setup_dynamic_tools(registry, resident, [], context_mode=mode)
-    assert loop_model_call._fit_route_tool_ceiling(_round(registry, resident)) is False
-    assert resident == before
-    forbidden = ("write_file", "commit_reviewed", "run_command") if profile == "local_readonly_subagent" else (
-        "commit_reviewed", "request_restart", "update_identity")
-    for name in forbidden:
-        result = registry.execute_result("enable_tools", {"tools": name})
-        assert result.status == "blocked" and "Hidden by policy" in result.text, result.text
-        assert registry.execute_result(name, {}).status == "blocked"
-    assert resident == before
+def test_a_fitting_catalog_keeps_its_envelope_and_the_selector_grants_nothing(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for mode in ["low", "max", "nano"]:
+        for profile in PROFILES:
+            tmp_path = next(case_paths)
+            with subtests.test(mode=mode, profile=profile), monkeypatch.context() as monkeypatch:
+                registry = _child(tmp_path, monkeypatch, profile, mode)
+                resident = initial_tool_schemas(registry, context_mode=mode)
+                assert len(resident) <= 128 and "enable_tools" in _names(resident)
+                assert "compact_context" in _names(resident)  # its own fold, in every mode
+                before = list(resident)
+                loop._setup_dynamic_tools(registry, resident, [], context_mode=mode)
+                assert loop_model_call._fit_route_tool_ceiling(_round(registry, resident)) is False
+                assert resident == before
+                forbidden = ("write_file", "commit_reviewed", "run_command") if profile == "local_readonly_subagent" else (
+                    "commit_reviewed", "request_restart", "update_identity")
+                for name in forbidden:
+                    result = registry.execute_result("enable_tools", {"tools": name})
+                    assert result.status == "blocked" and "Hidden by policy" in result.text, result.text
+                    assert registry.execute_result(name, {}).status == "blocked"
+                assert resident == before
 
 
 def test_the_acting_work_order_forbids_tool_grants_not_the_selector_its_registry_carries(tmp_path, monkeypatch):
@@ -156,9 +160,11 @@ def test_an_acting_child_cannot_load_or_call_an_ungranted_extension(tmp_path, mo
     assert "ACTING_SUBAGENT_TOOL_NOT_GRANTED" in registry.execute(ungranted, {"query": "q"})
 
 
-@pytest.mark.parametrize("disabled", [("enable_tools",), ("list_available_tools",),
-                                      ("enable_tools", "list_available_tools")])
-@pytest.mark.parametrize("dispatch_only", [False, True])
+@pytest.mark.parametrize(("dispatch_only", "disabled"), [
+    pytest.param(False, ("list_available_tools",), id='False-disabled1'),
+    pytest.param(True, ("enable_tools",), id='True-disabled0'),
+    pytest.param(True, ("enable_tools", "list_available_tools"), id='True-disabled2'),
+])
 def test_a_selector_the_actor_cannot_call_is_never_recommended(tmp_path, monkeypatch, extensions,
                                                                disabled, dispatch_only):
     """A contract's disabled selector, including a consciousness-origin task whose disabled schema stays visible."""
@@ -197,6 +203,8 @@ def test_a_low_or_max_diagnostic_keeps_its_role_and_is_not_told_to_call_the_sele
     registry = _child(tmp_path, monkeypatch, "local_readonly_subagent", "max")
     resident = initial_tool_schemas(registry, context_mode="max")
     assert set(_names(resident)) <= TASK_DIAGNOSTIC_TOOL_NAMES and "enable_tools" not in _names(resident)
+    assert "compact_context" in _names(resident)  # its own fold, without the selector
+    assert registry.execute_result("compact_context", {"inspect": True}).status != "blocked"
     monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", len(resident) - 2)
     loop._setup_dynamic_tools(registry, resident, [], context_mode="max")
     fitted = _round(registry, resident)

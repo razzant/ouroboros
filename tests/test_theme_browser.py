@@ -8,7 +8,7 @@ from tests.test_subscription_setup_browser import subscription_ui as _subscripti
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def open_appearance(page):
@@ -59,6 +59,7 @@ def test_theme_choice_reload_and_main_surfaces(subscription_ui):
         page.locator(f'[data-nav-page="{name}"]').click()
         page.wait_for_selector(f'#page-{name}.active')
         capture(page, f'theme-light-{name}')
+    ui['errors'].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     assert page.locator('html').get_attribute('data-theme') == 'light'
@@ -150,6 +151,7 @@ def test_the_desktop_caption_hears_only_the_top_document(subscription_ui):
     # The page names itself by when it began; the reload that replaces it began later.
     began = page.evaluate('performance.timeOrigin')
     assert {token for _path, _theme, token, _sequence in calls} == {began}
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     page.evaluate("window.dispatchEvent(new CustomEvent('pywebviewready'))")
@@ -551,7 +553,9 @@ def test_module_widget_theme_retains_state_when_hidden_and_releases_on_stop(subs
     assert retained.locator('#state').inner_text() == 'light:1'
     page.locator('[data-nav-page="widgets"]').click()
     page.wait_for_selector('#page-widgets.active')
-    card.locator('[data-widget-power]').click()
+    # The owner's Stop is the card menu's while the widget runs (the head offers Start only).
+    card.locator('[data-widget-menu-trigger]').click()
+    page.get_by_role('menuitem', name='Stop', exact=True).click()
     page.wait_for_function('window.__moduleThemeListeners.size === 0')
 
 

@@ -34,7 +34,14 @@ test('the reader keeps the single projection: service label, revision, sanitized
 test('Connect starts Silent and still offers connected connectors with their exact place count', () => {
     const html = connectListHtml({ connectors: [github], places: [place, { ...place, id: 'gh-2' }] });
     assert.match(strip(html), /It starts Silent: it hears and thinks there and sends nothing until you make it Active\./);
-    assert.match(strip(html), /Connected · 2 places · Connect another/);
+    // The count is the row's meta line, ending where its fact ends (no separator leading into the button).
+    assert.match(html, /<div class="harness-account-meta">Connected · 2 places<\/div>/);
+    assert.doesNotMatch(strip(html), /places ·/);
+    assert.match(strip(html), /Connected · 2 places Connect another/);
+    // A connector that is simply on says nothing more; an exception keeps its words beside the count.
+    assert.doesNotMatch(connectListHtml({ connectors: [{ ...github, readiness: { text: 'Connector on', tone: 'ok' } }] }), /Connector on/);
+    assert.match(connectListHtml({ connectors: [{ ...github, readiness: { text: 'Off in Skills', tone: 'warn' } }], places: [place] }),
+        /Connected · 1 place · <span data-tone="warn">Off in Skills<\/span>/);
     assert.match(html, /data-i18n-authored>GitHub</);
     assert.doesNotMatch(connectListHtml({ connectors: [github] }), /Connect another/);
     assert.match(connectListHtml({ connectors: [] }), /No installed connector/);
@@ -93,6 +100,22 @@ test('the declared route uses the extension helper and no-store; unrelated route
         await assert.rejects(readPlaceConnector({ ...github, source: { url } }), /route could not be read/);
     }
     assert.equal(calls.length, 1);
+});
+
+test('a concrete Place asks for its own account identity and readiness; Connect retains the account list', async (t) => {
+    const { routes, calls } = setup(t);
+    for (const account of ['first+tag@example.test', 'second']) {
+        routes.set(`/api/extensions/github/status?account_id=${encodeURIComponent(account)}`, () => ({ ok: true,
+            json: async () => ({ account_id: account, text: `Ready ${account}`, identity: { sends_as: { id: account, kind: 'user', label: account } } }) }));
+        const status = await readPlaceConnector({ ...place, accountId: account });
+        assert.equal(status.identity.sends_as.id, account);
+        assert.equal(status.text, `Ready ${account}`);
+    }
+    routes.set('/api/extensions/github/status?account_id=legacy', () => ({ ok: true, json: async () => ({ text: 'Legacy ready' }) }));
+    assert.equal((await readPlaceConnector({ ...place, accountId: 'legacy' })).text, 'Legacy ready');
+    routes.set('/api/extensions/github/status?account_id=unknown', () => ({ ok: true, json: async () => ({ account_id: 'neighbor' }) }));
+    await assert.rejects(readPlaceConnector({ ...place, accountId: 'unknown' }), /different account/);
+    assert.equal(calls.length, 4);
 });
 
 test('an unreadable Places response is an error; a known empty projection is empty', async (t) => {

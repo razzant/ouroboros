@@ -9,6 +9,7 @@ conversation produced duplicate roots here and on a foreign Windows install.
 
 from __future__ import annotations
 
+import re
 import types
 
 import pytest
@@ -53,7 +54,7 @@ def test_an_unconfirmed_promote_reads_as_a_pending_admission(tmp_path, _short_co
 
     ctx = _promote_ctx(tmp_path, _DeadQueue())
     out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
-    assert out.startswith("Accepted, waiting to start:")
+    assert out.startswith("Not confirmed yet:")
     task_id = ctx.event_queue.events[0]["task_id"]
     assert f"get_task_result({task_id})" in out
 
@@ -71,6 +72,80 @@ def test_an_unconfirmed_promote_reads_as_a_pending_admission(tmp_path, _short_co
     # The quiet direction: the pending sentence belongs to an emitted stub alone,
     # so an id nobody ever promoted is still honestly unknown.
     assert "unknown or not yet registered" in _get_task_result(ctx, "never-promoted")
+
+
+def _record_body(root, *, lag):
+    """The body as the supervisor records it: a published queue (the owner's task and a correspondent's
+    Presence turn running, two waiting, a started pool) stamped 4 s ago and a ``supervisor_load`` row 40 s ago."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros.utils import append_jsonl
+    from tests._shared import write_queue_document
+
+    now = datetime.now(timezone.utc)
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    write_queue_document(root / "state" / "queue_snapshot.json", {
+        "ts": (now - timedelta(seconds=4)).isoformat(),
+        "running": [{"id": "owner-1", "task": {"id": "owner-1"}},
+                    {"id": "speaker-1", "task": {"id": "speaker-1", "_presence_turn": True}}],
+        "pending": [{"id": "w1", "task": {"id": "w1"}}, {"id": "w2", "task": {"id": "w2"}}],
+        "worker_total": 2, "lane_carrier_total": 1})
+    append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": (now - timedelta(seconds=40)).isoformat(),
+                                                      "type": "supervisor_load", "window_sec": 60.0,
+                                                      "max_event_lag_sec": lag})
+
+
+_CLOCK = r"at (\d\d-\d\d )?\d\d:\d\d UTC"
+
+
+def test_a_live_unconfirmed_promote_says_its_measured_wait_and_the_body_as_recorded(tmp_path, _short_confirmation_window):
+    """The receipt that said "Accepted" says what is known: not confirmed yet, the wait it measured, the
+    queue's counts at the snapshot's own clock (a correspondent's Presence turn is not the owner's work)
+    and the newest load row's worst event wait in its window, each dated by its source; no verdict."""
+    from ouroboros.tools.control_routing import _start_task
+
+    _record_body(tmp_path, lag=312.5)
+    ctx = _promote_ctx(tmp_path, _DeadQueue())
+    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
+    task_id = ctx.event_queue.events[0]["task_id"]
+    assert out.startswith(f"Not confirmed yet: separate task {task_id} is waiting to start. "
+                          "Its complete intent is durable; admission to "), out
+    assert re.search(r"is pending \(live\)\. No confirmation came in \d+\.\d s of waiting\. Queue as recorded "
+                     + _CLOCK + r" \(\d+\.\d s old\): 1 running, 2 waiting\. Newest server load row " + _CLOCK
+                     + r": events waited up to 312\.5 s for the supervisor in its 60\.0 s window\. "
+                     r"A \[ROUTING_RECEIPTS\] row reports its recorded outcome\.", out), out
+    assert out.endswith(f"Use get_task_result({task_id}) to reconcile it before an explicit retry.")
+    assert "Accepted" not in out and "behind" not in out
+
+
+def test_the_start_task_schema_says_what_its_receipt_says():
+    """The schema the mind reads before calling agrees with the receipt (#1959's pair): a pending intent is
+    recorded, not yet confirmed, and never "accepted"."""
+    from ouroboros.tools.control import _START_TASK_DESCRIPTION
+
+    assert "A durable pending intent is recorded but not yet confirmed" in _START_TASK_DESCRIPTION
+    assert "accepted" not in _START_TASK_DESCRIPTION.lower()
+
+
+def test_an_unrecorded_body_is_unknown_never_zero(tmp_path, _short_confirmation_window):
+    from ouroboros.tools.control_routing import _start_task
+
+    ctx = _promote_ctx(tmp_path, _DeadQueue())
+    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
+    assert ("Queue: unknown (no readable snapshot). Server load: unknown (no supervisor_load row in the "
+            "journal's recent tail).") in out, out
+    assert not re.search(r"\b0 (running|waiting)", out)
+
+
+def test_a_deferred_promote_was_not_waited_for_and_states_no_wait_or_body(tmp_path, _short_confirmation_window):
+    """The other side: a deferred emission is admitted after this turn, so there is no wait to measure."""
+    from ouroboros.tools.control_routing import _start_task
+
+    _record_body(tmp_path, lag=312.5)
+    ctx = _promote_ctx(tmp_path, None)
+    out = _start_task(ctx, "Continue the racer", title="Racer continuation", workspace="none")
+    assert out.startswith("Not confirmed yet:") and "is pending (deferred). A [ROUTING_RECEIPTS] row" in out, out
+    assert "No confirmation came" not in out and "Queue" not in out and "load row" not in out
 
 
 def test_a_confirmed_admission_reads_as_the_ordinary_result(tmp_path, _short_confirmation_window):
@@ -255,7 +330,7 @@ def _emit_into(root, monkeypatch):
     monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_POLL_SEC", 0.005)
     ctx = _promote_ctx(root, _DeadQueue())
     out = _start_task(ctx, "Build the racer", title="Racer build", workspace="none")
-    assert out.startswith("Accepted, waiting to start:"), out
+    assert out.startswith("Not confirmed yet:"), out
     return ctx, ctx.event_queue.events[0]
 
 

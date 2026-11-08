@@ -101,7 +101,7 @@ test('compact Chat removes internal write/status metadata while preserving execu
     // The card's own details block holds the labelled facts beyond the compact line.
     const factsEl = { dataset: { liveFacts: '' }, innerHTML: '', hidden: true };
     const details = { classList: { contains: (name) => name === 'chat-live-details' }, children: [factsEl] };
-    const record = { groupId: 'child-1', metaEl: { innerHTML: '', isConnected: true }, root: { children: [details] },
+    const record = { groupId: 'child-1', isSubagent: true, metaEl: { innerHTML: '', isConnected: true }, root: { children: [details] },
         executorChip: view.executorChip, agentModel: view.model, modelExecution: view.modelExecution,
         _lastFrameMeta: view.meta, costMeta: view.costProjection, latestActivityTs: '12:34:56' };
     renderLiveCardMeta(record);

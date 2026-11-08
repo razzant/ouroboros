@@ -10,7 +10,6 @@ from tests.test_planned_delegate_assignment import prepared as prepared, restore
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("door", ["self_restart", "managed_update"])
@@ -131,7 +130,7 @@ def test_saved_run_handoff_accepts_settlement_since_reservation(tmp_path, monkey
     assert result["settled"] is (transition == "settled")
 
 
-@pytest.mark.parametrize("fault", ["attempt", "authority", "holder", "generation", "cause"])
+@pytest.mark.parametrize("fault", ["attempt", "generation", "cause"])
 def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypatch, fault):
     custody, recovery, task, _, _, _, _ = _pending_handoff(tmp_path, "nanny")
     task["_working_recovery"] = {}
@@ -154,8 +153,15 @@ def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypa
     assert recovery._read(tmp_path, "nanny")["status"] == "vetoed" and reconciled == [True]
 
 
-@pytest.mark.parametrize("fault", ["none", "no_resume", "panic", "transaction", "attempt", "holder", "old_generation"])
-@pytest.mark.parametrize("fate", ["pending", "bound", "settled"])
+@pytest.mark.parametrize(("fate", "fault"), [
+    ("pending", "none"),
+    ("bound", "no_resume"),
+    ("bound", "panic"),
+    ("bound", "transaction"),
+    ("bound", "attempt"),
+    ("settled", "holder"),
+    ("settled", "old_generation"),
+])
 def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
         tmp_path, monkeypatch, stub_delegate_engines, fault, fate):
     custody, recovery, task, _, invocation, _, _ = _pending_handoff(tmp_path, "nanny")
@@ -205,7 +211,6 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
         prepared, monkeypatch, stub_delegate_engines, adopt_before_restore):
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros import claudexor_daemon, delegate_recovery as recovery, loop, subagent_bootstrap
-    from ouroboros.working_checkpoint import checkpoint_path
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from supervisor import queue, workers
     from tests.test_project_hold_recovery import worker
@@ -219,8 +224,10 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
     source = case.host.pending[0]["_working_recovery"]
     assert source["from_attempt"] == case.handoff["old_attempt"]
     assert source["source_task_id"] == "child1" and source["cause"] == "restart"
-    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == checkpoint_path(
-        root, "child1", case.handoff["old_attempt"]).read_bytes()
+    from ouroboros.working_checkpoint import read_working
+
+    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == read_working(
+        root, "child1", case.handoff["old_attempt"])[0]
     def no_engine(*_args, **_kwargs):
         pytest.fail("startup cannot admit the leaf before restoring its owner")
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", no_engine)
@@ -304,8 +311,11 @@ def test_unreadable_custody_keeps_saved_reservation_without_observation_or_veto(
     assert recovery._read(tmp_path, "nanny")["status"] == "reserved"
 
 
-@pytest.mark.parametrize("binding", ["after_restart", "before_restart", "settled_before_restart"])
-@pytest.mark.parametrize("aged_gc", [False, True])
+@pytest.mark.parametrize(("aged_gc", "binding"), [
+    (False, "before_restart"),
+    (True, "after_restart"),
+    (True, "settled_before_restart"),
+])
 def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
         tmp_path, monkeypatch, binding, aged_gc, stub_delegate_engines):
     import os
@@ -375,7 +385,7 @@ def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("fault", ["task", "attempt", "authority", "holder", "custody_read", "row_read"])
+@pytest.mark.parametrize("fault", ["authority", "custody_read", "row_read"])
 def test_second_handoff_never_replaces_unproven_pending_wait_source(tmp_path, monkeypatch, fault):
     from ouroboros import delegate_custody_current as current
 

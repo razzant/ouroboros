@@ -35,7 +35,7 @@ from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-exp
     session_design_navigation,
     session_host_references,
 )
-from ouroboros.subagent_work_order import session_service_directories
+from ouroboros.subagent_work_order import in_place_scratch, session_service_directories
 from ouroboros.delegate_source_coverage import (
     add_terminal_source_verification,  # noqa: F401  (leaf reads it through _delegate() at call time)
     prepare_work_order_start_binding,
@@ -50,9 +50,9 @@ from ouroboros.delegate_start_instructions import (
     UNPROVEN_BOUNDARY_INSTRUCTION as _UNPROVEN_BOUNDARY_INSTRUCTION,
     access_instruction,
     append_coordination_context,
-    apply_execution_binding,
     directory_copy_binding_instruction,
     execution_binding_fingerprint,
+    execution_binding_text,
 )
 from ouroboros.subagent_runtime import (  # noqa: F401 - shared primitive re-export
     delegate_start_entry as _delegate_start_entry,
@@ -103,9 +103,9 @@ from ouroboros.deadline_utils import deadline_expired
 from ouroboros.delegate_directory import (
     blocked_geometry_refusal, git_directory_options_refusal, in_place_refusal, in_place_start, is_in_place_run,
     prepare_directory_execution, snapshot_checkout, started_receipt)
-from ouroboros.delegate_registration_policy import resolve_registration
+from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
-from ouroboros.subagent_worktrees import registered_checkout
+from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -119,7 +119,8 @@ from ouroboros.delegate_shared import (  # noqa: F401
 # (same objects) because sibling code and the tests address it on THIS surface.
 # `_fail` is NOT re-imported from it — the one shared refusal author is
 # `delegate_shared._fail`, which delegate_integration itself imports.
-from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding
+from ouroboros.engine_facts import engine_pool_line
+from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding, with_run_binding
 from ouroboros.tools.delegate_integration import (  # noqa: F401
     _CAPTURE_DELEGATED_SNAPSHOT,
     _capture_block,
@@ -405,7 +406,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _canonical_work_order_fingerprint: str = "", _work_order_source_request: Any = None,
                     _coordination_context: str = "", _initial_bootstrap: bool = False, mode: Optional[str] = None,
                     override_plan_readiness: Optional[bool] = None, _plan_answers: Any = None,
-                    attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False) -> ToolResult:
+                    attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False,
+                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None) -> ToolResult:
     from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -432,7 +434,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
     binding_fingerprint = ""
     processing_info: Dict[str, Any] = {}
-    resource_ref, directory_options, continuation, documents = {}, {}, NO_CONTINUATION, NO_DOCUMENTS
+    resource_ref, directory_options, continuation, documents, inputs = {}, {}, NO_CONTINUATION, NO_DOCUMENTS, NO_INPUTS
     if recovering:  # the owned recorded request is validated before any fingerprint (#1614)
         binding, refusal = _resolve_retry_invocation(
             ctx, drive, retry_token, text, max_seconds=max_seconds, geometry=(directory_strategy, scope_paths))
@@ -448,8 +450,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         (request_body, route, authority, root, key, project_id, owned_project_id,
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint,
-         seconds_basis, continuation, ttl_info) = binding
-        invocation_id = retry_token
+         seconds_basis, continuation, ttl_info, retained_inputs) = binding
+        invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
     else:
         route = actor["route"]
         if selector_root:
@@ -523,22 +525,17 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness=override_plan_readiness, plan_answers=_plan_answers)
                 if refusal:
                     return refusal
-            if authority.access == "readonly" or authority.investigation:  # a folderless Project's staged inputs
-                from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
-                try:
-                    readonly_root, input_instruction = prepare_folderless_inputs(ctx, invocation_id)
-                except (OSError, ValueError) as exc:
-                    return _fail("delegate_start", "readonly_inputs_unavailable", str(exc), definitely_unrun=True)
-                if readonly_root:
-                    root = readonly_root
-                    instructions += input_instruction
-            preparation = ceiling_authority if authority.mode == "plan" else authority
+            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs,  # read-only runs
+                                           thread_turn=bool(continuation.request.get("_thread_id")))
+            if refusal:
+                return refusal
+            readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction
+            preparation, run_binding = (ceiling_authority if authority.mode == "plan" else authority), ""
             if preparation.access in SESSION_ACCESS_PROFILES or continuation.snapshot:
                 target_root = record_auth["target_root"]
                 authority_source = record_auth["source"]
                 if workspace == "in_place":
-                    snapshot, snap_error, resource_ref, binding = in_place_start(continuation.snapshot, target_root)
-                    instructions += binding
+                    snapshot, snap_error, resource_ref, run_binding = in_place_start(continuation.snapshot, target_root, in_place_scratch(ctx, gateway, route, authority, invocation_id, target_root))
                 elif continuation.snapshot:
                     snapshot, snap_error = continuation.snapshot, None
                 elif authority_source == "skill_payload":
@@ -567,22 +564,23 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             scope_root = (readonly_root or target_root) if execution_root or directory_options or (snapshot and authority.mode == "plan") else root
             service = session_service_directories(ctx, gateway, route, authority, snapshot=snapshot, payload=authority_source == "skill_payload", execution_root=execution_root or root)
             if snapshot is not None:
-                binding_fingerprint = execution_binding_fingerprint(
-                    execution_root or root, target_root)
-                instructions = apply_execution_binding(instructions, execution_root or root, target_root, binding_fingerprint,
-                                                       evidence_root="" if authority_source == "skill_payload" else None, granted_scratch=service.scratch)
+                binding_fingerprint = execution_binding_fingerprint(execution_root or root, target_root)
+                run_binding = execution_binding_text(execution_root or root, target_root, binding_fingerprint,
+                                                     evidence_root="" if authority_source == "skill_payload" else None, granted_scratch=service.scratch)
             elif directory_options and directory_options.get("isolation") == "envelope":
                 binding_fingerprint = execution_binding_fingerprint("", target_root, "directory_copy")
-                instructions += directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
-            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
-                gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or registered_checkout(scope_root))
+                run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
+            instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
+            continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root, inputs.selection_note)
+            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(gateway, scope_root, execution_root, authority.access,
+                minted=bool(readonly_root) or minted_root(scope_root, drive), thread=authority.mode == "plan" or bool(continuation.custody.get("thread_id")))
             if directory_options or is_in_place_run({"resource_ref": resource_ref}):
                 project_persistent = True
             if authority.access == "full":
                 gateway.ensure_full_access(scope_root)
             seconds = bound.seconds
             documents = attach_selected_documents(ctx, gateway, route.route_id, attachment_paths, _document_intent, _document_first_start)
-            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service)
+            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service, start_body=None if continuation_token else f"{text}\n{instructions}")  # the start tail: a start that continues no run
             request_body = _start_request(ctx, route, authority, scope_root, continuation.prompt or text,
                                           seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral, service_roots=service.roots,
                                           **({"directory_options": directory_options} if directory_options else {}))
@@ -612,7 +610,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
             processing=processing_info,
-            prompt_cache_ttl=ttl_info, **documents.custody,
+            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody,
         )
         if not requested and not claim_refusal:
             claim_refusal = {"reason": "start_request_row_unwritable", "detail":
@@ -693,7 +691,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             continuation=continuation.facts, plan=plan_facts(continuation.custody),
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
-                            snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts,
+                            snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
                             effort_fact=({} if recovering else actor.get("effort_fact")))
 
 
@@ -702,7 +700,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
                      baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None,
                      prompt_cache_ttl=None, continuation=None, max_seconds: int = 0, max_seconds_basis: str = "",
-                     snapshot_facts=None, effort_fact=None, plan=None, documents=None) -> ToolResult:
+                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None) -> ToolResult:
     """The one author of delegate_start's started result (note + payload).
 
     The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
@@ -766,8 +764,9 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     # Optional receipts expose the captured processing, continuation and snapshot
     # facts; copy the continuation binding before publishing it to the nanny.
     for key, value in (("processing", processing), ("prompt_cache_ttl", prompt_cache_ttl),
-                       ("continuation", dict(continuation or {})), ("snapshot", snapshot_facts), ("documents", documents)):
-        if value:
+                       ("continuation", dict(continuation or {})), ("snapshot", snapshot_facts), ("documents", documents),
+                       ("input_files", input_files)):  # one row per selected entry; explicit [] shown; prepared is not read
+        if value or (key == "input_files" and value is not None):
             payload[key] = value
     if snapshot_id:
         # The C1 binding, stated where the nanny can read it: the run edits the
@@ -884,14 +883,14 @@ def bounded_max_seconds(ctx: ToolContext, requested: Optional[int]) -> MaxSecond
     fallback branch read as "no bound" and answered with hours of delegated
     work. An explicit ask is ``requested`` unless the deadline, the lifetime or
     the engine's schema bound narrowed it (each named); an omitted ask derives
-    from the tighter of deadline and lifetime, else the operation window.
+    from the tighter of deadline and lifetime, else no cap (``seconds`` 0).
     """
-    from ouroboros.config import operation_window_sec, resolve_task_execution_timeout_sec
+    from ouroboros.config import resolve_task_execution_timeout_sec
     from ouroboros.deadline_utils import deadline_remaining_sec, has_deadline
     from ouroboros.delegate_registration_policy import (
-        CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_LIFETIME_DERIVED, CAP_BASIS_OPERATION_WINDOW,
-        CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_DEADLINE, CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
-        CAP_BASIS_REQUESTED_CLAMPED_SCHEMA,
+        CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_LIFETIME_DERIVED, CAP_BASIS_REQUESTED,
+        CAP_BASIS_REQUESTED_CLAMPED_DEADLINE, CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
+        CAP_BASIS_REQUESTED_CLAMPED_SCHEMA, CAP_BASIS_UNBOUNDED,
     )
 
     try:
@@ -966,11 +965,9 @@ def bounded_max_seconds(ctx: ToolContext, requested: Optional[int]) -> MaxSecond
     if candidates:
         seconds, basis = min(candidates, key=lambda item: item[0])
         return MaxSecondsBound(max(1, min(_CLAUDEXOR_MAX_SECONDS, seconds)), basis)
-    # Neither a deadline nor a finite lifetime: the finite operation window.
-    # Omitting `maxSeconds` — the old behavior — handed the run Claudexor's
-    # 7-day schema bound; the cap is damage limitation, and custody (the
-    # durable start row plus reconciliation) is what actually stops an orphan.
-    return MaxSecondsBound(min(_CLAUDEXOR_MAX_SECONDS, int(operation_window_sec(None))), CAP_BASIS_OPERATION_WINDOW)
+    # Neither a deadline nor a finite lifetime: no cap. `maxSeconds` is omitted, which the pinned
+    # engine reads as its run clock off; Stop, money and custody (the start row plus reconciliation) remain.
+    return MaxSecondsBound(0, CAP_BASIS_UNBOUNDED)
 
 
 def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
@@ -1112,17 +1109,17 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     _started_at = parse_deadline_ts(_started_ts)
     _elapsed = lambda: None if _started_at is None else max(0, int(  # noqa: E731
         (_dt.datetime.now(tz=_dt.timezone.utc) - _started_at).total_seconds()))
-    # The idle-rail lease for THIS hold: granted before the loop, released in the
+    # The idle-rail lease for THIS window: granted before the loop, released in the
     # finally below — the supervisor's idle enforcer spares a leased task while
     # every other rail (deadline, ceiling, budget, cancel) still cuts through.
     # The grant carries a unique lease_id (F5b) and the release names the SAME
     # id, so an abandoned, executor-killed wait thread's late release can never
-    # blank a newer grant made by this task's next wait.
+    # blank a newer grant made by this task's next wait. An observation beat
+    # leases nothing: its supervising hold holds one lease (``progress.HoldLease``).
     _lease_id = uuid.uuid4().hex
-    _emit_external_wait_lease(
-        ctx, rid, _external_wait_lease_until(
-            ctx, max(window, read_window()) if observation_only else window, _started_at, _run_max_seconds),
-        lease_id=_lease_id)
+    if not observation_only:
+        _emit_external_wait_lease(ctx, rid, _external_wait_lease_until(ctx, window, _started_at, _run_max_seconds),
+                                  lease_id=_lease_id)
     try:
         if gateway is None:
             gateway = ClaudexorGateway()
@@ -1130,9 +1127,6 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
         step = None
         if observation_only:
-            _emit_external_wait_lease(
-                ctx, rid, _external_wait_lease_until(ctx, read_window(), _started_at, _run_max_seconds),
-                lease_id=_lease_id)
             from ouroboros import delegate_observe  # speech from the journal, attention from the engine
             step = delegate_observe.step(ctx, gateway, rid, window=window, since_seq=since_seq, read_window=read_window,
                                          elapsed_seconds=_elapsed(), max_seconds=_run_max_seconds or None)
@@ -1222,10 +1216,12 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                 "status": "observation_pending", "run_id": rid,
                 "reason": exc.observation_reason or exc.code, "detail": str(exc),
                 "waited_sec": time.monotonic() - started, "answered": exc.observation_answered,
+                "engine_pool": engine_pool_line(),
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
-        _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
+        if not observation_only:
+            _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
         if gateway is not None and not borrowed:
             gateway.close()
 
@@ -1310,7 +1306,7 @@ def _published_entry(core: Any) -> Any:
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.config import EFFORT_SCALE, get_task_abs_ceiling_sec, operation_window_sec
+    from ouroboros.config import EFFORT_SCALE, get_task_abs_ceiling_sec
 
     return [
         ToolEntry("delegate_start", {
@@ -1350,15 +1346,15 @@ def get_tools() -> List[ToolEntry]:
                 "properties": {
                 "prompt": {"type": "string", "description":
                     "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
-                    "the session has none of my memory. The host appends my human's originating words verbatim. "
-                    "The run starts in my write root; a path named here does not move it: for another "
-                    "repository, schedule a child whose workspace is that repository. "
+                    "the session starts with my human's words for the work, the marks and the knowledge outline, "
+                    "none of my other memory; the host appends those words verbatim. The run starts in my write root; "
+                    "a path named here does not move it: for another repository, schedule a child whose workspace is that repository. "
                     "Direct retry_of: omit or pass '' to replay the recorded request; other text must equal "
                     "the original call's. Configured-session retry/replacement: optional advisory coordination "
                     "only, never sent with retry_of; the host supplies the canonical work order."},
                 "subagent_id": {"type": "string", "description":
                     "Exact agent_session id from Available subagents, required for direct starts including continue_from. "
-                    "Omit for the configured snapshot and retry_of. Schedule API actors as recursive children instead."},
+                    "Omit for the configured snapshot and retry_of."},
                 "mode": {"type": "string", "enum": ["ask", "plan", "agent"], "description":
                     "Omit for access-derived execution. ask/plan are read-only. Plan artifacts return questions to the starter; "
                     "continue_from with mode=plan clarifies, mode=agent implements the frozen plan within its recorded ceiling."},
@@ -1392,13 +1388,13 @@ def get_tools() -> List[ToolEntry]:
                     "scope_paths; direct without scope equals omission."},
                 "scope_paths": {"type": "array", "items": {"type": "string"}, "description":
                     "Relative copy inputs or direct-work capture paths, including future outputs; ['.'] selects the "
-                    "whole folder. Copy requires nonempty scope. Read-only callers omit this and directory_strategy. "
+                    "whole folder. Copy requires nonempty scope. "
                     "Unselected large inputs stay at source. Direct work without selected/observed paths cannot "
                     "claim a complete changed-file list."},
                 "max_seconds": {"type": "integer", "description":
-                    "Wall-clock cap, narrowed by your remaining deadline. Allow realistic end-to-end time "
-                    "(often 3-5+ minutes). An advancing delegate_wait cursor means progress; the run enforces "
-                    "its own cap. Do not cancel progressing work just to hurry it."},
+                    "Optional wall-clock ceiling, narrowed by the task deadline and remaining finite execution time; "
+                    "omit for no extra ceiling. Reaching it can interrupt useful work; inspect without ending the "
+                    "run via a delegate_wait checkpoint. Stop, money and custody stay separate."},
                 "continue_from": {"type": "string", "description":
                     "Continue a finished run after cap, subscription limit, crash/restart, cancel or input_required. "
                     "Prefer this when work is worth keeping. It must belong to your task line: yours, your confirmed "
@@ -1409,11 +1405,12 @@ def get_tools() -> List[ToolEntry]:
                     "be empty. For resumable pool_exhausted or a limit with resetsAt, use "
                     "await_messages(wake_at=resetsAt) before continuing. Needs an observed terminal (not settled "
                     "money), not superseded, no ambiguous apply. Ordinary continuations never widen; plan implementation requires the starter's recorded ceiling. "
-                    "Select subagent_id as for a start; configured sessions omit it. Never combine with retry_of. A continuation inherits no attached documents: pass attachment_paths again."},
+                    "Never combine with retry_of."},
                 "continue_carrier": {"type": "string", "enum": ["auto", "packet"], "description":
                     "With continue_from: auto (default) reuses the session where possible; packet starts a new "
                     "session with retained evidence when the old session has gone astray. Omit for plan threads."},
                 **attachment_parameters("Until a scheduled child's first run starts, omitted attachment_paths keep its parent's selection. A continuation or replacement inherits none: pass them again. Omit both with retry_of."),
+                **input_files_parameter("continue_from retains its own new selection; nothing is inherited. Omit with retry_of: its result returns the original receipt."),
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
                     "Replays that invocation's recorded request byte-identically under its original key to retrieve "
@@ -1429,7 +1426,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "delegate_wait",
             "description": (
                 "Sleep on a delegated run until it ends, asks a question or needs you. Quiet progress costs "
-                "no model rounds: the host renews quiet transport windows with zero model calls, and journal "
+                "no model rounds: the host renews quiet transport windows, and journal "
                 "progress streams to the human without waking you. An unreachable daemon is the "
                 "same quiet renewal (typed reason daemon_unreachable, told to the owner once per "
                 "outage); while such a read hangs, a finalize_now/hurry control is noticed only "
@@ -1437,7 +1434,7 @@ def get_tools() -> List[ToolEntry]:
                 "An observed terminal, a new interaction, "
                 "fault, addressed owner/task message, a direct-child attention/terminal event, "
                 "cancel/deadline control, recovery judgment, or an explicit one-shot checkpoint "
-                "wakes exactly once. "
+                "wakes exactly once. Host-marked context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "
@@ -1471,7 +1468,8 @@ def get_tools() -> List[ToolEntry]:
                 "checkpoint_reason": {"type": "string", "description":
                     "Why one proactive inspection is worth a model call. No repeating cadence."},
             }},
-        }, _published_entry(_delegate_wait_entry), timeout_sec=operation_window_sec(get_task_abs_ceiling_sec()) + 120),
+        }, _published_entry(_delegate_wait_entry),  # no lifetime: no outer bound; the wait wakes on controls
+           timeout_sec=None if (lifetime := get_task_abs_ceiling_sec()) is None else lifetime + 120),
         ToolEntry("delegate_cancel", {
             "name": "delegate_cancel",
             "description": (
@@ -1564,7 +1562,7 @@ def get_tools() -> List[ToolEntry]:
                 "stored receipt instead of delivering twice); after any other outcome a "
                 "new message needs a NEW id (omit message_id). A message steers only the current "
                 "attempt: the host never re-injects it (a continuation keeps it only as the engine's "
-                "session history or evidence), and it "
+                "session history or evidence; my human's rows the host placed ride the next continuation under their own heading), and it "
                 "is reconciled on the delegate_wait timeline (message.* rows)."
             ),
             "parameters": {"type": "object", "required": ["run_id", "text"], "properties": {

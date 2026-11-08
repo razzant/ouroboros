@@ -14,7 +14,11 @@ weights. Opt-in lanes never contribute weight or join the selection.
 
 A shard may hold no file with a test of a pass (few files carry `serial`). It
 deselects everything, records `assigned: []` and ends with exit status 0 instead
-of pytest's 5: the empty slice of the manifest's packing is its whole proof.
+of pytest's 5: the empty slice of the manifest's packing is its whole proof. So
+does a pass over explicit modules with nothing narrowed (journal-persist's
+`serial("exclusive")` pass, the gate's, scripts/run_tests.py's): the modules'
+tests were collected and this pass holds none of them (`DEFAULT_PASS_EMPTY`);
+modules that collect nothing, or a `-k`/`--deselect` run, keep pytest's 5.
 
 An independent, unsharded --default-suite-manifest collection witnesses each
 pass. tests/ci_evidence.py reconciles every shard against those manifests. Skips
@@ -27,10 +31,16 @@ import sys
 
 import pytest
 
-from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
+from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR
 from tests.browser_lane import _COLLECTION_INI, _NARROWING_OPTIONS
 from tests.ci_evidence import file_shards
 from tests.ci_verdicts import durations_table, platform_name
+
+
+# The two default passes, by the one expression every caller spells for each (ci.yml, scripts/run_tests.py,
+# the gate's pass specs): the marker partition is what makes a pass, whatever paths it runs over.
+PASS_EXPRESSIONS = {f"{prefix}{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}": name
+                    for prefix, name in (("not ", "parallel"), ("", "serial"))}
 
 
 def pytest_addoption(parser):
@@ -42,6 +52,13 @@ def pytest_addoption(parser):
 
 def _enabled(config):
     return config.getoption("--default-suite-shard") or config.getoption("--default-suite-manifest")
+
+
+def _default_pass(config):
+    """The default pass this un-narrowed session runs, by its exact expression; None for any other selection."""
+    if any(getattr(config.option, name, None) for name in _NARROWING_OPTIONS):
+        return None
+    return PASS_EXPRESSIONS.get(config.option.markexpr)
 
 
 def _shard(config):
@@ -75,11 +92,9 @@ def pytest_configure(config):
     manifest = config.getoption("--default-suite-manifest")
     if manifest and (shard or not config.option.collectonly):
         raise pytest.UsageError("DEFAULT_SUITE_MANIFEST: require unsharded --collect-only")
-    expressions = {f"{prefix}serial and {LANE_EXCLUSION_EXPR}": name
-                   for prefix, name in (("not ", "parallel"), ("", "serial"))}
-    if config.option.markexpr not in expressions:
+    if config.option.markexpr not in PASS_EXPRESSIONS:
         raise pytest.UsageError("DEFAULT_SUITE_INCOMPLETE: require the unchanged default pass expression")
-    config._default_suite_pass = expressions[config.option.markexpr]
+    config._default_suite_pass = PASS_EXPRESSIONS[config.option.markexpr]
     narrowed = any(getattr(config.option, name, None) for name in _NARROWING_OPTIONS)
     overridden = any(entry.split("=", 1)[0].strip() in _COLLECTION_INI
                      for entry in (config.option.override_ini or []))
@@ -89,8 +104,12 @@ def pytest_configure(config):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection_modifyitems(config, items):
-    collected = list(items) if _enabled(config) else []
+    collected = list(items)
     yield  # conftest adds file-level serial markers; pytest applies the normal -m selection.
+    if _default_pass(config):
+        # This collecting process's count of the selection's tests and of this pass's share of them;
+        # an xdist worker hands it to the controller (below), which decides the session's status.
+        config._default_pass_share = (len(collected), len(items))
     if not _enabled(config):
         return
     excluded = [term.removeprefix("not ") for term in LANE_EXCLUSION_EXPR.split(" and ")]
@@ -98,7 +117,7 @@ def pytest_collection_modifyitems(config, items):
                if not any(item.get_closest_marker(marker) for marker in excluded)]
     serial = config._default_suite_pass == "serial"
     expected = sorted(item.nodeid for item in default
-                      if bool(item.get_closest_marker("serial")) == serial)
+                      if bool(item.get_closest_marker(EXCLUSIVE_MARKER)) == serial)
     if not expected or sorted(item.nodeid for item in items) != expected:
         raise pytest.UsageError("DEFAULT_SUITE_INCOMPLETE: collected selection differs from the default pass")
     weights, source = file_weights(dict(sorted(Counter(item.nodeid.split("::", 1)[0] for item in default).items())))
@@ -121,7 +140,10 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
-    """xdist's controller does not collect: retain the workers' agreed lane proof."""
+    """xdist's controller does not collect: retain the workers' agreed lane proof and pass share."""
+    share = getattr(node, "workeroutput", {}).get("default_pass_share")
+    if share is not None:
+        node.config._default_pass_share = tuple(share)  # every worker collected the same selection
     if not _enabled(node.config):
         return
     lane = getattr(node, "workeroutput", {}).get("default_suite_lane")
@@ -136,12 +158,20 @@ def pytest_testnodedown(node, error):
 def pytest_sessionfinish(session):
     config = session.config
     lane = getattr(config, "_default_suite_lane", None)
+    share = getattr(config, "_default_pass_share", None)
     if hasattr(config, "workeroutput"):
         if lane is not None:
             config.workeroutput["default_suite_lane"] = lane
+        if share is not None:
+            config.workeroutput["default_pass_share"] = list(share)
     elif getattr(config, "_default_suite_mismatch", False):
         print("DEFAULT_SUITE_INCOMPLETE: workers disagree about the complete lane")
         session.exitstatus = 1
     elif (lane is not None and lane.get("assigned") == []
           and session.exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED):
         session.exitstatus = pytest.ExitCode.OK  # An empty shard ran all it was assigned: nothing.
+    elif (lane is None and share is not None and share[0] and not share[1]
+          and session.exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED):
+        # A pass over explicit modules whose tests all belong to the other pass: it ran all it was asked, nothing.
+        print(f"DEFAULT_PASS_EMPTY: the {_default_pass(config)} pass holds none of the {share[0]} collected test(s)")
+        session.exitstatus = pytest.ExitCode.OK

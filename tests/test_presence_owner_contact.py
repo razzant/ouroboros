@@ -36,17 +36,11 @@ from supervisor import queue as task_queue
 from tests.test_place_focus import focus as focus
 from tests.test_quiz_answer import _post
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.fixture
-def contact_runtime(focus, monkeypatch):
-    root, place, admission, event = focus
+def contact_door(root, monkeypatch, bus):
+    """Real Main publication, the owner's HTTP answer and the supervisor's event consumer on ``root``, over ``bus``."""
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
-    monkeypatch.setattr(task_queue, "RUNNING", {})
-    monkeypatch.setattr(task_queue, "PENDING", [])
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
     monkeypatch.setattr(message_bus, "DATA_DIR", root)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a: None)
@@ -57,9 +51,6 @@ def contact_runtime(focus, monkeypatch):
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(td, "request_drive_root", lambda _request: root)
     app = Starlette(routes=[Route("/api/decisions", td.api_decision_answer, methods=["POST"])])
-    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
-                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
-    bus = queue.Queue()
     monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: bus)
     consumer = SimpleNamespace(DRIVE_ROOT=root, RUNNING=task_queue.RUNNING, EVENT_Q=bus,
                                send_with_budget=message_bus.send_with_budget, append_jsonl=append_jsonl)
@@ -69,8 +60,21 @@ def contact_runtime(focus, monkeypatch):
         while not bus.empty():
             dispatch_event(bus.get_nowait(), consumer)
 
-    return SimpleNamespace(root=root, place=place, admission=admission, event=event,
-                           bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+    return SimpleNamespace(root=root, bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+
+
+@pytest.fixture
+def contact_runtime(focus, monkeypatch):
+    root, place, admission, event = focus
+    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
+    monkeypatch.setattr(task_queue, "RUNNING", {})
+    monkeypatch.setattr(task_queue, "PENDING", [])
+    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
+    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
+                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
+    door = contact_door(root, monkeypatch, queue.Queue())
+    door.place, door.admission, door.event = place, admission, event
+    return door
 
 
 def _run(runtime, during, *, live=True, uncertain=False):
@@ -240,11 +244,16 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     ctx = SimpleNamespace(task_metadata=metadata)
     _initialize_owner_directives(ctx, [{"role": "user", "content": model_text}])
     assert [row["content"] for row in ctx._owner_directives] == [incoming["text"]]
+    asked = late["answer_snapshot"]["quiz"]["question"]  # the card it answers rides beside it, the asker's words
+    assert [(row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) for row in ctx._owner_directives] == [
+        (f"Ouroboros, task {tid}", asked.split("\n")[0])]
     assert _answer(r, tid, qid).status_code == 200 and fresh._inbox.empty()
-    # Consume the real accepted owner row through the normal supervisor/direct
-    # lane. Only the model is a double; admission rebuilds its source-work frame.
+    # Consume the real accepted owner row through the normal supervisor door and the real
+    # carrier body (the conversation lane). Only the model is a double; the carrier's first
+    # step rebuilds its source-work frame.
     import server
     from ouroboros.context import build_user_content
+    from tests.test_attachment_staging import carried_turn
     from tests.test_v6730_origin_invariant import _ImmediateThread
 
     admitted = []
@@ -258,7 +267,7 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
         consciousness=SimpleNamespace(inject_observation=lambda _t: None, pause=lambda: None, resume=lambda: None),
         get_chat_agent=lambda: SimpleNamespace(_busy=False), send_with_budget=lambda *_a, **_kw: None,
         handle_chat_direct=lambda chat_id, text, image_data=None, **kw:
-            workers._run_chat_task(owner_agent, chat_id, text, image_data, **kw),
+            carried_turn(monkeypatch, r.root, owner_agent, chat_id, text, image_data, **kw),
     )
     with monkeypatch.context() as scoped:
         scoped.setattr(threading, "Thread", _ImmediateThread)
@@ -272,6 +281,7 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     owner_ctx = SimpleNamespace(task_metadata=owner_task["metadata"])
     _initialize_owner_directives(owner_ctx, [{"role": "user", "content": content}])
     assert [row["content"] for row in owner_ctx._owner_directives] == [incoming["text"]]
+    assert [row["reply_to"]["author"] for row in owner_ctx._owner_directives] == [f"Ouroboros, task {tid}"]
     _exercise_late_owner(r, owner_task, monkeypatch)
     assert fresh.get_updates(offset=0, timeout=0) == []
     r.event = replace(r.event, source_event_id="after-pause")
@@ -334,11 +344,126 @@ def _exercise_late_owner(r, task, monkeypatch):
         bridge=None, append_jsonl=lambda *_a, **_kw: None, persist_queue_snapshot=lambda **_kw: True,
         enqueue_task=lambda child: pending.append(child) or child, load_state=lambda: {"owner_chat_id": 1})
     ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(event, host))
-    assert _start_task(ctx, "Investigate the source", title="Source research").startswith("OK: task")
+    assert _start_task(ctx, "Investigate the source", title="Source research",
+                       context_requires_self_body_docs=True).startswith("OK: task")
     [child] = pending
     assert presence_related_work(r.admission.binding_id, child)
     assert "presence" not in child["metadata"]
     assert presence_caller_binding(ctx) is None, "starting related work cannot narrow its owner"
+    _exercise_related_root(r, ctx, child, host, monkeypatch, task["metadata"]["late_answer"]["task_id"])
+
+
+def _pooled_metadata(row):
+    """What the pooled agent hands its tools (``agent.py``): queued metadata, lineage and the door's own stamp."""
+    carried = ("parent_task_id", "root_task_id", "delegation_role", "budget_drive_root",
+               "origin_message_ref", "origin_message_text", "objective_author", "owner_corpus")
+    return {**row["metadata"], **{key: row[key] for key in carried if row.get(key) not in (None, "")}}
+
+
+def _exercise_related_root(r, owner, root, host, monkeypatch, source_task):
+    """#2482: the root the owner's private late answer started is the owner's ordinary work.
+
+    It writes to Main, may ask the owner for a secret, answers a relay, keeps its own words, publishes
+    focus, sees and tells its peers and reads the owner's schedules; its children and the roots it starts are ordinary. Only
+    the relation stays: the original place reads and stops it, another place does not, and nothing
+    of the place's external voice reaches it.
+    """
+    from ouroboros.dialogue_provenance import (
+        is_presence_task,
+        presence_binding_authority_metadata,
+        presence_caller_binding,
+        presence_related_work,
+    )
+    from ouroboros.gateway.history import _assemble_history_response
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.peer_roster import maybe_append_roster_note
+    from ouroboros.place_reply import reply_carrier
+    from ouroboros.tools.control import _tell_task
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.tools.followup import _manage_schedules
+    from ouroboros.tools.presence import _cancel_presence_work
+    from ouroboros.tools.project_journal import _scope_authority
+    from ouroboros.tools.recent_tasks import _restricted_actor
+    from ouroboros.tools.secret_hitl import _unavailable as secret_refusal
+    from ouroboros.utils import atomic_write_json
+    from supervisor.events import _handle_promote_chat_to_task, _handle_steer_task
+    from tests.test_presence_own_work import OTHER, _registry, _supervisor
+
+    binding = r.admission.binding_id
+    # Admitted as the owner's start: its own contract, never the answering turn's, and no Presence authority.
+    assert "presence_binding_authority" not in root["metadata"] and not is_presence_task(root)
+    assert root["task_contract"]["context_requires_self_body_docs"] is True
+    assert root["task_contract"]["objective"] == "Investigate the source"
+    peer = {"id": "owner-peer-work", "delegation_role": "root", "chat_id": 1}
+    write_task_result(r.root, peer["id"], "running", delegation_role="root", chat_id=1)
+    write_task_result(r.root, root["id"], "running", metadata=root["metadata"], chat_id=root["chat_id"],
+                      delegation_role="root", root_task_id=root["id"])
+    atomic_write_json(r.root / "state" / "queue_snapshot.json", {"worker_total": 1, "pending": [], "running": [
+        {"id": task["id"], "task": task} for task in (root, peer)]})
+    pool = _supervisor(r.root, running=[root, peer])
+
+    def live(event):
+        r.bus.put(event)
+        r.pump()
+
+    ctx = ToolContext(repo_dir=r.root, drive_root=r.root, budget_drive_root=r.root, task_id=root["id"],
+                      current_chat_id=root["chat_id"], task_metadata=_pooled_metadata(root),
+                      task_contract=root["task_contract"], is_direct_chat=False,
+                      event_queue=SimpleNamespace(put_nowait=live))
+    ctx.messages = []
+    tools = ToolRegistry(repo_dir=r.root, drive_root=r.root)
+    tools.set_context(ctx)
+    assert presence_caller_binding(ctx) is None and not _restricted_actor(ctx)
+    assert _scope_authority(ctx)[0] == "root" and reply_carrier(ctx.task_metadata) == {}
+    with monkeypatch.context() as waiting:  # with its live continuation owner it may ask the owner for a secret
+        waiting.setattr(ctx, "owner_wait_callback", lambda *_a, **_k: None, raising=False)
+        assert secret_refusal(ctx) == ""
+
+    # Main: the reported MAIN_NOTICE_BLOCKED. One owner-visible row, and the words stay this work's own.
+    sent = tools.execute("send_user_message", {"text": "The source research found the cause.", "destination": "main"})
+    assert sent.startswith("OK: notice"), sent
+    main = json.loads(_assemble_history_response(r.root, 1, 50, 0))["messages"]
+    [notice] = [m for m in main if m.get("system_type") == "main_notice" and m.get("task_id") == root["id"]]
+    assert notice["text"] == "The source research found the cause." and not notice.get("presence_contact")
+    assert pending_owner_dialogue(ctx), "the work's own outward words stay in its context"
+
+    # Relay: the owner hands this work a retained owner message; the reported refusal was here.
+    owner.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, pool))
+    [handle] = list(held_owner_messages(owner))[:1]
+    assert "Message written to" in _tell_task(owner, root["id"], "Reply to the owner directly", quote=[handle])
+    _drain_incoming_messages([], queue.Queue(), r.root, root["id"], None, set(), owner_ctx=ctx)
+    [relay_id] = list(ctx._open_relays)
+    answered = tools.execute("send_user_message", {"text": "Answered where you asked.", "reply_to_relay": relay_id})
+    assert answered.startswith("OK: answer to relay"), answered
+
+    # Focus, peers, the owner's schedule table and tells to the owner's other work.
+    focused = tools.execute("update_focus", {"text": "Reading the source conversation",
+                                             "source_ref": {"reader": "get_task_result", "task_id": source_task}})
+    assert focused.startswith("OK: focus["), focused
+    notes = []
+    assert maybe_append_roster_note(ctx, notes, r.root) and peer["id"] in str(notes)
+    assert json.loads(tools.execute("live_roots", {})).get("ok") is not False
+    listed = json.loads(_manage_schedules(ctx, "list"))
+    assert listed["total"] == len(task_queue.list_scheduled_tasks(r.root)["tasks"]) == 2, listed
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, pool))
+    assert "Message written to" in _tell_task(ctx, peer["id"], "Coordinate on the source")
+
+    # Its delegated children inherit nothing of the place; a root it starts keeps only the relation.
+    assert presence_binding_authority_metadata(ctx.task_metadata, task_contract=ctx.task_contract) == {}
+    host.PENDING.clear()
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(event, host))
+    assert _start_task(ctx, "Follow the lead", title="Lead").startswith("OK: task")
+    [started] = host.PENDING
+    assert presence_related_work(binding, started) and "presence_binding_authority" not in started["metadata"]
+
+    # The original place still reads and stops this work; another place reaches neither.
+    place, place_ctx = _registry(r.root, binding=binding)
+    stranger, _stranger = _registry(r.root, binding=OTHER)
+    assert "PRESENCE_CAPABILITY_BLOCKED" not in place.execute("get_task_result", {"task_id": root["id"]})
+    assert "PRESENCE_CAPABILITY_BLOCKED" in stranger.execute("get_task_result", {"task_id": root["id"]})
+    assert root["id"] in [row["task_id"] for row in json.loads(place.execute("recent_tasks", {"limit": 50}))["tasks"]]
+    assert "PRESENCE_WORK_NOT_CORRELATED" in _cancel_presence_work(_stranger, root["id"])
+    assert "Cancel requested" in _cancel_presence_work(place_ctx, root["id"])
 
 
 @pytest.mark.parametrize("required", [False, True])
@@ -388,6 +513,60 @@ def test_required_private_question_uses_existing_wait_and_stop(contact_runtime):
     _run(r, during, live=False)
 
 
+def test_the_model_reads_where_private_contact_and_its_answers_stand():
+    """The tool I report with and the note beside an owner's answer say the same three facts as the room rule:
+    Main keeps the address, the Project my work lives in shows the same row, the place never does."""
+    from ouroboros.presence_owner_contact import answer_source_context
+    from ouroboros.tools.control import get_tools
+
+    [tool] = [entry for entry in get_tools() if entry.name == "send_user_message"]
+    said = tool.schema["parameters"]["properties"]["destination"]["description"]
+    assert "Main only" not in said
+    assert all(fact in said for fact in ("Main keeps its address", "the Project its work lives in (if any) shows the "
+                                         "same row", "its place never sees it"))
+    note = answer_source_context({"presence_contact": {"task_id": "work-1", "binding_id": "b", "source_event_id": "e"}})
+    assert "delivered privately in Main" not in note
+    assert all(fact in note for fact in ("one row at its Main address", "the Project its work lives in (if any)",
+                                         "never in its source conversation", "No external reply or action"))
+
+
+def test_a_fresh_private_question_is_one_unread_message_in_main_and_its_project_on_a_declared_frame(contact_runtime):
+    """The real producer's one question frame stays inside the published ``QuizOutbound`` (its ``also_rooms`` declared
+    and typed), and its one row counts once in each room that shows it, as a private notice does; a place never."""
+    from typing import get_type_hints
+
+    from ouroboros.gateway.contracts import QuizOutbound
+    from ouroboros.gateway.schema import validate_ingress
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    r, saved = contact_runtime, {}
+    project = create_project(r.root, "source-work", name="Source work")
+
+    def revisions():
+        return {room["chat_id"]: room["revision"] for room in dialogue_store.rooms(r.root)}
+
+    def during(ctx, _task, _agent):
+        bind_task_to_project(r.root, ctx.task_id, project["id"], origin={"absent": "system"})
+        saved["before"] = revisions()
+        assert _ask(ctx).startswith("OK:")
+        saved["tid"], saved["place_room"] = ctx.task_id, _task["chat_id"]
+
+    _run(r, during, live=False)  # the deferred question is published by the runner's flush
+    saved["after"] = revisions()
+    [frame] = [f for f in r.frames if f.get("type") == "quiz" and f.get("task_id") == saved["tid"]]
+    [row] = [entry.row for entry in dialogue_store.iter_rows(r.root, "chat")
+             if entry.row.get("type") == "quiz" and entry.row.get("task_id") == saved["tid"]]
+    declared = set(get_type_hints(QuizOutbound))
+    assert not set(frame) - declared, sorted(set(frame) - declared)  # every emitted key is published
+    assert not validate_ingress(frame, QuizOutbound), validate_ingress(frame, QuizOutbound)
+    assert validate_ingress({**frame, "also_rooms": "elsewhere"}, QuizOutbound)  # typed, not only present
+    assert (frame["chat_id"], frame["also_rooms"]) == (1, [project["chat_id"]])
+    assert set(row["room_revisions"]) == set(frame["room_revisions"]) == {"1", str(project["chat_id"])}
+    moved = {chat: saved["after"].get(chat, 0) - saved["before"].get(chat, 0) for chat in (1, project["chat_id"])}
+    assert moved == {1: 1, project["chat_id"]: 1}  # one unread message in each room that shows it
+    assert saved["place_room"] not in (1, project["chat_id"])  # and never the place's (its stamp names none)
+
+
 def test_main_question_keeps_its_address_after_project_binding_in_frontend_consumer(contact_runtime):
     import shutil
     import subprocess
@@ -406,18 +585,35 @@ def test_main_question_keeps_its_address_after_project_binding_in_frontend_consu
         blocks = quiz_states(r.root, ctx.task_id)
         qid, = blocks
         assert "publication_chat_id" not in blocks[qid]
-        assert question_display_rooms(r.root, ctx.task_id, blocks)[qid] == {
-            "state": "known", "chat_id": 1, "project_id": ""}
+        assert question_display_rooms(r.root, ctx.task_id, blocks)[qid] == {  # Main's address, its Project's too
+            "state": "known", "chat_id": 1, "project_id": "", "also_project_ids": [project["id"]]}
         saved.update(tid=ctx.task_id, qid=qid)
 
     _run(r, during, live=False)
     detail = detail_client(r.root).get("/api/tasks/" + saved["tid"]).json()
     assert detail["owner_quiz"][saved["qid"]]["publication_chat_id"] == 1
+    assert detail["question_rooms"][saved["qid"]]["also_project_ids"] == [project["id"]]
+    census = main_decisions_snapshot(r.root, [], {})  # still Main's own native question, no Project pointer
+    assert [(row["task_id"], row.get("native")) for row in census["current_questions"]] == [(saved["tid"], True)]
     main = json.loads(_assemble_history_response(r.root, 1, 20, 0))["messages"]
     other = json.loads(_assemble_history_response(r.root, project["chat_id"], 20, 0))["messages"]
-    assert len([m for m in main if m.get("quiz")]) == 1
-    assert not [m for m in other if m.get("quiz")]
+    # One stored question at its Main address, shown in Main and in its work's Project (formerly Main-only).
+    shown = [[m for m in rows if m.get("quiz")] for rows in (main, other)]
+    assert [len(rows) for rows in shown] == [1, 1]
+    assert shown[0][0]["row_address"] == shown[1][0]["row_address"] and shown[1][0]["row_address"].startswith("row:1@")
     run = subprocess.run([shutil.which("node"), "web/tests/presence_contact_consumer.mjs"],
         input=json.dumps({"detail": detail, "quizId": saved["qid"], "sourceUrl": r.event.message["url"]}),
         text=True, capture_output=True, timeout=15, cwd=Path(__file__).resolve().parents[1])
     assert run.returncode == 0, run.stdout + run.stderr
+    # Its one live frame: Main's by address, the Project's through ``also_rooms``, as each panel's router reads it.
+    [frame] = [f for f in r.frames if f.get("type") == "quiz" and f.get("quiz_id") == saved["qid"]]
+    assert (frame["chat_id"], frame["also_rooms"]) == (1, [project["chat_id"]])
+    module = (Path(__file__).resolve().parents[1] / "web" / "modules" / "chat_activity.js").as_uri()
+    probe = subprocess.run([shutil.which("node"), "--input-type=module", "-e", f"""
+        import {{ chatThreadAccepts }} from {json.dumps(module)};
+        let input = ''; for await (const chunk of process.stdin) input += chunk;
+        const [frame, project] = JSON.parse(input), known = new Set([project]);
+        process.stdout.write(JSON.stringify([chatThreadAccepts(frame, true, 1, known),
+            chatThreadAccepts(frame, false, project, known), chatThreadAccepts(frame, false, project + 1, known)]));
+    """], input=json.dumps([frame, project["chat_id"]]), text=True, capture_output=True, timeout=15, check=True)
+    assert json.loads(probe.stdout) == [True, True, False]

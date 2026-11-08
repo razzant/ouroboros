@@ -6,10 +6,11 @@ projections, the source-complete decision pipeline, continuation authority, live
 notifications, UI disposers and embedded-surface geometry. Each rule bounds reading cost
 and names its enforcement or its absence.
 
-P7 makes context fit a maintenance constraint, not a line-count aesthetic. Python
-modules everywhere (`tests/` and `devtools/` included) and first-party `web/**/*.js`
-(`web/tests/` included; vendored and minified excluded) target roughly 1000 lines. The
-gates read exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
+P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
+runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
+excluded) target roughly 1000 lines; test modules are outside the module band (their
+function cap stays; the diff pulse states lines per changed test module). The gates read
+exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
 Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical
 UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the 1001–1500 band (`BAND_PATHS`; a new
 entry needs a nonblank rationale), and 300 lines per non-grandfathered runtime-Python
@@ -28,15 +29,26 @@ ARCHITECTURE §6 "Commit preflight").
 
 ### Paying down a size cap
 
-A change that runs into a band, the hard cap, the function gate or the byte debt pays it
-down by simplifying where the change lives (simpler control and data flow, dead code and
-duplicates removed, an existing SSOT reused, prose made compact), so the module reads
-better. Extraction is the last resort and counts only for a natural boundary that would
+A change that runs into a band, the hard cap, the function gate, the byte debt, or the size
+of a book, BIBLE.md or the prompts pays where the change lives by removing what its reader
+no longer needs, so what stays reads better. In code the reader then holds fewer concepts,
+branches and state: simpler control and data flow, dead code and duplicates removed (a
+re-export no consumer reads through its module is dead; a test that only pins its presence
+is not a consumer), an existing SSOT reused. In a book, BIBLE.md or a prompt a statement
+leaves for its owner: the touched node's old description, history, a fact another document
+owns, mechanism detail moved into its module's docstring or test. Rewording a statement
+that stays is judged by whether it reads better with every fact, reason and qualifier kept,
+never by the bytes it saves; a chapter introduction, the book's Low/Nano view, is never cut
+to pay. Extraction is the last resort and counts only for a natural boundary that would
 stay correct with the parent far below the cap: its own reason to change, an explicit
-contract, a real caller. A cap-driven bucket, a one-caller passthrough, or bytes bought by
-deleting contract-bearing comments, docstrings, messages or tests is a defect to report,
-not paydown (BIBLE P7 «first simplify what exists»). Enforcement: CHECKLISTS item 27
-`size_cap_paydown`, advisory when applicable.
+contract, a real caller, no import back into the parent. The same logic in fewer lines, a
+cap-driven bucket, a one-caller passthrough, or bytes bought by losing a fact (a
+contract-bearing comment, docstring, message or test; a book's reason or qualifier) is a
+defect to report, not paydown (BIBLE P7 «first simplify what exists»). When nothing honest
+fits, the record says so: a band entry with its reason, or the owner's `book-growth` label;
+the hard cap, the function gate and the byte debt take no new record, so a change or merge
+that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`,
+advisory when applicable.
 
 ### Pragmatic SOLID
 
@@ -78,7 +90,8 @@ addressed store, outside queue locks, released before display consumers; unavail
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
 history grows 20→2,000 rows). Main batches question display views and warms lineage by
 generation, keeping strict per-member gaps if a batch fails (`tests/test_main_decisions_reads.py`);
-`tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows.
+`tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
+`tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
 - **Measure growth:** history, object count, nesting, cold caches and contention, using
   existing spans and real-reader spies when responsiveness suffers. Telemetry adds no
@@ -92,7 +105,11 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 - **Reuse precedents:** a writer seam whose transaction also writes the facts readers
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
-  one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3).
+  one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3); one
+  census per tree (`tree_census.writer_facts`); reuse by source identity, never time, against a
+  fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`); rows kept by stamp, verdicts
+  per reader (`delegate_custody_current.held_runs`, `task_store.owing_documents`); one batch of
+  stored results (`obligations.result_rows`).
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
@@ -141,8 +158,7 @@ attention or enforcement changes, no requested-as-observed execution. Incomplete
 rows remain gaps. Existing chat/task/attempt readers supply the view;
 `gateway/task_reviews.py` adds passive paged history and owned saved-text exports
 through ledger/Plan/skill readers. No second ledger, persisted UI state or cost
-copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`,
-`web/tests/harness_presentation.test.js`, `tests/test_task_review_sources.py`.
+copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`.
 
 #### Context and growth matrix
 
@@ -171,8 +187,7 @@ serialized budget; previews carry `full_chars` and a `source_ref`). Durable `tas
 bodies stay the SSOT; the brief names each omitted field and size and never stands in for
 it. No hop cap, no chain walk: a successor reads its predecessor through the exact read
 above, and the predecessor mind's notes follow the assignment as one foldable row.
-Enforcement: `tests/test_continuation_context_authority.py`,
-`tests/test_helper_predecessor_history.py`.
+Enforcement: `tests/test_continuation_context_authority.py`.
 
 ### Invariant: notifications ring for live events only
 
@@ -184,17 +199,15 @@ never call it; no notification state survives reload.
 
 The room gate refuses hidden, A2A and unknown chats. Each task ending has one key;
 a direct ending is an ordinary reply. Frame lineage excludes child banners.
-Activation resolves exact Project identity through `GET /api/projects?chat_id=…`,
-independent of the capped sidebar. Missing, inactive or unreadable destinations show
-unavailable without navigating. Established Main notices, including Telegram, open Main.
-A later click supersedes an unfinished lookup; hydration stays silent.
+Activation follows ARCHITECTURE §3 (exact registry identity, never the capped sidebar;
+an unresolved destination shows unavailable, keeping the view; Main notices open
+Main); a later click supersedes an unfinished lookup; hydration stays silent.
 
 Classification and gating are pure over a frame and stored preferences, testable
 without DOM or socket. Preferences stay client-local, outside `s-`, settings-dirty
 tracking and `/api/settings`. Delivery degrades rather than disappearing and never
 requests OS permission. Importance adds no host field, text heuristic or model call
 (mechanism: `web/modules/notifications.js` header). Enforcement:
-`tests/test_notifications_static.py`, `tests/test_notification_destination.py`,
 `web/tests/notifications.test.js`.
 
 ### Invariant: UI resources carry a disposer
@@ -240,5 +253,4 @@ behavior in the refresh contract, where missing or malformed job status is an im
 protocol error and an unknown in-progress label is a bounded pending state.
 
 Enforcement: CHECKLISTS item 9 `perf_lifecycle` points lifecycle changes here; the
-widget geometry/refresh contracts are pinned in `tests/test_widgets_ui_static.py` and
-`tests/test_extension_surfaces.py`.
+widget geometry/refresh contracts live in `tests/test_widgets_ui_static.py`.

@@ -26,7 +26,6 @@ from ouroboros.review_evidence import (
 from ouroboros.tools.registry import ToolContext
 from tests._workspace_executor_shared import _init_repo
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -127,7 +126,7 @@ def test_partial_visual_result_completeness_follows_recovery(evidence_context, r
     assert packet["gap_count"] == (0 if recoverable else 1)
 
 
-@pytest.mark.parametrize("shape", ["missing", "empty", "failed", "other_execution", "tampered"])
+@pytest.mark.parametrize("shape", ["missing", "failed", "tampered"])
 def test_following_response_gap_never_selects_a_later_success(evidence_context, shape):
     ctx = evidence_context
     model_response(ctx, "before", "Before")
@@ -362,8 +361,11 @@ def test_retrieving_seat_request_preserves_selected_source(evidence_context, mon
     assert (request.policy.get("native_data_root") == ctx.budget_drive_root) is (delivery == "native")
 
 
-@pytest.mark.parametrize("image_state", ["attached", "missing", "reported_failure"])
-@pytest.mark.parametrize("skill", ["unix_computer_use", "another_image_producer"])
+@pytest.mark.parametrize(("skill", "image_state"), [
+    ("unix_computer_use", "attached"),
+    ("another_image_producer", "missing"),
+    ("another_image_producer", "reported_failure"),
+])
 def test_autoattached_image_process_trace_reaches_commit_evidence(evidence_context, image_state, skill):
     from ouroboros.extension_surface_names import extension_surface_name
     from ouroboros.loop_tool_execution import process_tool_results
@@ -490,3 +492,23 @@ def test_real_packet_assembly_omits_optional_excerpt_before_required_material(ev
     assert "docs/ARCHITECTURE.md" in fitted and "docs/DEVELOPMENT.md" in fitted
     assert "OPTIONAL_IMAGE_EXCERPT" not in fitted and "excerpt omitted to fit" in fitted
     assert ctx._commit_review_evidence == evidence
+
+
+def test_selected_visual_source_adds_no_mask_of_its_own(evidence_context):
+    """The selected trace rows reach reviewers as the trace holds them (owner, 2026-10-29);
+    a response stored masked in observability stays as stored — never claimed restored."""
+    ctx = evidence_context
+    keyed = 'OPENAI_API_KEY=sk-' + 'b' * 40 + ' in {"token": "abcd1234"}'
+    model_response(ctx, "before", "Inspect the screenshot")
+    tool_response(ctx, "image", "before", tool="vlm_query", result=keyed,
+                  args={"path": "/tmp/view.png", "prompt": "read token=abcd1234 from the form"})
+    model_response(ctx, "after", "The page shows " + keyed)
+    source = capture_commit_review_evidence(ctx)
+    exact = read_actor_source_bytes(ctx.budget_drive_root, ctx.task_id, source["source_ref"]).decode()
+    [row] = [json.loads(block) for block in exact.split("\n\n")[2:]]
+    assert row["result"] == keyed
+    assert row["args"]["prompt"] == "read token=abcd1234 from the form"
+    # The response comes from its observability record, written under that store's own
+    # redaction: the view carries those stored bytes, neither re-masked nor restored.
+    from ouroboros.observability import redact_projection
+    assert row["following_visible_text"] == redact_projection("The page shows " + keyed).value

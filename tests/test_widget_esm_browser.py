@@ -22,10 +22,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from ouroboros.test_environment import isolated_environment
+from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import diagnostic_directory
 from tests.candidate_checkout import candidate_checkout, require_candidate_interpreter, verify_checkout
 from tests.separate_ui_support import ModelStub, OwnedProcess
+from tests.ui_console_errors import PageErrors
 from tests.widget_esm_fixture import BINARY, NAME, install
 
 pytestmark = pytest.mark.ui_browser
@@ -43,7 +44,8 @@ def network_server(tmp_path, request):
     evidence = diagnostic_directory(tmp_path / 'evidence', 'widget-esm-' + request.node.callspec.params['engine'])
     source = Path(__file__).resolve().parents[1]
     with candidate_checkout(source, tmp_path / 'repo', origin_proof=True) as candidate:
-        env = isolated_environment(tmp_path, tmp_path / 'repo')
+        # The core's worker manager listens beneath TMPDIR: the launcher's short temp, else tmp_path/tmp.
+        env = isolated_environment(tmp_path, tmp_path / 'repo', process_temp=owned_process_temp())
         data = Path(env['OUROBOROS_DATA_DIR'])
         skill = install(data)
         model = ModelStub()
@@ -88,6 +90,26 @@ def network_server(tmp_path, request):
                 assert client.get('/api/widgets').status_code == 401, 'must exercise the real network gate'
                 assert client.get('/static/modules/widget_module.js').status_code == 401
                 assert client.post('/auth/login', json={'password': PASSWORD}).status_code == 200
+                # Health answers before supervisor init, which starts that manager, has an outcome. Until then a
+                # state read may fail (500) or outlast the client timeout: no answer yet. A 200 is the answer.
+                deadline, last = time.monotonic() + 45, 'no answer'
+                while True:
+                    try:
+                        answer = client.get('/api/state')
+                    except httpx.TransportError as exc:
+                        answer, last = None, repr(exc)
+                    if answer is not None and answer.status_code == 200:
+                        state = answer.json()
+                        if state['supervisor_ready']:
+                            break
+                        if error := state['supervisor_error']:
+                            pytest.fail(f"supervisor not ready: {error}\n{server.log_text()[-4000:]}")
+                        last = 'starting'
+                    elif answer is not None:
+                        last = f'HTTP {answer.status_code}: {answer.text[:300]}'
+                    if time.monotonic() > deadline:
+                        pytest.fail(f"supervisor not ready: {last}\n{server.log_text()[-4000:]}")
+                    time.sleep(.2)
                 assert client.get('/static/candidate-sentinel.txt').content == candidate.sentinel_bytes
                 assert health.json()['runtime_version'] == candidate.version_text
                 enabled = client.post(f'/api/skills/{NAME}/toggle', json={'enabled': True}, timeout=45)
@@ -111,7 +133,7 @@ def test_password_network_esm_files(network_server, engine):
 
     url, client, skill, evidence = network_server
     observations = {}
-    errors = []
+    errors = PageErrors(None, engine)
     asset_responses = []
 
     def resource_records():
@@ -129,7 +151,7 @@ def test_password_network_esm_files(network_server, engine):
         observations.update(browser_version=browser.version, headless=True)
         context = browser.new_context(viewport={'width': 1280, 'height': 900})
         page = context.new_page()
-        page.on('pageerror', lambda e: errors.append(str(e)))
+        errors.watch(page, navigates=False)  # every page error counts until the logout declares a navigation
         # Collect without nested protocol calls from inside a network callback.
         # Body completion is proven by the widget's values, not event ordering.
         page.on('response', lambda r: asset_responses.append(r) if '/api/widget-assets/' in r.url else None)
@@ -202,8 +224,9 @@ def test_password_network_esm_files(network_server, engine):
             assert client.get(proof['base'] + 'data.bin').status_code == 404
             actual = page.locator(card + ' iframe').element_handle().content_frame()
             fresh = actual.evaluate('window.proof')
-            # Stop completes the existing dispose hook and revokes this mount only.
-            page.locator(card + ' [data-widget-power]').click()
+            # Stop (the card menu's) completes the existing dispose hook and revokes this mount only.
+            page.locator(card + ' [data-widget-menu-trigger]').click()
+            page.get_by_role("menuitem", name="Stop", exact=True).click()
             page.locator(card + ' iframe').wait_for(state='detached')
             page.wait_for_function("async base => (await fetch(base + 'data.bin')).status === 404", arg=fresh['base'])
             assert client.get(f'/api/extensions/{NAME}/count').json()['hits'] >= 1
@@ -221,6 +244,9 @@ def test_password_network_esm_files(network_server, engine):
             page.wait_for_function("""() => Object.values(JSON.parse(
                 localStorage.getItem('ouroboros.holds') || '{}').entries || {})
                 .every(entry => entry.reason !== 'start')""")
+            # Only now, after the opaque frames' own refusals above: unloading this document may cancel the
+            # board's own-origin reads, which WebKit reports as access-control page errors (#1468).
+            errors.watch(page)
             page.goto(url + '/auth/logout')
             assert client.get(mounted['base'] + 'data.bin').status_code == 404
             page.locator('#password').fill(PASSWORD)
@@ -236,8 +262,8 @@ def test_password_network_esm_files(network_server, engine):
             assert client.get(mounted['base'] + 'data.bin').status_code == 404
             assert client.get('/api/widgets').status_code == 401
             observations.update(reload=True, dispose=True, disable=True, logout=True, password_change=True,
-                                errors=errors, engines=engine)
-            assert errors == []
+                                errors=errors.report(), engines=engine)
+            assert errors.unexpected() == [], errors.report()
         finally:
             observations['asset_requests'] = resource_records()
             if not observations.get('password_change'):

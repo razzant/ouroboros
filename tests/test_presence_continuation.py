@@ -44,6 +44,7 @@ from ouroboros.presence_runner import (
 )
 from ouroboros.review_records import ReviewSlot
 from ouroboros.task_results import load_task_result, write_task_result
+from tests._worlds import clone_repository, world
 from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_presence_runner import _admission
 
@@ -56,7 +57,17 @@ RESUMED = "[PRESENCE CONVERSATION RESUMED]"
 SETTLED = "[Review settled] The reviewers finished"
 LEFT = "An addressed message reached you while the reviewers ran"
 KEY = "telegram:bot-1:room-1:topic-1"
-pytestmark = pytest.mark.serial
+
+
+def _build_harness_repo(repo):
+    """Lay out the tiny Git root once; each harness receives a private clone."""
+    for args in (["init"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                       "commit", "--allow-empty", "-m", "fixture baseline"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _harness_repo(tmp_path):
+    return clone_repository(world("presence-continuation-harness-repo", _build_harness_repo), tmp_path / "repo")
 
 
 def call(name, arguments, identifier):
@@ -166,12 +177,8 @@ def harness(tmp_path, monkeypatch):
     # One held reviewer seat is the whole review pool a result review draws from.
     slots = [ReviewSlot(slot_id="reviewer-one", model="fixture/reviewer", effort="high", timeout_sec=180)]
     monkeypatch.setattr("ouroboros.reviewer_slot_config.review_pool_slots", lambda *_a, **_kw: list(slots))
-    data, repo = tmp_path / "data", tmp_path / "repo"
+    data, repo = tmp_path / "data", _harness_repo(tmp_path)
     data.mkdir()
-    repo.mkdir()
-    for args in (["init"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                           "commit", "--allow-empty", "-m", "fixture baseline"]):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     h = SimpleNamespace(data=data, repo=repo, gate=PresenceTurnGate(1, state_root=data / "state"),
                         executions=PresenceTurnExecutions(), release=threading.Event(), entered=threading.Event(),
                         verdict="PASS", reviews=[], inputs=[], script=[], calls=0, ctxs=[], progress=[],

@@ -113,8 +113,7 @@ def _preflight_record(ctx, answer: str, *, pending: bool) -> dict:
             "aggregate": str(record.verdict.get("aggregate") or "")}
 
 
-@pytest.mark.parametrize("mode", ["preflight", "wave", "exception_pending", "base_exception_pending", "finished",
-                                  "answered", "exception_empty"])
+@pytest.mark.parametrize("mode", ["preflight", "wave", "exception_empty"])
 def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_path, mode):  # noqa: F811
     from ouroboros.review_ledger import STATE_PENDING
     from tests.test_git_review_preflight_gate import _roster

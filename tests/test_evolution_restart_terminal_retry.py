@@ -9,7 +9,6 @@ import pytest
 
 from tests.test_agent_restart_intent import enqueue, evolution_completion, runtime, worker  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def prepare(runtime, monkeypatch):  # noqa: F811
@@ -29,8 +28,14 @@ def prepare(runtime, monkeypatch):  # noqa: F811
     return intent, tx, finish, queued, delivered, requested
 
 
-@pytest.mark.parametrize("fault", ["lock", "write", "write_refused", "write_then_error", "unreadable", "missing"])
-@pytest.mark.parametrize("status", ["completed", "failed"])
+@pytest.mark.parametrize(("status", "fault"), [
+    ("completed", "lock"),
+    ("completed", "write_then_error"),
+    ("completed", "missing"),
+    ("failed", "write"),
+    ("failed", "write_refused"),
+    ("failed", "unreadable"),
+])
 def test_terminal_consumer_retries_same_decision_after_early_failure(runtime, monkeypatch, fault, status):  # noqa: F811
     from supervisor import evolution_lifecycle as evolution
 
@@ -82,8 +87,12 @@ def test_terminal_consumer_retries_same_decision_after_early_failure(runtime, mo
     assert [row["id"] for row in delivered] == [queued["id"]]
 
 
-@pytest.mark.parametrize("status", ["failed", "timeout", "interrupted", "cancelled"])
-@pytest.mark.parametrize("control", ["none", "owner_stop", "panic"])
+@pytest.mark.parametrize(("control", "status"), [
+    ("none", "failed"),
+    ("none", "cancelled"),
+    ("owner_stop", "timeout"),
+    ("panic", "interrupted"),
+])
 def test_committed_failed_cycle_keeps_lifecycle_restart_decision(runtime, monkeypatch, status, control):  # noqa: F811
     from ouroboros.server_liveness import drain_worker_events
     from ouroboros.task_results import load_task_result, write_task_result

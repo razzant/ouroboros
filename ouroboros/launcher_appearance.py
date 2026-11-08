@@ -19,12 +19,14 @@ worker threads, possibly out of order, even across a reload, so each carries
 when its document became the window's page and its count there: only a request
 newer by that pair is kept, never the one that merely arrived last.
 
-Until the page reports, the frame matches the window's own background colour,
-the colour pywebview paints before the page loads (dark for the main window,
-the default light for setup); a page whose palette differs corrects it once its
-bridge is ready. High Contrast owns the caption colours: while it is on the
-attribute is cleared explicitly, and a preference change, which the page does
-not announce, re-applies the page's palette.
+Until the page reports, the frame matches the colour pywebview paints before
+the page loads, read once the form exists: the room of Windows' app mode
+(``host_palette``, applied by ``launcher_window_chrome.paint_room``), else the
+window's own (dark for the main window, white elsewhere); a page whose palette
+differs corrects it once its bridge is ready. A window shown before the server
+has no bridge, so that first tint stays. High Contrast owns the caption
+colours: while it is on the attribute is cleared explicitly, and a preference
+change, which the page does not announce, re-applies the page's palette.
 
 The intended caption is the app's palette whatever Windows' own mode: the
 attribute is TRUE exactly when the page paints dark (High Contrast aside).
@@ -32,10 +34,10 @@ Microsoft's sources disagree on whether Windows honours that under a light
 system mode: the attribute reference words TRUE as honoring dark mode "when the
 dark mode system setting is enabled" (Windows 11 build 22000 on), while on
 Microsoft Q&A (question 966330, 16 Aug 2022) a Microsoft engineer reproduced the
-dark caption under a light system and left bug-or-documentation open. No native
-Windows run has checked it here: dark-on-light, Windows 10 and the pixels are
-unproven, not excluded. A refusal's HRESULT is logged once; an accepted call is
-not proof of the pixels.
+dark caption under a light system and left bug-or-documentation open. One hosted
+run showed it dark on build 26100; Windows 10 and every other build are unproven,
+not excluded. A refusal's HRESULT is logged once; an accepted call is not proof of
+the pixels.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ THEMES = ("light", "dark")
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _SPI_GETHIGHCONTRAST = 0x0042
 _HCF_HIGHCONTRASTON = 0x00000001
+_APP_MODE_KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"  # under HKEY_CURRENT_USER
 # SetWindowPos: keep size, position, z-order and activation; recompute the frame
 # (SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED).
 _SWP_REFRESH_FRAME = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
@@ -103,6 +106,25 @@ def _high_contrast() -> bool:
     return bool(info.dwFlags & _HCF_HIGHCONTRASTON)
 
 
+def host_palette() -> str:
+    """The palette a System page paints in this host's WebView2 before it reads a choice; ``""`` if unknown.
+
+    WebView2 is Chromium, whose source reads the app mode so (``os_settings_provider_win.cc``, read
+    2026-11-01; one hosted run agreed both ways on build 26100): dark only for a DWORD ``AppsUseLightTheme`` of 0,
+    light when that value or its key is missing or unreadable. A contrast theme paints its own colours,
+    which no room matches: unknown, as is any other OS (``launcher_window_chrome``)."""
+    if not _WINDOWS or _high_contrast():
+        return ""
+    import winreg  # function-local: DEVELOPMENT "Platform Abstraction Rule"
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APP_MODE_KEY) as key:
+            value, kind = winreg.QueryValueEx(key, "AppsUseLightTheme")
+    except OSError:
+        return "light"
+    return "dark" if kind == winreg.REG_DWORD and value == 0 else "light"
+
+
 def _refresh_frame(hwnd: int) -> None:
     """Ask Windows to recompute the frame so a change on a visible window repaints its caption."""
     import ctypes
@@ -135,7 +157,6 @@ class NativeAppearance:
         if not _WINDOWS or window is None:
             return
         self._window = window
-        self._theme = palette_of_background(getattr(window, "background_color", ""))
         window.events.before_show += self._before_show
         window.events.closed += self._close
 
@@ -178,6 +199,8 @@ class NativeAppearance:
             if self._closed:
                 return
             self._form, self._hwnd = form, hwnd
+            # The form exists, so its colour is fixed: whoever set it (``paint_room`` or the caller) is done.
+            self._theme = self._theme or palette_of_background(getattr(self._window, "background_color", ""))
         self._subscribe_preferences()
         self._apply(shown=False)
 

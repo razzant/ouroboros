@@ -1,13 +1,14 @@
 """Main's route-bound window facts, independent of review capability authority.
 
 Acceptances are lower bounds, never evidence of room for a reply. A numbered
-refusal constrains planning until a later larger acceptance or evidence expiry.
+refusal, or a numberless one at the refused request's measured size, constrains
+planning until a later larger acceptance or evidence expiry.
 The observations share the capability JSON store; old stores need no migration.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class WindowLimit:
     kind: str  # input | total | output
     source: str
     observed_at: str = ""
+    acceptance_can_raise: bool = True
 
 
 @dataclass(frozen=True)
@@ -147,7 +149,9 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
         kind = str(getattr(evidence, "window_kind", "total") or "total")
         limits[kind] = WindowLimit(int(evidence.window_tokens), kind,
                                   str(getattr(evidence, "source", None) or getattr(evidence, "evidence_source", "metadata")),
-                                  str(getattr(evidence, "ts", "")))
+                                  str(getattr(evidence, "ts", "")),
+                                  (getattr(evidence, "route_facts", {}) or {}).get("acceptance_can_raise",
+                                      not bool(getattr(evidence, "route_facts", {}))))
     declared = tuple(limits.values())
     server = getattr(evidence, "server_window", {})
     contradiction = WindowLimit(**server) if server else captured.contradicted_by if captured else None
@@ -157,8 +161,9 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
         contradiction = None
     # Only a disproved stated limit yields to an accepted INPUT. An acceptance
     # below a stated total proves no reply room; without a statement capacity stays unknown.
-    if any(accepted > limit.tokens for limit in limits.values()):
-        limits = {"input": WindowLimit(accepted, "input", "accepted", accepted_at)}
+    if any(limit.acceptance_can_raise and accepted > limit.tokens for limit in limits.values()):
+        limits = {kind: limit for kind, limit in limits.items() if not limit.acceptance_can_raise}
+        limits["input"] = WindowLimit(accepted, "input", "accepted", accepted_at)
     for index in range(len(rows) - 1, -1, -1):
         row = rows[index]
         if row.get("refused"):
@@ -179,15 +184,24 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
-def record_refusal(usage, plan) -> None:
+def record_refusal(usage, plan, refused_input: int = 0) -> None:
+    """Record a typed size refusal for the refusing account: its stated limit, else ``refused_input``.
+
+    ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
+    accepted request of this conversation), passed only when measured: Codex states no number, and a
+    route that never records its refusals keeps planning at a larger acceptance and is refused again.
+    Without a stated limit or a measured size a refusal adds no ceiling."""
     from ouroboros import capability_evidence as ce
 
     plan = observed_plan(plan, usage)
-    if plan is None:
+    if plan is None or not getattr(plan, "window_witness_bound", True):
         return
     message = str(usage.get("_last_llm_provider_message") or "")
     limit = ce._parse_ctx_limit_number(message)
-    if not limit or not getattr(plan, "window_witness_bound", True):
+    if not limit:
+        if int(refused_input or 0) > 0:
+            record_observation(ce.canonical_evidence_root(), observation_scope(plan),
+                               refused=int(refused_input), kind="input")
         return
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))
@@ -216,3 +230,14 @@ def observed_plan(plan, usage):
     record = getattr(plan, "window_record", None)
     return replace(plan, route_fp=fp, window_record=replace(record, route_fp=fp) if record else None,
                    model_route=dict(observed), window_witness_bound=True)
+
+
+def route_window_kwargs(evidence: Any) -> Dict[str, Any]:
+    """The plan fields a declared route window carries (a call's RouteFacts): its working reserve and its units."""
+    facts = getattr(evidence, "route_facts", {}) or {}
+    return {"working_reserve_tokens": facts.get("working_reserve_tokens"), "window_basis": str(facts.get("basis") or "")}
+
+
+def estimator_ratio(evidence: Any, ratio: float) -> float:
+    """An estimator-based window is fitted on raw estimates (density 1); a provider window keeps the measured density."""
+    return 1.0 if route_window_kwargs(evidence)["window_basis"] == "estimator" else ratio

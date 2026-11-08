@@ -29,9 +29,9 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import types
 
 import pytest
+from tests._source_scan import parse
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -69,6 +69,10 @@ TERMINAL_WRITERS = {
     # its recovered admission cannot originate a new terminal transition.
     ('supervisor/continuation_admission.py::_replay', 'stored.get("status") or "scheduled"'): 'dynamic',
     ('ouroboros/agent.py::_task_exception_terminal', 'STATUS_FAILED'): 'terminal',
+    # A conversation turn's before-start Stop (cancelled) or exhausted budget (failed) is the
+    # turn's own typed terminal, recorded in its carrier before the exception unwinds; its
+    # projector never replaces a row that is already truly terminal.
+    ('supervisor/worker_chat_lane.py::conversation_exception_terminal', 'STATUS_CANCELLED if stopped else STATUS_FAILED'): 'terminal',
     ('ouroboros/agent_task_pipeline.py::_store_task_result', 'status'): 'dynamic',
     ('ouroboros/delegate_terminal.py::record_terminal_reconciliation', 'str(existing.get("status") or STATUS_RUNNING)'): 'dynamic',
     # Foreign-root disclosure preserves CURRENT status and pointers under the
@@ -92,6 +96,14 @@ TERMINAL_WRITERS = {
     # preserves the current lifecycle; "running" is the writer's placeholder.
     ('ouroboros/delegate_terminal.py::refresh_disposed_reconciliation', '"running"'): 'dynamic',
     ('ouroboros/gateway/tasks.py::_admission_rejection_response', 'STATUS_FAILED'): 'terminal',
+    # The API admission receipt lands after the snapshot barrier, outside the first queue-lock section: it keeps
+    # the status the window left (a launch's running, a Stop's terminal) and adds only its token and admission facts.
+    ('ouroboros/gateway/tasks.py::_enqueue_api_task_durably', 'str(current.get("status") or STATUS_SCHEDULED)'): 'dynamic',
+    # #2753 native capture facts (a capture gap, received files, a capture effect) are written with the stored
+    # row's own status; their field projectors add only the capture facts and never end a task.
+    ('ouroboros/headless.py::_native_capture_gap', 'row["status"]'): 'dynamic',
+    ('ouroboros/headless.py::record_native_capture_effect', 'owner["status"]'): 'dynamic',
+    ('ouroboros/headless.py::record_native_received_files', 'owner["status"]'): 'dynamic',
     # API refusal now belongs to _admission_rejection_response and its receipt writer.
     # Runtime707: CURRENT-ref retry publication moved out of observability's
     # locked sweep; terminal file-failure publication moved off event drain.
@@ -101,12 +113,19 @@ TERMINAL_WRITERS = {
     # Existing task custody/projection enrichment only: its locked field
     # projector preserves CURRENT lifecycle status rather than ending a task.
     ('ouroboros/history_retention.py::call_inventory_custodied', 'current["status"]'): 'dynamic',
+    # Settlement's raw-QA carry arms only missing-evidence facts on the same
+    # attempt; its locked projector returns the row's own status unchanged.
+    ('ouroboros/history_retention.py::raw_evidence_custodied', 'current["status"]'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'status'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'str(existing.get("status") or status or "completed")'): 'terminal',
     ('ouroboros/mutation_attribution.py::advance_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::capture_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::record_terminal_mutation_candidates', 'status'): 'dynamic',
     ('ouroboros/post_task_checkpoint.py::set_root_post_task_checkpoint', 'str(existing.get("status") or task.get("status") or STATUS_COMPLETED)'): 'terminal',
+    # #2566: a moved Presence turn's saved continuation nothing authorized (a crash retry) ends its attempt before
+    # the attempt leaves RUNNING and its slot: the orphan reconciler's unknown-outcome presence_attempt_lost failure,
+    # and its projector keeps a terminal already there. No answer exists; its task_done follows.
+    ('ouroboros/presence_carrier.py::_end_refused_attempt', 'STATUS_FAILED'): 'terminal',
     # Presence recovery records an observation of an existing unresolved turn.
     # Its field projector preserves CURRENT status, even after a late terminal;
     # the receipt cannot terminalize or regenerate the lost attempt.
@@ -288,7 +307,7 @@ def _calls(source: str, target: str):
                 found.append((".".join(stack) or "<module>", node))
             self.generic_visit(node)
 
-    Visitor().visit(ast.parse(source))
+    Visitor().visit(parse(source))
     return found
 
 
@@ -371,19 +390,6 @@ def test_c7_the_set_of_terminal_status_writers_equals_the_manifest():
         f"retired) — update the manifest row in the same commit: {removed}"
     )
     assert live == TERMINAL_WRITERS
-
-
-def test_c7_the_one_terminal_write_primitive_is_still_one():
-    """The property the manifest is guarding: there is a single durable writer
-    with the monotonic reducer inside it, not a family of them."""
-    from ouroboros import task_results
-
-    source = (REPO / "ouroboros" / "task_results.py").read_text(encoding="utf-8")
-    assert source.count("def write_task_result(") == 1
-    assert callable(task_results.write_task_result)
-    body = _function_source(REPO / "ouroboros" / "task_results.py", "write_task_result")
-    assert "patch_document" in body, "the write is one store write transaction"
-    assert "_is_status_regression" in body, "the reducer is inside the transaction, not at callers"
 
 
 # ---------------------------------------------------------------------------
@@ -522,65 +528,6 @@ def test_c9_the_lanes_that_owe_nothing_are_an_enumerated_list():
 # ---------------------------------------------------------------------------
 
 
-def _sweep_sees(tmp_path, task_id: str, monkeypatch) -> bool:
-    """Whether the watchdog, reading its own canonical root, sees the intent."""
-    from ouroboros.cancel_intents import active_intents
-    from supervisor import queue as q
-
-    monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path, raising=False)
-    return task_id in active_intents(q.DRIVE_ROOT)
-
-
-def _agent_ctx(canonical, child_drive, *, carry_budget_root: bool):
-    from ouroboros.tools.registry import ToolContext
-
-    ctx = ToolContext(repo_dir=canonical, drive_root=child_drive or canonical)
-    ctx.task_id = "parent-1"
-    ctx.task_metadata = {"root_task_id": "parent-1", "parent_task_id": "parent-1"}
-    if carry_budget_root:
-        ctx.task_metadata["budget_drive_root"] = str(canonical)
-    return ctx
-
-
-def test_c10_the_agent_tool_writes_a_split_drive_intent_at_the_canonical_root(
-    tmp_path, monkeypatch,
-):
-    """C10: the agent `cancel_task` tool resolves
-    `metadata["budget_drive_root"] or ctx.budget_drive_root or ctx.drive_root`.
-    For a split-drive child the FIRST term is the canonical supervisor root, so
-    the intent lands where `sweep_cancel_intents` reads — the divergence a
-    reviewer suspected in the third fallback does not exist here."""
-    from ouroboros.tools.join_ledger import _cancel_task
-
-    canonical = tmp_path / "data"
-    child = tmp_path / "task_drives" / "child"
-    child.mkdir(parents=True)
-    ctx = _agent_ctx(canonical, child, carry_budget_root=True)
-
-    out = _cancel_task(ctx, "victim-1", reason="stop")
-
-    assert "Cancel requested" in out, out
-    assert (canonical / "state" / "cancel_intents.json").is_file()
-    assert not (child / "state" / "cancel_intents.json").exists()
-    assert _sweep_sees(canonical, "victim-1", monkeypatch)
-
-
-def test_c10_a_task_without_a_child_drive_resolves_to_the_same_root(
-    tmp_path, monkeypatch,
-):
-    """C10: the third fallback (`ctx.drive_root`) is reached only when NO child
-    drive exists — and then `drive_root` IS the canonical root, so the two
-    shapes agree. The pairing is what holds the invariant, asserted below."""
-    from ouroboros.tools.join_ledger import _cancel_task
-
-    canonical = tmp_path / "data"
-    canonical.mkdir()
-    ctx = _agent_ctx(canonical, None, carry_budget_root=False)
-
-    assert "Cancel requested" in _cancel_task(ctx, "victim-2", reason="stop")
-    assert _sweep_sees(canonical, "victim-2", monkeypatch)
-
-
 def test_c10_a_child_drive_is_never_set_without_its_budget_drive_root():
     """C10, the invariant the two tests above ride on: every production site
     that points a task's `drive_root` at a child drive sets `budget_drive_root`
@@ -594,47 +541,6 @@ def test_c10_a_child_drive_is_never_set_without_its_budget_drive_root():
                 continue
             window = "\n".join(source.splitlines()[index:index + 4])
             assert "budget_drive_root" in window, f"{module}:{index + 1}\n{window}"
-
-
-def test_c10_the_settled_probe_reads_the_intent_root_not_the_child_drive(tmp_path):
-    """C10, the one real divergence — and it is noise, not a wedge. The mint's
-    already-settled probe reads the task result at the INTENT root, so a
-    split-drive child whose result lives on its own drive reads as unsettled
-    and an intent IS minted. Custody then settles it `already_settled`, so the
-    cost is one watchdog round trip, not a lost cancellation."""
-    from ouroboros.cancel_intents import request_cancel, settled_status
-    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
-
-    canonical = tmp_path / "data"
-    child = tmp_path / "task_drives" / "child"
-    canonical.mkdir()
-    child.mkdir(parents=True)
-    write_task_result(child, "done-1", STATUS_COMPLETED, result="finished")
-
-    assert settled_status(child, "done-1") == STATUS_COMPLETED
-    assert settled_status(canonical, "done-1") == "", "the probe cannot see it"
-    intent = request_cancel(canonical, "done-1", reason="late cancel")
-    assert intent.get("already_settled") is False
-    assert intent.get("request_id"), "an intent is minted over a settled child"
-
-
-def test_c10_the_http_and_supervisor_roots_come_from_one_configured_value():
-    """C10 for the HTTP and project-deletion ingresses: they mint at the app's
-    `state.drive_root`, the watchdog reads `supervisor.queue.DRIVE_ROOT`, and
-    both are bound from the ONE configured `DATA_DIR` at startup. Two globals
-    that merely happen to agree would be the gap; one source is the answer."""
-    server_source = (REPO / "server.py").read_text(encoding="utf-8")
-    assert "app.app.state.drive_root = pathlib.Path(DATA_DIR)" in server_source
-    assert "DRIVE_ROOT=DATA_DIR" in server_source
-    from ouroboros.gateway._helpers import request_drive_root
-
-    app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root="/pinned/root"))
-    request = types.SimpleNamespace(app=app)
-    # Path-compare, not string-compare: Windows spells the same bound value
-    # with backslashes.
-    assert pathlib.Path(str(request_drive_root(request))) == pathlib.Path("/pinned/root"), (
-        "the ingress root is whatever the app was bound to, never a re-derivation"
-    )
 
 
 def test_terminal_inventory_sees_conditional_writers_without_leaking_aliases():

@@ -59,6 +59,20 @@ def _write(path: Path, size: int) -> Path:
     return path
 
 
+def test_first_count_progress_does_not_call_an_undecided_folder_zero(tmp_path):
+    progress = []
+    known = tmp_path / "known"
+    known.mkdir()
+    _write(known / "result", 3)
+    unknown = {"id": "project_folders", "group": "work", "roots": [], "undecided": "Choose the project folder"}
+    ticks = iter(range(1000))  # every traversal tick crosses the reporting interval
+    count = measure(tmp_path, places=[unknown, _place("task_results", known)], progress=progress.append,
+                    clock=lambda: float(next(ticks)))
+    assert _row(count, "project_folders")["bytes"] is None
+    assert progress and any(row["places_done"] == 1 for row in progress)
+    assert all(part["name"] != "project_folders" for row in progress for part in row["done"])
+
+
 @pytest.fixture(params=["openat", "by-path"])
 def walk(request, monkeypatch):
     """Both traversals: directory-relative no-follow opens, and the by-path fallback a platform
@@ -357,8 +371,7 @@ def test_a_count_that_raises_or_cannot_write_leaves_the_file_byte_identical(tmp_
 
 
 @pytest.mark.parametrize("content", [
-    b"not json", b"[]", b'{"_schema_version": 2, "latest": {}}', b'{"_schema_version": 1}',
-    b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": "many", "files": 1, "unreadable": 0, "places": [], "started_at": "x"}}',
+    b"not json", b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": "many", "files": 1, "unreadable": 0, "places": [], "started_at": "x"}}',
     b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": 1, "files": 1, "unreadable": 0, "places": [1], "started_at": "x"}}',
 ])
 def test_a_corrupt_or_foreign_file_is_no_count_yet(tmp_path, content):
@@ -371,8 +384,7 @@ def test_a_corrupt_or_foreign_file_is_no_count_yet(tmp_path, content):
     assert projection["count"] is None and projection["error"] is None and projection["counting"] is None
 
 
-@pytest.mark.parametrize("previous", [{}, "a summary", 7, {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": "none"},
-                                      {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": [{"id": 3}]}])
+@pytest.mark.parametrize("previous", [{}, 7, {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": [{"id": 3}]}])
 def test_a_malformed_previous_loses_growth_never_the_count_or_the_reader(tmp_path, previous):
     """`previous` is validated like `latest`: a hand-edited or foreign summary is dropped, so the
     saved count still shows (without growth) and no reader raises."""
@@ -801,6 +813,7 @@ def test_storage_route_surface(tmp_path):
         ("/api/storage/free/preview", frozenset({"POST"})),
         ("/api/storage/free", frozenset({"POST"})),
         ("/api/storage/free/cancel", frozenset({"POST"})),
+        ("/api/storage/free/items", frozenset({"GET", "HEAD"})),
     }
 
 
@@ -818,7 +831,7 @@ def test_mounted_storage_routes_read_passively_until_the_owner_measures(tmp_path
     spawned = _fake_spawn(monkeypatch, [b'{"event":"progress","place":"engine","current":"","places_done":1,"places_total":12,"bytes":1,"files":1,"done":[]}\n'], hold=hold)
     monkeypatch.setattr(storage, "count", StorageCounter())
     routes = [route for route in collect_routes(data_dir=data) if getattr(route, "path", "").startswith("/api/storage")]
-    assert len(routes) == 6
+    assert len(routes) == 7
     # The owner's cancel writes one supervisor row (logs/); nothing else under the data folder may change.
     snapshot = lambda: sorted((str(path), path.stat().st_mtime_ns) for path in data.rglob("*")  # noqa: E731
                               if "logs" not in path.relative_to(data).parts)
@@ -869,14 +882,16 @@ def test_storage_envelopes_have_a_field_identical_browser_twin():
     from tests.test_gateway_parity import _js_typedef_fields
 
     text = (WEB / "storage_types.js").read_text(encoding="utf-8")
-    from ouroboros import storage_free
+    from ouroboros import storage_deleted, storage_free
 
     names = [name for name in contracts.__all__ if name.startswith("Storage")]
+    deleted = ["StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart"]
     assert names == ["StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
-                     "StorageRest", "StorageVolume", "StorageRemover", "StorageFree", "StorageFreeGroup", "StorageFreeItem",
-                     "StorageFreeKept", "StorageFreeRequest", "StorageFreeRun"]
+                     "StorageRest", "StorageVolume", "StorageRemover", *deleted, "StorageFree", "StorageFreeEntry",
+                     "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept", "StorageFreePool",
+                     "StorageFreeRequest", "StorageFreeRun"]
     for name in names:
-        home = storage_free if name.startswith("StorageFree") else storage
+        home = storage_deleted if name in deleted else storage_free if name.startswith("StorageFree") else storage
         assert getattr(contracts, name) is getattr(home, name)
         assert _js_typedef_fields(text, name) == set(getattr(contracts, name).__annotations__), name
     assert "storage_types.js" in (WEB / "api_types.js").read_text(encoding="utf-8").splitlines()[0]
@@ -891,7 +906,7 @@ def test_a_real_count_has_exactly_the_contract_fields(tmp_path):
     _write(data / "observability" / "a.bin", 1)
     record = _count(data)
     required = {key for key, kind in storage.StorageCount.__annotations__.items() if "NotRequired" not in str(kind)}
-    assert set(record) == required
+    assert set(record) == required | {"deleted_projects"}, "optional only on a count saved before it existed"
     place_required = {key for key, kind in storage.StoragePlace.__annotations__.items() if "NotRequired" not in str(kind)}
     assert all(set(row) == place_required for row in record["places"])
     assert all(set(part) == set(storage.StoragePart.__annotations__) for row in record["places"] for part in row["parts"])

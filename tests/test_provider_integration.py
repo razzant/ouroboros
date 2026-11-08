@@ -16,6 +16,7 @@ import pytest
 
 from tests.provider_contract_ci import (
     _emit_canary_response_warnings,
+    bind_provider_canary_credential,
     full_registry_canary_tools,
     provider_canary_matrix,
     require_provider_canary_credential,
@@ -42,18 +43,17 @@ def shipped_builtin_tools():
 @integration
 @pytest.mark.parametrize(
     "canary",
-    [pytest.param(canary, marks=[pytest.mark.required_provider if canary.credential_required
-                                 else pytest.mark.optional_provider,
-                                 *([pytest.mark.skip(reason=canary.skip_reason)] if canary.skip_reason else [])])
-     for canary in _PROVIDER_CANARIES],
+    [pytest.param(canary, marks=pytest.mark.required_provider if canary.credential_required
+                  else pytest.mark.optional_provider) for canary in _PROVIDER_CANARIES],
     ids=[canary.canary_id for canary in _PROVIDER_CANARIES],
 )
-def test_full_registry_provider_contract(canary, shipped_builtin_tools, request):
+def test_full_registry_provider_contract(canary, shipped_builtin_tools, request, monkeypatch):
     """Exercise one bounded public-chat canary per physical provider surface."""
     from tests.provider_contract_diagnostics import provider_evidence
 
     with provider_evidence(request, canary) as observer:
         require_provider_canary_credential(canary)
+        bind_provider_canary_credential(canary, monkeypatch)
         try:
             _message, usage, _final_message, _final_usage = run_provider_contract_canary(
                 _get_llm_client(),

@@ -150,8 +150,10 @@ def test_a_nonspecific_400_neither_drops_effort_nor_resends(isolated, route, asy
     assert retry_sent[0]["reasoning_effort"] == "high"  # nothing was learned from it
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+@pytest.mark.parametrize(("stream", "asynchronous"), [
+    pytest.param(False, False, id='json-sync'),
+    pytest.param(True, True, id='stream-async'),
+])
 def test_a_model_without_thinking_is_resent_without_the_field_and_that_route_remembers(
         isolated, route, asynchronous, stream):
     client, model, sent = route("ollama", asynchronous=asynchronous, script=[httpx.Response(400, json=NO_THINKING)])

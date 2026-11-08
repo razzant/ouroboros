@@ -9,6 +9,12 @@ recorded, and this transfer supplies no reviewer approval. The evidence lives in
 result; no second ledger is introduced, and honest ambiguity (a pre-existing
 dirty path that changed, a stale baseline) is reported as blockers for the
 reviewing LLM panels to weigh, never as an automatic verdict.
+
+A body candidate's surface may carry the basis its owner established
+(``body_candidate``): ``original`` (observed when prepared), ``derived`` (its
+clean creation) or ``carried`` (a predecessor's row). Dirt in any other
+observation of such a copy is uncertain rather than known foreign: automatic
+staging leaves it out, an explicit selection may carry it to review.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ _FINGERPRINT_MAX_BYTES = 32 * 1024 * 1024
 # unusable for attribution instead of expensively pretending.
 _BASELINE_DIRTY_PATHS_MAX = 4096
 _OBSERVED_EFFECT_STATES = frozenset({"observed_window", "quiescent"})
+ESTABLISHED_BASES = frozenset({"original", "derived", "carried"})
 
 
 def attribution_task_id(results_drive_root: Any, candidates: Iterable[Any]) -> str:
@@ -264,7 +271,11 @@ def _capture_surface(surface: Mapping[str, Any]) -> dict[str, Any]:
         "canonical_root": str(root),
         "known_paths": known_paths,
         "captured_at": utc_now_iso(),
+        **{key: dict(surface[key]) for key in ("basis", "candidate") if isinstance(surface.get(key), Mapping)},
     }
+    if surface_type in _GIT_SURFACE_TYPES and isinstance(surface.get("git"), Mapping):
+        row["git"] = dict(surface["git"])  # a basis the caller established instead of today's files
+        return row
     if surface_type in _GIT_SURFACE_TYPES:
         try:
             inside = _run_git(root, "rev-parse", "--is-inside-work-tree").strip() == "true"
@@ -305,7 +316,10 @@ def capture_mutation_baseline(
 
     The host calls this when a root task starts (and may append a late,
     previously unseen surface before its first write).  Existing roots and
-    known-target fingerprints are immutable once captured.
+    known-target fingerprints are immutable once captured, unless a caller
+    ``supersede``s a row with a basis it established; the whole earlier row
+    then stays in ``extensions``. A Git row recorded before rows named their
+    copy may join that ``candidate`` identity, its observation unchanged.
     """
     task_id = str(task_id or "").strip()
     if not task_id:
@@ -331,7 +345,7 @@ def capture_mutation_baseline(
         surface_type, root = _surface_identity(surface)
         key = (surface_type, str(root))
         existing_surface = existing_by_key.get(key)
-        if existing_surface is not None:
+        if existing_surface is not None and not surface.get("supersede"):
             # Git baselines already cover the complete worktree. Bounded
             # non-Git surfaces add a newly declared exact target before that
             # target's first write without re-fingerprinting older targets.
@@ -353,15 +367,24 @@ def capture_mutation_baseline(
                         "canonical_root": key[1],
                         "known_paths": new_paths,
                     })
+            elif isinstance(surface.get("candidate"), Mapping) and "candidate" not in existing_surface:
+                # Which copy it observes: its dates, observation and basis stay exactly as recorded.
+                existing_surface["candidate"] = dict(surface["candidate"])
+                added.append({"surface_type": key[0], "canonical_root": key[1],
+                              "candidate": existing_surface["candidate"]})
             continue
         candidate = _capture_surface(surface)
-        if predecessor_source and isinstance(candidate.get("git"), dict):
+        if predecessor_source and isinstance(candidate.get("git"), dict) and "git" not in surface:
             candidate["git"]["predecessor_adoption"] = _predecessor_git_changes(
                 results_drive_root, task_id, candidate, predecessor_source,
             )
+        extension: dict[str, Any] = {"surface_type": key[0], "canonical_root": key[1]}
+        if existing_surface is not None:  # never erased: the whole earlier row stays in this history
+            captured.remove(existing_surface)
+            extension.update(basis=candidate.get("basis") or {}, superseded=existing_surface)
         captured.append(candidate)
         existing_by_key[key] = candidate
-        added.append({"surface_type": key[0], "canonical_root": key[1]})
+        added.append(extension)
     if isinstance(prior_baseline, dict) and not added:
         return dict(prior)
     captured.sort(key=lambda item: (item["surface_type"], item["canonical_root"]))
@@ -460,6 +483,13 @@ def _foreign_dirty_paths(git: Mapping[str, Any]) -> set[str]:
     return set(git.get("dirty_paths") or []) - set(adoption.get("paths") or [])
 
 
+def _uncertain_dirt(row: Mapping[str, Any], dirty: set[str], candidate_root: bool) -> set[str]:
+    """A body candidate's dirt from any observation but an established basis: maybe this work's, never known foreign."""
+    basis = row.get("basis") if isinstance(row.get("basis"), Mapping) else {}
+    copy = candidate_root or isinstance(row.get("candidate"), Mapping)
+    return set(dirty) if copy and basis.get("kind") not in ESTABLISHED_BASES else set()
+
+
 def mutation_evidence_projection(evidence: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return bounded host evidence suitable for acceptance and outcome gates."""
     if not isinstance(evidence, Mapping) or not evidence:
@@ -528,6 +558,8 @@ def mutation_evidence_projection(evidence: Mapping[str, Any] | None) -> dict[str
                     terminal_excluded_count += excluded
                     if excluded:
                         blockers.append("preexisting_dirty_changed")
+                    if row.get("uncertain"):  # a body candidate's unresolved observation, not foreign work
+                        blockers.append("attribution_uncertain")
                     blockers.extend(
                         str(item)[:80]
                         for item in row.get("blockers") or []
@@ -599,8 +631,16 @@ def attributed_git_candidates(
     results_drive_root: Any,
     task_id: str,
     repo_root: Any,
+    *,
+    candidate_root: bool = False,
 ) -> dict[str, Any]:
-    """Compute the exact clean-at-baseline Git candidate set for one root."""
+    """Compute the exact clean-at-baseline Git candidate set for one root.
+
+    ``candidate_root`` is the caller's host fact that this root is its bound body
+    candidate; it also covers rows recorded before candidate surfaces carried an
+    identity. Dirt in such a copy is ``uncertain`` unless an established basis
+    recorded it; only known foreign dirt is ``excluded`` and can block.
+    """
     root = _canonical_root(repo_root)
     result = load_task_result(results_drive_root, task_id) or {}
     evidence = result.get("mutation_evidence")
@@ -631,7 +671,7 @@ def attributed_git_candidates(
             "blockers": blockers,
             "baseline_hash": str((baseline or {}).get("baseline_hash") or ""),
         }
-    git = matching[0]["git"]
+    row, git = matching[0], matching[0]["git"]
     if git.get("dirty_overflow"):
         return {
             "candidates": [],
@@ -649,8 +689,11 @@ def attributed_git_candidates(
     if current_head != str(git.get("base_commit") or ""):
         blockers.append("baseline_stale")
     dirty = _foreign_dirty_paths(git)
+    copy = candidate_root or isinstance(row.get("candidate"), dict)
+    basis = dict(row["basis"]) if isinstance(row.get("basis"), dict) else {"kind": "unrecorded"}
+    uncertain_dirty = _uncertain_dirt(row, dirty, copy)
     fingerprints = git.get("dirty_fingerprints") or {}
-    excluded = sorted(path for path in changed if path in dirty)
+    excluded = sorted(path for path in changed if path in dirty - uncertain_dirty)
     candidates = sorted(path for path in changed if path not in dirty)
     # A pre-existing dirty path is excluded evidence either way; it becomes a
     # blocker only when known content/mode CHANGED during the observed window
@@ -658,12 +701,7 @@ def attributed_git_candidates(
     current_fingerprints = _git_path_fingerprints(root, excluded)
     if any(not _foreign_fingerprint_matches(fingerprints.get(path), current_fingerprints[path]) for path in excluded):
         blockers.append("preexisting_dirty_changed")
-    effect_state = str(evidence.get("effect_state") or "")
-    if effect_state not in _OBSERVED_EFFECT_STATES:
-        blockers.append(effect_state or "effect_state_unknown")
-    for flag_row in evidence.get("flags") or []:
-        if isinstance(flag_row, dict) and str(flag_row.get("flag") or ""):
-            blockers.append(str(flag_row["flag"]))
+    blockers.extend(_evidence_blockers(evidence, _OBSERVED_EFFECT_STATES))
     return {
         "candidates": candidates,
         "excluded_preexisting_dirty": excluded,
@@ -673,7 +711,18 @@ def attributed_git_candidates(
         "base_tree": str(git.get("base_tree") or ""),
         "canonical_root": str(root),
         **({"predecessor_adoption": dict(git["predecessor_adoption"])} if git.get("predecessor_adoption") else {}),
+        **({"uncertain": sorted(path for path in changed if path in uncertain_dirty),
+            "copy": {"basis": basis, **({"candidate": dict(row["candidate"])}
+                                       if isinstance(row.get("candidate"), dict) else {})}} if copy else {}),
     }
+
+
+def _evidence_blockers(evidence: Mapping[str, Any], states: frozenset) -> list[str]:
+    """An effect state outside ``states`` and every populated flag, as blockers."""
+    effect_state = str(evidence.get("effect_state") or "")
+    return ([] if effect_state in states else [effect_state or "effect_state_unknown"]) + [
+        str(row["flag"]) for row in evidence.get("flags") or []
+        if isinstance(row, dict) and str(row.get("flag") or "")]
 
 
 def resolve_attributed_git_paths(
@@ -681,22 +730,54 @@ def resolve_attributed_git_paths(
     task_id: str,
     repo_root: Any,
     explicit_paths: Sequence[Any] | None,
+    *,
+    candidate_root: bool = False,
+    retained: bool = False,
 ) -> tuple[list[str], dict[str, Any], str]:
-    """Resolve omitted/explicit staging paths against one attributed candidate set."""
-    evidence = attributed_git_candidates(results_drive_root, task_id, repo_root)
+    """Resolve omitted/explicit staging paths against one attributed candidate set.
+
+    Automatic selection stays cautious: any blocker refuses it and uncertain
+    paths stay out. On a body candidate copy an explicit selection may also name
+    uncertain paths and pass a stale base (an overlapping move, never re-anchored
+    here); ``selection`` then carries that gap to review and the author. Known
+    foreign dirt is never selectable, and empty never means everything.
+    ``retained`` marks a call collecting a review over the index it keeps: with
+    paths omitted, that staged composition is the explicit selection, retaining
+    its uncertainty and moved-base disclosure rather than selecting fresh work.
+    """
+    evidence = attributed_git_candidates(results_drive_root, task_id, repo_root, candidate_root=candidate_root)
     blockers = [str(item) for item in evidence.get("blockers") or [] if str(item)]
     if blockers == ["baseline_stale"] and try_reanchor_stale_baseline(
         results_drive_root, task_id, repo_root,
     ):
-        evidence = attributed_git_candidates(results_drive_root, task_id, repo_root)
+        evidence = attributed_git_candidates(results_drive_root, task_id, repo_root, candidate_root=candidate_root)
         blockers = [str(item) for item in evidence.get("blockers") or [] if str(item)]
-    if blockers:
+    implicit_collection = explicit_paths is None and retained
+    if implicit_collection:
+        try:  # the composition the collected review froze stays its selection
+            explicit_paths = [path for path in _run_git(_canonical_root(repo_root), "diff", "--cached",
+                                                        "--no-renames", "--name-only", "-z").split("\0") if path] or None
+        except RuntimeError:
+            pass  # unreadable: the fresh rules below answer
+    copy = evidence.get("copy") if isinstance(evidence.get("copy"), dict) else None
+    if candidate_root and blockers == ["baseline_surface_missing"]:  # a body copy younger than the task's baseline:
+        try:  # its own changes are this continued work, each uncertain, as on a moved base (06.11)
+            evidence["uncertain"] = sorted(_git_status_paths(_canonical_root(repo_root)))
+        except Exception:
+            evidence["uncertain"] = []
+        copy = evidence.setdefault("copy", {"basis": {"kind": "unrecorded"}})
+    gaps = blockers if copy is not None and set(blockers) <= {"baseline_stale", "baseline_surface_missing"} else []
+    if blockers and not (gaps and explicit_paths is not None):
+        named = f": paths={json.dumps(evidence.get('uncertain') or [], ensure_ascii=False)}" if evidence.get("uncertain") else ""
         return [], evidence, (
             "⚠️ GIT_ATTRIBUTION_BLOCKED: clean task attribution is unavailable "
             f"({', '.join(blockers)}). Automatic staging is disabled; preserve the "
             "unattributed changes and resolve the evidence conflict before review."
+            + (" To send this body candidate's composition to review with this gap "
+               f"disclosed, name its paths explicitly{named}." if gaps else "")
         )
     candidates = [str(item) for item in evidence.get("candidates") or [] if str(item)]
+    uncertain = [str(item) for item in evidence.get("uncertain") or [] if str(item)]
     if explicit_paths is None:
         selected = candidates
     else:
@@ -706,7 +787,7 @@ def resolve_attributed_git_paths(
             ))
         except ValueError as exc:
             return [], evidence, f"⚠️ PATH_ERROR: {exc}"
-        outside = sorted(set(selected) - set(candidates))
+        outside = sorted(set(selected) - set(candidates) - set(uncertain))
         if outside:
             return [], evidence, (
                 "⚠️ GIT_ATTRIBUTION_BLOCKED: explicit paths must be a subset of "
@@ -716,15 +797,55 @@ def resolve_attributed_git_paths(
         return [], evidence, (
             "⚠️ GIT_NO_ATTRIBUTED_CHANGES: no clean-at-baseline task-owned paths "
             "are available to stage."
+            + (f" Uncertain attribution in this body candidate: {', '.join(uncertain)}; name such paths "
+               "explicitly to send them to review with that gap disclosed." if uncertain else "")
         )
+    if copy is not None:
+        evidence["selection"] = {**copy, "base_commit": str(evidence.get("base_commit") or ""), "gaps": gaps,
+                                 "uncertain": sorted(set(selected) & set(uncertain)),
+                                 "explicit_uncertain": [] if implicit_collection else sorted(set(selected) & set(uncertain)),
+                                 "left_out": sorted(set(uncertain) - set(selected)),
+                                 "excluded_known_foreign": len(evidence.get("excluded_preexisting_dirty") or [])}
     return selected, evidence, ""
+
+
+def selection_disclosure(selection: Mapping[str, Any] | None) -> str:
+    """The attribution facts of one selected body-candidate composition, for its reviewers and author:
+    every uncertain name, since an identical diff can hide which of its paths are."""
+    if not isinstance(selection, Mapping):
+        return ""
+    basis = selection.get("basis") if isinstance(selection.get("basis"), Mapping) else {}
+    kind, notes = str(basis.get("kind") or "unrecorded"), []
+    if kind not in {"original", "derived", "carried"}:
+        notes.append(f"the copy's recorded basis is {kind}, a later observation")
+    elif kind != "original":
+        notes.append(f"the copy's baseline is {kind} from {basis.get('source') or 'an earlier record'}: changes "
+                     "made in it since then count as this continued work, which does not prove that each "
+                     "line was written by this task")
+    if "baseline_surface_missing" in (selection.get("gaps") or ()):
+        notes.append("the copy has no recorded task baseline, so which of its changes this task made is unknown")
+    elif selection.get("gaps"):
+        notes.append(f"its HEAD moved from the recorded base {str(selection.get('base_commit') or '')[:12]} over "
+                     "paths it changes, and this explicit selection was not re-anchored")
+    for key, label in (("uncertain", "selected with uncertain attribution"), ("left_out", "left out as uncertain")):
+        if selection.get(key):
+            notes.append(f"{label}: {', '.join(selection[key])}")
+    return ("Task attribution of this body-candidate composition: " + "; ".join(notes) + ".") if notes else ""
 
 
 def record_terminal_mutation_candidates(
     results_drive_root: Any,
     task_id: str,
+    *,
+    candidate_roots: Iterable[Any] = (),
 ) -> dict[str, Any]:
-    """Persist one quiescent projection from the existing baseline authority."""
+    """Persist one quiescent projection from the existing baseline authority.
+
+    ``candidate_roots`` names the lineage's body candidate (rows recorded before
+    surfaces carried an identity): its uncertain dirt is listed as such and stays
+    in the remainder, as the commit consumer reads the same copy.
+    """
+    copies = {str(_canonical_root(path)) for path in candidate_roots if str(path or "").strip()}
     current = load_task_result(results_drive_root, task_id) or {}
     evidence = dict(current.get("mutation_evidence") or {})
     # The final task-result write publishes terminal candidates and the
@@ -772,8 +893,9 @@ def record_terminal_mutation_candidates(
                 changed = []
                 blockers.append("candidate_scan_failed")
             dirty = _foreign_dirty_paths(git)
+            uncertain = _uncertain_dirt(surface, dirty, root_text in copies)
             fingerprints = git.get("dirty_fingerprints") or {}
-            excluded = sorted(path for path in changed if path in dirty)
+            excluded = sorted(path for path in changed if path in dirty - uncertain)
             try:
                 current_fingerprints = _git_path_fingerprints(root, changed)
             except OSError:
@@ -784,14 +906,7 @@ def record_terminal_mutation_candidates(
                 for path in excluded
             ):
                 blockers.append("preexisting_dirty_changed")
-            effect_state = str(evidence.get("effect_state") or "")
-            if effect_state != "quiescent":
-                blockers.append(effect_state or "effect_state_unknown")
-            blockers.extend(
-                str(flag_row.get("flag") or "")
-                for flag_row in evidence.get("flags") or []
-                if isinstance(flag_row, dict) and str(flag_row.get("flag") or "")
-            )
+            blockers.extend(_evidence_blockers(evidence, frozenset({"quiescent"})))
             candidates = sorted(path for path in changed if path not in dirty)
             candidate_fingerprints = {path: current_fingerprints[path] for path in candidates if path in current_fingerprints}
             row.update({
@@ -799,8 +914,9 @@ def record_terminal_mutation_candidates(
                 "candidate_fingerprints": candidate_fingerprints,
                 "base_commit": current_head,
                 "excluded_preexisting_dirty": excluded,
+                **({"uncertain": sorted(path for path in changed if path in uncertain)} if uncertain else {}),
                 "blockers": sorted(dict.fromkeys(blockers)),
-                "uncommitted_paths": sorted(set(uncommitted) - dirty),
+                "uncommitted_paths": sorted(set(uncommitted) - (dirty - uncertain)),
                 "uncommitted_state": "unknown" if blockers else "known",
                 "head_advanced": bool(
                     current_head
@@ -908,6 +1024,8 @@ def advance_mutation_baseline(
     repo_root: Any,
     *,
     reason: str = "attributed_commit",
+    commit: str = "",
+    attribution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Open a new baseline epoch after the task's own attributed commit.
 
@@ -915,6 +1033,8 @@ def advance_mutation_baseline(
     surviving foreign dirt as pre-existing and the next attributed staging
     window opens from the new commit instead of failing ``baseline_stale``.
     An unexplained HEAD move (no advance) still surfaces as a stale baseline.
+    The epoch row keeps the whole replaced surface and, for a commit, its
+    ``selection`` facts, so a gap disclosed at review stays in history.
     """
     root = _canonical_root(repo_root)
     current = load_task_result(results_drive_root, str(task_id or "")) or {}
@@ -923,7 +1043,7 @@ def advance_mutation_baseline(
     if not isinstance(baseline, dict):
         raise RuntimeError("cannot advance a missing mutation baseline")
     surfaces = [dict(row) for row in baseline.get("surfaces") or [] if isinstance(row, dict)]
-    replaced = False
+    replaced: list[dict[str, Any]] = []
     for idx, row in enumerate(surfaces):
         if str(row.get("canonical_root") or "") != str(root) or not isinstance(row.get("git"), dict):
             continue
@@ -946,11 +1066,14 @@ def advance_mutation_baseline(
             }} if row["git"].get("predecessor_adoption") else {}),
         }
         surfaces[idx] = new_row
-        replaced = True
+        replaced.append(row)
     if not replaced:
         raise RuntimeError("no git baseline surface matches the committed root")
     epochs = [dict(r) for r in baseline.get("epochs") or [] if isinstance(r, dict)]
-    epochs.append({"advanced_at": utc_now_iso(), "reason": str(reason or "attributed_commit")})
+    epochs.append({"advanced_at": utc_now_iso(), "reason": str(reason or "attributed_commit"),
+                   "previous": replaced,
+                   **({"commit": str(commit)} if commit else {}),
+                   **({"attribution": dict(attribution)} if attribution else {})})
     baseline = dict(baseline)
     baseline.update({"surfaces": surfaces, "epochs": epochs})
     baseline.pop("baseline_hash", None)

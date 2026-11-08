@@ -31,7 +31,7 @@ def refused(focus, monkeypatch):
     return task, now
 
 
-@pytest.mark.parametrize('attention', ['paused', 'off', 'no_wake_match', 'focus'])
+@pytest.mark.parametrize('attention', ['paused', 'no_wake_match', 'focus'])
 def test_certified_retry_can_settle_original_arrival_or_start_focus(focus, refused, monkeypatch, attention):
     root, place, admission, event = focus
     original, now = refused

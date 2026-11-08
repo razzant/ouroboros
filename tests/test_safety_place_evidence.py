@@ -3,8 +3,10 @@ import json
 
 import pytest
 
+from ouroboros import place_guard as _place_guard
 from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
+REAL_CALL_PLACE_FACTS = _place_guard.call_place_facts  # bound before the fixture stubs it
 
 
 def bundle(h, name, arguments):
@@ -25,14 +27,17 @@ def test_focus_and_arbitrary_place_arguments_are_not_destinations(supervisor, mo
     data = bundle(h, name, {"place_id": "target", "text": "unrelated work"})
     assert data["subject"]["place"] == {} and not data["standing_delegation"]["place_notes"]
     assert data["occasion"]["focus"]["place_id"] == "focus-room" and not reads
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a: {"place_id": "target"})
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a: {"places": [{"place_id": "target"}]})
     data = bundle(h, name, {"text": "resolved work"})
-    assert data["subject"]["place"]["place_id"] == "target"
+    assert data["subject"]["place"]["places"][0]["place_id"] == "target"
     assert data["standing_delegation"]["place_notes"][0]["standing_delegation"] is True
 
 
-@pytest.mark.parametrize("canonical_source", ["metadata", "context"])
-@pytest.mark.parametrize("name", ["configure_presence", "place_reply", "remote_write"])
+@pytest.mark.parametrize(("name", "canonical_source"), [
+    ("configure_presence", "context"),
+    ("place_reply", "metadata"),
+    ("remote_write", "context"),
+])
 def test_destination_notes_use_canonical_root_and_keep_each_place(supervisor, monkeypatch, tmp_path,
                                                                 canonical_source, name):
     from ouroboros import places, place_guard
@@ -65,3 +70,30 @@ def test_destination_notes_use_canonical_root_and_keep_each_place(supervisor, mo
         assert data["subject"]["place"]["places"][1]["place_state"] == "silent"
     else:
         assert data["subject"]["place"]["place_state"] == "active"
+
+
+def test_place_reply_bundle_carries_this_turns_own_sends_in_its_conversation(supervisor, monkeypatch, tmp_path):
+    """The Supervisor judges a focus's final with what the turn already said there: receipts and the run's own
+    receipt-less message calls (06.11 I2: an honest "I already replied" was flagged as unverified without them)."""
+    from ouroboros import places, place_guard
+    from ouroboros.utils import append_jsonl
+    h = supervisor
+    monkeypatch.setattr(place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    monkeypatch.setattr(places, "load_places", lambda root: [places.Place("p", "connector", "chat", "a", "r", label="Team")])
+    key = "chat:a:r:0"
+    h.ctx.task_id = "focus"
+    h.ctx.task_metadata = {"wake_cause": "focus", "focus": {"place_id": "p"}, "presence": {
+        "place_id": "p", "delivery_reporting_version": 1, "transport_skill": "connector",
+        "event": {"conversation_key": key, "provider": "chat", "account_id": "a", "conversation_id": "r", "thread_id": ""}}}
+    h.ctx._place_message_calls = [{"tool": "ext_send", "at": "2026-11-06T02:18:50+00:00", "conversation_keys": [key], "text": "queued"}]
+    for row in ({"task_id": "focus", "direction": "in", "text": "hi"},
+                {"task_id": "focus", "type": "presence_delivery", "text": "I replied",
+                 "transport": {"conversation_key": key, "delivery": {"state": "delivered", "delivery_id": "d", "part_id": "0"}}},
+                {"task_id": "quiet-focus", "direction": "in", "text": "hi again"}):
+        append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
+    args = {"place_id": "p", "text": "final", "destination": {"account_id": "a", "conversation_id": "r", "thread_id": ""}}
+    data = bundle(h, "place_reply", args)
+    assert data["subject"]["place"]["this_turn_sends"] == {
+        "confirmed": '"I replied"', "calls_without_receipt": [{"tool": "ext_send", "at": "2026-11-06T02:18:50+00:00", "text": "queued"}]}
+    h.ctx.task_id, h.ctx._place_message_calls = "quiet-focus", []  # a turn that said nothing there: none, not unknown
+    assert bundle(h, "place_reply", args)["subject"]["place"]["this_turn_sends"] == {"confirmed": "none", "calls_without_receipt": []}

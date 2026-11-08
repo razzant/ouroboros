@@ -13,7 +13,8 @@
 * READ: no arguments → the free state: the current revision, every participant's open
   objections (``not_adjudicated`` flagged), who last saw which revision, the latest
   contributions and the pending asks; pending seats whose producer finished while
-  nobody listened are settled at $0 first.
+  nobody listened are settled at $0 first. Each ask names the evidence it recorded as
+  not attached in full (``omissions``: locator and reason), in the read and the ask's result.
 
 Every refusal — a schema error, an old-form call (``spec``, ``review_disposition``,
 ``author_action``, …: a typed $0 refusal naming the new form, no shim), a missing first
@@ -36,8 +37,8 @@ from ouroboros.config import (
     get_llm_transport_read_timeout_sec,
     get_review_enforcement,
     get_task_abs_ceiling_sec,
-    operation_window_sec,
 )
+from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.tools import plan_ask, plan_packet
 from ouroboros.tools.plan_review_runtime import REVIEWER_EFFORT_SCHEMA as _REVIEWER_EFFORT_SCHEMA
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -54,13 +55,16 @@ RETIRED_FIELDS = frozenset({"spec", "review_disposition", "author_action", "auth
                             "invariants", "decisions", "deferred", "affected_resources"})
 
 
-def _plan_task_tool_timeout_sec() -> float:
+def _plan_task_tool_timeout_sec() -> Optional[float]:
     """The outer settlement envelope of one call (never a cognition cutoff): an
-    ``agent_session`` participant inherits the task's operation window, an API
-    participant one transport read plus one finalization grace, and the entry covers
-    either plus one grace."""
-    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()),
-                operation_window_sec(get_task_abs_ceiling_sec()))
+    ``agent_session`` participant inherits the task's lifetime, an API participant one
+    transport read plus one finalization grace, and the entry covers either plus one grace.
+    ``None`` without a lifetime: a session seat then has no window, so neither does the
+    entry; the call's drain observes the owner's controls and a deadline still clamps it."""
+    lifetime = get_task_abs_ceiling_sec()
+    if lifetime is None:
+        return None
+    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()), float(lifetime))
             + get_finalization_grace_sec())
 
 
@@ -96,7 +100,8 @@ _SCHEMA = {
         "first reading of declared body work is seated like a body plan's first ask. "
         "Participants answer in parallel the first time and see each other's answers on later "
         "asks; each receives the plan or its delta, the council so far, its own open objections, your message and your "
-        "attachments. Answers arrive in your mailbox; READ (no arguments, free) shows the current revision, every open "
+        "attachments. Each answer reaches you at your next step and before an unhurried finish; the mailbox gets one frame "
+        "when every counted participant has settled, answered or not. READ (no arguments, free) shows the current revision, every open "
         "objection with who raised it, who saw which revision, the latest contributions and the pending asks. An "
         "objection stands until the participant who raised it withdraws it (ask that participant again after you "
         "revise or argue); nobody votes and there is no verdict. Under Blocking, outside Cyber Pro, an open objection of an owner-marked "
@@ -124,8 +129,14 @@ _SCHEMA = {
             "reason": {"type": "string", "description": "Why these reviewers: required when an Advisory first ask about your own code names fewer than all ticked reviewers. Blocking adds missing ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
             "message": {"type": "string", "description": "What you want from the asked participants now (what changed, what you decided and why, what to look at)."},
             "attach": {"type": "array", "items": {"type": "string"},
-                       "description": "Evidence locators for the asked participants (paths with optional ::lines=A-B, task:<id>, chat:<id>); attached bounded, every absence named."},
+                       "description": ("Evidence locators for the asked participants (paths with optional "
+                                       "::lines=A-B, task:<id>, chat:<id>); files attach as read_file may read them, your "
+                                       "own task_drive/artifact_store included, other runtime data never; bounded, every "
+                                       "absence named. Use task:<id> for a helper's saved result.")},
             "reviewer_effort": {**_REVIEWER_EFFORT_SCHEMA, "description": "Optional panel strength for THIS ask (Auto rows, clamped into the owner's effort range)."},
+            "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": (
+                "Alone: continue stopped session participants of an EARLIER ask, each named as the read's continuable "
+                "offer gives it; the same ask, revision and thread, never a new ask. " + CONTINUE_SEATS_SCHEMA["description"])},
         },
         "required": [],
     },
@@ -225,9 +236,11 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
     retired = sorted(key for key in given if key in RETIRED_FIELDS)
     if retired:
         return _retired_form_refusal(ctx, retired)
-    unknown = sorted(key for key in given if key not in WRITE_FIELDS and key not in ASK_FIELDS)
+    unknown = sorted(key for key in given if key not in WRITE_FIELDS and key not in ASK_FIELDS and key != "continue_seats")
     if unknown:
         return _arg_error(ctx, f"unknown fields {unknown}.")
+    if "continue_seats" in given and len(given) > 1:
+        return _arg_error(ctx, "continue_seats stands alone: it continues stopped participants of an earlier ask.")
     error = _validate_write(given)
     if error:
         return _arg_error(ctx, error)
@@ -243,6 +256,8 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         record = plan_record.load_plan_record(state_root, task_id)
     except plan_record.PlanRecordInvalid as exc:
         return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_RECORD_UNREADABLE: {exc}. Nothing was written; the recorded plan state stands.")
+    if "continue_seats" in given:
+        return _continue(ctx, record, given["continue_seats"], state_root=state_root, task_id=task_id)
     legacy, legacy_error = plan_record.legacy_facts(state_root, task_id)
     latest = plan_record.latest_revision(record)
     revision_fields: Optional[Dict[str, Any]] = None
@@ -307,6 +322,30 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
     return _publish(ctx, record, effect=effect, notes=notes, legacy=legacy, legacy_error=legacy_error)
 
 
+def _continue(ctx: ToolContext, record: Mapping[str, Any], selections: Any, *, state_root: Any, task_id: str) -> str:
+    """The explicit continuation of stopped session participants inside their own ask (``plan_ask.continue_participants``)."""
+    from ouroboros.review_continuation import ContinuationRefused
+
+    try:
+        outcome = plan_ask.continue_participants(ctx, record, selections, state_root=state_root, task_id=task_id)
+    except ContinuationRefused as exc:  # refused before any choice, or recorded with nothing sent (its repeat sends it)
+        return _refuse(ctx, "TOOL_ERROR" if exc.recorded else "TOOL_ARG_ERROR",
+                       f"ERROR: PLAN_CONTINUATION_{'UNSENT' if exc.recorded else 'REFUSED'}: "
+                       + json.dumps(exc.payload(), ensure_ascii=False, default=str) + " " + exc.consequence())
+    except (plan_record.PlanRecordInvalid, ValueError, OSError) as exc:
+        return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_CONTINUATION_FAILED: {exc}. A recorded choice is repaired and sent "
+                       "by repeating the same continue_seats.")
+    names = ", ".join(f"{item['seat_id']} as {item['operation_id']}" + (" (rejoined)" if item["rejoined"] else "")
+                      for item in outcome["continued"] if not (item["window_spent"] or item["not_sent"]))
+    spent = ", ".join(item["seat_id"] for item in outcome["continued"] if item["window_spent"])
+    unsent = ", ".join(item["seat_id"] for item in outcome["continued"] if item["not_sent"])
+    notes = [f"Continued in ask {outcome['ask_id']}: {names}. Same ask, revision and seat; the reply arrives in your mailbox."] if names else []
+    notes += [f"Not sent in ask {outcome['ask_id']}: {spent}. The original review window ended first; no reply will arrive."] if spent else []
+    notes += [f"Not sent in ask {outcome['ask_id']}: {unsent}. Its start was recorded by a call that never sent it; continue it "
+              "again from the offer below to start it within what remains of the original window."] if unsent else []
+    return _publish(ctx, outcome["record"], effect="continue", notes=notes)
+
+
 def _refuse_unroutable(ctx: ToolContext, exc: Any, *, revision_fields: Optional[Dict[str, Any]], body: bool, body_note: str,
                        state_root: Any, task_id: str) -> str:
     """The one refusal that leaves a fact: the mind asked and NO named route could take the
@@ -351,7 +390,7 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
         lines.append(f"Dispatch outcome unknown for {', '.join(unknown)} ({next(p.get('error') for p in sent if p['seat_id'] == unknown[0])}): "
                      "the substrate held them when the host lost track, so a reply may still arrive through custody; a new ask to them may pay twice.")
     if pending:
-        lines.append("Answers settle in the background and arrive in your mailbox (await_messages / wait_task); plan_task() reads them. "
+        lines.append("Answers settle in the background and reach you at your next step and before your final; plan_task() reads them. "
                      f"Still working: {', '.join(pending)}.")
     return "\n".join(lines)
 
@@ -377,6 +416,22 @@ def _render_done_when(rows: List[Mapping[str, Any]]) -> str:
 
 _NO_REVISION = ("No plan revision is recorded. Ask the council to read the request, or write a plan: goal, done_when, "
                 "affected_paths ([] for no files), plan.")
+
+
+def _room_facts(participant: Mapping[str, Any]) -> str:
+    """What the own room reached this seat, each fact apart: rows delivered inline, what file reads covered of the
+    exact snapshot. Neither says what it understood, and 0 file characters never means it saw no room. The rows were
+    counted before any send: a seat never sent was delivered none, and a pending outcome says the delivery may not have
+    gone. A stored row with no provenance or measured status (an older projector's paged brief or blank 0 of N) measured
+    nothing of the room."""
+    inline, read, facts = participant.get("room_delivery"), participant.get("room_read_coverage"), []
+    if isinstance(inline, Mapping) and participant.get("status") != "not_dispatched":
+        facts.append(f"{inline.get('conversation_inline_rows', 0)} of {inline.get('conversation_rows', 0)} conversation rows inline"
+                     + (", counted for a delivery that may not have been sent"
+                        if participant.get("status") == "pending" else ""))
+    if isinstance(read, Mapping) and read.get("provenance") and read.get("status") in {"complete", "incomplete"}:
+        facts.append(f"file reads covered {read.get('covered_chars', 0)} of {read.get('complete_chars', 0)} chars ({read['provenance']})")
+    return f" [room: {'; '.join(facts)}]" if facts else ""
 
 
 def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None,
@@ -418,9 +473,14 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             elif p["status"] == "pending" and p.get("unresolved"):
                 tag = ("pending — outcome unknown" + (f" ({p['error']})" if p.get("error") else "")
                        + "; a reply may still arrive, and a new ask to it may pay twice")
-            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}")
+            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
         lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
+        if stored.get("omissions"):  # recorded by plan_evidence when the ask was prepared; the ask's result shows it too
+            lines.append("  evidence omitted: " + "; ".join(f"{o.get('locator')} ({o.get('reason')})" for o in stored["omissions"]))
+            hint = plan_packet.omission_hint(stored["omissions"])
+            if hint:
+                lines.append(f"  {hint}")
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
             points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
                       if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]
@@ -511,6 +571,10 @@ def _publish(ctx: ToolContext, record: Mapping[str, Any], *, effect: str, notes:
     # the tool's read says the same, never "nothing holds".
     decision = _decision(ctx, record, legacy, unreadable=legacy_error.get("source") == "plan_review_state")
     text = ("\n".join(notes) + "\n\n" if notes else "") + render_record(record, decision, legacy, legacy_error)
+    offers = plan_ask.continuation_offers(state_root, record)
+    if offers:  # a stopped session participant continues only by this explicit choice, inside its own ask
+        text += ("\n\nContinuable stopped participants (plan_task(continue_seats=[{seat_id, operation_id}])): "
+                 + json.dumps(offers, ensure_ascii=False, default=str))
     latest = plan_record.latest_revision(record)
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta={
         "plan_effect": effect,

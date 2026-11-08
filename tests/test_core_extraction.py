@@ -28,7 +28,6 @@ _MOVED_NAMES = frozenset({
     "_MEMORY_AT_DRIVE_MEMORY",
     "_SKILL_OWNER_STATE_FILENAMES",
     "_access_or_block",
-    "_annotate_reread",
     "_coerce_line_window",
     "_coerce_start_char",
     "_data_list",
@@ -164,8 +163,18 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # description also explains that a new wait after timeout needs a new key.
     # Rolled for the decision-quality review fixes: escalate's description names a helper's
     # proposal as a fork source and makes a set-aside position one of the options; nothing else changed.
+    # Rolled for #2577: the send_photo, send_video and send_file `file_path` descriptions now say the path
+    # is relative to the active workspace or absolute; nothing else changed (c624c58e... before).
+    # Rolled again for #2633: send_photo, send_video, send_file, send_links and show_card name this work's
+    # room and say that for Presence-bound work it is local, not the place conversation.
+    # Rolled for owner answer 3A (#2811): escalate's description says a card from Presence work goes privately to
+    # Main and asks for one line in the conversation, sent in the asking tool batch, when the human is the
+    # person talked with there.
+    # Rolled for the pause/continue doors (audit 05.11): escalate's wait_for_answer description says waiting
+    # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
+    # (8892c8af... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "c624c58e06228b4f0079bcbaafac846c6eb2a59ade38300a2d7fd528895a39fb"
+        "2f79b9f5e817f17552818bd9cd50c253b1c9fee3e4612b8fc02e66d92cc6e522"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

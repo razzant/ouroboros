@@ -19,7 +19,7 @@ from tests.candidate_checkout import candidate_checkout
 from tests.test_claudexor_capability_replay import replay as replay
 from tests.test_claudexor_capability_engine import call, notices, TREE
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def navigate(page, name):

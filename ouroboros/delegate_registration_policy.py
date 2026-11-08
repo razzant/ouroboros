@@ -15,10 +15,13 @@ user's own project vanished when a delegated run finished. A registration
 marked persistent survives every retirement path; only ownership of the
 one-shot snapshot registrations is discharged.
 
-A root Ouroboros mints for one task, run or review (a registry checkout, a
-folderless read-only scratch, a review checkout or input view without a sticky
-thread) is not an identity at all: it declares ``scope.ephemeral`` and registers
-nothing, so it never becomes a permanent engine project or a ghost later.
+A root Ouroboros mints for one task, run or review (``minted_root``: a registry
+checkout, a review checkout or input view, a folder under a task's own drive, a
+folderless read-only scratch) is not an identity at all: it declares
+``scope.ephemeral`` and registers nothing, so it never becomes a permanent engine
+project or a ghost later. A sticky thread on it does the same once the engine also
+sweeps the lanes such threads leave (``ephemeral_scope``); an older engine keeps
+the thread's registration.
 """
 
 from __future__ import annotations
@@ -163,12 +166,13 @@ def record_persistent(record) -> bool:
     return persistent_registration(str(workspace_root or ""), str(request.get("access") or ""))
 
 
-def minted_review_root(root: str, drive: Any) -> bool:
-    """A tree minted for one review: an isolated review checkout (``<data>/state/review_checkouts``),
-    a retained review-input snapshot (``source_handles/review_inputs`` of a task under the data
-    root) or a checkout the subagent worktree registry holds (a child's copy, a body candidate).
-    Any other root, an owner's project or the system repository, keeps its registration
-    wherever it lives, even under the data root."""
+def minted_root(root: str, drive: Any) -> bool:
+    """A tree Ouroboros minted for one task, run or review: an isolated review checkout
+    (``<data>/state/review_checkouts``), a retained review-input snapshot (``source_handles/review_inputs``
+    of a task under the data root), a folder inside a task's own drive (``task_drives/<id>/**``,
+    ``state/headless_tasks/<id>/**``, which the drive custody pass retires) or a checkout the subagent
+    worktree registry holds (a child's copy, a body candidate). Any other root, an owner's project or
+    the system repository, keeps its registration wherever it lives, even under the data root."""
     import pathlib
 
     from ouroboros.subagent_worktrees import registered_checkout
@@ -178,16 +182,30 @@ def minted_review_root(root: str, drive: Any) -> bool:
     parts = path.relative_to(data).parts if path.is_relative_to(data) else ()
     return (parts[:2] == ("state", CHECKOUT_SUBDIR)
             or any(parts[i:i + 2] == ("source_handles", "review_inputs") for i in range(len(parts) - 1))
+            or (len(parts) > 1 and parts[0] == "task_drives")
+            or (len(parts) > 2 and parts[:2] == ("state", "headless_tasks"))
             or registered_checkout(root))
 
 
-def resolve_registration(gateway, scope_root: str, execution_root: str, access: str, *, minted: bool = False):
+def ephemeral_scope(gateway: Any, *, thread: bool = False) -> bool:
+    """Does this engine accept ``scope.ephemeral`` for a minted root: on a run
+    (``config.CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION``) or on a sticky thread, whose lane only an
+    engine that sweeps unregistered namespaces removes (``CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION``)."""
+    from ouroboros.config import CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION, CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION
+    from ouroboros.gateways.claudexor import engine_at_least
+
+    floor = CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION if thread else CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION
+    return engine_at_least(str(getattr(gateway, "engine_version", "") or ""), floor)
+
+
+def resolve_registration(gateway, scope_root: str, execution_root: str, access: str, *, minted: bool = False,
+                         thread: bool = False):
     """Register (or adopt) the scope root and decide the markers in one step.
 
     Returns ``(project_id, owned_project_id, project_persistent, ephemeral)``. A
-    ``minted`` root on an engine that accepts ``scope.ephemeral``
-    (``config.CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION``) registers nothing: ``("",
-    "", False, True)``. Otherwise an existing registration is adopted unowned; a
+    ``minted`` root on an engine that accepts ``scope.ephemeral`` for it
+    (``ephemeral_scope``; ``thread``: the start binds a sticky thread) registers nothing:
+    ``("", "", False, True)``. Otherwise an existing registration is adopted unowned; a
     fresh one is owned by this start; #362 marks the stable-target case
     persistent so no retire path deletes the user's own project. Ownership comes
     from the engine's ``created`` once its answers carry it (one POST, no
@@ -196,11 +214,10 @@ def resolve_registration(gateway, scope_root: str, execution_root: str, access: 
     A gateway without ``project_registration`` (an older client or a test double)
     keeps the previous flow exactly.
     """
-    from ouroboros.config import CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable, engine_at_least
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     version = str(getattr(gateway, "engine_version", "") or "")
-    if minted and engine_at_least(version, CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION):
+    if minted and ephemeral_scope(gateway, thread=thread):
         return "", "", False, True
     persistent = persistent_registration(execution_root, access)
     register = getattr(gateway, "project_registration", None)
@@ -222,19 +239,18 @@ def resolve_registration(gateway, scope_root: str, execution_root: str, access: 
 
 
 # How a run's ``maxSeconds`` was decided (#1196), recorded on the START_REQUESTED
-# and STARTED rows as ``max_seconds_basis``. Only a cap the nanny ASKED for — an
-# explicit finite leaf cap, at most narrowed by the engine's schema bound — makes
-# a later ``wall_clock_exceeded`` a finite-leaf expiry a continuation may follow;
-# a cap the nanny's own deadline or lifetime derived (or narrowed) expiring IS
-# that deadline, and a row that predates the field is unknown, never assumed.
+# and STARTED rows as ``max_seconds_basis``: a fact beside the number, which no
+# admission or continuation decision reads (a continuation follows any stop). A cap
+# the nanny asked for, one its own deadline or lifetime derived or narrowed, or
+# none (``unbounded``: no ``maxSeconds`` was sent); a row that predates the field is
+# unknown, and an older row's ``operation_window`` names the retired 6 h fallback.
 CAP_BASIS_REQUESTED = "requested"
 CAP_BASIS_REQUESTED_CLAMPED_SCHEMA = "requested_clamped_by_schema"
 CAP_BASIS_REQUESTED_CLAMPED_DEADLINE = "requested_clamped_by_deadline"
 CAP_BASIS_REQUESTED_CLAMPED_LIFETIME = "requested_clamped_by_lifetime"
 CAP_BASIS_DEADLINE_DERIVED = "deadline_derived"
 CAP_BASIS_LIFETIME_DERIVED = "lifetime_derived"
-CAP_BASIS_OPERATION_WINDOW = "operation_window"
-FINITE_LEAF_CAP_BASES = frozenset({CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_SCHEMA})
+CAP_BASIS_UNBOUNDED = "unbounded"
 
 # The STARTED row's string facts as ``(RunCustody attribute, row key)`` pairs —
 # one table shared by the replay and the ``record_started`` emit.
@@ -264,7 +280,8 @@ STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort")
 STARTED_PROGRESS_FLAGS: Tuple[str, ...] = (
     "ledger_recorded", "settled", "containment_disclosed", "unread_disclosed",
     "output_artifact", "output_complete", "output_sha", "output_consumed", "output_source",
-    "patch_captured", "patch_disposed", "patch_apply_pending", "superseded_by")
+    "patch_captured", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
+    "superseded_by")
 # The closing facts SETTLED wrote (and the fault CONTAINMENT_FAULT recorded): a later
 # STARTED row never carries them, so replacing wholesale would forget a run's cost,
 # its spend disclosure, the engine's model/profile/locators and an unresolved fault,

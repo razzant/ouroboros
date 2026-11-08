@@ -66,13 +66,17 @@ export function withWidgetStartMode(current, key, mode) {
     return next;
 }
 
-// Head controls: a framed card's status (dot + text) and its one primary
-// button, then the card menu on the Skills card menu primitive
-// (`.skills-card-menu` + `<dialog role="menu">`): a framed card's launch policy
-// and every card's width steps, each a radio group. The checked policy is set
+// Head controls: a framed card's status (dot + text) and its power button
+// (Start; while it runs, Stop, which style.css leaves to the menu), then the
+// card menu on the Skills card menu primitive (`.skills-card-menu` +
+// `<dialog role="menu">`): a framed card's launch policy and every card's width
+// steps, each a radio group, then a running framed card's Stop (rare, so never
+// the board's loudest word) with the cause of a fault. The checked policy is set
 // by `syncWidgetCardControls` once the page knows the owner's preferences; the
-// checked width when the menu opens (`bindWidgetCardMenus`).
-export function renderWidgetCardControls(tab) {
+// checked width when the menu opens (`bindWidgetCardMenus`). The head draws the two
+// parts apart (`renderWidgetCardParts`): the lifecycle controls may drop under the
+// title's row, the menu stays with the move handle in one pair that never splits.
+export function renderWidgetCardParts(tab) {
     const item = (attrs, label, role = 'menuitemradio') => (
         `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
     );
@@ -88,28 +92,37 @@ export function renderWidgetCardControls(tab) {
     const remove = tab?.pinned_card ? `<div role="group" aria-label="Card">${item('data-widget-unpin', 'Remove', 'menuitem')}</div>` : '';
     const power = framed ? `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>
         <button type="button" class="btn btn-primary btn-sm" data-widget-power>Start</button>` : '';
-    return `${power}
-        <div class="skills-card-menu">
-            <button type="button" class="skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
-            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${sizes}${remove}</dialog>
+    const stop = framed ? item('data-widget-stop hidden', 'Stop', 'menuitem') : '';
+    const menu = `<div class="skills-card-menu">
+            <button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
+            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${sizes}${framed ? `<div role="group" aria-label="Run">${stop}<p class="widgets-menu-note" data-widget-fault-details hidden></p></div>` : ''}${remove}</dialog>
         </div>`;
+    return { run: power, menu };
 }
 
 const STATUS_TEXT = { starting: 'Starting…', running: 'Running', stopping: 'Stopping…' };
 
 /**
- * Show a widget fault in the card's own status slot. Only the status span is
- * written: the lifecycle state is untouched, because the frame really is still
- * mounted and its Stop button must keep saying Stop. The status node persists
- * the fault for its keyed card until a real lifecycle transition clears it.
+ * Show a widget fault in the card's own status slot, its raw cause (`details`)
+ * in the card menu. Only the status span is written: the lifecycle state is
+ * untouched, because a frame with a fault may still be mounted (Stop stays in
+ * the menu). A mount that `ended` by itself keeps the fault while its card
+ * settles stopped, where Start again restarts it. The status node persists the
+ * fault for its keyed card until a real lifecycle transition clears it.
  */
-export function setWidgetCardFault(card, text) {
+export function setWidgetCardFault(card, text, { details = '', ended = false } = {}) {
     const status = card?.querySelector('[data-widget-status]');
     if (!status) return;
     status.hidden = false;
     status.dataset.tone = 'error';
     status.dataset.widgetFault = text;
     status.textContent = text;
+    if (details) status.dataset.widgetFaultDetails = details;
+    else delete status.dataset.widgetFaultDetails;
+    if (ended) status.dataset.widgetEnded = 'true';
+    else delete status.dataset.widgetEnded;
+    const detail = card.querySelector('[data-widget-fault-details]');
+    if (detail) { detail.textContent = details; detail.hidden = !details; }
 }
 
 /**
@@ -126,8 +139,12 @@ export function setWidgetCardNote(card, text) {
 
 /**
  * Keep the head controls truthful. `state` is one of stopped | starting |
- * running | stopping — expressed through the button label, `disabled` while a
- * transition is in flight, and the status sentence; no state machine object.
+ * running | stopping — expressed through the head's power button (Start, Stop
+ * while the frame runs or stops, Start again after a mount that ended by
+ * itself; `disabled` while a transition is in flight; crimson only for a plain
+ * Start), the menu's Stop (only while it runs) and the status sentence; no state
+ * machine object. A running card's power is `data-running`: style.css keeps Stop
+ * in the card menu and hides it there (the board's fork: drop that one rule).
  * A running card kept alive across pages (`mode === 'retain'`) says so: the
  * frame really keeps running while Widgets is hidden (the browser, not the
  * host, may pause its animation frames meanwhile — see CREATING_SKILLS).
@@ -135,17 +152,28 @@ export function setWidgetCardNote(card, text) {
 export function syncWidgetCardControls(card, state, mode = '') {
     const power = card?.querySelector('[data-widget-power]');
     if (!power) return;
-    power.textContent = state === 'running' || state === 'stopping' ? 'Stop' : 'Start';
-    power.disabled = state === 'starting' || state === 'stopping';
     const status = card.querySelector('[data-widget-status]');
+    // A fault is kept while its frame still runs, and while a mount that ended by itself settles stopped.
+    const fault = status?.dataset.widgetFault;
+    const kept = Boolean(fault) && (state === 'running' || (status.dataset.widgetEnded === 'true' && state !== 'starting'));
+    const again = kept && state === 'stopped';
+    const running = state === 'running' || state === 'stopping';
+    power.textContent = running ? 'Stop' : (again ? 'Start again' : 'Start');
+    power.classList?.toggle('btn-primary', !running && !again);
+    power.classList?.toggle('btn-default', running || again);
+    power.toggleAttribute?.('data-running', running);
+    power.disabled = state === 'starting' || state === 'stopping';
+    const stop = card.querySelector('[data-widget-stop]');
+    if (stop) stop.hidden = state !== 'running';
     if (status) {
-        const fault = status.dataset.widgetFault;
-        if (state === 'running' && fault) {
+        if (kept) {
             status.hidden = false;
             status.dataset.tone = 'error';
             status.textContent = fault;
         } else {
             delete status.dataset.widgetFault;
+            delete status.dataset.widgetFaultDetails;
+            delete status.dataset.widgetEnded;
             status.hidden = state === 'stopped';
             status.dataset.tone = state === 'running' ? 'ok' : 'neutral';
             status.textContent = state === 'running' && mode === 'retain'
@@ -153,6 +181,8 @@ export function syncWidgetCardControls(card, state, mode = '') {
                 : (STATUS_TEXT[state] || 'Stopped');
         }
     }
+    const detail = card.querySelector('[data-widget-fault-details]');
+    if (detail) { detail.textContent = (kept && status.dataset.widgetFaultDetails) || ''; detail.hidden = !detail.textContent; }
     if (!mode) return;
     card.querySelectorAll('[data-widget-start-mode]').forEach((item) => {
         item.setAttribute('aria-checked', item.dataset.widgetStartMode === mode ? 'true' : 'false');
@@ -184,7 +214,7 @@ export function renderWidgetFacade(mount, tab) {
  * (`widths.widthOf(key)`) checked, and on the stacked column it says that
  * widths apply to the wide board only.
  */
-export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove = () => {}) {
+export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove = () => {}, onStop = () => {}) {
     if (!list) return { close() {}, destroy() {} };
     let active = null;
     const close = () => active?.binding.close();
@@ -209,11 +239,12 @@ export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove 
         popover.show();
         trigger.setAttribute('aria-expanded', 'true');
         const onSelect = (selection) => {
-            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-unpin]');
+            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-unpin], [data-widget-stop]');
             if (!item) return;
             active?.binding.close({ restoreFocus: true });
             const size = item.dataset.widgetSize;
-            if (item.hasAttribute('data-widget-unpin')) onRemove(key);
+            if (item.hasAttribute('data-widget-stop')) onStop(key);
+            else if (item.hasAttribute('data-widget-unpin')) onRemove(key);
             else if (!size) onSelectMode(key, item.dataset.widgetStartMode || '');
             else widths?.setWidth(key, size === 'reset' ? null : Number(size));
         };

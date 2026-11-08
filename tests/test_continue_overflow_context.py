@@ -14,10 +14,16 @@ import httpx
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._worlds import clone, world
 from tests.test_continue_successor_context import FIELD, _mutation_evidence
 from tests.test_doc_context import _make_env_and_memory, foreign_tree
 from tests.test_main_authored_context import call
 from tests.test_owner_continue import NONCE, _interrupted
+
+
+@pytest.fixture(scope="module")
+def foreign_world():
+    return world("continue-foreign-tree", lambda root: foreign_tree(root))
 
 
 def _run_refusal(registry, messages, task, monkeypatch):
@@ -69,7 +75,7 @@ def _run_refusal(registry, messages, task, monkeypatch):
 
 @pytest.mark.parametrize("flag", [True, False, None])
 @pytest.mark.parametrize("mode", ["max", "low"])
-def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag, mode):
+def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, foreign_world, flag, mode):
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.context import build_llm_messages
@@ -88,7 +94,7 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag
     monkeypatch.setattr("ouroboros.context.resolve_context_fit_route", lambda *_a, **_kw: (
         {"model": "openai/test-model", "provider": "openai"},
         SimpleNamespace(route_fp="fixture", status="asserted", stale=False, window_tokens=1_000_000)))
-    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
+    workspace = clone(foreign_world, tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
     _interrupted(env.drive_root, workspace_root=str(workspace), workspace_mode="external",
         task_contract={"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})},
         mutation_evidence=_mutation_evidence())
@@ -112,12 +118,13 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag
     for index, request in enumerate(inputs):
         system = json.dumps([m for m in request["messages"] if m["role"] == "system"])
         assert "PREDECESSOR-CONTRACT-SENTINEL" not in system and "predecessor_authority" in system
-        # Low projects books as navigation, and a confirmed Max overflow retries in task-local
-        # Low; the stored inclusion choice survives that rendering policy. User content may be blocks.
+        # Low projects books as navigation. A Max overflow without numbers narrows memory first and keeps the books
+        # (owner order 7A: memory before books, which wait for a further refusal; 06.11), so the stored inclusion
+        # choice keeps the whole handbook in every Max request here. User content may be blocks.
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
                    for m in request["messages"] if m["role"] == "system"
-                   for block in m["content"]) == int(flag is True and mode == "max" and index < 2)
-        if mode == "low" or index == 2:
+                   for block in m["content"]) == int(flag is True and mode == "max")
+        if mode == "low" or (index == 2 and flag is not True):
             assert "## DEVELOPMENT.md (navigation map)" in system
         users = json.dumps([m for m in request["messages"] if m["role"] == "user"], ensure_ascii=False)
         assert json.dumps(task["text"], ensure_ascii=False)[1:-1] in users
@@ -127,17 +134,15 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag
     assert len({request["model"] for request in inputs}) == 1
     assert inputs[1]["reasoning_effort"] == inputs[2]["reasoning_effort"]
     refused_read = next(m for m in inputs[1]["messages"] if m.get("tool_call_id") == "read-evidence")
-    # Nothing shown is addressable, so the second pass runs whole. Max turns its books into navigation, a change
-    # the one retry answers with the chosen read whole (owner 2A); Low has nothing else to give this unmeasured
-    # refusal, so the never-answered read alone takes the disclosed late rescue.
-    assert any(m.get("tool_call_id") == "read-evidence" for m in inputs[2]["messages"]) is (mode == "max")
-    assert (refused_read in inputs[2]["messages"]) is (mode == "max")
-    records = [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
-    assert bool(records) is (mode == "low")
+    # Memory (Max) or retained host sections (Low) pay before the just-chosen read.
+    assert refused_read in inputs[2]["messages"]
+    assert not [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
     if mode == "low":
-        capsule = _capsule_metadata(records[0])[1]
-        assert capsule["retention"] == "source_view"
-        checkpoint = json.loads(read_actor_source_bytes(env.drive_root, task["id"], capsule["checkpoint_ref"]))
-        assert refused_read in checkpoint["messages"], "the refused request's body stays exactly retrievable"
-        assert checkpoint["messages"] == inputs[1]["messages"]  # Low has no floor below it: the refused request itself
+        receipts = registry._ctx.context_fit_plan.low_projection.memory_facts["host_sections_addressed"]
+        assert receipts
+        refused_system = "\n\n".join(block["text"] for m in inputs[1]["messages"]
+                                     if m["role"] == "system" for block in m["content"])
+        for receipt in receipts:
+            whole = read_actor_source_bytes(env.drive_root, task["id"], receipt["source_ref"]).decode()
+            assert whole in refused_system
     assert load_task_result(env.drive_root, "pred-1") == before, "recovery never rewrites predecessor authority"

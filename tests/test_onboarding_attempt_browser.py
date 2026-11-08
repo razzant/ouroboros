@@ -18,7 +18,7 @@ import pathlib
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 SAVE_TIMEOUT = {"code": "settings_save_timeout", "saved": None, "error": (
     "the settings save is still running in the server after 60s and was left to finish on its own; "

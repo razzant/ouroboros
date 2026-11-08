@@ -47,10 +47,14 @@ store imports once) while the allowance's own last-24-hours window stays CURRENT
 and the subagent metrics cursor is ABSENT while the event chain holds every unit's suffix.
 
 Run in its own interpreter with ``OUROBOROS_DATA_DIR`` set to the root (the writers that use
-the process data root then write there): ``python -m tests._scale_root ROOT K OUT.json``. The
+the process data root then write there) and ``OUROBOROS_SETTINGS_PATH``, when set, naming the root's
+``settings.json``: ``python -m tests._scale_root ROOT K OUT.json``. The
 build names ``<home>/worktrees`` the process's worktree root, as the measured boot must too; the
 meter's execution root is the copies' own folder inside it, so resolving the configured root on a
-pass is no walk of a checkout.
+pass is no walk of a checkout. The root's configured budget (state and ``settings.json``) is the limit its
+money is settled under (``spend_limit_usd``), so an owner's turn has room at every size; ``facts["budget"]``
+records what admission reads back from the root: the budget its settings resolve to (no limit is handed to
+the read), the settled spend and what remains.
 """
 
 from __future__ import annotations
@@ -479,10 +483,22 @@ LIMIT_REFERENCE_K = 30
 
 
 def spend_limit_usd(k: int) -> float:
-    """The global limit the synthetic money is reserved under: the k=30 root's $100, or proportionally more
-    for a larger root (every unit settles ``ABSENT_OWNERS_PER_K`` attempts: the known spend grows with the
-    shape, and a fixed limit refused the k=100 root's reservations once it reached $100)."""
+    """The global limit the synthetic money is reserved under, and the root's configured budget (``build``): the
+    k=30 root's $100, or proportionally more for a larger root (every unit settles ``ABSENT_OWNERS_PER_K``
+    attempts: the known spend grows with the shape, and a fixed $100 refused the k=100 root's reservations once it
+    reached it, then its owner's turns before their first request: #2407)."""
     return GLOBAL_LIMIT_USD * max(1.0, k / LIMIT_REFERENCE_K)
+
+
+def _budget(root: pathlib.Path) -> Dict[str, float]:
+    """The root's money as admission reads it (``usage_projection``): the limit, the settled spend, what remains.
+    No limit is handed to the read: it is the budget this process's settings resolve to
+    (``settings_setup_contract.resolve_total_budget_usd``), so the fact follows the configured budget instead of
+    echoing the one ``build`` authored. ``main`` holds the process to the root's own ``settings.json``."""
+    from ouroboros.usage_accounting import usage_projection
+
+    projection = usage_projection(root)
+    return {key: projection[key] for key in ("limit_usd", "settled_usd", "remaining_known_usd")}
 
 
 def money(root: pathlib.Path, task_id: str, *, category: str = "", cost: float = 0.4,
@@ -648,6 +664,21 @@ def _forget_metrics_cursor(root: pathlib.Path) -> None:
         txn.conn.execute("DELETE FROM meta WHERE key=?", (CURSOR,))
 
 
+def heartbeats(root: pathlib.Path) -> None:
+    """The running tasks' workers' heartbeats, as a live install's would be: a stamp of now on each of their rows.
+
+    The rows keep the ``ts`` they were written with, and one older than ``task_status._ORPHAN_RUNNING_GRACE_SECONDS``
+    goes down the stale-orphan check, which parses the events tail while the queue snapshot is fresh. That is the path of
+    an orphaned row (a live worker's row is younger than the grace), and counting is not timing: which path a boot takes
+    must not follow how long the build or the boot took, which grows with k. The build stamps the rows last; the driver
+    stamps them again before the boundaries that read them."""
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import utc_now_iso
+
+    for task_id in CURRENT["running"]:
+        write_task_result(root, task_id, "running", ts=utc_now_iso())
+
+
 def build(root: Any, k: int) -> Dict[str, Any]:
     """Build the published root (see the module docstring); returns its facts."""
     from ouroboros.startup_migrations import prepare_startup_state
@@ -657,10 +688,11 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     root = pathlib.Path(root)
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
-    state.init(root, 100.0)
+    limit = spend_limit_usd(k)  # the budget the history's money is settled under, so a turn still has room
+    state.init(root, limit)
     state.init_state()  # a first boot's state, before any history exists
     # No fallback model: the turn law (B10) ends a turn at its first model request, which the driver refuses.
-    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": 100, "OUROBOROS_MAX_WORKERS": 2,
+    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": limit, "OUROBOROS_MAX_WORKERS": 2,
                                                     "OUROBOROS_MODEL_FALLBACKS": []}), encoding="utf-8")
     facts: Dict[str, Any] = {"k": k}
     steps: Dict[str, float] = {}
@@ -687,15 +719,34 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     facts["packs"] = step("packed", lambda: _packed(root, k))
     facts["plan_asks"] = step("plan_asks", lambda: _plan_asks(root, k))
     step("metrics_cursor", lambda: _forget_metrics_cursor(root))
+    facts["budget"] = _budget(root)
+    step("heartbeats", lambda: heartbeats(root))  # last: the history above takes longer the larger k is
     facts["build_seconds"] = round(time.monotonic() - started, 2)
     facts["build_steps"] = steps
     return facts
+
+
+def force_store_journal() -> None:
+    """``COST_STORE_JOURNAL``: the journal mode every store of this measurement takes, whatever this machine's SQLite and
+    filesystem would choose: the stand holds its counts on WAL and on PERSIST (Windows CI is PERSIST)."""
+    mode = os.environ.get("COST_STORE_JOURNAL", "")
+    if mode:
+        from ouroboros import store
+
+        store._journal_mode = lambda *_args: mode
 
 
 def main(argv: List[str]) -> int:
     root, k, out = pathlib.Path(argv[0]), int(argv[1]), pathlib.Path(argv[2])
     if pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", "")).resolve() != root.resolve():
         raise SystemExit("OUROBOROS_DATA_DIR must name the root being built")
+    from ouroboros import config
+    from ouroboros.launch_roots import same_location
+
+    if not same_location(config.SETTINGS_PATH, root / "settings.json"):  # the budget fact is read through it
+        raise SystemExit(f"OUROBOROS_SETTINGS_PATH must name the settings.json of the root being built, "
+                         f"not {config.SETTINGS_PATH}")
+    force_store_journal()
     facts = build(root, k)
     out.write_text(json.dumps(facts, indent=1, sort_keys=True), encoding="utf-8")
     return 0

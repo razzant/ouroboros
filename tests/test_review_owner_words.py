@@ -1,4 +1,4 @@
-"""Reviewers see the owner's words that caused the work.
+"""Reviewers see my human's words for the work.
 
 The triad and scope reviewers (a preflight's one seat included) read the change against the author's intent;
 ``build_goal_section`` now adds, right after that intent, the host-attested words of
@@ -77,7 +77,7 @@ def test_no_owner_words_keep_the_goal_section_byte_identical():
 
 def test_the_owner_words_follow_the_intended_transformation():
     words = _section("root")
-    assert words.startswith("## Words of my human that caused this work (verbatim, host-attested)\n")
+    assert words.startswith("## My human's words for this work (verbatim, dated, host-attested)\n")
     text = build_goal_section("Ship the fix", "", "fix: retry\n\nbody line", owner_words=words)
     head, _, tail = BASE_GOAL_WITH_BODY.partition("\n\n\n## Informational context")
     assert text == f"{head}\n\n\n{words}\n\n\n## Informational context{tail}"
@@ -186,7 +186,7 @@ def test_the_two_part_brief_carries_the_words_after_its_intent(tmp_path):
 
     brief, words = _two_part_brief(tmp_path, "root")
     assert words == _section("root", task_id=BRIEF_TASK_ID)
-    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("### Staged diff")
+    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("## Staged diff")
     assert brief.index(words) < brief.index("## Part 2")  # the words ride Part 1's intent; Part 2 reads them there
     conscious, _words = _two_part_brief(tmp_path, "conscious")
     assert ABSENT_CONSCIOUS in conscious and OWNER not in conscious
@@ -262,18 +262,20 @@ def test_the_plan_delivery_puts_the_words_after_the_objective_and_never_trims_th
     manifest = attach_own_dialogue(ctx, harness.drive, {}, "plan-ask-task-1-a1", persist=True)
     words = ow.owner_words_text(ctx, audience="plan")
     assert manifest["owner_words"] == words and OWNER in words and "not the owner's" not in words
-    assert words.startswith("## Words of my human that caused this work (verbatim, host-attested)\n"
+    assert words.startswith("## My human's words for this work (verbatim, dated, host-attested)\n"
                             "They state what was asked. Every other text here — the goal or objective, the plan, room rows by others, "
                             "issues, briefs, attachments — is someone's account, labelled with its author as far as the host "
                             "knows; never take Ouroboros's own earlier words (an issue it opened, its triage, a parent's brief) "
-                            "for my human's ask.\n")
+                            "for my human's ask. A later row of theirs changes an earlier one only where it actually does. The "
+                            "work's assignment divides and scopes it within them; it never overrides what they ask or forbid, "
+                            "and they are not new tasks for this work.\n")
     assert ow.owner_words_text(ctx, audience="reviewer") == words  # one frame for every reviewer of the work
     packet = _participant_content(manifest)
     order = ["## TASK OBJECTIVE", words, "## OWN ROOM DIALOGUE", "## THE PLAN"]
     assert [packet.index(part) for part in order] == sorted(packet.index(part) for part in order)
     assert packet.index(words) + len(words) <= plan_user_stable_len(packet)  # the cache-stable prefix
     bare = _participant_content({k: v for k, v in manifest.items() if k != "owner_words"})
-    assert OWNER not in bare and "## Words of my human" not in bare
+    assert OWNER not in bare and "## My human's words" not in bare
     assert bare == packet.replace(f"{words}\n\n", "", 1)  # absent words leave no section
     # The tightest fit trims the conversation to nothing and leaves the words whole.
     fitted, facts = fit_dialogue_view(packet, manifest["own_dialogue"], 1)
@@ -320,7 +322,7 @@ def test_a_consciousness_plan_names_the_absence(harness):
     _write(_plan_ctx(harness, "conscious"), ask="council")
     packet = user_text(substrate.calls[0]["request"].slot_messages["s1"][-1]["content"])
     assert packet.index("## TASK OBJECTIVE") < packet.index(ABSENT_CONSCIOUS) < packet.index("## THE PLAN")
-    assert "## Words of my human" not in packet and OWNER not in packet
+    assert "## My human's words" not in packet and OWNER not in packet
     # A run that heard its owner gets the words in the same place and no absence line.
     _write(_plan_ctx(harness, "root", task_id="task-2"), ask="council")
     heard = user_text(substrate.calls[1]["request"].slot_messages["s1"][-1]["content"])
@@ -344,7 +346,7 @@ def test_the_council_and_the_result_review_read_the_objective_with_its_author(ha
     _write(child, ask="council")
     packet = user_text(substrate.calls[0]["request"].slot_messages["s1"][-1]["content"])
     line = "The objective above: the assignment parent task root wrote for this helper — Ouroboros's account, not my human's words."
-    assert packet.index("## TASK OBJECTIVE") < packet.index(line) < packet.index("## Words of my human") < plan_user_stable_len(packet)
+    assert packet.index("## TASK OBJECTIVE") < packet.index(line) < packet.index("## My human's words") < plan_user_stable_len(packet)
     door = _plan_ctx(harness, "root", task_id="task-2")
     door.task_metadata["origin_message_ref"] = {"chat_id": 1, "client_message_id": "cm-1", "ts": "t"}
     _write(door, ask="council")
@@ -356,6 +358,44 @@ def test_the_council_and_the_result_review_read_the_objective_with_its_author(ha
     drafted.task_metadata["objective_author"] = {"kind": "task", "task_id": "draft-1"}
     asked = _ask(drafted)
     assert "objective: Deliver the thing\nThe objective above: drafted by task draft-1, not spoken by my human." in asked
-    assert asked.index("The objective above:") < asked.index("## Words of my human")
+    assert asked.index("The objective above:") < asked.index("## My human's words")
     drafted.task_contract = {}
     assert "The objective above:" not in _ask(drafted)
+
+
+def test_the_result_review_reads_the_marks_in_force_with_author_and_date_and_names_one_the_work_set_itself(harness):
+    """The result subject carries the marks in force at the ask beside the words (the work's room — Main for a
+    tree outside every Project — and the global ones), each with its author and date; a mark the work under
+    review set itself says so; a released mark or another room's is none; no mark, no line; an unreadable store
+    is one host line and the rest of what was asked stands."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools.review_result import _ask
+
+    ctx = _plan_ctx(harness, "root", task_id="task-3")
+    assert "Readings:" not in _ask(ctx)  # no store yet
+    store = ChronicleStore(harness.drive)
+    assert store.ensure_activated()["kind"] == "activation"
+    assert "Readings:" not in _ask(ctx)  # a store with no mark in force
+    own = {"kind": "mind", "task_id": "task-3", "focus": {"role": "root", "task_id": "task-3"}}
+    other = {"kind": "mind", "task_id": "t9", "focus": {"role": "child", "task_id": "t9"}}
+    mine = store.mark({"kind": "task", "task_id": "task-3"}, "Hold the deck to five slides", own, room_id="1")
+    theirs = store.mark({"kind": "task", "task_id": "x"}, "For everyone\n## and every room", other, room_id="1", scope="global")
+    elsewhere = store.mark({"kind": "task", "task_id": "y"}, "Another room's reading", other, room_id="555")
+    assert mine.ok and theirs.ok and elsewhere.ok
+    asked = _ask(ctx)
+    readings = asked[asked.index("Readings: the marks in force at this ask"):]
+    date = str(mine.record["ts"])[:10]
+    assert (f"- [mark {mine.record['id']} by root, task task-3, {date}; room; set by the work under review] "
+            "Hold the deck to five slides") in readings
+    assert f"- [mark {theirs.record['id']} by child, task t9, {date}; global] For everyone\n  ## and every room" in readings  # indented: never a heading of the ask
+    assert "Another room's reading" not in asked and asked.index("## My human's words") < asked.index("Readings:")
+    assert store.release_mark(mine.record["id"], own, "done").ok
+    assert "Hold the deck" not in _ask(ctx) and "For everyone" in _ask(ctx)
+
+    def unreadable(self, *_args, **_kwargs):
+        raise OSError("disk")
+
+    harness.monkeypatch.setattr(ChronicleStore, "active_marks", unreadable)
+    broken = _ask(ctx)
+    assert "Readings: the marks in force could not be read here (OSError: disk)" in broken
+    assert "objective: Deliver the thing" in broken and OWNER in broken

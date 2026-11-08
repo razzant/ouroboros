@@ -6,6 +6,7 @@
 // source that could not be read says so in the status line without blanking
 // the others. Install returns at once; the card follows the skill's real state.
 import { applyMasonry } from './masonry.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
 import { installedSkillModel } from './skill_card_renderer.js';
@@ -87,8 +88,10 @@ export function shelfItems(catalog, installedByName, { query = '', source = 'all
     return recommendedMissing(Array.isArray(catalog.items) ? catalog.items : [], installedByName);
 }
 
-function installedFrom(row) {
-    return row?.install?.source?.id || '';
+function installedHere(item, row) {
+    // A copy without a source record counts as this one; a recorded copy needs this source's id: the host
+    // names the connected source the copy matches now (none: no id), whatever id it was installed under.
+    return row && !row.lifecycle_virtual && (!row.install || row.install.source?.id === item.source_id) ? row : null;
 }
 
 /**
@@ -96,7 +99,7 @@ function installedFrom(row) {
  * catalog item, its source, the installed listing (`listed`: it has been read)
  * and the installs started here.
  */
-export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false } = {}) {
+export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false, pageModules = {} } = {}) {
     const id = escapeHtml(item.id);
     const act = (label, action, tone = 'default', extra = '') => buttonHtml(label, { tone, attrs: `data-browse-action="${action}" data-item="${id}"${extra ? ` ${extra}` : ''}` });
     if (pending && !installed?.lifecycle_virtual) {
@@ -124,16 +127,15 @@ export function browseCardState(item, { source = null, installed = null, listed 
             : { status: statusHtml(`Installed · ${escapeHtml(versionText(item.installed.version))}`, 'muted'), action: '' };
     }
     if (installed && !installed.lifecycle_virtual) {
-        const fromHere = !installedFrom(installed) || installedFrom(installed) === item.source_id;
-        if (!fromHere) {
+        if (!installedHere(item, installed)) {
             const other = installed.install?.source?.name || 'another source';
             return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
         }
-        const model = installedSkillModel(installed, { reviewing });
+        const model = installedSkillModel(installed, { reviewing, pageModules });
         const v = escapeHtml(versionText(installed.version));
         const update = installed.install?.update_available;
         const retryUpdate = update && installed.install?.update_rejected;
-        if (model.modified && !retryUpdate) return { status: statusHtml(`Installed · modified here`, 'muted'), action: act('Details', 'open', 'ghost') };
+        if (model.modified && !retryUpdate && !model.needs) return { status: statusHtml(`Installed · modified here`, 'muted'), action: act('Details', 'open', 'ghost') };
         if (installed.lifecycle_pending) return { status: statusHtml(escapeHtml(installed.lifecycle_kind === 'update' ? 'Updating…' : 'Working…'), 'muted', { work: true }), action: '' };
         if (/Reviewing/.test(model.chip)) {
             return { status: statusHtml('Reviewing · you can skip', 'muted', { work: true }), action: skipReviewButtonHtml(`data-browse-action="skip" data-item="${id}"`) };
@@ -164,10 +166,10 @@ export function renderBrowseCard(item, { source, state, categoryLabels = new Map
     const cats = [connects ? chipHtml(connects, 'neutral') : '', ...(showCategory ? (item.category || [])
         .filter((cat) => cat !== CONNECTORS || !connects).map((cat) => chipHtml(categoryLabels.get(cat) || cat, 'neutral')) : [])].join('');
     const icon = connects ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(item.icon, 18)}</span>` : '';
-    return `<article class="marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
-        <div class="skills-head-title">${icon}<button type="button" class="skills-card-name" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
+    return `<article class="ui-card marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
+        <div class="skills-head-title">${icon}<button type="button" class="skills-card-name ui-hit-area" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
         <p class="skills-card-purpose"${long ? ' data-clamped' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
-        ${long ? `<button type="button" class="skills-read-more" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
+        ${long ? `<button type="button" class="skills-read-more ui-hit-area" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
         <div class="skills-card-meta-lines">
             <div class="skills-card-who"><span data-i18n-authored>${escapeHtml(item.name)}</span> · ${catalogWhoHtml(item)}</div>
             ${facts ? `<div class="skills-card-facts">${escapeHtml(facts)}</div>` : ''}
@@ -207,7 +209,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             <label class="ui-field-inline skills-browse-filter"><span>Sort</span><select class="ui-control" data-browse-sort aria-label="Sort"></select></label>
             <label class="skills-official-toggle"><span class="skills-switch"><input type="checkbox" role="switch" data-browse-official aria-checked="false"><span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span></span><span>Official only</span></label>
         </div>`;
-    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories"></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
+    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories" data-scroll-x></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
     const searchInput = chrome.querySelector('[data-browse-search]');
     const sourceSelect = chrome.querySelector('[data-browse-source]');
     const sortSelect = chrome.querySelector('[data-browse-sort]');
@@ -215,6 +217,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     const statusEl = pane.querySelector('[data-browse-status]');
     const board = pane.querySelector('[data-browse-board]');
     const categoriesEl = pane.querySelector('[data-browse-categories]');
+    if (categoriesEl) bindScrollFade(categoriesEl, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
 
     const sourceById = () => new Map(state.sources.map((source) => [source.id, source]));
     const categoryLabels = () => new Map([...(state.catalog?.categories || []).map((cat) => [cat.id, cat.label || cat.id]), [CONNECTORS, 'Connectors']]);
@@ -300,11 +303,13 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     function stateFor(item) {
         const listing = host.installedByName();
+        const pageModules = host.pageModuleFacts?.() || {};
         const pending = state.pending.get(item.id) || null;
         return browseCardState(item, {
             source: sourceById().get(item.source_id) || null,
             installed: listing?.get(item.name) || null, listed: Boolean(listing),
             pending, failure: state.failures.get(item.id) || '',
+            pageModules,
         });
     }
 
@@ -455,7 +460,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     function openSheet(item, opener) {
         state.sheet?.handle.close();
         const handle = openSkillDetailSheet({
-            item, installed: host.installedByName()?.get(item.name) || null,
+            item, installed: installedHere(item, host.installedByName()?.get(item.name)),
             source: sourceById().get(item.source_id) || null,
             actionsHtml: sheetActions(item),
             // A registry hit has no entry to read until it is installed; its card is all there is.

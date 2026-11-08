@@ -638,6 +638,10 @@ def test_registry_golden_e2e_start_wait_apply_review_stale(tmp_path, monkeypatch
         "    description: Run.\n---\n", encoding="utf-8")
     (skill / "scripts").mkdir()
     (skill / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    # Credential-like names are ordinary payload on the whole path (owner choice): one already
+    # in the live payload, others the child creates; synthetic fixtures, no real keys.
+    (skill / ".env").write_bytes(b"TOKEN=synthetic-live\n")
+    (skill / "credentials.json").write_bytes(b'{"fixture": true}\n')
     sibling = _seed_skill(data, name="beta")
     sibling_bytes = (sibling / "SKILL.md").read_bytes()
     # A PASS review bound to the CURRENT payload content.
@@ -665,20 +669,30 @@ def test_registry_golden_e2e_start_wait_apply_review_stale(tmp_path, monkeypatch
         "root": "skill_payload", "bucket": "external", "skill_name": "alpha"}))
     assert started["status"] == "started", started
     exec_root = pathlib.Path(str(seen["request"]["scope"]["root"]))
+    assert (exec_root / ".env").read_bytes() == b"TOKEN=synthetic-live\n"  # passed to the child whole
     # The deterministic "harness" edits the private snapshot only.
     (exec_root / "notes.txt").write_text("DONE\n", encoding="utf-8")
+    created = {".env": b"TOKEN=synthetic-edited\n", "prod.env": b"MODE=fixture\n",
+               "id_rsa": b"SYNTHETIC KEY FIXTURE\n"}
+    for rel, body in created.items():
+        (exec_root / rel).write_bytes(body)
     assert (skill / "notes.txt").read_text(encoding="utf-8") == "PENDING\n"
 
     out = _terminal_wait(ctx, monkeypatch)
     assert out["status"] == "terminal"
     capture = out["workspace_capture"]
     assert capture["status"] == "ready_with_changes", capture
+    manifest = json.loads(pathlib.Path(capture["manifest_artifact"]).read_text(encoding="utf-8"))
+    assert set(manifest["tracked_changed"]) == {"notes.txt", *created}
+    assert manifest["blocked_reserved_paths"] == []
     assert (skill / "notes.txt").read_text(encoding="utf-8") == "PENDING\n"
 
     applied = registry.execute("integrate_delegated_patch", {
         "run_id": "run-p1", "decision": "apply", "reason": "golden"})
     assert "✅ Integrated" in applied, applied
     assert (skill / "notes.txt").read_text(encoding="utf-8") == "DONE\n"
+    assert {rel: (skill / rel).read_bytes() for rel in created} == created
+    assert (skill / "credentials.json").read_bytes() == b'{"fixture": true}\n'
     assert not (skill / ".git").exists()
     # Sibling skill + lifecycle sidecars byte-identical; enablement unchanged.
     assert (sibling / "SKILL.md").read_bytes() == sibling_bytes
@@ -692,6 +706,9 @@ def test_registry_golden_e2e_start_wait_apply_review_stale(tmp_path, monkeypatch
     from tests.test_skill_review_persist_guard import _clean_wave
 
     _clean_wave(monkeypatch)  # the golden pool's seats answer clean through the real custody layer
+    from ouroboros.skill_review_packs import frozen_payload_files
+
+    assert {".env", "credentials.json", *created} <= {row["path"] for row in frozen_payload_files(skill)}
     preflight = json.loads(registry.execute("skill_preflight", {"skill": "alpha"}))
     assert preflight.get("ok") is True, preflight
     review_out = registry.execute("skill_review", {"skill": "alpha"})
@@ -832,14 +849,16 @@ def test_payload_instructions_variant_is_payload_only(tmp_path, monkeypatch, acc
     from ouroboros.tools.delegate import _HOST_INSTRUCTIONS, _host_instructions
 
     ordinary = _host_instructions(delegated_run_shape(False))
-    ban = "do not touch the host's runtime controls or memory, or modify its skills"
+    ban = ("do not touch the host's runtime controls, or modify its memory or skills; unless your assignment "
+           "restricts reads, you may read the memory files your session references name")
     assert ban in ordinary
     assert "PAYLOAD ASSIGNMENT" not in ordinary
     mutating = _host_instructions(delegated_run_shape(True, access))
     assert ban in mutating
     payload = _host_instructions(delegated_run_shape(True, access), payload_skill="alpha")
-    assert "modify its skills" not in payload
-    assert "do not touch the host's runtime controls or memory." in payload
+    assert "modify its memory or skills" not in payload
+    assert ("do not touch the host's runtime controls, or modify its memory; unless your assignment "
+            "restricts reads, you may read the memory files your session references name") in payload
     assert "PAYLOAD ASSIGNMENT" in payload and "'alpha'" in payload
     assert ban in _HOST_INSTRUCTIONS  # source intact
 

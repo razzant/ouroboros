@@ -18,7 +18,6 @@ import pytest
 from ouroboros import mcp_client
 from tests.test_mcp_headers_loopback import loopback  # noqa: F401
 
-pytestmark = pytest.mark.serial  # binds real loopback ports
 
 KEY = "synthetic-redirect-key-0001"
 TOKEN = "Bearer synthetic-redirect-token-0002"

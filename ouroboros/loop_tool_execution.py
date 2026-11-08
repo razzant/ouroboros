@@ -14,21 +14,21 @@ import os
 import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
 from ouroboros.config import (
     NESTED_SETTLEMENT_MARGIN_SEC,
-    get_finalization_grace_sec,
     load_settings,
 )
-from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
     CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
-    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source,
+    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
+    worker_position,
 )
 from ouroboros.tool_capabilities import (
     FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
@@ -82,9 +82,11 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     # Tools share the cognitive-operation idle lease;
     # a timeout/late notice deliberately does NOT close the lease because the
     # worker thread may still be running after the logical caller returned.
+    # The settlement row (``CALL_SETTLED``) closes it: every call publishes it
+    # before its ``tool_call_finished`` frame, so that frame states no change.
     operation_id = str(enriched.get("invocation_id") or enriched.get("tool_call_id") or "")
     event_type = str(enriched.get("type") or "")
-    if operation_id and event_type in {"tool_call_started", "tool_call_finished", CALL_SETTLED}:
+    if operation_id and event_type in {"tool_call_started", CALL_SETTLED}:
         emit_cognitive_operation_event(
             event_queue,
             task_id=str(enriched.get("task_id") or getattr(tool_ctx, "task_id", "") or ""),
@@ -258,16 +260,19 @@ def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
 
 def _get_tool_timeout(
     tools: ToolRegistry, tool_name: str, tool_args: Optional[Dict[str, Any]] = None
-) -> int:
-    """Return max(settings/env timeout, per-tool minimum).
+) -> Optional[int]:
+    """Return max(settings/env timeout, per-tool minimum); ``None`` for a long-lived entry
+    with no window (``ToolEntry.timeout_sec=None``), which Tool Timeout never re-caps and only
+    the deadline clamp below can narrow.
 
     A handler that bounds its own child (``shell_process.COMMAND_TIMEOUT_TOOLS``) waits
     at least that child's timeout plus the settlement margin, resolved by the handler's
     own function from the arguments dispatch hands it (its alias folding, on a copy), so
     the child's cleanly reported timeout fires first; a second rule once ran a 1800 s
-    check under a 1000 s wait (#1376). Near a task deadline the child keeps its 60 s
-    floor, so this wait can outlast that deadline as the registered window already
-    could; what settles after the wait ends is a late result (``late_tool_results``).
+    check under a 1000 s wait (#1376). Near a task bound the child is narrowed to what is
+    left of it less the finalization reserve and a spent bound starts no child, but this
+    wait never drops below the registered window, so it can outlast that bound as it
+    already could; what settles after the wait ends is a late result (``late_tool_results``).
     """
     settings_val = 0
     try:
@@ -284,11 +289,12 @@ def _get_tool_timeout(
             except ValueError:
                 pass
     per_tool = tools.get_timeout(tool_name)
-    base = max(settings_val, per_tool) if settings_val > 0 else per_tool
+    base = max(settings_val, per_tool) if settings_val > 0 and per_tool is not None else per_tool
     if tool_name in {"analyze_screenshot", "vlm_query"}:
         from ouroboros.tools.vision import _vision_tool_timeout
 
-        base = max(base, _vision_tool_timeout(tools._ctx, tool_args or {}))
+        vision = _vision_tool_timeout(tools._ctx, tool_args or {})
+        base = None if vision is None else max(base, vision)
     if tool_name in _PER_CALL_TIMEOUT_TOOLS:
         call_args, entry = dict(tool_args or {}), (getattr(tools, "_entries", None) or {}).get(tool_name)
         if entry is not None:
@@ -311,40 +317,15 @@ _DEADLINE_CLAMPED_TOOLS = frozenset({
 })
 
 
-def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout: int) -> int:
-    """min(tool timeout, remaining − finalization reserve) for network/long tools.
-
-    ``remaining`` is the nearer explicit bound: ``deadline_at`` or the execution
-    window (#939). With neither the behavior is byte-identical. An already-elapsed
-    bound is also left unclamped — the loop's forced finalization owns that path.
-    The clamp never floors PAST the reserve: inside or near the finalization window
-    the tool gets a near-immediate (1s) timeout — a fast, cleanly-messaged failure —
-    rather than a grace-period-eating floor (review round 1: a 30s floor let one web
-    call consume the reserve the clamp exists to protect)."""
+def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout: Optional[int]) -> Optional[int]:
+    """min(tool timeout, remaining − finalization reserve) for network/long tools; a tool
+    with no window (``None``) takes the clamped remainder itself, else keeps ``None``. The
+    arithmetic is ``deadline_utils.deadline_clamped_timeout_sec`` (one owner): with neither
+    bound the behavior is byte-identical, an elapsed one stays unclamped (forced
+    finalization owns it), and near the reserve the tool gets 1 s, never a grace-eating floor."""
     if tool_name not in _DEADLINE_CLAMPED_TOOLS:
         return base_timeout
-    try:
-        remaining = deadline_remaining_sec(getattr(tools, "_ctx", None))
-        from ouroboros.model_wait import explicit_execution_window_remaining
-        execution_left = explicit_execution_window_remaining(getattr(tools, "_ctx", None))  # #939
-        if execution_left is not None:
-            remaining = min(remaining, execution_left) if remaining > 0 else execution_left
-    except Exception:
-        return base_timeout
-    if remaining <= 0:
-        return base_timeout
-    # v6.55.0: the plain finalization GRACE emit-window (task_pacing SSOT), NOT the pct
-    # reserve (a review gate): clamping out the last pct-of-total strands long tasks idle.
-    try:
-        from ouroboros.task_pacing import effective_finalization_reserve_sec
-
-        reserve = effective_finalization_reserve_sec(getattr(tools, "_ctx", None))
-    except Exception:
-        reserve = float(get_finalization_grace_sec())
-    window = remaining - reserve
-    if window >= base_timeout:
-        return base_timeout
-    return int(max(1.0, min(float(base_timeout), window)))
+    return deadline_clamped_timeout_sec(getattr(tools, "_ctx", None), base_timeout)
 
 
 def _truncate_tool_result(
@@ -609,12 +590,12 @@ def _execute_single_tool(
     correlation = {key: invocation[key] for key in ("execution_id", "round_id", "llm_call_id") if key in invocation}
     # The invocation id and attempt make this call's own manifest (one address per invocation)
     # bindable to its wait-end record when it settles after a timeout (``late_tool_results``).
-    trace_identity = {"tool": fn_name, "tool_call_id": tool_call_id,
+    trace_identity = {"tool": fn_name, "tool_call_id": tool_call_id, **({"via": tc["via"]} if tc.get("via") else {}),
                       "parent_call_id": correlation.get("llm_call_id"),
                       "execution_id": correlation.get("execution_id"), "round_id": correlation.get("round_id"),
                       **{key: invocation[key] for key in ("invocation_id", "task_attempt") if key in invocation}}
     settlement = {"type": CALL_SETTLED, "tool": fn_name, "task_id": task_id, **invocation_fields(invocation),
-                  **start_log_field(invocation)}
+                  **start_log_field(invocation), **({"via": tc["via"]} if tc.get("via") else {})}
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
@@ -678,6 +659,9 @@ def _execute_single_tool(
 
         with staged_read_delivery_scope():
             tool_result = host_refusal if host_refusal is not None else tools.execute_result(fn_name, args)
+        if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
+            from ouroboros.tools.tool_discovery import with_gateway_schema
+            tool_result = with_gateway_schema(tools, fn_name, tool_result)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -826,7 +810,7 @@ def tool_timeout_text(fn_name: str, timeout_sec: float, reset_msg: str = "") -> 
 
 
 @contextlib.contextmanager
-def abandoned_on_timeout(timeout_sec: float, *, bounded: bool = True) -> Iterator[Callable[..., Any]]:
+def abandoned_on_timeout(timeout_sec: Optional[float], *, bounded: bool = True) -> Iterator[Callable[..., Any]]:
     """Own the private worker of ONE call so a timed-out call can be ABANDONED.
 
     The late-settlement half of tool execution, without its task-log rows, so
@@ -876,7 +860,8 @@ def _make_timeout_result(
     except Exception:
         pass
 
-    result = tool_timeout_text(fn_name, timeout_sec, reset_msg)
+    position = worker_position(invocation)  # P1: where the abandoned worker stands
+    result = tool_timeout_text(fn_name, timeout_sec, reset_msg) + worker_phrase(position)
     tool_result = ToolResult(
         status="timeout",
         code="TOOL_TIMEOUT",
@@ -904,7 +889,7 @@ def _make_timeout_result(
                 "args_redacted_preview": args_for_log,
                 "result": result,
                 "result_meta": result_meta,
-                **frozen,
+                **frozen, **position,
             },
             manifest={
                 "execution_id": corr.get("execution_id"),
@@ -936,7 +921,7 @@ def _make_timeout_result(
         **(live or {}), "ts": utc_now_iso(), "type": CALL_WAIT_ENDED, "tool": fn_name, "task_id": task_id,
         "args": args_for_log, "timeout_sec": timeout_sec, "waited_ms": elapsed_ms(invocation),
         "result_preview": result, "result_ref": result_ref, **invocation_fields(invocation),
-        **start_log_field(invocation),
+        **start_log_field(invocation), **{k: v for k, v in position.items() if k != "worker_stack"},
     }, corr, tool_call_id=tool_call_id)
     wait_log = _append_tool_log(tools, drive_logs, dict(row))
     if live is not None:  # the live frame also names a failed append of this very row
@@ -980,11 +965,12 @@ def _execute_with_timeout(
     tools: ToolRegistry,
     tc: Dict[str, Any],
     drive_logs: pathlib.Path,
-    timeout_sec: int,
+    timeout_sec: Optional[int],
     task_id: str = "",
     stateful_executor: Optional[StatefulToolExecutor] = None,
 ) -> Dict[str, Any]:
-    """Execute one tool call with timeout handling.
+    """Execute one tool call with timeout handling (``None``: a long-lived handler that
+    observes the owner's controls itself, waited for without a host timeout).
 
     The call's identity is frozen and its durable ``tool_call_started`` row written
     BEFORE submission (#1316): that row means host processing began, not that the
@@ -1017,7 +1003,7 @@ def _execute_with_timeout(
     # Durable/live start share identity for replay deduplication.
     live = _with_correlation({
         "ts": utc_now_iso(), "type": CALL_STARTED, "task_id": task_id, "tool": fn_name,
-        "timeout_sec": None if is_reviewed_mutative else timeout_sec,
+        **({"via": tc["via"]} if tc.get("via") else {}), "timeout_sec": None if is_reviewed_mutative else timeout_sec,
         "terminal_wait": terminal_wait, "args": args_for_log,
         **receipt, **invocation_fields(invocation),
     }, correlation, tool_call_id=tool_call_id)
@@ -1039,7 +1025,8 @@ def _execute_with_timeout(
                     with execution_deadline_scope(monotonic_now() + timeout_sec):
                         return submit_tool(tool_ctx, fn_name, stateful_executor.submit, fn, *values)
             else:
-                submit = scope.enter_context(abandoned_on_timeout(timeout_sec, bounded=not is_reviewed_mutative))
+                submit = scope.enter_context(abandoned_on_timeout(
+                    timeout_sec, bounded=not is_reviewed_mutative and timeout_sec is not None))
             from ouroboros.owner_pause import OwnerPauseRefused
             from ouroboros.store import StoreError
             try:
@@ -1168,6 +1155,7 @@ def handle_tool_calls(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Execute tool calls, append results, and return error count.
 
@@ -1177,19 +1165,79 @@ def handle_tool_calls(
     delivered under the measured frame. Without them results are delivered
     whole, best effort, and no cap is invented.
     """
-    from ouroboros.openai_chat_dispatch import (
-        custom_tool_argument_error,
-        custom_validation_by_call_id,
-    )
+    initial_count = len(llm_trace.get("tool_calls") or [])
+    results = execute_tool_calls(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
+    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
+                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
+    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
+        tools._ctx._skill_finalization_injected = False
+    return errors
 
+
+def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """A result only the batch can state about one of its calls, in the shape of any other."""
+    fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
+    tool_result = ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
+    return {
+        "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
+        "tool_call_id": tc.get("id", ""),
+        "fn_name": fn_name,
+        "result": text,
+        "is_error": True,
+        "tool_args": {},
+        "args_for_log": {},
+        "is_code_tool": fn_name in tools.CODE_TOOLS,
+        "result_meta": _typed_result_metadata(fn_name, text, True, tool_result),
+        "tool_result": tool_result,
+    }
+
+
+def _unexpected_batch_error(tools: ToolRegistry, tc: Dict[str, Any], exc: BaseException) -> Dict[str, Any]:
+    return _batch_error_result(tools, tc, f"⚠️ TOOL_ERROR: Unexpected error: {sanitize_tool_result_for_log(str(exc))}")
+
+
+def _left_by_control(tools: ToolRegistry, tc: Dict[str, Any], control: BaseException, *, started: bool) -> Dict[str, Any]:
+    """What ending the batch left of one call. Only a never-entered call can say its effect did not happen."""
+    fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
+    reason = getattr(control, "control_reason", "") or type(control).__name__
+    return _batch_error_result(tools, tc, (
+        f"⚠️ TOOL_ERROR ({fn_name}): {reason} interrupted this call before it returned. Its effect may have "
+        "happened and may still finish; check before repeating it." if started else
+        f"⚠️ TOOL_ERROR ({fn_name}): NOT STARTED: {reason} ended this batch before the handler was entered."))
+
+
+def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException) -> Dict[str, Any]:
+    """A parallel call once its pool has settled: the shutdown cancelled only those still queued."""
+    if future.cancelled():
+        return _left_by_control(tools, tc, control, started=False)
+    error = future.exception()
+    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)):
+        return _left_by_control(tools, tc, error, started=not getattr(error, "invocation_not_started", False))
+    return future.result() if error is None else _unexpected_batch_error(tools, tc, error)
+
+
+def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
+                       stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Run one batch's effects and return their results; ``process_tool_results`` records them."""
+    results, control = execute_tool_batch(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
+    if control is not None:
+        raise control
+    return results
+
+
+def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
+                       stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any],
+                       ) -> Tuple[List[Dict[str, Any]], Optional[Exception]]:
+    """``execute_tool_calls`` for a caller that records a batch cut short: one result per call, exact where it
+    finished, beside the exception that ended the batch, which that caller raises after recording them."""
+    from ouroboros.openai_chat_dispatch import custom_tool_argument_error, custom_validation_by_call_id
     from ouroboros.loop_delivery import completion_observation
     if not isinstance(getattr(tools._ctx, "_completion_observation", None), dict):
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
-    initial_count = len(llm_trace.get("tool_calls") or [])
-    validation = tuple(
-        getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ()
-    )
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    tool_calls = [resolve_gateway_call(tc) for tc in tool_calls]  # a gateway envelope runs as the MCP call it names
+    validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
 
@@ -1229,9 +1277,17 @@ def handle_tool_calls(
         return result
 
     can_parallel = tool_calls_can_run_parallel(tool_calls)
+    results: List[Any] = [None] * len(tool_calls)
+    control: Optional[Exception] = None
 
     if not can_parallel:
-        results = [_execute(tc) for tc in tool_calls]
+        for idx, tc in enumerate(tool_calls):
+            try:
+                results[idx] = _execute(tc)
+            except Exception as exc:
+                control = exc
+                results[idx] = _left_by_control(tools, tc, exc, started=not getattr(exc, "invocation_not_started", False))
+                break
     else:
         max_workers = min(len(tool_calls), 8)
         executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -1244,57 +1300,38 @@ def handle_tool_calls(
                 ): idx
                 for idx, tc in enumerate(tool_calls)
             }
-            results = [None] * len(tool_calls)
             batch_raised = True
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
                 try:
                     results[idx] = future.result()
-                except (UsageAccountingError, ModelWaitInterrupted):
-                    raise
+                except (UsageAccountingError, ModelWaitInterrupted) as exc:
+                    control = exc
+                    break
                 except Exception as exc:
-                    tc = tool_calls[idx]
-                    requested_fn_name = tc.get("function", {}).get("name", "unknown")
-                    fn_name = str(requested_fn_name or "").strip()
-                    safe_error = sanitize_tool_result_for_log(str(exc))
-                    result = f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}"
-                    tool_result = ToolResult(
-                        status="error",
-                        code="EXECUTOR_ERROR",
-                        text=result,
-                    )
-                    results[idx] = {
-                        "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
-                        "tool_call_id": tc.get("id", ""),
-                        "fn_name": fn_name,
-                        "result": result,
-                        "is_error": True,
-                        "tool_args": {},
-                        "args_for_log": {},
-                        "is_code_tool": fn_name in tools.CODE_TOOLS,
-                        "result_meta": _typed_result_metadata(fn_name, result, True, tool_result),
-                        "tool_result": tool_result,
-                    }
-            batch_raised = False
+                    results[idx] = _unexpected_batch_error(tools, tool_calls[idx], exc)
+            else:
+                batch_raised = False
         finally:
             # A batch leaving on an exception (BudgetExceeded) must not strand an
             # already-running wrapper that has not yet registered its inner future
             # with budget-pause quiescence: cancel the queued ones, WAIT for the
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
             executor.shutdown(wait=batch_raised, cancel_futures=True)
-
-    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
-                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas)
-    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
-        tools._ctx._skill_finalization_injected = False
-    return errors
+        if control is not None:
+            for future, idx in future_to_index.items():
+                if results[idx] is None:
+                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control)
+    if control is not None:  # a sequential batch's remainder was never entered
+        results = [row or _left_by_control(tools, tc, control, started=False) for row, tc in zip(results, tool_calls)]
+    return results, control
 
 
 def _maybe_auto_attach_image(
     exec_result: Dict[str, Any],
     tools: Optional[ToolRegistry],
     *, staged_messages: Optional[list] = None,
-) -> Optional[Dict[str, str]]:
+) -> Optional[Dict[str, Any]]:
     """Same-round image attachment for tool results that explicitly offer one.
 
     A successful result whose JSON carries ``auto_attach_image: <local path>`` — a
@@ -1314,22 +1351,25 @@ def _maybe_auto_attach_image(
     the path, so the agent can view it manually, which is exactly the pre-6.81.1
     behavior.
 
-    EXTENSION tool results only (the ``ext_`` surface): this capability is
-    defined for first-party skills, whose payloads the review/grant lifecycle
-    already governs. MCP results are untrusted server-supplied data — honoring
-    the field there would let a remote server convert an agent-chosen context
-    mutation into a data-driven automatic one. (The perimeter below would still
-    hold — same roots/size/MIME as view_image — but the narrower surface is the
-    honest contract.)"""
+    The ``auto_attach_image`` field is honored for EXTENSION tool results only
+    (the ``ext_`` surface): first-party skills, whose payloads the review/grant
+    lifecycle already governs. MCP text is untrusted server data — honoring the
+    field there would let a remote server turn an agent-chosen context mutation
+    into a data-driven one. A successful MCP call's protocol images are offered
+    instead by host metadata minted at projection (``mcp_result_images``), never
+    by its text, ``_meta`` or a path it names."""
     if tools is None or exec_result.get("is_error"):
         return
+    typed = exec_result.get("tool_result")
+    if isinstance(typed, ToolResult) and typed.meta.get("mcp_image_owner"):
+        from ouroboros.mcp_result_images import attach_returned_images
+        return attach_returned_images(getattr(tools, "_ctx", None), typed, staged_messages)
     if not str(exec_result.get("fn_name") or "").startswith("ext_"):
         return
     # A payload that declares its own failure must not have an image lifted out of
     # it, even when the executor call itself did not raise. Read the typed code the
     # dispatcher published rather than re-deriving the JSON fact here: this guard
     # is the SECOND consumer of that fact and must not drift from the first.
-    typed = exec_result.get("tool_result")
     if isinstance(typed, ToolResult) and typed.code == "TOOL_REPORTED_FAILURE":
         return
     raw = (typed.producer_text if isinstance(typed, ToolResult)
@@ -1351,7 +1391,13 @@ def _maybe_auto_attach_image(
         observation = {"status": "unavailable"}
         from ouroboros.tools.vision import attach_local_image_to_context
 
-        ok, note = attach_local_image_to_context(ctx, path, stamp=getattr(tools, "_ctx", None), observation=observation)
+        # The producer's typed capture target, never the output filename or pixels.
+        target = parsed.get("auto_attach_source")
+        if target is None and isinstance(parsed.get("display"), dict):
+            target = parsed["display"].get("index")
+        source = json.dumps([exec_result["fn_name"], target], sort_keys=True) if target not in (None, "") else ""
+        ok, note = attach_local_image_to_context(ctx, path, stamp=getattr(tools, "_ctx", None),
+                                               observation=observation, **({"capture_source": source} if source else {}))
         observation["status"] = "attached" if ok else "unavailable"
         if not ok:
             observation["reason"] = note
@@ -1390,6 +1436,7 @@ def process_tool_results(
     *,
     fit_candidate: Optional[FitCandidate] = None,
     tool_schemas: Optional[list] = None,
+    project_results: Optional[Callable] = None,
 ) -> int:
     """Append tool results to messages/trace and return error count.
 
@@ -1427,8 +1474,10 @@ def process_tool_results(
                      else row for row in messages]
     history_count = len(messages)
     image_observations = [_maybe_auto_attach_image(row, tools, staged_messages=image_history) for row in results]
+    from ouroboros.mcp_result_images import settle_returned_images
+    settle_returned_images(results, image_observations, image_history)  # final per-image states, before delivery
     image_messages = image_history[history_count:]
-    views = _deliver_tool_results(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
+    views = (project_results or _deliver_tool_results)(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
                                   [*review_updates, *dialogue_updates, *image_messages])
     messages[:] = image_history[:history_count]
 
@@ -1463,6 +1512,12 @@ def process_tool_results(
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery
             acknowledge_question_delivery(ctx, truncated_result)  # exposure needs the complete ready view
+        if ctx is not None and published.get("held_dependency_notice") and not (is_error or result_partial):
+            from ouroboros.model_sleep import acknowledge_hold_delivery
+            acknowledge_hold_delivery(ctx, truncated_result)  # likewise for a held dependency
+        elif ctx is not None and not is_error and (published.get("held_dependency_notice") or published.get("read_view")):
+            from ouroboros.model_sleep import credit_hold_source
+            credit_hold_source(ctx, exec_result, view)  # a shortened one: shown once its exact source was, whole
         if ctx is not None and published.get("review_delivery") and not result_partial:
             from ouroboros.review_waiting import acknowledge_delivery
             acknowledge_delivery(ctx, published["review_delivery"])
@@ -1528,6 +1583,8 @@ def process_tool_results(
             if pending.get(key) == value:
                 pending.pop(key)
         ctx._pending_review_context = pending
+        if getattr(ctx, "_held_dependencies_pending", None):
+            ctx._held_dependencies_pending = []  # the batch reached the transcript: undelivered holds re-read
     # Auto-attach AFTER the round's complete tool-message block, never between two
     # tool messages answering the same assistant turn: the user(image) injection
     # then preserves tool-result contiguity BY CONSTRUCTION instead of relying on

@@ -1,7 +1,7 @@
 """Shared evidence sections: the task contract and its effective claims, the
 host-attested verification receipts, and the owner's verbatim corpus.
 
-Each section redacts before publication and discloses omissions. Readers: result
+Each section carries its sources' own text and discloses omissions. Readers: result
 review (``tools.review_result``), delivery criteria (``loop_delivery``), owner
 words, post-task synthesis and plan facts; ``review_evidence`` re-exports them.
 The retired task-acceptance packet's budget and content revision stay below only
@@ -37,14 +37,9 @@ def _ev():
 _ACCEPT_NOTES_CAP = 8000               # commit-review exhibit preview bound
 
 
-def _accept_redact_cap(value: Any, limit: int | None, suffix: str = "") -> str:
-    from ouroboros.observability import redact_projection
-
-    if isinstance(value, str):
-        red = redact_projection(value).value
-    else:
-        # Structural masking first, then token redaction after serialization.
-        red = redact_projection(json.dumps(redact_projection(value).value, ensure_ascii=False, default=str)).value
+def _accept_cap(value: Any, limit: int | None, suffix: str = "") -> str:
+    """The receipt's own text (serialized when structured), bounded with a disclosed cut."""
+    red = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     if limit is None:
         return red
     if not suffix:
@@ -56,7 +51,7 @@ def _accept_redact_cap(value: Any, limit: int | None, suffix: str = "") -> str:
 def _accept_task_contract(ctx: Any) -> Dict[str, Any]:
     """Return the full normalized task contract, never a hand-maintained allowlist.
 
-    Explicit contract fields win over nested metadata; redaction happens at the call site."""
+    Explicit contract fields win over nested metadata."""
     contract = getattr(ctx, "task_contract", {})
     meta = getattr(ctx, "task_metadata", {})
     out: Dict[str, Any] = {}
@@ -99,16 +94,15 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
     _masked = unreconciled_masked(valid)
     _masked_pass = _masked[-1] if _masked else None
     # v6.78.0: the SHARED identity projection (SSOT with the fixed ledger receipt row),
-    # rendered through the redacting `_accept_redact_cap` because a receipt's `check`
-    # and observed paths are raw host command surface.
+    # bounded through `_accept_cap` (disclosed truncation; the text itself is unrewritten).
     def _identity(receipt: Dict[str, Any]) -> Dict[str, Any]:
-        return receipt_identity_projection(receipt, bound=_accept_redact_cap, check_cap=400)
+        return receipt_identity_projection(receipt, bound=_accept_cap, check_cap=400)
 
     _reds = unreconciled_failed(valid)
     _red = _reds[-1] if _reds else None
     _latest_identity = _identity(latest)
     # Canonicalize the RAW set first, render and bound it second — always that order.
-    # Redaction and truncation are lossy, so de-duplicating the RENDERED strings (as
+    # Truncation is lossy, so de-duplicating the RENDERED strings (as
     # this did) collapsed distinct long paths sharing a rendered prefix while
     # `artifacts_missing_after_omitted` still reported 0. Same rule, same helper, as the
     # receipt path sets and `fold_retrieval_usage`'s raw-keyed URL dedup.
@@ -154,9 +148,8 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         # criterion_id, check text, and the observed-path SET that IS the identity of the
         # command-less artifact-observation class (for which `latest_check` is empty), plus
         # the disclosed omitted count / full-set hash whenever the path list is bounded.
-        # The receipt `check`/`summary`/paths are raw host command stdout/stderr — redact (NOT
-        # just truncate) before they reach the reviewer prompt (review #1, HIGH-1: this was the
-        # one packet block bypassing redaction). `_accept_redact_cap` redacts + DISCLOSED-truncates.
+        # The receipt `check`/`summary`/paths reach the reviewer as recorded, DISCLOSED-truncated
+        # by `_accept_cap`.
         "latest_identity": _latest_identity,
         "latest_check": _latest_identity["check"],
         "latest_returncode": latest.get("returncode"),
@@ -167,24 +160,23 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         # (check process lifetime), `latest_signal` (POSIX signal name of a
         # killed check — a 9ms SIGKILL is not an ordinary red), and
         # `latest_resolved_runtime` (the substituted physical executable;
-        # absent = the recorded check argv ran as written). The path is raw
-        # host surface, so it goes through the redacting bound.
+        # absent = the recorded check argv ran as written), bounded like the rest.
         **({"latest_duration_ms": latest.get("duration_ms")} if latest.get("duration_ms") is not None else {}),
         **({"latest_signal": str(latest.get("signal") or "")} if latest.get("signal") else {}),
-        **({"latest_resolved_runtime": _accept_redact_cap(str(latest.get("resolved_runtime") or ""), 300)} if latest.get("resolved_runtime") else {}),
+        **({"latest_resolved_runtime": _accept_cap(str(latest.get("resolved_runtime") or ""), 300)} if latest.get("resolved_runtime") else {}),
         "latest_expected_match": str(latest.get("expected_match") or ""),
-        "latest_summary": _accept_redact_cap(str(latest.get("summary") or ""), 2000),
+        "latest_summary": _accept_cap(str(latest.get("summary") or ""), 2000),
         # C: aggregate the after-only artifact-lifecycle flag across ALL receipts (a deleted
         # deliverable is interesting even if a later receipt passed clean). Flag-only — the
         # status stays pass; the LLM reviewer judges whether attesting a now-missing artifact
-        # is acceptable (Bible P5). Paths redacted before reaching the reviewer prompt.
+        # is acceptable (Bible P5).
         "artifacts_missing_after_any": any(bool(r.get("artifacts_missing_after")) for r in valid),
         # Same P1 rule as the identity paths, through the SAME shared helper: the bound
-        # stays, the SILENCE does not. Redaction/truncation happen HERE, after the set
+        # stays, the SILENCE does not. Truncation happens HERE, after the set
         # was canonicalized, so what is counted is what is carried.
         **disclosed_list_projection(
             _missing_after, key="artifacts_missing_after", limit=IDENTITY_PATH_LIMIT,
-            bound=_accept_redact_cap, item_cap=200,
+            bound=_accept_cap, item_cap=200,
         ),
         # v6.52.2: a PASS whose check can MASK the real exit code (`... | tail`, `|| true`) is
         # WEAK grounding — surface it so the reviewer does not credit a possibly-laundered green.
@@ -199,7 +191,7 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
             }),
             key="check_exit_masking_reasons",
             limit=10,
-            bound=_accept_redact_cap,
+            bound=_accept_cap,
         ),
         # v6.54.4 criterion provenance: how many checks verified a criterion the
         # AGENT synthesized vs one the task states. An agent_defined-only summary
@@ -209,7 +201,7 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
             "agent_defined": sum(1 for r in valid if str(r.get("criterion_source") or "") == "agent_defined"),
         },
         "latest_criterion_source": str(latest.get("criterion_source") or ""),
-        "latest_criterion_basis": _accept_redact_cap(str(latest.get("criterion_basis") or ""), 400),
+        "latest_criterion_basis": _accept_cap(str(latest.get("criterion_basis") or ""), 400),
     }
 
 
@@ -226,8 +218,29 @@ def _accept_receipt_exhibits(receipts: list) -> list:
         "contract_kind": str(r.get("contract_kind") or ""),
         "criterion_source": str(r.get("criterion_source") or ""),
         "provenance": "host_attested",
-        **receipt_identity_projection(r, bound=_accept_redact_cap, check_cap=200),
+        **receipt_identity_projection(r, bound=_accept_cap, check_cap=200),
     } for idx, r in enumerate(x for x in (receipts or []) if isinstance(x, dict))]
+
+
+def marks_in_force(ctx: Any, task_id: str) -> List[Dict[str, Any]]:
+    """The marks in force at a result ask, as a reviewer's readings beside the rows they target: the work's room
+    (Main's for a tree outside every Project) and the global ones, each with its ``id``, ``scope``, ``text``, its
+    author (``who``: ``chronicle_store.draft_signer`` for the mind, else the author's kind), its ``date`` and
+    whether the work under review set it itself (``own``). Raises what the store raised: the caller names it."""
+    from ouroboros.chronicle_store import ChronicleStore, draft_signer
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.projects_registry import project_chat_for_task_tree
+
+    meta, store = getattr(ctx, "task_metadata", None) or {}, ChronicleStore(ctx.drive_root)
+    room = project_chat_for_task_tree(ctx.drive_root, task_id, meta.get("parent_task_id"), meta.get("root_task_id"))
+    readings = []
+    for mark in store.active_marks(str(room or WEB_UI_CHAT_ID)) if store.log_path.exists() else []:
+        author = mark.get("author") if isinstance(mark.get("author"), dict) else {}
+        readings.append({"id": mark.get("id"), "scope": mark.get("scope") or "room", "text": mark.get("text") or "",
+                         "who": draft_signer(author) if author.get("kind") == "mind" else author.get("kind") or "not recorded",
+                         "date": str(mark.get("ts") or "")[:10] or "date not recorded",
+                         "own": str(author.get("task_id") or "") == task_id})
+    return readings
 
 
 def _accept_effective_claims(
@@ -294,19 +307,25 @@ def _owner_content_projection(content: Any) -> str:
     return "\n".join(parts)
 
 
-def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
+def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     """Collect the task-local canonical owner corpus without semantic inference."""
-    rows: List[Dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    rows: List[Dict[str, Any]] = []
+    seen_ids: set[tuple[str, ...]] = set()
+    seen_texts: set[str] = set()
 
-    def add(source: str, content: Any, msg_id: str = "", origin: Any = None) -> None:
+    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
-        key = (str(msg_id or ""), text)
-        if key in seen or (not key[0] and any(existing[1] == text for existing in seen)):
+        # One source is one row: an identified row repeats only a row of one of its ids (a mailbox msg_id, a chat
+        # message's room and client id), never another message in the same words; a row with no id repeats words.
+        client = str((origin or {}).get("client_message_id") or "")
+        ids = {("msg", str(msg_id))} if msg_id else set()
+        ids |= {("client", str((origin or {}).get("chat_id") or ""), client)} if client else set()
+        if ids & seen_ids or (not ids and text in seen_texts):
             return
-        seen.add(key)
+        seen_ids.update(ids)
+        seen_texts.add(text)
         row = {"source": source, "content": text}
         if msg_id:
             row["msg_id"] = str(msg_id)
@@ -314,6 +333,8 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         # the sibling it was relayed from, an owner answer's card) travels with the row:
         # every reader of this one corpus sees a relayed proposal as such, without inferring it from the text.
         row.update({key: str(value) for key, value in (origin or {}).items() if value})
+        if isinstance(reply_to, dict) and reply_to:  # the message these words reply to, never counted as them
+            row["reply_to"] = dict(reply_to)
         rows.append(row)
 
     recorded = getattr(ctx, "_owner_directives", None)
@@ -324,7 +345,9 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
-                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id")},
+                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                    "client_message_id", "chat_id")},
+                    item.get("reply_to"),
                 )
 
     messages = getattr(ctx, "messages", None)

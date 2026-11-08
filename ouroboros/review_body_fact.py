@@ -20,8 +20,9 @@ Recognition order, and the ``how`` each step records:
 3. ``remote_chain`` — a remote's fetch URL is a local path that reaches the
    body, followed recursively up to :data:`REMOTE_CHAIN_DEPTH` hops.
 4. ``managed_remote`` — a fetch URL equals the install manifest's
-   ``managed_remote_url``: the configured update source (official repository,
-   fork or mirror) IS this install's body.
+   ``managed_remote_url`` (or, for an older/source install without that
+   manifest, the maintained ``managed`` remote): the configured update source
+   (official repository, fork or mirror) IS this install's body.
 5. ``install_fork`` — a fetch URL equals the installed repository's ``origin``.
 6. ``copy_origin`` — the task-owned copy registry binds the root to a source
    (``workspace_copies.admitted_copy_metadata``), consulted when git gave no
@@ -162,6 +163,35 @@ def _remotes(root: Path) -> List[Tuple[str, str]]:
     return remotes
 
 
+def repository_root(path: Any, *, probe_cache: Optional[dict] = None) -> Optional[Path]:
+    """Return Git's authoritative repository root containing ``path``.
+
+    ``path`` may name a not-yet-created file; Git is probed from its nearest
+    existing parent.  A failed probe is deliberately ``None`` rather than a
+    foreign verdict. A caller may reuse probes within one classification only.
+    """
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        probe = candidate if candidate.is_dir() else candidate.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+    except (OSError, RuntimeError, ValueError):  # a name the filesystem refuses (over-long, NUL) is a failed probe
+        return None
+    if probe_cache is not None and probe in probe_cache:
+        return probe_cache[probe]
+    try:
+        top = _git(probe, "rev-parse", "--show-toplevel")
+    except _GitUnavailable:
+        top = None
+    try:
+        result = Path(top.strip()).resolve(strict=False) if top and top.strip() else None
+    except (OSError, RuntimeError, ValueError):
+        result = None
+    if probe_cache is not None:
+        probe_cache[probe] = result
+    return result
+
+
 def _inside(root: Path, system: Path) -> bool:
     return same_directory(root, system) or any(same_directory(parent, system) for parent in root.parents)
 
@@ -266,11 +296,21 @@ def body_fact(root: Any, *, system_repo: Any, manifest: Optional[dict] = None,
         origin = _git(system, "remote", "get-url", "origin") or ""
     except _GitUnavailable:
         origin = ""
+    # Source installs and older bundles can have the maintained update remote
+    # but no persisted manifest.  The remote is the same configured source the
+    # updater uses; only use it as a fallback when the manifest says nothing.
+    managed = str((manifest or {}).get("managed_remote_url") or "").strip()
+    if not managed:
+        managed_name = str((manifest or {}).get("managed_remote_name") or "managed").strip() or "managed"
+        try:
+            managed = _git(system, "remote", "get-url", managed_name) or ""
+        except _GitUnavailable:
+            managed = ""
     identity = _BodyIdentity(
         system=system,
         # A former official home resolves like the updater resolves it (owner 2026-10-11 №3=A).
         managed_url=normalize_remote_url(
-            follow_former_official_home(str((manifest or {}).get("managed_remote_url") or ""))),
+            follow_former_official_home(managed)),
         origin_url=normalize_remote_url(origin.strip()),
         data_dir=data_dir,
     )

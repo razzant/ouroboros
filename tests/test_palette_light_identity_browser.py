@@ -2,7 +2,7 @@
 
 The real page and product renderers of tests/test_dark_voice_material_contrast_browser.py, in the light theme, in
 Chromium and WebKit: each reader the dark palette touched computes the light value in LIGHT below, with the
-deliberately removed System edge transparent. The chosen answer's `Your choice` word takes no room while its spoken
+deliberately removed System edge absent. The chosen answer's `Your choice` word takes no room while its spoken
 name stays, and an app card's frame gets the same theme packet from its host as from the root.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from tests import test_dark_voice_material_contrast_browser as dv
 
 room_ui = dv.room_ui
 subscription_ui = dv.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 COLOUR = ("color", "backgroundColor")
 CAPSULE = ("color", "backgroundColor", "boxShadow", "opacity")
@@ -65,7 +65,7 @@ READERS = {
     "owner time": ('[data-palette="owner"] .msg-time', ("color",)),
     "queued words": ('[data-palette="owner"] .msg-pending', ("color",)),
     "routing words": ('[data-palette="owner"] .msg-routing-annotation', ("color",)),
-    "System row": ('.chat-bubble.system', ("backgroundColor", "borderLeftColor")),
+    "System row": ('.chat-bubble.system', ("backgroundColor", "borderLeftWidth")),
     "System name": ('.chat-bubble.system .sender', ("color",)),
     "Panic": ('#page-chat .chat-header-btn.danger', (*COLOUR, "backgroundImage")),
 }
@@ -109,7 +109,7 @@ LIGHT = {
         "backgroundColor": "rgba(201, 53, 69, 0.1)",
         "boxShadow": REST,
         "opacity": "1"},
-    "answer frame": {"backgroundColor": "rgba(32, 35, 43, 0.024)", "borderTopColor": "rgba(32, 35, 43, 0.08)"},
+    "answer frame": {"backgroundColor": "rgba(32, 35, 43, 0.03)", "borderTopColor": "rgba(32, 35, 43, 0.08)"},
     "chosen answer": {
         "color": "rgb(23, 107, 73)",
         "backgroundColor": "rgba(34, 197, 94, 0.14)",
@@ -174,7 +174,7 @@ LIGHT = {
     "owner time": {"color": "rgb(98, 105, 119)"},
     "queued words": {"color": "rgb(137, 144, 155)"},
     "routing words": {"color": "rgb(137, 144, 155)"},
-    "System row": {"backgroundColor": "rgba(245, 158, 11, 0.12)", "borderLeftColor": "rgba(0, 0, 0, 0)"},
+    "System row": {"backgroundColor": "rgba(245, 158, 11, 0.12)", "borderLeftWidth": "0px"},
     "System name": {"color": "rgb(128, 80, 0)"},
     "Panic": {"color": "rgb(180, 35, 50)", "backgroundColor": "rgb(255, 255, 255)",
               "backgroundImage": "linear-gradient(rgba(239, 68, 68, 0.1), rgba(239, 68, 68, 0.1)), none"},

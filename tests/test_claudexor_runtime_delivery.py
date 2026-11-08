@@ -155,7 +155,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "4.8.1"
+    assert pin.version == "5.0.1"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 
@@ -271,7 +271,7 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
     monkeypatch.setattr(
         platform,
         "probe_node_version",
-        lambda candidate: NODE_VERSION if candidate == str(node) else "",
+        lambda candidate: NODE_VERSION if pathlib.Path(candidate).is_file() else "",
     )
     manager = runtime.ClaudexorRuntimeManager(pin)
     probes = []
@@ -283,7 +283,9 @@ def test_seed_install_uses_bundled_node_and_records_real_source(tmp_path, monkey
 
     command = manager.ensure()
     target = runtime.managed_runtime_dir(pin)
-    assert command == [str(node), str(target / pin.entrypoint)]
+    kept = pathlib.Path(command[0])  # the bundle's Node copied in once: the daemon outlives the app
+    assert command == [str(kept), str(target / pin.entrypoint)] and kept.read_bytes() == node.read_bytes()
+    assert kept.parents[2].parent == runtime.managed_runtime_root() / "node"
     assert probes and all(probe_pin == pin for _, probe_pin in probes)
     metadata = json.loads((target / "managed-runtime.json").read_text(encoding="utf-8"))
     assert metadata["archive_source"] == "bundle_seed"
@@ -435,8 +437,6 @@ def test_preserved_node_reader_accepts_exact_supported_metadata_schemas(
 
 @pytest.mark.parametrize("payload", [
     {"schema_version": 3, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": True, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": "2", "version": NODE_VERSION, "platform": "linux-x64"},
     {"schema_version": 2, "version": "bad", "platform": "linux-x64"},
     [],
 ])

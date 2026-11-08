@@ -57,6 +57,7 @@ import pathlib
 import re
 import signal
 import sys
+import uuid
 
 import pytest
 
@@ -79,6 +80,7 @@ from tests.system_e2e.harness import (
     submit_running,
     wait_durable_result,
     wait_until,
+    ws_url,
 )
 from tests.system_e2e.interfaces import (
     FAKE_HANG_MARKER,
@@ -274,7 +276,6 @@ S11_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s11_delegated_transport_wire_custody_and_typed_refusals(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -434,7 +435,6 @@ S12_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux",
                     reason="process-group SIGKILL + /proc scans are Linux-only")
 def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
@@ -593,7 +593,6 @@ def _skill_entry(server, name: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_skills_lifecycle_review_grants_enable_dispatch_disable_delete(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -741,14 +740,42 @@ permissions: ["tool"]
 E2E hot-adoption probe extension body.
 """
 S13H_DISPATCH_MARKER = "S13H_HOT_DISPATCH_DONE_e2e_w3b"
+# The probe's echo names the process that ran it: an extension handler runs in-process in
+# the worker carrying the task (``ouroboros/tools/extension_dispatch.py``), so the durable
+# tools row itself says which process adopted the skill.
+S13H_PLUGIN = (
+    "import os\n"
+    "\n"
+    "def _echo(ctx, message='hi'):\n"
+    "    return f'echo: {message} pid={os.getpid()}'\n"
+    "\n"
+    "def register(api):\n"
+    "    api.register_tool(\n"
+    "        'echo', _echo, description='echo probe',\n"
+    "        schema={'type': 'object', 'properties': {'message': {'type': 'string'}}},\n"
+    "    )\n"
+)
+_S13H_PID_RE = re.compile(r"echo: hot-ping pid=(\d+)")
 
 
 def _worker_boot_pids(oracle: ArtifactOracle) -> set:
     return {int(row.get("pid") or 0) for row in oracle.events("worker_ready")}
 
 
+def _worker_ready_count(oracle: ArtifactOracle, pid: int) -> int:
+    return sum(1 for row in oracle.events("worker_ready") if int(row.get("pid") or 0) == pid)
+
+
+def _owner_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
+    for row in oracle.events("task_received"):
+        task = row.get("task") or {}
+        origin = (task.get("metadata") or {}).get("origin_message_ref") or {}
+        if origin.get("client_message_id") == client_message_id:
+            return str(task.get("id") or "")
+    return ""
+
+
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
         e2e_clone, tmp_path_factory):
     """The W3B-F1 defect, at the product surface: enable AFTER boot must reach the
@@ -761,6 +788,15 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
     it live. Here the pool spawned BEFORE the payload existed and no process is
     replaced, so the tool call can only succeed by the worker noticing the
     server's published generation and adopting it.
+
+    Since #2654 the pool at rest is the conversation lane's one ready spare: project
+    workers are bought on demand and retired when idle, so a pooled task dispatched
+    after the enable always cold-starts a worker that loads the skill at spawn and
+    proves nothing. The probe is therefore the owner's Main turn over the SAME /ws the
+    SPA opens: it takes the spare that booted before the payload existed. The lane
+    replenishes its spare at once, so a NEW worker appears; the proof is not "no new
+    PID" but the tools row naming the process that ran the echo — a worker that booted
+    once, before the payload — together with that worker's recorded adoption.
     """
     require_lane(LANE_MOCK)
     from ouroboros.extension_loader import extension_surface_name
@@ -793,7 +829,7 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
             payload_dir = data_root / "skills" / "external" / S13H_SKILL
             payload_dir.mkdir(parents=True)
             (payload_dir / "SKILL.md").write_text(S13H_SKILL_MD, encoding="utf-8")
-            (payload_dir / "plugin.py").write_text(S13_PLUGIN, encoding="utf-8")
+            (payload_dir / "plugin.py").write_text(S13H_PLUGIN, encoding="utf-8")
             review = _api(server.base_url, "POST",
                           f"/api/skills/{S13H_SKILL}/review", {}, timeout=600)
             assert review.get("status") == "clean", review
@@ -811,26 +847,40 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
                 (data_root / "state" / "extension_generation.json").read_text(encoding="utf-8"))
             assert generation.get("generation"), generation
 
-            # DISPATCH into one of those very workers — no restart anywhere.
-            task_id = submit_running(server, "Call the probe echo tool once, then finish.")
-            result = server.wait_task(task_id, timeout=300)
-            assert result.get("status") == "completed", result
-            stored = wait_durable_result(oracle, task_id)
+            # DISPATCH into one of those very workers — no restart anywhere: the owner's
+            # Main turn takes the lane's ready spare, which booted before the payload.
+            from websockets.sync.client import connect as ws_connect
+
+            client_message_id = f"e2e-s13h-{uuid.uuid4().hex[:12]}"
+            with ws_connect(ws_url(server), open_timeout=30, proxy=None) as ws:
+                ws.send(json.dumps({"type": "chat", "chat_id": 1, "client_message_id": client_message_id,
+                                    "content": "Call the probe echo tool once, then finish."}))
+                task_id = wait_until(lambda: _owner_turn_id(oracle, client_message_id), 120)
+                assert task_id, "the owner's turn never wrote its task_received row"
+                stored = wait_durable_result(oracle, task_id, timeout=300)
+            assert stored.get("status") == "completed", stored
             assert S13H_DISPATCH_MARKER in str(stored.get("result") or ""), stored
             assert stub.script_consumed(), "the hot-adoption dispatch script was not consumed"
             rows = [row for row in oracle.task_drive(task_id).tools_rows()
                     if str(row.get("tool") or "") == surface]
             assert rows, "the extension tool call never reached the tools log"
-            assert "echo: hot-ping" in json.dumps(rows), rows
+            ran_in = {int(pid) for pid in _S13H_PID_RE.findall(json.dumps(rows))}
+            assert len(ran_in) == 1, rows
 
-            # ...and it really was an EXISTING worker: no process was replaced
-            # between the enable and the dispatch.
-            assert _worker_boot_pids(oracle) == boot_workers, (
-                "the pool respawned, so this proves nothing about hot adoption")
+            # ...and it really was an EXISTING worker: the process that ran the echo
+            # booted once, before the payload existed. The lane's replenished spare (a
+            # worker_ready after the enable) never ran it.
+            (carrier,) = ran_in
+            assert carrier in boot_workers, {
+                "echo_ran_in": carrier, "booted_before_the_payload": sorted(boot_workers),
+                "booted_since": sorted(_worker_boot_pids(oracle) - boot_workers)}
+            assert _worker_ready_count(oracle, carrier) == 1, "the carrier re-announced readiness"
             adoptions = [row for row in oracle.events("extension_generation_adopted")
                          if S13H_SKILL in (row.get("skills") or [])]
             assert adoptions, "no worker recorded adopting the published generation"
-            assert any(row.get("converged") is True for row in adoptions), adoptions
+            assert any(row.get("converged") is True
+                       and row.get("published_generation") == generation["generation"] for row in adoptions), (
+                adoptions, generation)
 
             # DISABLE symmetry: the owner's disable republishes at once, so the
             # same channel carries the retraction (a worker adopting it unloads —

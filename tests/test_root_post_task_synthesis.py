@@ -8,9 +8,9 @@ shared pre-synthesis usage snapshot taken once before worker dispatch, and
 that snapshot reaching (or staying out of) the free facts row and the
 reflection prompt; and that the retired dialogue writer leaves no trace in the
 phase: the frozen legacy dialogue files stay byte-identical and no Light call
-is bought for the dialogue, while reflection and scratchpad upkeep still run;
-the one memory call left, the fallback draft of one unit, is made only while
-consciousness is off.
+is bought for the dialogue or the scratchpad (#918: only the mind's fold
+rewrites it); the one memory call left, the fallback draft of one unit, is made
+only while consciousness is off.
 """
 
 from tests import _dialogue as dialogue_test
@@ -264,10 +264,6 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
         lambda *args, **kwargs: order.append("memory_fallback_draft"),
     )
     monkeypatch.setattr(
-        pipeline, "_run_scratchpad_consolidation",
-        lambda *args, **kwargs: order.append("scratchpad_consolidation"),
-    )
-    monkeypatch.setattr(
         pipeline,
         "_record_task_facts",
         lambda _env, _task, usage, *_args, **_kwargs: (
@@ -297,7 +293,7 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
     )
 
     assert reads == [(tmp_path, "root-synthesis", "")]
-    assert order == ["snapshot", "facts", "memory_fallback_draft", "scratchpad_consolidation", "promotion"]
+    assert order == ["snapshot", "facts", "memory_fallback_draft", "promotion"]
     assert len(snapshots) == 1
     snapshot = snapshots[0]
     assert snapshot["accounted_upper_bound_usd_with_children"] == 4.75
@@ -494,7 +490,7 @@ def test_child_legacy_usage_does_not_claim_a_subtree_snapshot(tmp_path):
 # --- the retired dialogue writer: a root's post-phase buys no dialogue Light call ---------------
 
 class _RecordingLight:
-    """Every Light send of the post-task phase: scratchpad upkeep answers JSON, any other send prose."""
+    """Every Light send of the post-task phase, answered with prose."""
 
     prompts: list = []
 
@@ -505,14 +501,12 @@ class _RecordingLight:
         prompt = str(messages[0]["content"])
         type(self).prompts.append(prompt)
         usage = {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0}
-        if "scratchpad working memory" in prompt:
-            return {"content": json.dumps({"compressed_block": "COMPRESSED scratchpad memory."})}, usage
         return {"content": "I understand this run."}, usage
 
 
 def _frozen_dialogue_install(root):
     """A data root the old writer would have consolidated: 250 chat rows past a frozen cursor,
-    frozen legacy blocks, an identity, and a scratchpad big enough for its own upkeep."""
+    frozen legacy blocks, an identity, and a scratchpad past the retired compression threshold."""
     from ouroboros.memory import Memory
 
     (root / "logs").mkdir(parents=True, exist_ok=True)
@@ -536,10 +530,11 @@ def _frozen_dialogue_install(root):
 
 def test_root_post_phase_keeps_frozen_dialogue_memory_and_buys_no_dialogue_light_call(tmp_path, monkeypatch):
     """After N root tasks the frozen ``dialogue_blocks.json``/``dialogue_meta.json`` are byte-identical
-    and no Light send carries the dialogue (the guard: the writer and its stage are gone), while the
-    scratchpad upkeep still runs (what stays). An errored root buys no reflection and no Pattern Register
-    rewrite any more. The install's chronicle is not active, so the fallback draft has nothing to read;
-    its conditional sides are pinned below."""
+    and no Light send carries the dialogue (the guard: the writer and its stage are gone), nor the
+    scratchpad: its post-task pass is retired too (#918), so its blocks stay exactly as written until the
+    mind folds them. An errored root buys no reflection and no Pattern Register rewrite any more. The
+    install's chronicle is not active, so the fallback draft has nothing to read; its conditional sides
+    are pinned below."""
     import ouroboros.llm as llm_mod
     import ouroboros.post_task_evolution as post_task_evolution
 
@@ -570,17 +565,17 @@ def test_root_post_phase_keeps_frozen_dialogue_memory_and_buys_no_dialogue_light
 
     # The guard: nothing of the dialogue was sent to Light, and the frozen files never changed.
     prompts = _RecordingLight.prompts
-    assert prompts and not [prompt for prompt in prompts if "DIALOGUE-ROW-" in prompt]
+    assert not [prompt for prompt in prompts if "DIALOGUE-ROW-" in prompt]
     assert not [prompt for prompt in prompts if "Messages to summarize" in prompt or "Compare this draft memory" in prompt]
     assert {name: (tmp_path / "memory" / name).read_bytes() for name in frozen} == frozen
     events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert not [row for row in events if row.get("type") in {"chat_block_consolidation", "consolidation_skipped_locked"}]
-    # What stays: the scratchpad was consolidated and every phase completed. No other Light
-    # send exists: no reflection, no Pattern Register rewrite, whatever the trace's errors.
-    scratchpad = [prompt for prompt in prompts if "scratchpad working memory" in prompt]
-    assert len(scratchpad) == 1 and prompts == scratchpad
-    assert memory.load_scratchpad_blocks() != scratch_before
-    assert memory.load_scratchpad_blocks()[0]["content"] == "COMPRESSED scratchpad memory."
+    # No Light send exists at all: no scratchpad pass (#918), no reflection, no Pattern Register
+    # rewrite, whatever the trace's errors; the blocks are byte-for-byte what was written, and every
+    # phase completed.
+    assert prompts == []
+    assert memory.load_scratchpad_blocks() == scratch_before
+    assert not [row for row in events if row.get("type") == "scratchpad_consolidation"]
     for task_id in roots:
         checkpoint = pipeline.load_task_result(tmp_path, task_id)["root_phase_checkpoint"]
         assert checkpoint["post_task_synthesis"] == "completed", checkpoint

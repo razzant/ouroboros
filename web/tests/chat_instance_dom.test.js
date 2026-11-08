@@ -1068,6 +1068,18 @@ test('history rebuild keeps a lineage-known branch nested, never appended top-le
         assert.equal(scout.parentNode?.dataset?.subagentsFor, 'grandchild-infra-lens');
         assert.equal(codeLens.dataset.parentTaskId, 'prev-root');
         assert.equal(infra.dataset.parentTaskId, 'code-lens');
+        // Details opens under the card's own lines: the children follow its facts and notes and earlier episodes
+        // follow the children, in the template's order, so pressing Details moves no node. (How short a card that
+        // holds children keeps what it opens is style.css's, measured in a browser.)
+        const placement = (card) => {
+            const kids = card.children, at = (pick) => kids.findIndex(pick);
+            return [at((n) => Object.hasOwn(n.dataset, 'liveTimeline')), at((n) => n.dataset.subagentsFor === card.dataset.taskId),
+                at((n) => Object.hasOwn(n.dataset, 'liveEpisodeHistory'))];
+        };
+        for (const card of [root, codeLens, infra]) {
+            const [notes, children, episodes] = placement(card);
+            assert.deepEqual([children - notes, episodes - children], [1, 1], `${card.dataset.taskId}: notes, children, earlier episodes`);
+        }
         // A reconnect replays the same window again: still nested, no duplicates.
         handlers.get('open')({ previouslyConnected: true });
         await new Promise((resolve) => setTimeout(resolve, 25));

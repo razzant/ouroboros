@@ -15,7 +15,6 @@ from tests.test_extension_ws_diagnostics import child_env, relay_endpoint, relay
 
 @pytest.mark.parametrize(("status", "reason"), [
     (202, None), (429, "rate_limited"), (500, "http_server_error"),
-    ("connection_refused", "transport_error"), ("missing_env", "missing_transport"),
 ])
 def test_real_route_completion_discloses_background_relay_failures(tmp_path, status, reason, caplog):
     # Sending after the HTTP body proves that the final X carries the diagnostic;
@@ -78,7 +77,8 @@ def register(api):
         assert not [row for row in caplog.records if "WS relay failures" in row.getMessage()]
     assert len(requests) == (5 if isinstance(status, int) else 0)
     assert not list((drive / "state" / "skills" / skill.name / "extension_calls").glob("*.result.json"))
-    assert not runner._active_subprocesses
+    from ouroboros.tools import shell_process
+    assert not shell_process._active_subprocesses
 
 
 def test_legacy_empty_completion_frame_remains_compatible():

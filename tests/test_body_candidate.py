@@ -92,7 +92,6 @@ def test_candidate_starts_from_the_accepted_commit_not_from_serving_dirt(body):
     assert (serving / "owner-untracked.txt").read_text() == "mine\n"
 
 
-@pytest.mark.serial  # real child process
 def test_explicit_prepare_gives_processes_the_candidate_cwd_and_an_isolated_environment(body):
     serving, data = body
     before = _tree_bytes(serving)
@@ -373,7 +372,6 @@ def test_protected_path_policy_applies_to_the_candidate_as_to_the_body(body, mon
     assert (candidate / "BIBLE.md").read_text() == "# Constitution\n"
 
 
-@pytest.mark.serial  # real child process
 def test_bound_task_cannot_reach_the_serving_checkout_through_another_root(body, monkeypatch, tmp_path):
     serving, data = body
     monkeypatch.setenv("HOME", str(tmp_path))  # the serving checkout sits under the owner's home, as installed
@@ -579,6 +577,61 @@ def test_unrelated_task_never_inherits_and_explicit_resume_names_one_exact_candi
     assert owned.value.code == "CANDIDATE_ALREADY_OWNED"
 
 
+def test_a_fresh_bind_names_open_neighbours_with_the_paths_they_changed_now(body):
+    """Two foci opened candidates 43 seconds apart and edited the same files (audit 05.11, item 18): the second
+    focus's first body write and its explicit receipt now name the open neighbour with the paths it changed at
+    that moment; an ended owner's candidate is only counted, and a later write of the same task adds nothing."""
+    serving, data = body
+    ended = make_ctx(serving, data, "ended-task")
+    body_candidate.prepare(ended)
+    _terminal(data, "ended-task")
+    wake = make_ctx(serving, data, "focus-wake")
+    quiet = _registry(serving, data, wake).execute("write_file", {"path": "ouroboros/mod_b.py", "content": "GEN = 'W'\n"})
+    assert "Other body candidates" not in quiet  # an ended neighbour alone is the Runtime fact's, not a note
+    candidate = pathlib.Path(body_candidate.descriptor(wake)["path"])
+    candidate_commit(candidate, files={"ouroboros/mod_b.py": "GEN = 'W'\n"})
+    (candidate / "ouroboros/mod_a.py").write_text("GEN = 'W2'\n")
+    (candidate / "scratch.txt").write_text("plan\n")
+    records = sorted(map(str, body_candidate.list_candidates()))
+
+    owner = make_ctx(serving, data, "owner-project")
+    registry = _registry(serving, data, owner)
+    first = registry.execute("write_file", {"path": "ouroboros/mod_a.py", "content": "GEN = 'O'\n"})
+    line = (f"- body_focus-wake: task focus-wake (no task record), branch candidate/focus-wake, base "
+            f"{git(serving, 'rev-parse', 'HEAD')[:12]}, path {candidate}: changed ouroboros/mod_a.py, "
+            "ouroboros/mod_b.py, scratch.txt")
+    assert f"Other body candidates, read now (never stored):\n{line}" in first and "ended-task" not in first
+    assert "Other body candidates" not in registry.execute("write_file", {"path": "x.txt", "content": "x\n"})
+    receipt = registry.execute("prepare_self_change", {})
+    assert receipt.endswith(f"\n{line}\n- 1 more belong to ended tasks: retained work, listed in the Runtime "
+                            "body_candidates fact; prepare_self_change(resume=<id>) continues one.")
+    # Read at the moment, never stored: the neighbour's record holds no paths (only the new candidate is added).
+    assert [row for row in map(str, body_candidate.list_candidates()) if "owner-project" not in row] == records
+
+
+def test_a_neighbour_read_is_bounded_and_says_what_it_could_not_read(body, monkeypatch):
+    serving, data = body
+    wake = make_ctx(serving, data, "focus-wake")
+    candidate = pathlib.Path(body_candidate.prepare(wake)["path"])
+    for index in range(10):
+        (candidate / f"n{index}.txt").write_text("x\n")
+    _terminal(data, "someone-else")  # the task store exists: the neighbour's own record is what is missing
+    owner = make_ctx(serving, data, "owner-project")
+    note = body_candidate.neighbour_note(owner)
+    assert "task focus-wake (no task record)" in note and note.endswith(
+        "changed n0.txt, n1.txt, n2.txt, n3.txt, n4.txt, n5.txt, n6.txt, n7.txt (+2 more in that path)")
+    with monkeypatch.context() as patch:
+        patch.setattr(body_candidate, "_NEIGHBOUR_READ_SECONDS", 0.0)
+        assert body_candidate.neighbour_note(owner).endswith(": changed paths not read (time bound)")
+    with monkeypatch.context() as patch:
+        import ouroboros.task_store as task_store
+
+        patch.setattr(task_store, "task_drive_status", lambda *_a, **_k: 1 / 0)
+        assert "task focus-wake (status unreadable)" in body_candidate.neighbour_note(owner)  # unknown is not ended
+    shutil.rmtree(candidate)
+    assert body_candidate.neighbour_note(owner).endswith(": its checkout is missing")
+
+
 # --------------------------------------------------------------------------- #
 # Retention: unique work outlives age; an incomplete capture keeps the original
 # --------------------------------------------------------------------------- #
@@ -604,7 +657,12 @@ def test_gc_removes_only_candidates_without_unique_work(body):
     _terminal(data, "gc-junk")
     report = _expire_all()
 
-    assert report["removed"] == 2
+    # A name the patch rules leave out is no evidence the file is temporary: that candidate stays.
+    assert report["removed"] == 1
+    assert not pathlib.Path(clean["path"]).exists() and pathlib.Path(junk["path"]).is_dir() and env_root.is_dir()
+    (pathlib.Path(junk["path"]) / "ouroboros/__pycache__/mod_a.cpython-311.pyc").unlink()
+    assert _expire_all()["removed"] == 1
+
     assert not pathlib.Path(clean["path"]).exists() and not pathlib.Path(junk["path"]).exists()
     assert not env_root.exists()
     assert git(serving, "branch", "--list", "candidate/*") == ""
@@ -784,7 +842,6 @@ def test_commit_seams_use_the_candidate_branch_and_never_the_serving_push(body, 
     assert body_candidate.publication_note(plain) == ""
 
 
-@pytest.mark.serial  # real child process
 def test_candidate_start_service_uses_isolated_environment(body):
     """An ordinary (non-executor) service launched inside a candidate must not inherit live data."""
     import json

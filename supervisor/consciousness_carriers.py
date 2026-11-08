@@ -5,21 +5,14 @@ from ouroboros.consciousness_authority import (
 )
 
 
-class WakeCensusBusy(RuntimeError):
-    """A caller holding the direct gate must retry rather than invert Q -> gate."""
-
-
-def queued_wakes(*, blocking=True) -> list[str]:
+def queued_wakes(*, held_only: bool = False) -> list[str]:
+    """Own-clock wakes the pool carries; ``held_only``: those in PENDING (paused, held, not yet dispatched)."""
     from supervisor import queue as q
 
-    if not q._queue_lock.acquire(blocking=blocking):
-        raise WakeCensusBusy("queue census busy")
-    try:
-        tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
+    with q._queue_lock:
+        tasks = [*q.PENDING, *([] if held_only else (meta.get("task") or {} for meta in q.RUNNING.values()))]
         return list(dict.fromkeys(str(task["id"]) for task in tasks if task.get("id")
                                  and is_own_clock_wake(task.get("metadata"))))
-    finally:
-        q._queue_lock.release()
 
 
 def is_autonomous_work(metadata) -> bool:
@@ -39,6 +32,46 @@ def autonomous_tasks() -> list[str]:
         tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
         return list(dict.fromkeys(str(task["id"]) for task in tasks if task.get("id")
                                  and is_autonomous_work(task.get("metadata"))))
+
+
+def _cited_quote(corpus) -> str:
+    """The span a run cited from my human's place words (``cited``; older rows hold only the span as ``content``)."""
+    return next((str(row.get("cited") or row.get("content") or "") for row in corpus or []
+                 if isinstance(row, dict) and row.get("source") == "place_owner" and row.get("basis") == "cited"), "")
+
+
+def cited_owner_roots() -> list[tuple[str, str]]:
+    """Live roots the switch does not stop because they run on my human's cited words: ``(task_id, quote)`` for every
+    pending or running owner-kind task whose corpus holds a ``place_owner`` row with ``basis: cited``."""
+    from supervisor import queue as q
+
+    with q._queue_lock:
+        tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
+    found: dict[str, str] = {}
+    for task in tasks:
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        if not task.get("id") or work_kind(metadata) != "owner":
+            continue
+        quote = _cited_quote(metadata.get("owner_corpus"))
+        if quote:
+            found.setdefault(str(task["id"]), quote)
+    return list(found.items())
+
+
+def cited_owner_schedules(drive_root) -> list[tuple[str, str]]:
+    """Enabled schedules and follow-ups the switch leaves firing because they run on my human's cited words:
+    ``(schedule_id, quote)`` for every owner-kind record whose next occurrence carries such a row."""
+    from ouroboros.consciousness_authority import schedule_owner_corpus
+    from supervisor.queue import list_scheduled_tasks
+
+    found = []
+    for record in list_scheduled_tasks(drive_root).get("tasks") or []:
+        if not isinstance(record, dict) or not record.get("id") or record.get("enabled") is False or record.get("writer_kind") != "owner":
+            continue
+        quote = _cited_quote(schedule_owner_corpus(record))
+        if quote:
+            found.append((str(record["id"]), quote))
+    return found
 
 
 def autonomous_work_enabled(task: dict, drive_root) -> bool:
@@ -62,11 +95,28 @@ def stop_pooled_wake(task_id: str) -> None:
                    requested_stop_policy=STOP_POLICY_FINALIZE)
 
 
-def finish_pooled_wake(ctx, task_id: str, result: dict) -> None:
-    """The detached attempt's end starts the ordinary next-wake interval."""
-    from ouroboros.task_carrier import execution_kind
+def pooled_terminal_ok(result: dict):
+    """A carried wake's recorded end as the clock reads it; None while nothing settled it (``interrupted``
+    stays with its restore owner, a legacy in-process row that predates the carrier facts with the stack that
+    ran it). Every lane carrier reports a wake's end only through this terminal, a worker and the disclosed
+    degraded executor alike (one execution model): none calls the clock back.
+    An early ``completed`` keeps its sticky lifecycle beside the fault's ``infra_failed`` axis."""
+    from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes
+    from ouroboros.task_carrier import carrier_executor, inline_execution
+    from ouroboros.task_status import SETTLED_STATUSES
 
+    status = result.get("status")
+    if status not in SETTLED_STATUSES or (inline_execution(result) and not carrier_executor(result)):
+        return None
+    return status == "completed" and normalize_outcome_axes(result)["execution"]["status"] != EXECUTION_INFRA_FAILED
+
+
+def finish_pooled_wake(ctx, task_id: str, result: dict, known: dict | None = None) -> None:
+    """The detached attempt's end starts the ordinary next-wake interval. ``known``: the identity
+    its RUNNING row or terminal event still carries when the durable result lost it."""
+    known = known or {}
     clock = getattr(ctx, "consciousness", None)
-    if (clock is not None and execution_kind(result) == "pooled"
-            and is_own_clock_wake(result.get("metadata"))):
-        clock._wake_finished(task_id, result.get("status") == "completed", metadata=result["metadata"], pooled=True)
+    metadata = result.get("metadata") or known.get("metadata")
+    ok = pooled_terminal_ok({**known, **result, "status": result.get("status")})
+    if clock is not None and ok is not None and is_own_clock_wake(metadata):
+        clock._wake_finished(task_id, ok, metadata=metadata, pooled=True)

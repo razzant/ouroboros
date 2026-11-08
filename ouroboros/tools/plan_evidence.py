@@ -5,9 +5,13 @@ Bounds (every cut disclosed, never silent): ``EVIDENCE_PER_ITEM_BYTES`` /
 ``EVIDENCE_TOTAL_BYTES`` — attached text per locator and per packet (~10k /
 ~30k tokens at chars/4); ``EVIDENCE_HASH_BYTES_LIMIT`` — a source above it is
 refused unread (``too_large:<bytes>``), never streamed. Path locators go through
-``review_helpers._SENSITIVE_*`` (lexical name AND resolved target) and the
-caller's ``allowed_roots``; URLs are listed, never fetched; the resolver never
-raises on agent-controlled input (every failure is a typed omission).
+the caller's deny roots, ``review_helpers._SENSITIVE_*`` (lexical name AND resolved
+target), the caller's ``allowed_roots`` and then ``read_file``'s own read admission;
+beneath a deny root only the caller's own task stores attach (``own_task_stores`` and
+``evidence_read_admission`` bind those task facts, as ``task_evidence_reader`` binds
+task results), and one seen in part keeps its whole source (``own_source_retention``);
+URLs are listed, never fetched; the resolver never raises on
+agent-controlled input (every failure is a typed omission).
 """
 
 from __future__ import annotations
@@ -141,6 +145,7 @@ def _selected_payload(raw: bytes, selector: dict, path: Optional[pathlib.Path] =
 
 def _read_selected_evidence(
     path: pathlib.Path, selector: dict, read_text: Optional[Callable[[pathlib.Path], str]], hash_limit: int,
+    keep: Optional[bytearray] = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     try:
         raw = (str(read_text(path)).encode("utf-8") if read_text is not None else path.read_bytes())
@@ -150,6 +155,8 @@ def _read_selected_evidence(
         return None, "unreadable"
     if len(raw) > hash_limit:
         return None, f"too_large:{len(raw)}"
+    if keep is not None:
+        keep.extend(raw)
     return _selected_payload(raw, selector, path)
 
 
@@ -159,7 +166,7 @@ def _decode_head(head: bytes, *, complete: bool) -> str:
     return codecs.getincrementaldecoder("utf-8")().decode(head, final=complete)
 
 
-def _payload_from_text(text: str, per_item: int) -> tuple[Optional[dict], Optional[str]]:
+def _payload_from_text(text: str, per_item: int, keep: Optional[bytearray] = None) -> tuple[Optional[dict], Optional[str]]:
     """In-memory evidence payload: full sha256/bytes, head bounded to ``per_item`` bytes.
     Unencodable text (lone surrogates) → ``binary``."""
     try:
@@ -167,12 +174,16 @@ def _payload_from_text(text: str, per_item: int) -> tuple[Optional[dict], Option
         head = text if len(full) <= per_item else _decode_head(full[:per_item], complete=False)
     except UnicodeError:
         return None, "binary"
+    if keep is not None:
+        keep.extend(full)
     return {"sha256": sha256(full).hexdigest(), "bytes": len(full), "text": head}, None
 
 
-def _payload_from_file(path: pathlib.Path, per_item: int, hash_limit: int) -> tuple[Optional[dict], Optional[str]]:
+def _payload_from_file(path: pathlib.Path, per_item: int, hash_limit: int,
+                       keep: Optional[bytearray] = None) -> tuple[Optional[dict], Optional[str]]:
     """Stream the file once: full-content sha256/bytes, head bounded to ``per_item`` bytes
-    (never the whole file in memory); sources above ``hash_limit`` are refused unread
+    (never the whole file in memory unless ``keep`` asks for the hashed bytes, then at most
+    ``hash_limit`` of them); sources above ``hash_limit`` are refused unread
     (``too_large:<bytes>``). → (payload, None) or (None, reason)."""
     digest, head, total = sha256(), bytearray(), 0
     try:
@@ -188,6 +199,10 @@ def _payload_from_file(path: pathlib.Path, per_item: int, hash_limit: int) -> tu
                 total += len(chunk)
                 if len(head) < per_item:
                     head.extend(chunk[: per_item - len(head)])
+                if keep is not None:
+                    if total > hash_limit:  # grew past the bound while read: refused like a larger source
+                        return None, f"too_large:{total}"
+                    keep.extend(chunk)
     except OSError:
         return None, "unreadable"
     if _raw_bytes_binary(bytes(head[:_BINARY_SNIFF_BYTES])):
@@ -201,12 +216,14 @@ def _payload_from_file(path: pathlib.Path, per_item: int, hash_limit: int) -> tu
 
 def _read_evidence(
     path: pathlib.Path, read_text: Optional[Callable[[pathlib.Path], str]], per_item: int, hash_limit: int,
+    keep: Optional[bytearray] = None,
 ) -> tuple[Optional[dict], Optional[str]]:
-    """→ (payload, omission_reason). Binary/undecodable → ``binary``; I/O failure → ``unreadable``."""
+    """→ (payload, omission_reason). Binary/undecodable → ``binary``; I/O failure → ``unreadable``.
+    ``keep`` receives the exact bytes the payload's sha256/bytes and head were computed from."""
     if read_text is None:
-        return _payload_from_file(path, per_item, hash_limit)
+        return _payload_from_file(path, per_item, hash_limit, keep)
     try:
-        return _payload_from_text(str(read_text(path)), per_item)
+        return _payload_from_text(str(read_text(path)), per_item, keep)
     except UnicodeError:
         return None, "binary"
     except OSError:
@@ -233,6 +250,13 @@ def _sensitive(path: pathlib.PurePath) -> bool:
     return path.suffix.lower() in _SENSITIVE_EXTENSIONS or path.name.lower() in _SENSITIVE_NAMES
 
 
+def _own_store_root(path: pathlib.Path, stores: list, denied: list) -> Optional[str]:
+    """The typed root of the own store holding ``path`` when every deny entry holding it lies above that store."""
+    holding = [deny for deny in denied if path == deny or _under(path, deny)]
+    return next((label for label, base in stores
+                 if _under(path, base) and not any(_under(deny, base) for deny in holding)), None)
+
+
 def resolve_evidence(
     locators: Iterable[str],
     *,
@@ -245,6 +269,9 @@ def resolve_evidence(
     resolve_chat: Optional[Callable[[str], Optional[dict | str]]] = None,
     hash_bytes_limit: int = EVIDENCE_HASH_BYTES_LIMIT,
     deny_paths: Iterable[str | pathlib.Path] = (),
+    own_stores: Iterable[tuple[str, str | pathlib.Path]] = (),
+    admit: Optional[Callable[[Optional[str], pathlib.Path], str]] = None,
+    retain: Optional[Callable[[bytes], dict]] = None,
 ) -> dict:
     """Resolve agent-declared evidence locators into a bounded manifest.
 
@@ -260,32 +287,33 @@ def resolve_evidence(
     ``task_not_found`` · ``duplicate_locator`` · ``unsupported_locator`` ·
     ``denied_path`` (a caller-declared deny root — the runtime data plane and the
     live settings file, refused INDEPENDENTLY of allowed-root membership so a
-    custom subject root can never make credentials attachable). Never
-    raises on agent-controlled locators. ``read_text`` overrides file reading
-    (tests / HEAD snapshots); ``resolve_task`` serves ``task:<id>``.
+    custom subject root can never make credentials attachable). ``admit(root, path)`` decides each file that
+    passed them: ``""`` admits, else its reason (``read_blocked:<CODE>``, ``read_target_differs``); ``root`` is
+    the typed root of the caller's own task store ``(root, base)`` in ``own_stores`` holding the file, else None.
+    An own-store file that no deny entry at or inside its store holds skips the deny and allowed-root checks; without
+    ``admit`` nothing beneath a deny root attaches. An attached own-store file seen in part (a head or a selection)
+    hands ``retain`` the exact bytes its part and hash were read from; the row carries what it returns (``ref``,
+    ``file``) and its failure is the omission ``source_unretained:<Error>``. Never raises on agent-controlled
+    locators. ``read_text`` overrides file reading (tests / HEAD snapshots); ``resolve_task`` serves ``task:<id>``.
     """
     active = pathlib.Path(active_root).resolve(strict=False)
     roots = [pathlib.Path(r).resolve(strict=False) for r in allowed_roots]
     denied = [pathlib.Path(r).resolve(strict=False) for r in deny_paths if str(r or "").strip()]
+    stores = [(str(label), pathlib.Path(base).resolve(strict=False)) for label, base in own_stores] if admit else []
     declared: list[str] = []
     attached: list[dict] = []
     omissions: list[dict] = []
     remaining = max(0, int(total_bytes))
     per_item = max(1, int(per_item_bytes))
 
-    def attach(locator: str, kind: str, payload: dict) -> None:
+    def attach(locator: str, kind: str, payload: dict) -> Optional[dict]:
         nonlocal remaining
-        # The filename policy cannot see CONTENT: an allowed notes.md may quote an API key,
-        # and attached text goes verbatim to external reviewers. Redact with the shared
-        # prompt-secret redactor; sha256/bytes keep describing the ORIGINAL source and the
-        # redaction is disclosed on the row.
-        from ouroboros.tools.review_helpers import redact_prompt_secrets
-
-        payload["text"], redacted = redact_prompt_secrets(payload["text"])
+        # Attached text is the source's own bytes (or its named head/selection): the
+        # path, root and deny rules decide what may attach, never its content.
         head_bytes = len(payload["text"].encode("utf-8"))
         if head_bytes > remaining:
             omissions.append({"locator": locator, "reason": "budget_exhausted"})
-            return
+            return None
         remaining -= head_bytes
         row = {
             "locator": locator, "kind": kind, "sha256": payload["sha256"],
@@ -294,11 +322,12 @@ def resolve_evidence(
         for key in ("selector", "selection_sha256", "selection_bytes"):
             if key in payload:
                 row[key] = payload[key]
-        if redacted or payload.get("secrets_redacted"):
+        if payload.get("secrets_redacted"):  # a retained source masked before capture says so
             row["secrets_redacted"] = True
         attached.append(row)
         if "selector" not in payload and payload["bytes"] > per_item:
             omissions.append({"locator": locator, "reason": f"truncated_to_{per_item}"})
+        return row
 
     for raw in locators or []:
         locator = str(raw or "").strip()
@@ -336,8 +365,8 @@ def resolve_evidence(
             if payload is None:
                 omissions.append({"locator": locator, "reason": reason})
             else:
-                if isinstance(source, dict):
-                    payload["secrets_redacted"] = bool(source.get("secrets_redacted"))
+                if isinstance(source, dict) and source.get("secrets_redacted"):
+                    payload["secrets_redacted"] = True
                 attach(locator, kind, payload)
                 if isinstance(source, dict) and source.get("coverage"):
                     coverage = source["coverage"]
@@ -353,10 +382,11 @@ def resolve_evidence(
         if path is None:
             omissions.append({"locator": locator, "reason": reason})
             continue
-        if any(path == deny or _under(path, deny) for deny in denied):
+        store = _own_store_root(path, stores, denied)
+        if store is None and any(path == deny or _under(path, deny) for deny in denied):
             omissions.append({"locator": locator, "reason": "denied_path"})
             continue
-        if not any(_under(path, root) for root in roots):
+        if store is None and not any(_under(path, root) for root in roots):
             omissions.append({"locator": locator, "reason": "outside_allowed_roots"})
             continue
         if _sensitive(path) or _sensitive(pathlib.PurePosixPath(source_locator.replace("\\", "/"))):
@@ -366,14 +396,26 @@ def resolve_evidence(
         if kind != "file":
             omissions.append({"locator": locator, "reason": kind})
             continue
+        if admit is not None and (refused := admit(store, path)):
+            omissions.append({"locator": locator, "reason": refused})
+            continue
+        # An own-store file goes with its task's drive: the bytes kept from this one read are the ones
+        # hashed, cut and selected, so a part the council sees keeps exactly that whole, never a reread.
+        keep = bytearray() if store is not None and retain is not None else None
         payload, reason = (
-            _read_selected_evidence(path, selector, read_text, hash_bytes_limit)
-            if selector else _read_evidence(path, read_text, per_item, hash_bytes_limit)
+            _read_selected_evidence(path, selector, read_text, hash_bytes_limit, keep)
+            if selector else _read_evidence(path, read_text, per_item, hash_bytes_limit, keep)
         )
         if payload is None:
             omissions.append({"locator": locator, "reason": reason or "unreadable"})
             continue
-        attach(locator, "path", payload)
+        row = attach(locator, "path", payload)
+        if row is not None and keep is not None and (selector or payload["bytes"] > per_item):
+            try:
+                held = retain(bytes(keep))
+                row.update(ref=dict(held["ref"]), file=str(held["file"]))
+            except Exception as exc:  # the part stays attached; its whole source is named absent, never implied
+                omissions.append({"locator": locator, "reason": f"source_unretained:{type(exc).__name__}"})
     return {
         "declared": declared, "attached": attached, "omissions": omissions,
         "bounds": {"per_item_bytes": per_item, "total_bytes": max(0, int(total_bytes))},
@@ -382,7 +424,7 @@ def resolve_evidence(
 
 def task_evidence_reader(root: pathlib.Path) -> Callable[[str], Optional[str]]:
     """Task-result projection with the WHOLE result; the evidence resolver hashes,
-    budgets and redacts it. One bound: ``EVIDENCE_PER_ITEM_BYTES`` cuts the attached
+    budgets and attaches it. One bound: ``EVIDENCE_PER_ITEM_BYTES`` cuts the attached
     head with the cut named (``truncated_to_N``) while sha256/bytes describe the full
     projection, and a locator selector reads the original. An inner preview here would
     hash the preview, so two results differing past it would share one identity and a
@@ -407,3 +449,85 @@ def task_evidence_reader(root: pathlib.Path) -> Callable[[str], Optional[str]]:
         projection["result"] = str(record.get("result") or "")
         return json.dumps(projection, ensure_ascii=False, indent=2, default=str)
     return _read
+
+
+def own_task_stores(ctx: Any) -> list[tuple[str, pathlib.Path]]:
+    """The caller's own ``task_drive`` and ``artifact_store`` at the host's addresses on its canonical and
+    execution drives, typed by root for ``evidence_read_admission``. Never another task's, nor a store a
+    symlink moved elsewhere: a moved store is not where the host put it."""
+    from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
+    from ouroboros.headless import TASK_DRIVES_DIR
+    from ouroboros.tool_access import canonical_data_root
+
+    own = task_id_for_artifacts(ctx)
+    drives = dict.fromkeys((canonical_data_root(ctx), pathlib.Path(ctx.drive_root).resolve(strict=False)))
+    stores = [(label, base) for drive in drives for label, base in (
+        ("task_drive", drive / TASK_DRIVES_DIR / own), ("artifact_store", task_artifact_dir_path(drive, own)))]
+    return [(label, base) for label, base in stores if base.resolve(strict=False) == base]
+
+
+def own_source_retention(root: pathlib.Path, task_id: str) -> Callable[[bytes], dict]:
+    """``resolve_evidence``'s ``retain`` for the asking task: the whole source behind a part the council saw, kept
+    write-once in its artifact store under ``root``, where its plan record lives (``store_actor_source_bytes``)
+    → ``{"ref": task_source, "file": its placement}``. The ask row carries the ref, which the record's source
+    closure follows (``review_source_closure``) through a child's promotion and the drive cleanup that removes
+    the original. Stored as text, never ``json``: these are the file's bytes, not a host record to rebind."""
+    from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
+
+    def retain(raw: bytes) -> dict:
+        ref = store_actor_source_bytes(root, task_id, category="context_checkpoints", source_id="plan-evidence",
+                                       data=raw, extension="txt")
+        return {"ref": ref, "file": str(task_artifact_dir_path(root, task_id, create=False) / ref["path"])}
+    return retain
+
+
+def evidence_read_admission(ctx: Any, governance: Optional[pathlib.Path] = None
+                            ) -> Callable[[Optional[str], pathlib.Path], str]:
+    """``read_file``'s ``read_admission`` (profile, Presence ceiling, runtime-data rules, protected artifacts) for
+    one evidence file, under its own store's typed root or else the root ``read_file`` selects for that absolute
+    address: ``""`` when it admits exactly that file, ``read_blocked:<CODE>`` when it refuses, and
+    ``read_target_differs`` when the read would bind another file at that address (an alias to a canonical
+    copy, which attaches by its own address): one path is never admitted and another read. ``governance`` is
+    the host's serving governance root (``plan_ask.planning_roots``): while a bound body candidate is what
+    ``system_repo`` names, a file physically under that exact root that ``read_file``'s own selection does not
+    admit as itself keeps its own bytes through a ``system_repo`` binding to that root, which the same admission
+    checks; the candidate's file is never read in its place."""
+    from ouroboros.tool_access import (
+        ResolvedResourceBinding,
+        active_tool_profile,
+        canonical_data_root,
+        resource_root_path,
+    )
+    from ouroboros.tools.core_file_tools import read_admission
+    from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+    system_repo = resource_root_path(ctx, "system_repo")
+    serving = pathlib.Path(governance).resolve(strict=False) if governance is not None else None
+    if serving == system_repo:
+        serving = None  # no candidate: read_file's own selection already binds this root
+
+    def decide(root: Optional[str], path: pathlib.Path, base: Optional[pathlib.Path] = None) -> str:
+        """One admission: under ``root``, else the root ``read_file`` selects; ``base`` binds ``system_repo`` there."""
+        try:
+            binding = None if base is None else ResolvedResourceBinding(
+                profile=active_tool_profile(ctx), root="system_repo", operation="read", base_path=base,
+                target_path=path, source="system_repo", skill_name="", state_drive_root=canonical_data_root(ctx))
+            root = root or _root_containing_absolute_path(ctx, "read_file", str(path)) or "active_workspace"
+            _root, binding, refusal = read_admission(ctx, root, str(path), resolved_binding=binding)
+        except Exception as exc:  # a broken carrier refuses this file; the resolver itself never raises
+            return f"read_blocked:{type(exc).__name__}"
+        if refusal is not None:
+            code = getattr(refusal, "code", "")
+            if not code:  # a protected path's refusal is its final text, "⚠️ RESOURCE_POLICY_BLOCKED: …"
+                match = re.search(r"[A-Z][A-Z0-9_]{2,}", str(refusal))
+                code = match[0] if match else "REFUSED"
+            return f"read_blocked:{code}"
+        return "" if pathlib.Path(binding.target_path) == path else "read_target_differs"
+
+    def admit(root: Optional[str], path: pathlib.Path) -> str:
+        verdict = decide(root, path)
+        if (verdict and root is None and serving is not None and path != serving and _under(path, serving)
+                and not _under(path, system_repo)):
+            verdict = decide("system_repo", path, serving)
+        return verdict
+    return admit

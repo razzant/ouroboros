@@ -1,7 +1,5 @@
 import copy
-import pytest
 
-pytestmark = pytest.mark.serial
 
 from ouroboros.schedule_continuation import admission_basis
 from ouroboros.owner_continue import work_order_text

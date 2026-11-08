@@ -44,14 +44,16 @@ def request_drain() -> None:
         _wake()
 
 
-def retain(root, stream, row, *, feed=False) -> None:
-    """Take immutable bytes without waiting for IO; disclose each overflow burst."""
+def retain(root, stream, row, *, feed=False, **shown) -> None:
+    """Take immutable bytes without waiting for IO; disclose each overflow burst. ``shown`` keeps the
+    append's appearance facts (``dialogue_store.append``: ``also_feed``, ``room_revisions``,
+    ``appearances``) for the retry, so a retried row is unread and found where it is shown."""
     from ouroboros.chat_chain import row_address
 
     global _bytes, _eviction_burst
     address = row_address(row)
     key = (str(pathlib.Path(root).resolve()), stream, address["chat_id"], address["ts"], address["row_sha256"])
-    payload = json.dumps([key[0], stream, row, bool(feed)], ensure_ascii=False).encode("utf-8")
+    payload = json.dumps([key[0], stream, row, bool(feed), shown], ensure_ascii=False).encode("utf-8")
     announce = False
     with _lock:
         if key in _rows:
@@ -100,10 +102,10 @@ def drain(*, wait_sec=ACQUISITION_SLICE_SEC) -> int:
                 payload = _rows.get(key)
                 if payload is None:
                     continue
-            root, stream, row, feed = json.loads(payload)
+            root, stream, row, feed, shown = json.loads(payload)
             try:
                 with store.acquisition_budget(wait_sec):
-                    ds.append(root, stream, row, feed=feed, idempotent=True, emit_live=False)
+                    ds.append(root, stream, row, feed=feed, idempotent=True, emit_live=False, **shown)
                     if stream == "chat":
                         from ouroboros.notice_receipts import record
                         record(root, row)

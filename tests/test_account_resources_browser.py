@@ -12,7 +12,7 @@ from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TARGET = {"harness": "claude", "profile_id": "claude-default"}
 ROW = '.harness-account-row[data-harness="claude"][data-profile="claude-default"]'
 
@@ -128,7 +128,10 @@ def test_twenty_accounts_layout_and_scoped_refresh(resources_ui, width, theme):
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert panel.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
     if width < 980:
-        assert panel.locator("[data-refresh-account]").bounding_box()["height"] >= 36
+        # A desk pointer: the one control height at every width; a finger's 44 px comes from the coarse-pointer scope.
+        control_h = page.evaluate("parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--control-h'))")
+        assert control_h >= 34
+        assert panel.locator("[data-refresh-account]").bounding_box()["height"] == pytest.approx(control_h, abs=0.5)
     panel.scroll_into_view_if_needed()
     capture(page, f"resources-{width}-{theme}-expanded")
     frame_section(panel.locator('.resource-reset-section'))
@@ -220,8 +223,24 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     page.locator("[data-confirm-ok]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     original = ui["reset_calls"][0]
+    # The recovery result is multiline and its action is optional. Narrow the
+    # real row inside a wide window: zero overflow alone missed text starvation.
+    result_row = row.locator(".resource-message").filter(has=page.locator("[data-recover-reset]"))
+    result_row.evaluate("e => { e.style.width = '320px'; e.style.maxWidth = '100%'; }")
+    result_row.scroll_into_view_if_needed()
+    copy_box = result_row.locator(".settings-action-copy").bounding_box()
+    recovery = row.locator("[data-recover-reset]")
+    action_box = recovery.bounding_box()
+    available = result_row.evaluate("e => { const s = getComputedStyle(e); return e.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight); }")
+    assert copy_box["width"] >= available - 2
+    assert action_box["y"] >= copy_box["y"] + copy_box["height"] - 1
+    assert result_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+    recovery.focus()
+    expect(recovery).to_be_focused()
+    capture(page, "resources-recovery-container-reflow")
     # Closing an embedded client loses session storage; durable references must survive.
     page.evaluate("sessionStorage.clear()")
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-settings-tab="providers"]').click()
     row.locator("[data-resources]").click()
@@ -273,6 +292,7 @@ def test_non_loopback_reset_keeps_original_request_after_reload(resources_ui, sc
     assert len(ui["reset_calls"]) == 1
     original = ui["reset_calls"][0]
     assert original[0] and original[1]["offer_id"] == offer_id and original[1]["target"] == TARGET
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-settings-tab="providers"]').click()
     row.locator("[data-resources]").click()

@@ -3,8 +3,13 @@
 // JSON shape is read in one place: a field the server renames is one fix in this file. Readers are
 // tolerant (unknown extra keys are fine; a missing field stays absent, never a guessed zero); writers
 // send exactly the contract's request keys.
-import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost } from './api_client.js';
+import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
 import { tr } from './i18n.js';
+import { errorWords } from './ui_primitives.js';
+
+/** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
+export const failureText = (error) => (error instanceof TypeError && error.response === undefined
+    ? errorWords(error).text : error?.message || String(error));
 
 /** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
@@ -128,7 +133,7 @@ export function normalizePlacesResponse(raw) {
 const WAKE_COST_KEYS = ['accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_presentation', 'cost_accounting_status', 'cost_accounting_error', 'cost_final',
     'cost_with_children_partial', 'unknown_unmetered', 'non_final_rows', 'reserved_usd',
-    'unresolved_upper_bound_usd', 'ledger_integrity_degraded'];
+    'unresolved_upper_bound_usd', 'ledger_integrity_degraded', 'cost_custody'];
 
 /** Frozen RecentWake: phases and terminality are server facts, never timestamp guesses. */
 export function normalizeWake(raw) {
@@ -164,9 +169,11 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
         level: text(bg.level),
         nextWakeAt: text(bg.next_wake_at),
+        appointmentAt: text(bg.appointment_at),
         lastWakeAt: text(bg.last_wake_at),
         lastWakeOutcome: text(bg.last_wake_outcome),
         liveWakeTaskId: text(bg.live_wake_task_id),
+        liveWakeHeld: bg.live_wake_held === true,
         spentUsd: amount(bg.spent_24h_usd),
         dailyUsd: amount(bg.daily_usd),
         unknownUnmetered: count(bg.unknown_unmetered) || 0,
@@ -198,7 +205,7 @@ export async function readConsciousness(init = {}) {
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */
 export async function readConsciousnessFromState(init = {}) {
-    const data = await fetchJson('/api/state', { cache: 'no-store', ...init });
+    const data = await readStateJson(init);
     if (!object(data?.bg_consciousness_state) && typeof data?.bg_consciousness_enabled !== 'boolean') {
         throw new Error('Consciousness state unavailable');
     }
@@ -218,8 +225,13 @@ export async function readPlaceConnector(connector, init = {}) {
     const route = url.startsWith(prefix) ? url.slice(prefix.length) : '';
     const path = route && extensionRoutePath(connector.connector, route);
     if (!path || path !== url) throw new Error(tr('places.status.route_unavailable', 'The connector status route could not be read.'));
-    const data = await fetchJson(path, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
+    const account = text(connector.accountId);
+    const statusPath = account ? extensionRoutePath(connector.connector, route, new URLSearchParams({ account_id: account })) : path;
+    const data = await fetchJson(statusPath, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
     if (!object(data) || data.error) throw new Error(tr('places.status.unavailable', 'The connector status could not be read.'));
+    if (account && Object.hasOwn(data, 'account_id') && data.account_id !== account) {
+        throw new Error(tr('places.status.account_mismatch', 'The connector returned a different account.'));
+    }
     return data;
 }
 
@@ -285,14 +297,15 @@ function ownerAnswer(data, what) {
     return data;
 }
 
-/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). */
-export async function saveSafetyLevel(level, kind = 'your_work') {
+/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). Each owner
+ *  safety write takes the caller's declared origin as `headers` (`api_client.APP_SETTINGS_ORIGIN` from Settings). */
+export async function saveSafetyLevel(level, kind = 'your_work', { headers } = {}) {
     const body = kind === 'consciousness' ? { mode: level, kind } : { mode: level };
-    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body), 'The safety level');
+    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body, { headers }), 'The safety level');
 }
 
-export async function saveSafetyRules(rules) {
-    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }), 'Your rules');
+export async function saveSafetyRules(rules, { headers } = {}) {
+    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }, { headers }), 'Your rules');
 }
 
 /**
@@ -309,9 +322,9 @@ export const SAFETY_MODEL_KEYS = Object.freeze([
 
 /** One owner transaction for any of SAFETY_MODEL_KEYS; a refusal throws the server's sentence. A roster that
  *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does. */
-export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false } = {}) {
+export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, headers } = {}) {
     const body = allowEmptyReviewPool ? { settings, allow_empty_review_pool: true } : { settings };
-    return ownerAnswer(await jsonPost('/api/owner/safety-model', body), 'The change');
+    return ownerAnswer(await jsonPost('/api/owner/safety-model', body, { headers }), 'The change');
 }
 
 /** The Agents roster as saved (`OUROBOROS_SUBAGENTS`, a JSON string or object), or null when unreadable. */

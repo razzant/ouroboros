@@ -1,7 +1,9 @@
 """Whole-task xz evidence, verified readers and restore; protocol: docs/PERSISTENCE.md, evidence pack row."""
 from __future__ import annotations
 
+import collections
 import contextlib
+import contextvars
 import gzip
 import hashlib
 import json
@@ -16,6 +18,7 @@ import zlib
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import store
+from ouroboros.shared_values import splice
 from ouroboros.utils import _atomic_overwrite, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
 
 PACKS_REL = pathlib.Path("observability/packs")
@@ -34,6 +37,10 @@ MIN_DICT_SIZE, MAX_DICT_SIZE = 4096, 64 << 20
 CHECKPOINTS_REL = pathlib.PurePosixPath("source_handles/context_checkpoints")
 CHECKPOINT = "checkpoint"
 BLOB_KINDS = frozenset({"json", "txt", "bin"})
+#: ``<sha256>.json.shared.gz``: a request view's skeleton, each repeated element a blob of its own
+#: (``observability.write_shared_blob``); ``blob_bytes`` splices the exact whole back and verifies it.
+SHARED_PLACEMENT_SUFFIX = ".shared.gz"
+PART_CACHE_BYTES = 64 << 20  # memory one pack write lends to reassembling views that share most parts
 USAGE_ARCHIVE_REL = pathlib.Path("archive/usage_ledger")
 _APPLICATION_ID = {store.TIER_ENFORCED: 0x4F555045, store.TIER_NAME: 0x4F55504E}  # 'OUPE' / 'OUPN'
 _INDEX_SCHEMA = """
@@ -48,6 +55,7 @@ CREATE TABLE swept (task_id TEXT PRIMARY KEY, stamps TEXT NOT NULL);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 _READ_CHUNK = 1 << 20
+_PART_CACHE: contextvars.ContextVar = contextvars.ContextVar("evidence_part_cache", default=None)
 _READERS: Dict[str, "_PackReader"] = {}
 _READERS_LOCK = threading.Lock()
 _READERS_MAX = 4
@@ -528,11 +536,79 @@ def read_loose_gzip(path: pathlib.Path, max_bytes: Optional[int] = None) -> byte
     return raw
 
 
+class _PartCache:
+    """The parts one pack write already read, newest kept, bounded by ``PART_CACHE_BYTES``."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit, self.size, self.parts = limit, 0, collections.OrderedDict()
+
+    def get(self, digest: str) -> Optional[bytes]:
+        raw = self.parts.get(digest)
+        if raw is not None:
+            self.parts.move_to_end(digest)
+        return raw
+
+    def put(self, digest: str, raw: bytes) -> None:
+        if len(raw) > self.limit:
+            return
+        self.parts[digest] = raw
+        self.size += len(raw)
+        while self.size > self.limit:
+            _, old = self.parts.popitem(last=False)
+            self.size -= len(old)
+
+
+@contextlib.contextmanager
+def part_cache_scope() -> Iterator[None]:
+    """One read per unique part while reassembling the views of one pack (``write_pack``)."""
+    token = _PART_CACHE.set(_PartCache(PART_CACHE_BYTES))
+    try:
+        yield
+    finally:
+        _PART_CACHE.reset(token)
+
+
+def shared_placement_path(root: Any, sha256: str) -> pathlib.Path:
+    return pathlib.Path(root) / "observability" / "blobs" / f"{sha256}.json{SHARED_PLACEMENT_SUFFIX}"
+
+
+def _shared_whole(root: pathlib.Path, sha256: str, size: int, max_bytes: Optional[int],
+                  admit: Optional[Callable[[pathlib.Path], None]]) -> Optional[bytes]:
+    """The verified whole of a view stored as a skeleton placement plus parts in ``root``; ``None``
+    without a placement. Parts are blobs of this root (loose, else packed), each verified by
+    ``blob_bytes``; a part nothing holds raises its own ``FileNotFoundError`` (the whole may
+    still lie in a pack), never a shorter view."""
+    placement = shared_placement_path(root, sha256)
+    if not placement.is_file():
+        return None
+    if admit is not None:
+        admit(placement)
+    skeleton = read_loose_gzip(placement, max_bytes)
+    cache = _PART_CACHE.get()
+
+    def part(digest: str) -> bytes:
+        raw = cache.get(digest) if cache is not None else None
+        if raw is None:
+            raw = blob_bytes(root, {"sha256": digest, "kind": "json", "encoding": "gzip"},
+                             expected_kind="json", max_bytes=max_bytes, admit=admit)
+            if cache is not None:
+                cache.put(digest, raw)
+        return raw
+
+    raw = splice(skeleton, part, context=f"view {sha256[:12]}")
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise ValueError("blob exceeds byte limit")
+    if size not in (-1, len(raw)) or hashlib.sha256(raw).hexdigest() != sha256:
+        raise EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
+    return raw
+
+
 def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_bytes: Optional[int] = None,
                admit: Optional[Callable[[pathlib.Path], None]] = None) -> bytes:
-    """Verified loose bytes, then every pack placement, then admissible retained roots.
+    """Verified loose bytes, then a view's skeleton placement spliced with its parts, then every
+    pack placement, then admissible retained roots.
 
-    ``admit`` (optional) sees each loose or pack file before it is opened; what it
+    ``admit`` (optional) sees each loose, placement or pack file before it is opened; what it
     raises propagates, so a refusal never becomes a miss, corruption or fallback."""
     root = pathlib.Path(root)
     sha256, kind, size = blob_ref_fields(ref)
@@ -557,6 +633,17 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                 failure = exc
             except (OSError, EOFError, zlib.error) as exc:
                 failure = exc  # retention repair distinguishes transient IO from damaged gzip
+            if kind == "json":
+                try:
+                    raw = _shared_whole(candidate, sha256, size, max_bytes, admit)
+                    if raw is not None:
+                        return raw
+                except FileNotFoundError as exc:
+                    failure = exc  # a part is gone: the fact names it; the whole may still be packed below
+                except ValueError as exc:
+                    failure = exc
+                except (OSError, EOFError, zlib.error) as exc:
+                    failure = exc
             try:
                 placements = _placements(candidate, sha256=sha256, kind=kind)
             except (OSError, EvidenceCorrupt) as exc:
@@ -841,23 +928,21 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 
-def row_packable(status: Any, review_pending: Any) -> bool:
-    """The packing rule over a row's two indexed facts: the status is terminal, and no review of the
-    task may still read its loose files (``review_collection_pending`` 1 names an open review
-    operation, whose agent-session reader holds a retained handle's absolute path, or a row an older
-    body flagged for its acceptance collection until the maintenance pass writes it back
-    (``task_store.reclassify_review_collection``); NULL is a row no body with the selector ever wrote, so no such
-    reader exists, and the selector stays a derived fact, never a retention duty). No duty, money or
-    delivery fact is consulted (packing moves verified bytes, never content: a later write becomes
-    the next generation)."""
+def row_packable(status: Any, review_pending: Any, plan_pending: Any) -> bool:
+    """The indexed status is terminal and no review or council may still read loose sources.
+    ``review_collection_pending`` names open operations or older acceptance collection;
+    ``plan_collection_pending`` names pending council replies, even after the author finishes.
+    Their session readers hold retained handles' absolute paths. A NULL predates the selector,
+    not an active reader. Both are derived facts, never retention duties. Money and delivery
+    are unrelated: packing moves verified bytes; a later write becomes the next generation."""
     from ouroboros.task_status import SETTLED_STATUSES
 
-    return status is not None and str(status) in SETTLED_STATUSES and review_pending != 1
+    return status is not None and str(status) in SETTLED_STATUSES and review_pending != 1 and plan_pending != 1
 
 
 def task_packable(txn: store.Txn, task_id: str) -> bool:
     """``row_packable`` over the task's row (``False`` without one)."""
-    row = txn.row(str(task_id), "status", "review_collection_pending")
+    row = txn.row(str(task_id), "status", "review_collection_pending", "plan_collection_pending")
     return row is not None and row_packable(*row)
 
 
@@ -933,7 +1018,12 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
                                 "path": (CHECKPOINTS_REL / entry.name).as_posix(), "source": pathlib.Path(entry.path)})
     for kind, sha256, size in manifest_blob_refs(root, task_id):
         loose = root / "observability" / "blobs" / f"{sha256}.{kind}.gz"
-        if loose.is_file() or _locate(root, sha256=sha256, kind=kind) is not None:  # a shared sha is duplicated per pack
+        placement = shared_placement_path(root, sha256) if kind == "json" else loose
+        if loose.is_file():
+            members.append({"sha256": sha256, "kind": kind, "size": size, "source": loose})
+        elif placement.is_file():  # a view's loose form is its skeleton; the pack keeps the spliced whole
+            members.append({"sha256": sha256, "kind": kind, "size": size, "source": placement})
+        elif _locate(root, sha256=sha256, kind=kind) is not None:  # a shared sha is duplicated per pack
             members.append({"sha256": sha256, "kind": kind, "size": size, "source": loose})
         elif missing is not None:
             missing.append((kind, sha256, size))
@@ -977,7 +1067,7 @@ def write_pack(root: Any, task_id: str, generation: int, members: List[Dict[str,
                                      filters=[{"id": lzma.FILTER_LZMA2, "preset": PRESET, "dict_size": dict_size}])
     digest, packed_total, offset, recorded = hashlib.sha256(), 0, 0, []
     try:
-        with open(tmp_pack, "wb") as handle:
+        with open(tmp_pack, "wb") as handle, part_cache_scope():
             def emit(chunk: bytes) -> None:
                 nonlocal packed_total
                 if chunk:

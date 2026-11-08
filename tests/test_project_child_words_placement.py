@@ -38,7 +38,6 @@ from supervisor import events_chat_delivery as delivery
 from supervisor import message_bus
 from tests.group_run import run_in_group
 
-pytestmark = pytest.mark.serial  # Access is read from the process environment
 
 LINEAGE = {"delegation_role": "subagent", "parent_task_id": "root-1", "root_task_id": "root-1",
            "subagent_role": "researcher"}
@@ -168,7 +167,7 @@ def test_only_cyber_pro_lets_a_child_speak_to_the_owner(room, monkeypatch):
         assert refusal in registry.execute("send_user_message", {"text": "halfway"})
         assert ctx.event_queue == []
     registry, ctx, _ = _child_registry(room, monkeypatch, "cyber_pro")
-    assert "sent to owner chat" in registry.execute("send_user_message", {"text": "halfway"})
+    assert "accepted for delivery to owner chat" in registry.execute("send_user_message", {"text": "halfway"})
     assert [frame["system_type"] for frame in ctx.event_queue] == ["proactive_message"]
 
 
@@ -189,7 +188,7 @@ def test_a_routing_notice_for_a_child_stands_alone_and_the_childs_words_stay_in_
     # The same words again, right away and after other words: each send is its own row.
     for text in ("CHILD_WORDS_1: halfway through.", "CHILD_WORDS_2: found the README.",
                  "CHILD_WORDS_2: found the README.", "CHILD_WORDS_1: halfway through."):
-        assert "sent to owner chat" in registry.execute("send_user_message", {"text": text})
+        assert "accepted for delivery to owner chat" in registry.execute("send_user_message", {"text": text})
         assert deliver(ctx.event_queue.pop()) == 0, "a child's own words change its card"
     assert _steer_refused(room) == 1, "the refusal is the owner's own conversation row"
 

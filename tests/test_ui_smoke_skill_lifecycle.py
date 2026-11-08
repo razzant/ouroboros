@@ -22,7 +22,6 @@ direct_server_with_data = _direct_server_with_data
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_with_data, monkeypatch, tmp_path):
     import time
     import urllib.request

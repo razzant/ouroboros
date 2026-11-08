@@ -164,3 +164,36 @@ def test_recheck_is_tri_state_and_never_waits_under_the_queue_lock(env, monkeypa
             reads.load('root')
         assert reads.prepared('root')['status'] == 'completed', 'the prepared row needs no re-check'
     assert reads.recheck(('root',)) == UNCHANGED, 'outside Q the probe waits with the normal budget'
+
+
+@pytest.mark.parametrize("interference", ["none", "busy", "unknown"])
+def test_drive_settlement_refreshes_ownership_after_its_own_publication(env, monkeypatch, interference):
+    """The real supervisor probe must not call its own custody publication a live task.
+    A different row write/worker/Keep at the final interlock must still retain."""
+    import contextlib
+    from ouroboros import task_custody
+    drive = env / "task_drives" / "root"
+    drive.mkdir(parents=True)
+    @contextlib.contextmanager
+    def interlock():
+        if interference == "row_changed":
+            task_results.write_task_result(env, 'root', 'completed', root_phase_checkpoint={'post_task_synthesis': 'paused'})
+        elif interference == "worker":
+            workers.WORKERS[1] = SimpleNamespace(busy_task_id='root')
+        elif interference == "keep":
+            task_results.write_task_result(env, 'root', 'completed', owner_keep={'basis': 'test'})
+        elif interference in {"busy", "unknown"}:
+            from ouroboros import store, task_store
+            error = store.StoreBusy('writer active') if interference == 'busy' else ValueError('signature unreadable')
+            monkeypatch.setattr(task_store, 'signature', lambda *a, **kw: (_ for _ in ()).throw(error))
+        with queue._queue_lock:
+            yield True
+    result = task_custody.settle_child_drive(env, 'root', drive,
+        live=queue_transitions.task_settlement_liveness, guard=interlock)
+    assert result['status'] == ('removed' if interference == 'none' else 'retained'), result
+    assert drive.exists() is (interference != 'none')
+    if interference in {"busy", "unknown", "row_changed", "worker"}:
+        assert result['reason'] == {'busy': 'store_busy', 'unknown': 'liveness_unknown',
+                                    'row_changed': 'liveness_unknown', 'worker': 'task_live'}[interference]
+    # The publication really happened, including the empty owner-mail capture.
+    assert task_results.load_task_result(env, 'root')['owner_mailbox']['read_complete'] is True

@@ -11,7 +11,8 @@ and delivers like one):
 
 - **A2A chats stay deferred.** A peer's ``wait_for_response`` subscription
   resolves on the FIRST non-progress chat frame, so a live mid-task frame
-  would hijack the answer the peer is waiting for.
+  would hijack the answer the peer is waiting for. Unbound peers accept text
+  only; media/cards have no consumer. A Project binding keeps its normal delivery.
 - **Sticky-deferred after the first live failure.** Once one frame falls back
   to the buffer, later frames must not overtake it: narrative order beats
   freshness, so the task finishes the attempt on the deferred path.
@@ -27,6 +28,16 @@ Retry semantics are the progress channel's: a live-delivered frame from a
 failed attempt is not recalled, and a retried task may narrate again. That is
 an accepted property of live delivery, not a defect to dedupe away.
 
+A frame buffered by an unmoved inline Presence turn has no end-of-task drain:
+its runner returns a result, not events. ``flush_owner_events`` hands local-room
+frames back to the bus at the turn's end; with neither that bus nor a carrier's
+sink the frame has no consumer, so it is refused as ``undelivered``, not promised.
+
+Receipts name the room the supervisor will actually pick (``delivery_audience``):
+a Project room, or a place's local room, which is never the external conversation
+(the owner's own bridge may mirror it). Queue admission proves neither delivery
+nor display, so neither is claimed there.
+
 Known, pre-existing exception to the ordering rule: the blocking-post-task
 final-answer shortcut (``deliver_final_message_live``) may ship the FINAL
 ahead of frames still buffered here — the answer is deliberately never held
@@ -37,11 +48,17 @@ itself, not against the terminal shortcut.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any, Dict
 
+log = logging.getLogger(__name__)
+
 _STICKY_ATTR = "_owner_delivery_sticky_deferred"
 _DIALOGUE_LOCK = threading.Lock()
+UNDELIVERED = "undelivered"  # refused here: the frame has no consumer and nothing was buffered
+UNSUPPORTED_PEER = "unsupported_peer"  # non-text frame for a known unbound peer; retained artifacts stay
+_LOCAL_ROW_FRAMES = frozenset({"send_photo", "send_video", "send_document", "send_links", "send_card"})
 
 
 def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
@@ -128,18 +145,81 @@ def publish_pending_owner_dialogue(ctx: Any, messages: list) -> None:
     acknowledge_owner_dialogue(ctx, rows)
 
 
-def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
-    """Deliver an owner-directed chat event live, or buffer it. Returns
-    ``"live"`` or ``"deferred"`` — the caller words its receipt honestly.
+def stamp_lineage(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp task lineage and origin before any owner-delivery snapshot is taken.
 
-    Lineage (``task_id`` / ``parent_task_id`` / ``root_task_id``) is stamped
-    for every task frame so the supervisor can resolve project binding for
-    live deliveries exactly as it does for the end-of-task drain.
+    The origin is deliberately stamped here, rather than only in
+    ``deliver_owner_event``: relay and Presence Main-contact events register
+    their durable outbox copy before the live/deferred delivery call. Mutate an
+    existing ``progress_meta`` mapping in place so a caller that already owes
+    this event keeps the exact same metadata on replay. Explicit event
+    metadata wins over task-derived metadata; ordinary owner turns remain
+    unlabelled.
     """
-    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+    from ouroboros.subagent_messages import initiator_meta
 
     meta = getattr(ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
+    evt.setdefault("task_id", str(getattr(ctx, "task_id", "") or ""))
+    evt.setdefault("parent_task_id", str(meta.get("parent_task_id") or ""))
+    evt.setdefault("root_task_id", str(meta.get("root_task_id") or ""))
+
+    progress_meta = evt.get("progress_meta") if isinstance(evt.get("progress_meta"), dict) else {}
+    explicit = str(evt.get("initiator") or progress_meta.get("initiator") or "").strip()
+    derived = initiator_meta(meta).get("initiator", "")
+    value = explicit or derived
+    if value:
+        # Keep an explicit event value authoritative, while making the same
+        # fact available to the send_message consumer and dialogue checkpoint.
+        if not isinstance(evt.get("progress_meta"), dict):
+            progress_meta = {}
+            evt["progress_meta"] = progress_meta
+        evt.setdefault("initiator", value)
+        progress_meta.setdefault("initiator", value)
+    return evt
+
+
+def local_room_frame(evt: Dict[str, Any]) -> bool:
+    """A send-family row for this work's own room: never a final, a Main notice or private contact."""
+    kind = evt.get("type")
+    return kind in _LOCAL_ROW_FRAMES or (kind == "send_message" and evt.get("system_type") == "proactive_message")
+
+
+def _no_consumer(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """A local-room frame an unmoved inline turn would buffer for nobody (module docstring)."""
+    from ouroboros.utils import in_worker_process
+
+    meta = getattr(ctx, "task_metadata", None)
+    if not (isinstance(meta, dict) and meta.get("presence_event_identity") and local_room_frame(evt)):
+        return False
+    if in_worker_process():
+        return False  # a carrier's turn: its runner's sink (or the saved turn's drain) takes it
+    from supervisor.workers import get_event_q
+
+    try:
+        get_event_q(create=False)
+    except RuntimeError:
+        return True
+    return False
+
+
+def _delivery_chat(root: Any, evt: Dict[str, Any]) -> Any:
+    """Resolve once with unreadable lineage preserved, never as proof of no Project."""
+    from ouroboros.projects_registry import RoomResolver
+
+    return RoomResolver(root, strict=True)(evt.get("task_id"), evt.get("parent_task_id"),
+                                           evt.get("root_task_id")) or evt.get("chat_id")
+
+
+def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
+    """Deliver an owner-directed chat event live, or buffer it. Returns ``"live"``,
+    ``"deferred"``, ``UNDELIVERED`` or ``UNSUPPORTED_PEER``; receipts keep the distinction.
+
+    Lineage is stamped for every task frame (``stamp_lineage``) so the supervisor
+    can resolve project binding for live deliveries exactly as it does for the
+    end-of-task drain.
+    """
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 
     def _accepted(mode: str) -> str:
         if not is_a2a_chat_id(evt.get("chat_id")):
@@ -151,16 +231,25 @@ def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
         ctx.pending_events.append(evt)
         return _accepted("deferred")
 
-    evt.setdefault("task_id", str(getattr(ctx, "task_id", "") or ""))
-    evt.setdefault("parent_task_id", str(meta.get("parent_task_id") or ""))
-    evt.setdefault("root_task_id", str(meta.get("root_task_id") or ""))
+    def _buffered() -> str:
+        return UNDELIVERED if _no_consumer(ctx, evt) else _deferred()
+
+    stamp_lineage(ctx, evt)
     if is_a2a_chat_id(evt.get("chat_id")):
+        if evt.get("type") in _LOCAL_ROW_FRAMES:
+            from ouroboros.tool_access import canonical_data_root
+
+            try:
+                if is_a2a_chat_id(_delivery_chat(canonical_data_root(ctx), evt)):
+                    return UNSUPPORTED_PEER
+            except Exception:
+                log.debug("peer delivery destination unread; retaining deferred frame", exc_info=True)
         return _deferred()
     if getattr(ctx, _STICKY_ATTR, False):
-        return _deferred()
+        return _buffered()
     event_queue = getattr(ctx, "event_queue", None)
     if event_queue is None:
-        return _deferred()
+        return _buffered()
     try:
         event_queue.put_nowait(dict(evt))
     except Exception:
@@ -168,5 +257,86 @@ def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
             setattr(ctx, _STICKY_ATTR, True)
         except Exception:
             pass
-        return _deferred()
+        return _buffered()
     return _accepted("live")
+
+
+def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
+    """``(room, place_bound)`` for a stamped frame, by the supervisor's own rule (lineage binding, else its chat).
+
+    ``room`` is empty for an ordinary owner room. A place room shares
+    the Project id range, so the registry decides, never the number.
+    """
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.projects_registry import project_thread_name
+    from ouroboros.tool_access import canonical_data_root
+
+    place_bound = presence_caller_binding(ctx) is not None
+    chat: Any = evt.get("chat_id")
+    try:
+        root = canonical_data_root(ctx)
+        chat = _delivery_chat(root, evt)
+        if is_a2a_chat_id(chat):
+            return "the peer conversation", False
+        name = project_thread_name(root, chat)
+    except Exception:
+        log.debug("delivery audience unread for task %s", evt.get("task_id"), exc_info=True)
+        return "a local room (exact destination unavailable)", place_bound
+    if name is not None:
+        return f'Project room "{_label(name)}"', place_bound
+    if chat == HIDDEN_CHAT_ID:
+        return "the hidden task record (not an owner-visible chat)", place_bound
+    if not place_bound or chat == WEB_UI_CHAT_ID:
+        return "", place_bound
+    meta = getattr(ctx, "task_metadata", None)
+    presence = meta.get("presence") if isinstance(meta, dict) else None
+    presence = presence if isinstance(presence, dict) else {}
+    place = presence.get("place") if isinstance(presence.get("place"), dict) else {}
+    label = _label(place.get("label") or place.get("provider") or presence.get("place_id"))
+    return (f'the local room of place "{label}"' if label else "this place's local room"), True
+
+
+def _label(value: Any) -> str:
+    return " ".join(str(value or "").split())[:80]
+
+
+def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
+    """The frame's actual local destination and queue acceptance, never proof of display."""
+    if mode == UNSUPPORTED_PEER:
+        return (f"⚠️ PEER_DELIVERY_UNSUPPORTED: {noun} not delivered: this peer conversation accepts text only. "
+                "Nothing was queued; any stored file or card remains available in this task.")
+    room, place_bound = delivery_audience(ctx, evt)
+    if mode == UNDELIVERED:
+        return (f"⚠️ LOCAL_ROOM_UNAVAILABLE: {noun} not delivered to {room or 'this local room'}: this turn has no "
+                "delivery channel for it, and nothing was buffered. It never reached the place conversation either.")
+    state = "accepted for delivery to" if mode == "live" else "queued for delivery to"
+    if not room:
+        return (f"OK: {noun} accepted for delivery to owner chat." if mode == "live"
+                else f"OK: {noun} queued for delivery to owner.")
+    if not place_bound:
+        return f"OK: {noun} {state} {room}."
+    from ouroboros.presence_context import ROUTED, ROUTELESS, UNKNOWN, final_route
+    from ouroboros.tool_access import canonical_data_root
+
+    try:  # the context's and the forced final's reader, read again now: a source may have published since
+        route, _why = final_route(canonical_data_root(ctx), getattr(ctx, "task_metadata", None),
+                                  getattr(ctx, "task_id", ""))
+    except Exception:
+        route = UNKNOWN
+    path = {ROUTED: "Your final answer has a route there (place state and Safety still apply); a connector tool "
+                    "sends separately.",
+            ROUTELESS: "From this run only a connector tool reaches it.",
+            UNKNOWN: "Whether your final answer reaches it is not settled yet; a connector tool sends there "
+                     "separately."}[route]
+    return f"OK: {noun} {state} {room} (Ouroboros side, not the place conversation). {path}"
+
+
+def publish_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
+    """The send family's one acceptance receipt in every room."""
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    text = named_delivery_receipt(ctx, evt, mode, noun)
+    if mode in (UNDELIVERED, UNSUPPORTED_PEER):
+        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=text))
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))

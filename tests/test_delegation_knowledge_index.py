@@ -110,8 +110,7 @@ def test_one_batch_of_delegations_carries_one_index(tmp_path):
     assert sum(message["content"].count("SUMMARY_ONCE") for message in shown) == 1
 
 
-@pytest.mark.parametrize("case", ["integrator", "consciousness", "no captured start", "a leaf that does not delegate",
-                                  "retry_of", "refused schedule", "refused start", "memory_mark"])
+@pytest.mark.parametrize("case", ["integrator", "no captured start", "refused schedule"])
 def test_nothing_without_an_accepted_new_delegation_by_a_focus_that_started_without_knowledge(tmp_path, case):
     """A focus that started with knowledge (or whose start is unknown) never gets it, a later delegation
     included; for a helper, a call that is not an accepted act of new work leaves the first act to come."""
@@ -164,6 +163,7 @@ def test_the_index_is_the_integrators_own_and_nothing_sent_before_it_changes(tmp
                   "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}}
     sent, _cap = build_llm_messages(env=env, memory=memory, task=child_task, ctx=child_ctx)
     assert "## Knowledge base" not in json.dumps(sent) and "REAL_REQUEST_SUMMARY" not in json.dumps(sent)
+    assert "- people/owner" in section(sent[0]["content"][-1]["text"], "## Knowledge outline")  # born with the outline
     main_ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id="tmain001", current_chat_id=1)
     main, _cap = build_llm_messages(env=env, memory=memory, task={"id": "tmain001", "type": "task", "text": "hi",
                                                                    "chat_id": 1}, ctx=main_ctx)

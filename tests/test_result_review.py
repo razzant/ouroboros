@@ -133,7 +133,6 @@ def test_result_reviews_of_one_root_share_one_allowance_wherever_their_material_
 
 @pytest.mark.parametrize("args, problem", [
     ({"subject": "result", "base": "HEAD~1"}, "root, workspace_root, base and head do not apply"),
-    ({"subject": "result", "workspace_root": "/tmp"}, "root, workspace_root, base and head do not apply"),
     ({"subject": "result", "coupling_only": ["x"]}, "coupling_only belongs to a change review"),
     ({"subject": "index", "answer": "Done."}, "answer belongs to subject=result"),
     ({"subject": "index", "surface": "result"}, "subject=result goes with surface=result"),
@@ -208,7 +207,8 @@ def test_blocking_holds_the_same_failed_result_until_it_changes_and_passes(tmp_p
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True, "Blocking holds again"
     assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
     answers.clear()  # the revised result satisfies the reviewers
-    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True, "its PASS reaches the mind"
+    assert ": PASS." in shown[-1] and result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
     assert len(sends) == 6
     current = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
     assert [run["aggregate_signal"] for run in current] == ["PASS"]
@@ -237,6 +237,7 @@ def test_a_required_root_result_is_reviewed_through_a_real_session_seat(tmp_path
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
     assert "three findings" in shown[0], shown
     monkeypatch.setattr(FakeGateway, "detail", _terminal_detail('{"findings": []}', conformance="passed"))
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True and ": PASS." in shown[-1]
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
     starts = [body for gateway in FakeGateway.instances for body in gateway.start_requests]
     assert len(starts) == 2 and all(body["outputSchema"]["required"] == ["findings"] for body in starts), starts
@@ -261,15 +262,18 @@ def test_nothing_is_forced_for_a_child_auto_off_or_a_plain_text_answer(tmp_path,
     assert sends == []
 
 
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 def test_required_reviews_presence_results_without_holding_them_and_ignores_a_declared_expected_output(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, enforcement):
     from ouroboros.tools.review_result import required_material, result_review_at_delivery
 
     sends: list[dict] = []
-    ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
+    ctx = _floor_ctx(tmp_path / "presence", monkeypatch, enforcement=enforcement)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     _produced_answer_protocol(monkeypatch)
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
-    ctx._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
     trace, shown = {"tool_calls": []}, []
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, \
         "Presence speech is never held for a review"
@@ -279,6 +283,16 @@ def test_required_reviews_presence_results_without_holding_them_and_ignores_a_de
     assert presence["panel"]["chosen_by"] == "host" and presence["panel"]["composition"] == "full_pool"
     assert set(presence["panel"]["assigned"]) == {"t1", "t2", "s1"}
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False and len(sends) == 3
+    for _ in range(3):  # the same answer reopened by place mail keeps one $0 refusal, without holding speech
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
+    rows = review_ledger.recent_records(ctx.drive_root, ctx.task_id, limit=50, surface="result")
+    refused = [row for row in rows if (row.get("verdict") or {}).get("aggregate") == "NOT_DISPATCHED"]
+    assert len(refused) == 1 and len(sends) == 3 and shown == []
+    current = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+    assert len(current) == 1 and current[0]["record_id"] == refused[0]["record_id"]
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
+    assert len(sends) == 6 and shown == [], "a raised ceiling permits its review; Presence still never holds"
     sends.clear()
 
     # The expected result a task was given is intent, never production (owner, 11 Oct, #1731).
@@ -304,6 +318,7 @@ def test_a_mind_reviewed_result_is_bound_at_delivery_in_auto_without_a_second_wa
     assert run_review_change(ctx, subject="result", answer=answer)["aggregate"] == "PASS"
     trace = {"tool_calls": []}
 
+    assert result_review_at_delivery(ctx, answer, trace, lambda text: None) is True, "no review tool returned it"
     assert result_review_at_delivery(ctx, answer, trace, lambda text: None) is False
     assert len(sends) == 3, "binding never buys a second wave"
     review = _review_axis(trace)
@@ -375,9 +390,9 @@ def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(
     assert _objective_axis(_review_axis(trace))["source"] == "author_acceptance"
 
 
-@pytest.mark.parametrize("owner_message", [False, True])
+@pytest.mark.parametrize(("checkpointed", "owner_message"), [(False, False), (True, True)])
 def test_delivery_collects_the_running_review_the_mind_started_without_buying_another(tmp_path, monkeypatch,
-                                                                                      owner_message):
+                                                                                      owner_message, checkpointed):
     """With ``owner_message`` an owner message arrives while the review runs (the usual reason its author left
     it): the running review of the same answer is still collected at $0 under its own subject, and since it
     judged the earlier request the host asks once whether the new words change it; delivering again keeps it."""
@@ -398,9 +413,10 @@ def test_delivery_collects_the_running_review_the_mind_started_without_buying_an
                                      {"source": "owner_mailbox", "content": "How far along are you?", "msg_id": "m-2"}]
 
         trace, shown = {"tool_calls": []}, []
-        if owner_message:
-            assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True, mode
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True, mode
+        if owner_message:  # one question, which carries the collected outcome too
             assert "How far along are you?" in shown[0] and "deliver again" in shown[0], shown
+        assert "(record " in shown[0] and "PASS" in shown[0], "the collected outcome reaches the mind first"
         assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, mode
         assert len(sends) == 4 and sends[3]["slot_id"] == "t2" and sends[3]["reconcile_only"] is True, \
             "the delivery rejoined the running wave's own seat; no second wave was bought"
@@ -408,6 +424,18 @@ def test_delivery_collects_the_running_review_the_mind_started_without_buying_an
         assert (run["record_id"], run["aggregate_signal"]) == (first["record_id"], "PASS"), mode
         record = review_ledger.load_record(ctx.drive_root, first["record_id"])
         assert record["brief"]["goal"] == "Check the arithmetic", "the collected record keeps the mind's brief"
+        from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
+        from ouroboros.late_review_marks import replay_owed_late_reviews
+        from ouroboros.task_results import write_task_result
+        from ouroboros.working_checkpoint import flush_content_acks
+
+        assert not (record.get("waiting") or {}).get("seen_outcome_states"), "showing alone is not a saved receipt"
+        if checkpointed:
+            flush_content_acks(ctx)  # the successful transcript checkpoint's commit point
+        write_task_result(ctx.drive_root, ctx.task_id, "completed", chat_id=1)
+        assert replay_owed_late_reviews(ctx.drive_root)["settled"] == 1
+        marks = [mark for mark in ChronicleStore(ctx.drive_root).active_marks(None) if is_late_review_mark(mark)]
+        assert bool(marks) is (not checkpointed), "only a whole saved host handback makes the unwaited mark redundant"
 
 
 def test_a_delivered_answer_never_keeps_an_earlier_answers_run_current(tmp_path, monkeypatch):
@@ -418,6 +446,7 @@ def test_a_delivered_answer_never_keeps_an_earlier_answers_run_current(tmp_path,
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     assert run_review_change(ctx, subject="result", answer="Report A")["aggregate"] == "PASS"
     trace = {"tool_calls": []}
+    assert result_review_at_delivery(ctx, "Report A", trace, lambda text: None) is True  # handed back once
     assert result_review_at_delivery(ctx, "Report A", trace, lambda text: None) is False
     assert result_review_at_delivery(ctx, "Report B", trace, lambda text: None) is False
     [run] = trace["review_runs"]
@@ -498,6 +527,7 @@ def test_a_raised_ceiling_lets_the_blocked_host_review_run(tmp_path, monkeypatch
                                            surface="result")) == records, "an unchanged ceiling writes no new refusal"
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True and ": PASS." in shown[-1]
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False, shown[-1]
 
 
@@ -514,6 +544,7 @@ def test_a_manual_review_after_a_raised_ceiling_also_delivers(tmp_path, monkeypa
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam([]))
     assert run_review_change(ctx, subject="result", answer="FINAL ANSWER: 3")["aggregate"] == "PASS"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, lambda _: None), "its PASS, handed back once"
     assert not rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, lambda _: None)
 
 
@@ -613,6 +644,7 @@ def test_returning_to_an_exactly_reviewed_answer_makes_its_review_current_again(
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam([]))
     run_review_change(ctx, subject="result", answer="Reviewed answer A")
     trace = {"tool_calls": [], "delivery_candidate": {"acceptance_binding": {"authoritative": False}}}
+    assert rr.result_review_at_delivery(ctx, "Reviewed answer A", trace, lambda _: None)  # handed back once
     assert not rr.result_review_at_delivery(ctx, "Reviewed answer A", trace, lambda _: None)
     rr.supersede_result_runs(trace, "candidate-2")  # a new candidate (B) replaced it
     assert not rr.result_review_at_delivery(ctx, "Different answer B", trace, lambda _: None)
@@ -666,7 +698,7 @@ def test_collecting_a_rebuttal_bearing_review_keeps_its_provenance_and_its_reuse
     assert first["state"] == "pending"
     root = review_ledger.ledger_root(ctx)
     pending = review_ledger.load_record(root, first["record_id"])
-    assert result_review_at_delivery(ctx, "The sum is 12.", {"tool_calls": []}, lambda _: None) is False
+    assert result_review_at_delivery(ctx, "The sum is 12.", {"tool_calls": []}, lambda _: None) is True  # collected
     settled = review_ledger.load_record(root, first["record_id"])
     assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS"
     assert settled["fingerprints"] == pending["fingerprints"] and settled["brief"] == pending["brief"]
@@ -740,7 +772,7 @@ def test_a_late_settlement_just_before_the_rejoin_write_keeps_the_rounds_provena
         return write(drive, record, rejoin=rejoin)
 
     monkeypatch.setattr(rc, "_write", late_settle_then_write)
-    assert result_review_at_delivery(ctx, args["answer"], {"tool_calls": []}, lambda _: None) is False
+    assert result_review_at_delivery(ctx, args["answer"], {"tool_calls": []}, lambda _: None) is True  # collected
     assert review_ledger.load_record(root, first["record_id"])["fingerprints"] == original["fingerprints"]
     assert rc.run_review_change(ctx, **args)["reused"] is True
 
@@ -752,21 +784,49 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
     """Owner, 18.10 (A): the only review of this exact answer judged an earlier request, so the host shows the
     owner's words since then once and asks. If they change what was asked, the mind asks for a review of the
     current request (the reviewers now see them and FAIL it; Blocking holds); if not, it delivers again and the
-    earlier review stands, with no new seat."""
+    earlier review stands, with no new seat.
+
+    The question names each new row by its identity — the reference token of its stamp, whole — never by likeness
+    of words or of the whole stamp: a one-word row and a Project room's row are named with their stamps; ``msg m-1``
+    is not ``msg m-12`` (the earlier subject holds the longer token, which a substring match would read as the
+    shorter); a row whose source or date merely changed, or that the earlier subject held under its pre-update
+    ``msg`` reference, is not named; a subject that cannot be read back names every row; none of it buys a seat."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.projects_registry import bind_task_to_project, create_project
     from ouroboros.tools import review_result as rr
 
     ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking")
     _produced_answer_protocol(monkeypatch)
+    room = create_project(ctx.drive_root, "quotas", name="Quotas")["chat_id"]
+    bind_task_to_project(ctx.drive_root, ctx.task_id, "quotas", room, origin={"absent": "system"})
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да", "msg_id": "m-12", "received": "2026-10-01T00:00:00+00:00"},
+                             {"source": "owner_mailbox", "content": "Use miles", "msg_id": "m-3", "client_message_id": "cm-3"}]
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     trace, shown = {"tool_calls": []}, []
-    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is False, "PASS delivers"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is True, "its PASS first"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is False, "then delivers"
     paid = len(sends)
     words = "Requirement change: give the distance in kilometres."
-    ctx._owner_directives = [*(getattr(ctx, "_owner_directives", None) or []),
+    # Since that review: the first «да» rides on under another source and date (a Continue's corpus); the pre-update
+    # row is now held with its chat row (one identity, two printed references); a second «да» (``msg m-1``, inside
+    # the seen ``msg m-12`` as a substring), the change, and a «да» in the Project room are new.
+    ctx._owner_directives = [{"source": "owner_corpus", "content": "да", "msg_id": "m-12", "ts": "2026-10-01T00:00:01+00:00"},
+                             ctx._owner_directives[1], {"source": "owner_mailbox", "content": "да", "msg_id": "m-1"},
                              {"source": "owner_mailbox", "content": words, "msg_id": "m-2"}]
+    ctx._held_owner_messages = {"row:held": {"ts": "2026-10-01T00:00:02+00:00", "direction": "in", "chat_id": 1,
+                                             "text": "Use miles", "client_message_id": "cm-3", "task_id": ""}}
+    ds.append(ctx.drive_root, "chat", {"ts": "2026-10-01T00:00:03+00:00", "direction": "in", "chat_id": room, "text": "да",
+                                       "client_message_id": "cm-room", "task_id": ""})
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is True, "asked once"
     assert words in shown[-1] and len(sends) == paid
+    assert [line for line in shown[-1].split("\n") if line.startswith("- [")] == [
+        f"- [owner · owner_mailbox of task {ctx.task_id} · msg m-1]", f"- [owner · owner_mailbox of task {ctx.task_id} · msg m-2]",
+        f"- [2026-10-01T00:00:03+00:00 · owner · room_message · chat {room} / cm-room]"]
+    assert "msg m-12]" not in shown[-1] and "cm-3" not in shown[-1] and "Use miles" not in shown[-1]
+    # A retained subject that cannot be read back names every current row, and buys nothing.
+    every = rr._request_changed_text(ctx, {"record_id": "lost", "subject": {"diff_sha": "0" * 64}, "verdict": {"aggregate": "PASS"}})
+    assert every.count("\n- [") == 5 and "msg m-12]" in every and "chat 1 / cm-3]" in every and len(sends) == paid
     if words_change_the_request:
         monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
         current = run_review_change(ctx, subject="result", answer="FINAL ANSWER: 12 miles")
@@ -801,6 +861,7 @@ def test_a_refusal_is_no_review_of_any_request(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "5")
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     paid = len(sends)
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True and ": PASS." in shown[-1]
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False
     assert len(sends) == paid + 3, "the floor reviewed the current request"
     current = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
@@ -849,6 +910,98 @@ def test_alternating_answers_at_a_spent_blocking_ceiling_hold_with_each_refusal_
     assert "raises the review ceiling" in shown[-1] and len(sends) == 3
 
 
+# --- What the delivery step already showed survives a cold same-ID continuation (map seam 2) ------------
+
+def _floor_review(tmp_path, monkeypatch, enforcement="advisory", answers=None):
+    """The Required root of the tests above over the golden seats: ``(ctx, sends, trace, shown)``."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, answers))
+    return ctx, sends, {"tool_calls": []}, []
+
+
+@pytest.mark.parametrize("writer", ["working", "owner_wait"])
+def test_findings_shown_before_a_cold_continuation_are_not_shown_again(tmp_path, monkeypatch, writer):
+    """Advisory: findings shown, the process ends; the same task continued from either saved source delivers on
+    the mind's decision instead of holding for the same findings again."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, answers={"t1": CRITICAL})
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True, "findings first"
+    before = ctx._result_review_shown = [f"review:{'0' * 32}#FAIL", *ctx._result_review_shown]  # #2339's token form
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch, writer=writer)
+    assert ctx._result_review_shown == before, "a token beside a record id, value for value and in order"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "the mind decided"
+    [run] = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+    assert run["informed_finish"] is True and len(shown) == 1 and len(sends) == 3, "shown once, reviewed once"
+
+
+def test_a_changed_request_is_asked_about_once_per_subject_across_a_cold_continuation(tmp_path, monkeypatch):
+    """The ask binds (review, subject): that pair is not asked again after the process ended, while newer owner
+    words over the SAME answer form a new subject that is asked about once more."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, enforcement="blocking")
+    answer = "FINAL ANSWER: 12 miles"
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "unreceived PASS is shown"
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is False, "the mind decided"
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Also mention the route.", "msg_id": "m-2"}]
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "asked once"
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch, writer="owner_wait")
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is False, "the same pair is not asked again"
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "And name the start town.", "msg_id": "m-3"})
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "a new subject is asked about"
+    assert "And name the start town." in shown[-1] and len(shown) == 3 and len(sends) == 3
+
+
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_a_shown_refusal_stands_across_a_cold_continuation(tmp_path, monkeypatch, enforcement):
+    """A shown $0 refusal outlives the process: Blocking holds on it (writing no new one) until a raised ceiling
+    lets the owed review run; Advisory delivers on the mind's informed decision."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, enforcement, answers={"t1": CRITICAL})
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # FAIL shown
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True  # refused, shown
+
+    root, task_id = review_ledger.ledger_root(ctx), ctx.task_id
+    written = len(review_ledger.recent_records(root, task_id, limit=50, surface="result"))
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch)
+    delivered = rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append)
+    assert len(review_ledger.recent_records(root, task_id, limit=50, surface="result")) == written, "no new refusal"
+    if enforcement == "advisory":
+        assert delivered is False and len(shown) == 2, "the mind decided"
+        return
+    assert delivered is True and "raises the review ceiling" in shown[-1], "still refused: held"
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True, "the owed PASS is shown"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False, "the mind decided"
+    assert len(sends) == 6
+
+
+@pytest.mark.parametrize("new_id, legacy", [(True, False), (False, True)])
+def test_no_presentation_is_invented_for_a_new_execution_or_a_legacy_source(tmp_path, monkeypatch, new_id, legacy):
+    """A new execution id borrows no review state and an older source cannot say what was shown: both start with
+    nothing shown (nor a running review), so a legacy source's findings show once more, never reviewed again."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, answers={"t1": CRITICAL})
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
+    fresh, restored = cold_continuation(ctx, trace, monkeypatch, new_id=new_id, legacy=legacy)
+    assert ctx._result_review_shown and fresh._result_review_pending == ""
+    assert not (fresh._result_review_shown or fresh._result_review_request_asked or fresh._result_review_refused)
+    if legacy:
+        assert rr.result_review_at_delivery(fresh, "FINAL ANSWER: 2", restored, shown.append) is True
+        assert len(shown) == 2 and len(sends) == 3
+
+
 def test_the_host_floor_seats_the_whole_pool_and_records_that_the_host_chose(tmp_path, monkeypatch):
     from ouroboros.review_projection import ledger_record_panel
     from ouroboros.tools.review_result import result_review_at_delivery
@@ -859,7 +1012,7 @@ def test_the_host_floor_seats_the_whole_pool_and_records_that_the_host_chose(tmp
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     trace = {"tool_calls": []}
 
-    assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, lambda _text: None) is False
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, lambda _text: None) is True  # its PASS, first
     assert len(sends) == 3
     [run] = trace["review_runs"]
     record = review_ledger.load_record(ctx.drive_root, run["record_id"])
@@ -879,7 +1032,7 @@ def test_a_minds_review_of_a_required_root_stays_chosen_by_ouroboros(tmp_path, m
 
     first = run_review_change(ctx, subject="result", answer=answer)
     assert first["panel"]["chosen_by"] == "ouroboros" and set(first["panel"]["assigned"]) == {"t1", "t2", "s1"}
-    assert result_review_at_delivery(ctx, answer, {"tool_calls": []}, lambda _text: None) is False
+    assert result_review_at_delivery(ctx, answer, {"tool_calls": []}, lambda _text: None) is True  # unread: shown
     assert len(sends) == 3, "a review the mind already ran is not bought again as the host's"
 
 

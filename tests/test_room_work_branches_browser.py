@@ -39,7 +39,7 @@ from tests import test_room_work_browser as rw
 
 subscription_ui = rw.subscription_ui
 direct_server_with_data = backend.direct_server_with_data
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 FULL_MENU = ["finalize", "hurry", "pause", "stop_now"]
@@ -251,8 +251,14 @@ TARGETS = """(scope) => {
     const min = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--touch-target-min')) || 0;
     const visible = (el) => Boolean(el) && !el.hidden && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const box = (el) => { const r = el.getBoundingClientRect(); return { w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10 }; };
+    // A control that looks smaller reaches the minimum through the shared hit area (DESIGN "Touch and containment"),
+    // judged as tests/test_design_system_gate_browser.py does: its centre ±(min/2 - 1) px each way lands on it.
+    const at = (x, y) => document.elementFromPoint(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1));
+    const reached = (el) => { const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, d = min / 2 - 1;
+        return min > 0 && [[cx - d, cy], [cx + d, cy], [cx, cy - d], [cx, cy + d]].every(([x, y]) => {
+            const hit = at(x, y); return Boolean(hit) && (hit === el || el.contains(hit)); }); };
     const of = (sel, kind) => [...root.querySelectorAll(sel)].filter(visible)
-        .map((el) => ({ kind, id: el.closest('.rw-row')?.dataset.id || '', ...box(el) }));
+        .map((el) => ({ kind, id: el.closest('.rw-row')?.dataset.id || '', ...box(el), reached: reached(el) }));
     const scrollLatest = root.querySelector('.chat-scroll-bottom-btn');
     return { coarse: matchMedia('(pointer: coarse)').matches, hoverNone: matchMedia('(hover: none)').matches, min,
         targets: [...of('.rw-trigger', 'trigger'), ...of('.rw-main[tabindex="0"]', 'row'), ...of('.rw-more', 'more'),
@@ -367,6 +373,7 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
         problems.append(f"opening moved a neighbouring target: {moved}")
     small = [t for t in out["open_targets"]["targets"]
              if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["open_targets"]["min"] - 0.5
+             and not t["reached"]
              or t["kind"] == "row" and t["h"] < out["open_targets"]["min"] - 0.5]
     if small:
         problems.append(f"targets under --touch-target-min {out['open_targets']['min']}px: {small}")
@@ -432,7 +439,8 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
     if not shade["reachable"]:
         problems.append("a Shade target is not the element hit at its centre")
     small = [t for t in out["shade_targets"]["targets"]
-             if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["shade_targets"]["min"] - 0.5]
+             if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["shade_targets"]["min"] - 0.5
+             and not t["reached"]]
     if small:
         problems.append(f"Shade targets under --touch-target-min: {small}")
     for name in out["shade_names"]:
@@ -969,6 +977,111 @@ def test_offline_http_across_a_socket_reopen_keeps_stale_actions_withdrawn(branc
     record("offline-http-socket-reopen", out)
     assert transport.posts == [] and transport.decision_posts() == []
     assert not problems, problems
+
+
+# ------------------------------------------------------------------------------------------------
+# A root asleep on the helper it chose, which still awaits its own Resume: Waiting, and the line says so.
+
+_SLEEP_ON_HELD = {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                  "sleep": {"mode": "warm", "tasks": ["rw-child"], "senders": ["rw-child"]}}
+# The chosen helper's census row carries no name, so the sleep counts it rather than name it by its id; its mail,
+# chosen too, is said as a message.
+_HELD_LINE = ("Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until "
+              "Ouroboros resumes it")
+# A Continue episode holds no request door for its predecessor's helper: no releaser is named.
+_COLD_LINE = "Sleeping until the task it chose finishes · 1 helper it waits for is paused"
+# Whether a status line shows whole where it is drawn: inside the viewport, nothing cut, nothing covering it.
+_LINE_FIT = """(el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + Math.min(4, r.width / 2), r.top + r.height / 2);
+    return { x: r.left, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight,
+             cut: el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1,
+             covered: !(hit === el || el.contains(hit)), lines: Math.round(r.height / parseFloat(getComputedStyle(el).lineHeight)) };
+}"""
+
+
+def _held_line(branch_ui, transport, task_id, tag, *, width, height, theme, work_id=None, line=_HELD_LINE):
+    """Open the room, wait for the sleeper's card and its work's list row to say the held line; measure and
+    capture both. A work is listed under its id: its first episode's, for a Continue."""
+    work_id = work_id or task_id
+    page = branch_ui["page"]
+    rw.open_app(branch_ui, transport, theme=theme, viewport={"width": width, "height": height})
+    bar = rw.wait_facts(page, "main", lambda f: f["badge"] == "Waiting", "the room says Waiting")
+    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{task_id}"]')
+    card.scroll_into_view_if_needed()
+    page.wait_for_function("""([task, line]) => document.querySelector(
+        `#chat-messages .chat-live-card[data-task-id="${task}"] [data-live-phase-secondary]`)?.textContent === line""",
+                           arg=[task_id, line], timeout=20000)
+    rw.settle_frames(page)
+    chip = {"word": card.locator("[data-live-phase]").inner_text().strip(),
+            "line": card.locator("[data-live-phase-secondary]").inner_text().strip(),
+            "fit": card.locator("[data-live-phase-secondary]").evaluate(_LINE_FIT)}
+    rw.capture(page, f"{tag}-card")
+    rw.trigger(page).click()
+    listed = rw.wait_facts(page, "main", lambda f: (rw.row(f, work_id) or {}).get("secondary"), "the sleeping row")
+    rw.settle_frames(page)
+    fit = page.locator(f'#page-chat .rw-row[data-id="{work_id}"] .rw-secondary').evaluate(_LINE_FIT)
+    rw.capture(page, f"{tag}-list")
+    record(tag, {"bar": bar, "chip": chip, "listed": listed, "row_line_fit": fit, "console": transport.console})
+    for where, measured in (("card", chip["fit"]), ("list", fit)):
+        assert not measured["cut"] and not measured["covered"], (where, measured)
+        assert 0 <= measured["x"] and measured["right"] <= measured["vw"] + 0.5, (where, measured)
+    assert (chip["word"], chip["line"]) == ("Waiting", line), chip
+    return bar, listed
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("width,height", [(1100, 722), (390, 844)])
+def test_a_sleep_on_a_helper_awaiting_resume_says_so_on_card_and_list_without_a_door(branch_ui, width, height, theme):
+    history = {1: [*rw.reading(8), rw.progress("rw-sleep", "Waiting for the builder it chose.", 30,
+                                               suggested_name=rw.LONG_NAME)]}
+    transport = BranchTransport(branch_ui["page"], history=history, activities=[
+        rw.activity("rw-sleep"),
+        rw.activity("rw-child", "budget_paused", pause_cause="unknown", can_resume=False,
+                    parent_task_id="rw-sleep", root_task_id="rw-sleep")])
+    transport.raw = {"rw-sleep": {"running": True, "owner_wait": _SLEEP_ON_HELD},
+                     "rw-child": {"_budget_pause": {"reason": "owner", "exact_continuation": True}}}
+    bar, listed = _held_line(branch_ui, transport, "rw-sleep", f"held-helper-{width}x{height}-{theme}",
+                             width=width, height=height, theme=theme)
+    row = rw.row(listed, "rw-sleep")
+    assert (row["word"], row["secondary"], row["resume"]) == ("Waiting", _HELD_LINE, False), row
+    assert rw.row(listed, "rw-child") is None, "a helper is a member of its root's work, never a row of its own"
+    assert bar["mark"].startswith("still") and not bar["waitNote"], ("still dots, no owner's move", bar)
+    assert transport.posts == [] and transport.decision_posts() == []
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("width,height", [(1100, 722), (390, 844)])
+def test_a_cold_sleep_of_a_continue_says_which_held_helper_of_the_earlier_episode_it_waits_for(
+        branch_ui, width, height, theme):
+    """The rows the real census gives a Continue episode cold-asleep on its predecessor's held helper
+    (``test_current_stop_readers``): the saved selection rides on the exact pause; the ended predecessor's
+    helpers are the owner's to select, the one the sleep chose is named on the line, the other is not."""
+    history = {1: [*rw.reading(8), rw.progress("rw-cold", "Waiting for the builder of the first attempt.", 30,
+                                               suggested_name=rw.LONG_NAME)]}
+    transport = BranchTransport(branch_ui["page"], history=history, activities=[
+        rw.activity("rw-cold", "budget_paused", pause_cause="sleep", can_resume=False),
+        *(rw.activity(helper, "budget_paused", pause_cause="unknown", can_resume=True,
+                      parent_task_id="rw-first", root_task_id="rw-first") for helper in ("rw-run", "rw-new"))])
+    transport.raw = {
+        "rw-cold": {"root_task_id": "rw-cold", "continuation": {"predecessor_task_id": "rw-first"}, "_budget_pause": {
+            "reason": "sleep", "scope": "task", "rail": "model_sleep", "exact_continuation": True, "root_task_id": "rw-cold",
+            "sleep": {"mode": "cold", "tasks": ["rw-run"], "senders": [], "runs": [], "wake_at": "", "any_mail": False}}},
+        "rw-run": {"root_task_id": "rw-first", "parent_task_id": "rw-first", "_budget_pause": {
+            "reason": "owner", "scope": "root", "rail": "owner_pause", "exact_continuation": True,
+            "root_task_id": "rw-first"}},
+        "rw-new": {"root_task_id": "rw-first", "parent_task_id": "rw-first", "_budget_pause_hold": {
+            "reason": "root_fence_lifted_pending_selection", "release": "resume", "root_task_id": "rw-first"}}}
+    transport.results = {"rw-first": {"task_id": "rw-first", "status": "interrupted", "chat_id": 1,
+                                      "root_task_id": "rw-first"}}
+    bar, listed = _held_line(branch_ui, transport, "rw-cold", f"cold-held-helper-{width}x{height}-{theme}",
+                             width=width, height=height, theme=theme, work_id="rw-first", line=_COLD_LINE)
+    row = rw.row(listed, "rw-first")
+    assert (row["word"], row["secondary"], row["resume"]) == ("Waiting", _COLD_LINE, False), row
+    assert all(rw.row(listed, task) is None for task in ("rw-cold", "rw-run", "rw-new")), "one work, one row"
+    # The earlier episode's helpers are the owner's to select: the owner's mark, as the projection's turn says.
+    assert bar["mark"].startswith("dot owner") and bar["waitNote"], bar
+    assert transport.posts == [] and transport.decision_posts() == []
 
 
 # ------------------------------------------------------------------------------------------------

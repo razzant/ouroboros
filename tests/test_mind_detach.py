@@ -1,4 +1,7 @@
-"""Same work, cold continuation, unchanged authority and actual attempt ownership."""
+"""Same work, cold continuation, unchanged authority and actual attempt ownership.
+
+A direct turn is a conversation-lane RUNNING row carried by the pool: its exact pause is parked by the
+supervisor from the body's event (the one pooled path), never by the body's own process."""
 
 import json
 from types import SimpleNamespace
@@ -26,8 +29,8 @@ def _arm(tmp_path, monkeypatch):
 def test_ready_detach_arms_then_parks_same_id_and_sleep_grant_is_single_use(tmp_path, monkeypatch, door):
     from ouroboros import budget_pause
     from ouroboros.task_results import load_task_result
-    from supervisor.direct_pause import park_direct_pause
     from supervisor.sleep_wake import wake_ready_sleepers
+    from tests.conversation_carrier_support import lane_row, park_lane_pause
 
     q, state, workers = _install_queue(tmp_path, monkeypatch)
     from supervisor import message_bus
@@ -45,7 +48,10 @@ def test_ready_detach_arms_then_parks_same_id_and_sleep_grant_is_single_use(tmp_
     assert pause["resume_point"]["unanswered_tool_call_ids"] == []
     task = {"id": "head", "type": "task", "chat_id": 0, "_is_direct_chat": True,
             "_attempt": 1, "tool_profile": "operator_control"}
-    assert park_direct_pause(task, budget_pause.pause_event(task, pause))
+    slot = lane_row(workers, task)  # the turn's RUNNING row, as the lane admitted and dispatched it
+    park_lane_pause(budget_pause.pause_event(task, pause), worker_id=slot.wid)  # the body's event, parked by the supervisor
+    budget_pause.end_dispatch_fence("head")  # the carrier's process-local fence ends with its body
+    assert slot.busy_task_id is None and "head" not in workers.RUNNING
     assert len(workers.PENDING) == 1 and workers.PENDING[0]["id"] == "head"
     parked = workers.PENDING[0]
     assert parked["tool_profile"] == "operator_control" and parked["_is_direct_chat"]
@@ -84,7 +90,7 @@ def test_ready_detach_arms_then_parks_same_id_and_sleep_grant_is_single_use(tmp_
     assert q.resume_budget_paused_task("head")["ok"], "explicit Resume can release the retained sleep"
 
 
-@pytest.mark.parametrize("kind", ["service", "delegated_run", "running_member", "member_custody", "custody_unreadable"])
+@pytest.mark.parametrize("kind", ["service", "delegated_run", "custody_unreadable"])
 def test_detach_refuses_blocker_list_without_arming(tmp_path, monkeypatch, kind):
     from ouroboros import model_sleep
 
@@ -93,19 +99,6 @@ def test_detach_refuses_blocker_list_without_arming(tmp_path, monkeypatch, kind)
     ctx, _limit, result = _arm(tmp_path, monkeypatch)
     assert result == {"ok": False, "error": "detach_blocked", "blockers": blockers}
     assert not getattr(ctx, "_model_sleep", None)
-
-
-def test_detach_does_not_accept_transfer_eligible_runs(tmp_path, monkeypatch):
-    from ouroboros import budget_pause, model_sleep, sleep_custody
-    from tests.test_model_sleep import _ctx
-
-    monkeypatch.setattr(budget_pause, "observe_task_runs", lambda *_a, **_k: {
-        "custody_read": "ok", "runs": [{"run_id": "r", "invocation_id": "i"}]})
-    monkeypatch.setattr(sleep_custody, "transferable_pairs", lambda *_a: ({("r", "i")}, False))
-    ctx = _ctx(tmp_path)
-    assert not model_sleep.cold_blockers(ctx, allow_transfer=True)
-    assert model_sleep.cold_blockers(ctx, chosen={"intent": "continue_in_background"}, allow_transfer=True) == [
-        {"kind": "delegated_run", "run_id": "r", "invocation_id": "i"}]
 
 
 def test_unreadable_custody_root_is_an_explicit_detach_blocker(tmp_path, monkeypatch):
@@ -198,9 +191,12 @@ def test_owner_question_stays_warm_in_either_tool_order(tmp_path, monkeypatch):
     assert model_detach.arm_detach(ctx, "")["error"] == "owner_question_pending"
 
 
-def test_raise_after_saved_pause_parks_before_unregister_without_error_terminal(tmp_path, monkeypatch):
+def test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_pause(tmp_path, monkeypatch):
+    """The carrier's body raises after its pause was saved: no exception terminal is written and nothing
+    is emitted; the saved pause of this attempt is what the crash recovery parks again (#1196, F4)."""
     from ouroboros import budget_pause
-    from supervisor import message_bus, worker_chat_lane
+    from ouroboros.task_results import load_task_result
+    from supervisor import message_bus, worker_process
 
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     ctx, limit, _result = _arm(tmp_path, monkeypatch)
@@ -208,10 +204,9 @@ def test_raise_after_saved_pause_parks_before_unregister_without_error_terminal(
     _quiet_external(monkeypatch, budget_pause)
     task = {"id": "head", "type": "task", "chat_id": 7, "text": "work",
             "project_id": "fixture", "_is_direct_chat": True, "_attempt": 1}
-    emitted, released = [], []
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=emitted.append))
+    emitted = []
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _e: None))
-    monkeypatch.setattr(worker_chat_lane, "_report_direct_chat_error", lambda *_a: pytest.fail("pause became terminal"))
+    monkeypatch.setattr("ouroboros.agent._task_exception_terminal", lambda *_a, **_k: pytest.fail("pause became terminal"))
 
     def fail(_task):
         try:
@@ -219,43 +214,20 @@ def test_raise_after_saved_pause_parks_before_unregister_without_error_terminal(
         except budget_pause.BudgetPauseRequested:
             raise OSError("after saved pause")
 
-    def unregister(task_id):
-        assert workers.PENDING[0]["id"] == task_id
-        released.append(task_id)
+    agent = SimpleNamespace(handle_task=fail, env=SimpleNamespace(drive_root=tmp_path, drive_path=lambda name: tmp_path / name))
+    try:
+        with pytest.raises(OSError, match="after saved pause"):
+            worker_process.run_worker_task(agent, task, wid=0, out_q=SimpleNamespace(put=emitted.append),
+                                           repo_dir=str(tmp_path), drive_root=str(tmp_path))
+    finally:
+        budget_pause.end_dispatch_fence("head")  # the dying carrier's process-local fence goes with it
+    assert not emitted
+    assert budget_pause.death_returns_to_pause(budget_pause.budget_pause_row(tmp_path, "head"), 1)
+    assert (load_task_result(tmp_path, "head") or {}).get("status") != "failed"
 
-    assert worker_chat_lane._execute_chat_task({"task": task, "agent": SimpleNamespace(handle_task=fail),
-        "chat_id": 7, "registry": SimpleNamespace(unregister=unregister)})
-    assert released == ["head"] and not emitted
-    assert not budget_pause.dispatch_fenced("head")
 
-
-@pytest.mark.parametrize("unreadable", [False, True])
-def test_failed_pause_source_stays_visible_without_dispatch_authority(tmp_path, monkeypatch, unreadable):
-    from ouroboros import budget_pause, working_checkpoint
-    from ouroboros.work_stop import stop_presentation
-    from supervisor.direct_pause import recover_direct_pause
-    from supervisor.events_budget import HOLD_UNSAVED_PAUSE, budget_hold_fact
-
-    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
-    task = {"id": "head", "type": "task", "chat_id": 0, "_attempt": 1, "_is_direct_chat": True}
-    assert not recover_direct_pause(task)
-    assert not workers.PENDING
-
-    def read(*_a):
-        if unreadable:
-            raise OSError("pause store unavailable")
-        return {"state": "pausing", "task_attempt": 1}
-
-    monkeypatch.setattr(budget_pause, "budget_pause_row", read)
-    monkeypatch.setattr(working_checkpoint, "complete_pause_from_working", lambda *_a: None)
-    assert recover_direct_pause(task)
-    assert len(workers.PENDING) == 1
-    held = workers.PENDING[0]
-    assert held["id"] == "head" and held["_is_direct_chat"]
-    # Unreadable evidence after the body ran is an unknown, never work "saved when the app stopped".
-    assert budget_hold_fact(held)["reason"] == ("authority" if unreadable else HOLD_UNSAVED_PAUSE)
-    if unreadable:
-        assert stop_presentation(held)["reason"]["text"] == "After a technical problem"
-    assert budget_hold_fact(held) and "_resume_selection" not in held
-    assert not held.get("_budget_pause_resume")
-    assert recover_direct_pause(task) and len(workers.PENDING) == 1
+# ``direct_pause.recover_direct_pause`` (the inline actor's own post-raise pause recovery: an unsaved or
+# unreadable pause held visibly with no dispatch authority) is retired with the in-process lane. A carrier
+# that raises after an incomplete pause dies with it, and its evidence is the pool's crash recovery's
+# (``worker_health._complete_exact_budget_pause_after_death``: the same attempt's working state completes
+# the pause, otherwise the attempt is terminal and never replayed), pinned by that recovery's own tests.

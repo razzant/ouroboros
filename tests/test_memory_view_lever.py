@@ -26,6 +26,97 @@ def plan():
                           65536, '"Assignment"', projection, replace(projection, mode="low"), core=core), snap
 
 
+def note_plan():
+    from tests.test_memory_view_floor import note_snapshot
+    p, snap = plan()
+    snap = replace(snap, room={**snap.room, 'notes': note_snapshot().room['notes']})
+    p = replace(p, core=replace(p.core, memory_view_json=mv.snapshot_json(snap)))
+    return floor.select_view(p, 'max', []), snap
+
+
+def test_note_selection_and_restoration_survive_the_next_projection():
+    p, snap = note_plan()
+    note = snap.room['notes'][0]
+    address = 'F8:' + note['id']
+    inventory = next(row for row in floor.view_inventory(p, 'max') if row['view_address'] == address)
+    assert inventory['saving_tokens'] > 800 and inventory['form'] == 'whole'
+    selected = floor.select_view(p, 'max', [address])
+    assert mv._note_pointer(note) in selected.max_projection.system_content_json
+    for restore in (False, True):
+        if restore:
+            selected = floor.select_view(selected, 'max', [inventory['restore_view_address']])
+        rebound = selected.reproject_for_route(window_tokens=1000000, known_window=True, ratio=1.0,
+            output_reserve=65536, tool_schemas=[], start_mode='max')
+        level = floor.kept_level(snap, rebound.max_projection.memory_facts)
+        assert (note['id'] in dict(level.addressed).get('F8', ())) is (not restore)
+        assert (mv._note_lines([note])[0] in json.loads(rebound.max_projection.system_content_json)[-1]['text']) is restore
+    aggregate = floor.select_view(p, 'max', [*('F8:' + n['id'] for n in snap.room['notes']), 'F8a:1'])
+    assert next(row for row in floor.view_inventory(aggregate, 'max') if row['view_address'] == address)['form'] == 'aggregate'
+    label = floor.select_view(aggregate, 'max', [address])
+    assert 'F8a' not in label.max_projection.memory_facts['floor']['steps']
+    assert mv._note_pointer(note) in label.max_projection.system_content_json
+    whole = floor.select_view(aggregate, 'max', [inventory['restore_view_address']])
+    assert whole.max_projection.memory_facts['floor']['steps']['F8'] == 5
+    assert '5 notes not yet sealed' in whole.max_projection.system_content_json
+
+
+@pytest.mark.parametrize('accept_restore', [False, True])
+def test_note_restoration_honours_explicit_fit_callback_verdict(tmp_path, monkeypatch, accept_restore):
+    """An explicit refusal blocks publication; Main's advisory estimate need not refuse."""
+    p, snap = note_plan()
+    note = snap.room['notes'][0]
+    ctx = SimpleNamespace(context_fit_plan=p, active_context_mode='max')
+    messages, schemas = p.messages_for('max'), []
+    record_context_view(ctx, messages, schemas)
+    assert 'requested' in _compact_context(ctx, view_address=['F8:' + note['id']])
+    messages = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch))
+    assert ctx._context_view_receipt['status'] == 'applied'
+    assert ctx.context_fit_plan.max_projection.memory_facts['floor']['steps']['F8'] == 1
+    record_context_view(ctx, messages, schemas)
+    shown = json.loads(_compact_context(ctx, inspect=True))
+    row = next(row for row in shown['units'] if row.get('view_address') == 'F8:' + note['id'])
+    assert row['form'] == 'line' and row['selected']
+    assert 'requested' in _compact_context(ctx, view_address=[row['restore_view_address']])
+    result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch,
+        lambda m, t: {'accepted': accept_restore, 'input_tokens': floor.view_tokens(json.dumps(m))}))
+    assert ctx._context_view_receipt['status'] == ('applied' if accept_restore else 'fit_rejected')
+    assert ('F8' in ctx.context_fit_plan.max_projection.memory_facts['floor']['steps']) is (not accept_restore)
+    if not accept_restore:
+        assert result == messages
+
+
+def test_aggregate_lever_preserves_element_addresses_and_requires_uncovered_note():
+    p, snap = plan()
+    owner = 'F7:' + snap.room['lane1'][0]['address']
+    held = floor.level_with(snap, mv.FULL_VIEW, [owner], owner_note=True)
+    with pytest.raises(ValueError, match='working_note'):
+        floor.level_with(snap, held, ['F7a:1'])
+    grouped = floor.level_with(snap, held, ['F7a:1'], owner_note=True)
+    assert dict(grouped.addressed)['F7'] == dict(held.addressed)['F7']
+    first = floor.select_view(p, 'max', ['F5:page-000', 'F5a:story'])
+    second = floor.select_view(first, 'max', ['F5:page-001'])
+    assert dict(floor.kept_level(snap, second.max_projection.memory_facts).addressed)['F5'] == ('page-000', 'page-001')
+    assert '2 older pages and parts' in second.max_projection.system_content_json
+    with pytest.raises(ValueError, match='already addressed'):
+        floor.level_with(snap, mv.FULL_VIEW, ['F7a:1'])
+
+
+def test_compact_range_form_keeps_an_authored_capsule_for_uncovered_owner_words(tmp_path, monkeypatch):
+    p, snap = plan()
+    p = floor.select_view(p, 'max', ['F7:' + snap.room['lane1'][0]['address']], owner_note=True)
+    ctx = SimpleNamespace(context_fit_plan=p, active_context_mode='max')
+    messages, schemas = p.messages_for('max'), []
+    record_context_view(ctx, messages, schemas)
+    assert 'working_note' in _compact_context(ctx, view_address=['F7a:1'])
+    assert 'requested' in _compact_context(ctx, view_address=['F7a:1'], working_note='Keep the owner commitment.')
+    result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch))
+    assert ctx._context_view_receipt['status'] == 'applied'
+    assert 'Keep the owner commitment.' in json.dumps(result)
+    assert dict(floor.kept_level(snap, ctx.context_fit_plan.max_projection.memory_facts).addressed)['F7a'] == ('1',)
+    sources = list(tmp_path.rglob('*.json'))
+    assert any(snap.room['lane1'][0]['line'] in path.read_text() for path in sources)
+
+
 def test_a_view_selection_keeps_its_mode_s_connections_form():
     p, _snap = plan()
     p = replace(p, core=replace(p.core, connections=("FULL MAP", "NAMES MAP")),

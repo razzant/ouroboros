@@ -24,7 +24,7 @@ def test_create_label_or_identity_mismatch_keeps_the_answer_and_never_sends_a_se
     assert "GH_WRITE_READBACK_MISMATCH" in line and receipt["readback"]["verified"] is False
     assert "labels" in receipt["readback"]["mismatch"] and receipt["url"] == record["html_url"]
     assert len(gh.sent()) == 1 and gh.sent()[0] == (
-        "POST", "repos/{owner}/{repo}/issues", {"title": "Title", "body": "Body", "labels": ["bug"]})
+        "POST", "repos/owner/selected/issues", {"title": "Title", "body": "Body", "labels": ["bug"]})
     assert receipt["id"] == record.get("id")
 
 

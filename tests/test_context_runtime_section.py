@@ -19,6 +19,33 @@ from ouroboros.context import build_runtime_section, build_user_content
 from tests._context_shared import _make_health_env
 
 
+@pytest.mark.parametrize(("attachment", "host_fact"), [
+    (False, None),
+    pytest.param(False, {"kind": "other"}, id='False-host_fact2'),
+    pytest.param(True, {}, id='True-host_fact1'),
+    pytest.param(True, {"kind": "call_open"}, id='True-host_fact3'),
+])
+def test_call_open_is_labelled_before_attachment_and_presence_rendering(monkeypatch, host_fact, attachment):
+    from copy import deepcopy
+    from ouroboros import context
+
+    text = "  A live call opened.\n"
+    task = {"text": text, "metadata": {"host_fact": host_fact}}
+    original = deepcopy(task)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,test"}}
+    monkeypatch.setattr(context, "_build_attachment_image_blocks", lambda _task: [image] if attachment else [])
+    seen = []
+    monkeypatch.setattr("ouroboros.presence_context.frame_presence_user_content",
+                        lambda source, content: seen.append((source, content)) or content)
+
+    expected = ("[Host fact: a live call opened; not the owner's words]\n\n" + text
+                if host_fact == {"kind": "call_open"} else text)
+    expected = [{"type": "text", "text": expected}, image] if attachment else expected
+    assert build_user_content(task) == expected
+    assert seen == [(task, expected)]
+    assert task == original  # attribution does not rewrite the source or choose different memory
+
+
 @pytest.mark.parametrize("root_only", [False, True])
 def test_schedule_digest_distinguishes_unreadable_from_empty(tmp_path, root_only):
     from types import SimpleNamespace
@@ -66,9 +93,11 @@ def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch)
     assert "runtime_data/uploads" in payload["runtime_mode_rule"]
 
 
-@pytest.mark.parametrize("trigger", ["once", "cron"])
-@pytest.mark.parametrize("previous", [None, {"task_id": "prior", "state": "pending_observation"},
-                                     {"task_id": "prior", "state": "completed", "quiet": True, "line": ""}])
+@pytest.mark.parametrize(("previous", "trigger"), [
+    (None, "once"),
+    pytest.param({"task_id": "prior", "state": "pending_observation"}, "cron", id='previous1-cron'),
+    pytest.param({"task_id": "prior", "state": "completed", "quiet": True, "line": ""}, "cron", id='previous2-cron'),
+])
 def test_runtime_keeps_the_admitted_occurrences_due_time_after_schedule_advances(tmp_path, trigger, previous):
     env = _make_health_env(tmp_path)
     due = "2026-09-29T00:30:00+00:00"
@@ -444,6 +473,14 @@ class TestRuntimeEnvSection:
         data = json.loads(section.split("## Runtime context\n\n", 1)[1])
         assert "owner_client" not in data
 
+    def test_the_block_is_compact_json_with_the_same_values(self, tmp_path):
+        """No indentation or separator spaces (20.10.2026): the same values, about a fifth fewer tokens."""
+        from ouroboros.context import build_runtime_section
+
+        section = build_runtime_section(self._make_env(tmp_path), {"id": "t8", "type": "task"})
+        body = section.split("## Runtime context\n\n", 1)[1]
+        assert body == json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
+
 
 def _delegation_data_root(tmp_path, monkeypatch):
     root = tmp_path / "delegation_data_root"
@@ -605,15 +642,17 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
     assert "## Drive state\n" + label in dynamic
     # The chat row is the memory view's (the open conversation): no capture-labelled chat tail.
     assert "## Recent chat" not in dynamic and "] hello" in dynamic.split("## This room (Main)", 1)[1]
-    assert '"context_captured_at": "2027-01-15T12:00:00+00:00"' in dynamic
+    runtime = json.loads(dynamic.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["context_captured_at"] == "2027-01-15T12:00:00+00:00"
     headings = [line for line in dynamic.splitlines() if line.startswith(("## Recent ", "## Drive state"))]
     assert headings and all(dynamic.split(heading + "\n", 1)[1].startswith(label) for heading in headings)
     assert "## Runtime context\n" + label not in dynamic  # labels are for the captured snapshots only
 
 
 class TestStorageFact:
-    """The last finished storage count reaches the Runtime block as one compact fact (Commit 5 of
-    the storage plan): present with a count, absent without, never zero, and no threshold, tier or
+    """The disk reaches the Runtime block as one compact fact (Commit 5 of the storage plan): free and
+    total space every turn, in the Storage page's decimal GB with its read time, the last finished count
+    with its growth once there is one, never a zero for what is unknown, and no threshold, tier or
     WARNING stands in for the mind's judgment."""
 
     def _env(self, tmp_path):
@@ -634,14 +673,19 @@ class TestStorageFact:
         section = build_runtime_section(env, {"id": "t1", "type": "task"})
         return section, json.loads(section.split("## Runtime context\n\n", 1)[1])
 
-    def test_absent_until_the_owner_counts_then_the_count_with_growth(self, tmp_path, monkeypatch):
+    def test_free_space_every_turn_then_the_count_with_growth_once_counted(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         from ouroboros import storage
 
         env = self._env(tmp_path)
         _section, data = self._runtime(env)
-        assert "storage" not in data, "no count yet: no fact, never zero"
+        disk = data["storage"]
+        assert set(disk) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, \
+            "no count yet: the disk alone, never a zero count"
+        assert disk["free_gb"] == round(disk["free_bytes"] / 1e9, 1) and disk["volume_total_gb"] == round(
+            disk["volume_total_bytes"] / 1e9, 1), "the decimal GB the Storage page prints (storage_format.js)"
+        assert disk["disk_read_at"] == data["context_captured_at"], "read in the build the section is dated by"
 
         (tmp_path / "observability").mkdir()
         (tmp_path / "observability" / "a.bin").write_bytes(b"x" * 4096)
@@ -650,7 +694,8 @@ class TestStorageFact:
         storage.save_count(tmp_path, first)
         section, data = self._runtime(env)
         fact = data["storage"]
-        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes", "volume_total_bytes"}
+        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
+                             "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
         assert fact["counted_at"] == first["finished_at"] and fact["bytes"] == first["bytes"] > 0
         assert fact["unreadable"] == 0 and "growth_flag" not in fact
         assert fact["previous_at"] is None and fact["growth_bytes"] is None
@@ -679,16 +724,17 @@ class TestStorageFact:
         monkeypatch.setattr("shutil.disk_usage", unavailable)
         _section, child_data = self._runtime(child_env)
         assert child_data["storage"]["bytes"] == second["bytes"]
-        assert child_data["storage"]["free_bytes"] is None
-        assert child_data["storage"]["volume_total_bytes"] is None
+        for key in ("free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"):
+            assert key not in child_data["storage"], f"an unreadable disk is absent, never zero: {key}"
 
-    def test_an_unreadable_saved_count_is_no_fact(self, tmp_path):
+    def test_an_unreadable_saved_count_is_no_count(self, tmp_path):
         from ouroboros import storage
 
         env = self._env(tmp_path)
         (tmp_path / storage.MEASUREMENT_FILE).write_bytes(b"not json")
         _section, data = self._runtime(env)
-        assert "storage" not in data
+        assert set(data["storage"]) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, \
+            "an unreadable count is no count fact; the disk is still read"
 
     @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a folder this user cannot list")
     def test_unreadable_items_qualify_the_headline_and_the_growth(self, tmp_path):
@@ -824,8 +870,9 @@ class TestVitalsFact:
         env = self._env(tmp_path, monkeypatch)
         _section, data = self._runtime(env)
         vitals = data["vitals"]
-        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note"}
-        assert {"owner_turns_note", "runtime", "note"} <= set(vitals)
+        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note", "engine_pool"}
+        assert {"owner_turns_note", "runtime", "note", "engine_pool"} <= set(vitals)
+        assert "engine" in vitals["engine_pool"]  # the one key that stays: it names the sources it could not read
         assert vitals["owner_turns_note"] == "none since this process started"
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
         _section, data = self._runtime(env)

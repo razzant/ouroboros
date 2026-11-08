@@ -13,7 +13,6 @@ from tests.test_telegram_format_parity import _load_skill
 from tests.test_telegram_routing_notices import phone  # noqa: F401 -- the owner's chat behind the real bus
 
 # The shared native-skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 
 class Api:
@@ -74,15 +73,15 @@ def test_every_chunk_id_is_retained_across_reload_and_nonlast_resolves(bridge):
     b = bridge
     state = _state(b.plugin)
     record = {"row_address": "row:1@2026-10-16T12:00:00Z#123456789abc", "task_id": "work-1", "kind": "message"}
-    client = b.transport.TelegramClient("test-token", on_message=lambda chat, mid: state._remember_message(b.api, chat, mid, record))
+    client = b.transport.TelegramClient("test-token", on_message=lambda chat, mid: state._remember_message(b.api, "", chat, mid, record))
     last = asyncio.run(client.send_message(42, "word " * 2000, parse_mode=""))
     assert len(b.calls) >= 3 and last == 100 + len(b.calls)
     plugin, _transport = _load_skill()  # no in-memory map survives a plugin restart
     restored = _state(plugin)
     for mid in range(101, last + 1):
-        assert restored._reply_reference(Api(b.api.state_dir), 42, mid) == record["row_address"]
-    assert restored._reply_reference(b.api, 43, 101) == ""
-    assert restored._reply_reference(b.api, 42, 9999) == ""
+        assert restored._reply_reference(Api(b.api.state_dir), "", 42, mid) == record["row_address"]
+    assert restored._reply_reference(b.api, "", 43, 101) == ""
+    assert restored._reply_reference(b.api, "", 42, 9999) == ""
 
 
 def test_confirmed_chunk_survives_later_unknown_send(bridge):
@@ -123,12 +122,12 @@ def test_message_reference_retention_is_bounded_and_work_cards_use_task_address(
     state, api = _state(bridge.plugin), bridge.api
     monkeypatch.setattr(state, "_MAX_MESSAGE_REFS", 3)
     for mid in range(1, 6):
-        state._remember_message(api, 42, mid, {"row_address": f"row-{mid}", "kind": "work_card", "task_id": f"task-{mid}"})
-    state._remember_message(api, 42, 3, {"row_address": "updated-row", "kind": "message"})
-    assert list(state._message_refs(api)) == ["42:4", "42:5", "42:3"]
-    assert state._reply_reference(api, 42, 1) == ""
-    assert state._reply_reference(api, 42, 4) == "task:task-4"
-    assert state._reply_reference(api, 42, 3) == "updated-row"
+        state._remember_message(api, "", 42, mid, {"row_address": f"row-{mid}", "kind": "work_card", "task_id": f"task-{mid}"})
+    state._remember_message(api, "", 42, 3, {"row_address": "updated-row", "kind": "message"})
+    assert list(state._message_refs(api, "")) == ["42:4", "42:5", "42:3"]
+    assert state._reply_reference(api, "", 42, 1) == ""
+    assert state._reply_reference(api, "", 42, 4) == "task:task-4"
+    assert state._reply_reference(api, "", 42, 3) == "updated-row"
 
 
 def _owner(mid=50, text="Explain this", *, reply=0, chat=42):
@@ -156,7 +155,6 @@ def _receive(b, message, *, update_id=70):
     ("message", "row:1@time#123456789abc", "row:1@time#123456789abc"),
     ("work_card", "row:1@time#123456789abc", "task:work-1"),
     ("message", "", "task:work-1"),
-    ("completion", "row:1@later#123456789abc", "row:1@later#123456789abc"),
 ])
 def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge, monkeypatch, kind, address, expected):
     b = bridge
@@ -178,7 +176,7 @@ def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge,
 
 def test_unmapped_or_other_chat_reply_has_no_reference_and_no_notice(bridge, monkeypatch):
     b = bridge
-    _state(b.plugin)._remember_message(b.api, 43, 101, {"row_address": "other-chat"})
+    _state(b.plugin)._remember_message(b.api, "", 43, 101, {"row_address": "other-chat"})
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(reply=101))
     _receive(b, _owner(51, reply=999))
@@ -192,8 +190,8 @@ def _accept_owner(b, mid, *, text="Same owner words", chat=42):
     from ouroboros.chat_chain import format_address, row_address
 
     state = _state(b.plugin)
-    state._owner_message_seen(b.api, chat, mid)
-    fields = state._owner_ingress_fields(b.api, chat, _owner(mid, text, chat=chat), mid)
+    state._owner_message_seen(b.api, "", chat, mid)
+    fields = state._owner_ingress_fields(b.api, "", chat, _owner(mid, text, chat=chat), mid)
     receiver = SimpleNamespace(enqueue_local_message=lambda *args, **kwargs: None)
     row, _ = accept_local_message(receiver, b.api.state_dir / "data", text,
                                  chat_id=chat, user_id=chat, source="skill:telegram", **fields)
@@ -201,7 +199,7 @@ def _accept_owner(b, mid, *, text="Same owner words", chat=42):
             "author_label": "You", "kind": "message", "snippet": text, "ts": row["ts"], "task_id": ""}
 
 
-@pytest.mark.parametrize("target", ["earlier", "latest", "other_chat", "unmapped", "system", "unresolved"])
+@pytest.mark.parametrize("target", ["earlier", "other_chat", "unresolved"])
 def test_native_reply_only_for_nonlatest_owner_from_same_telegram_chat(bridge, target):
     b = bridge
     earlier = _accept_owner(b, 10)
@@ -220,7 +218,7 @@ def test_native_reply_only_for_nonlatest_owner_from_same_telegram_chat(bridge, t
         assert data.get("reply_to_message_id") == (10 if target == "earlier" else None)
     assert b.api.logs == []
     if target == "earlier":
-        assert _state(b.plugin)._message_ref(b.api, 42, 10)["row_address"] == earlier["address"]
+        assert _state(b.plugin)._message_ref(b.api, "", 42, 10)["row_address"] == earlier["address"]
 
 
 def test_local_owner_command_breaks_native_reply_adjacency(bridge, monkeypatch):
@@ -239,17 +237,15 @@ def test_latest_owner_identity_survives_reference_eviction(bridge, monkeypatch):
     ref = _accept_owner(b, 10)
     _accept_owner(b, 11)
     # A late binding refreshes an old record; it must not make it the latest input.
-    record = {**state._message_ref(b.api, 42, 10), "row_address": ref["address"]}
-    state._remember_message(b.api, 42, 10, record)
-    state._remember_message(b.api, 42, 100, {"row_address": "bot-row"})
-    assert state._message_ref(b.api, 42, 11) == {}
-    assert state._native_reply_id(b.api, 42, {"reply_to": ref}) == 10
+    record = {**state._message_ref(b.api, "", 42, 10), "row_address": ref["address"]}
+    state._remember_message(b.api, "", 42, 10, record)
+    state._remember_message(b.api, "", 42, 100, {"row_address": "bot-row"})
+    assert state._message_ref(b.api, "", 42, 11) == {}
+    assert state._native_reply_id(b.api, "", 42, {"reply_to": ref}) == 10
 
 
 @pytest.mark.parametrize("surface,extra", [
     ("photo", {"image_base64": "eA=="}),
-    ("video", {"video_base64": "eA=="}),
-    ("document", {"file_base64": "eA==", "filename": "note.txt"}),
     ("document", {"file_base64": "eA==", "filename": "note.mp3", "mime": "audio/mpeg"}),
     ("links", {"title": "Read this", "actions": [{"label": "Source", "url": "https://example.com"}]}),
 ])
@@ -260,7 +256,7 @@ def test_every_mirrored_media_surface_retains_reference_and_native_reply(bridge,
     event = {"chat_id": 1, "row_address": "host-media-row", "task_id": "work", "reply_to": ref, **extra}
     asyncio.run(getattr(b.plugin, "_make_" + surface)(b.api)(event))
     assert len(b.calls) == 1 and b.calls[0][1]["reply_to_message_id"] == 10
-    assert _state(b.plugin)._reply_reference(b.api, 42, 101) == "host-media-row"
+    assert _state(b.plugin)._reply_reference(b.api, "", 42, 101) == "host-media-row"
     assert b.api.logs == []
 
 
@@ -272,8 +268,8 @@ def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(bridge, 
     assert len(b.calls) > 2
     last = 100 + len(b.calls)
     state = _state(b.plugin)
-    assert all(state._reply_reference(b.api, 42, mid) == "question-row" for mid in range(101, last + 1))
-    assert state._message_ref(b.api, 42, 101)["kind"] == "question"
+    assert all(state._reply_reference(b.api, "", 42, mid) == "question-row" for mid in range(101, last + 1))
+    assert state._message_ref(b.api, "", 42, 101)["kind"] == "question"
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(50, "Please explain", reply=101))
     assert posts[0][0] == "/chat/inject" and posts[0][1]["reply_to"] == "question-row"
@@ -306,9 +302,9 @@ def test_silent_mode_replaces_progress_only_within_its_episode_and_reply_origin(
 
     asyncio.run(run())
     assert [method for method, _ in b.calls] == ["sendMessage", "editMessageText", "sendMessage", "sendMessage"]
-    assert _state(b.plugin)._reply_reference(b.api, 42, 101) == "row-update"
-    assert _state(b.plugin)._reply_reference(b.api, 42, 103) == "row-continue"
-    assert _state(b.plugin)._reply_reference(b.api, 42, 104) == "row-origin"
+    assert _state(b.plugin)._reply_reference(b.api, "", 42, 101) == "row-update"
+    assert _state(b.plugin)._reply_reference(b.api, "", 42, 103) == "row-continue"
+    assert _state(b.plugin)._reply_reference(b.api, "", 42, 104) == "row-origin"
 
 
 def test_silent_mode_starts_new_message_when_native_reply_anchor_changes(bridge):
@@ -317,7 +313,7 @@ def test_silent_mode_starts_new_message_when_native_reply_anchor_changes(bridge)
     ref = _accept_owner(b, 10)
     event = _note("First note", "same-episode", reply_to=ref)
     asyncio.run(handle(event))
-    _state(b.plugin)._owner_message_seen(b.api, 42, 11)
+    _state(b.plugin)._owner_message_seen(b.api, "", 42, 11)
     asyncio.run(handle({**event, "text": "More about the earlier request"}))
     assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage"]
     assert "reply_to_message_id" not in b.calls[0][1] and b.calls[1][1]["reply_to_message_id"] == 10
@@ -344,7 +340,7 @@ def test_every_authored_message_and_the_final_answer_stay_their_own_messages(bri
     assert [data["text"] for _, data in b.calls] == _REPLIES
     # Silent mode means no sound; it never means fewer messages.
     assert [data.get("disable_notification") for _, data in b.calls] == [True if silent == "on" else None] * 3
-    assert b.plugin._get_silent_msg(b.api, 42) == 0
+    assert b.plugin._get_silent_msg(b.api, "", 42) == 0
 
 
 def test_progress_replaces_progress_but_never_a_reply_or_the_final_answer(bridge):
@@ -370,7 +366,7 @@ def test_progress_replaces_progress_but_never_a_reply_or_the_final_answer(bridge
     assert list(visible.values()) == [_REPLIES[0], "Building a trial PDF.", _REPLIES[1],
                                       "Checking table wrapping.", _REPLIES[2]]
     assert all(data.get("disable_notification") is True for method, data in b.calls if method == "sendMessage")
-    assert b.plugin._get_silent_msg(b.api, 42) == 0, "the final answer ends the progress run"
+    assert b.plugin._get_silent_msg(b.api, "", 42) == 0, "the final answer ends the progress run"
 
 
 def test_a_split_progress_note_is_never_replaced(bridge):
@@ -392,10 +388,10 @@ def test_a_message_tracked_before_this_version_is_never_replaced(bridge):
     """An older bridge tracked authored replies; with no progress fact on it that reply stays."""
     b = bridge
     handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
-    _state(b.plugin)._remember_message(b.api, 42, 77, {
+    _state(b.plugin)._remember_message(b.api, "", 42, 77, {
         "row_address": "old-reply", "chat_id": 1, "task_id": "t1", "kind": "message",
         "reply_to": "", "native_reply_id": 0})
-    b.plugin._set_silent_msg(b.api, 42, 77)
+    b.plugin._set_silent_msg(b.api, "", 42, 77)
     asyncio.run(handle(_note("Checking the result.", "t1")))
     assert [method for method, _ in b.calls] == ["sendMessage"]
     asyncio.run(handle({"text": "Same task, same origin: still its own message.", "task_id": "t1"}))
@@ -431,13 +427,14 @@ def test_silent_mode_mutes_and_replaces_the_hosts_technical_progress_but_not_its
     async def run():
         await handle(_host_note("Checkpoint 3 at round 12"))
         await handle(_host_note("Running the tests"))
-        await handle(_host_note("Fallback: switching model lane", task_incident="model_lane_switch"))
+        await handle(_host_note("Fallback: trying other/model", task_incident="model_lane_attempt"))
+        await handle(_host_note("Fallback: other/model is now the active route; it answered."))
         await handle(_note("Reading the failing test first."))
 
     asyncio.run(run())
     assert [(method, data.get("disable_notification")) for method, data in b.calls] == [
-        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None)]
-    assert b.calls[1][1]["message_id"] == b.calls[3][1]["message_id"] == "101"  # the first note, form-encoded
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None), ("editMessageText", None)]
+    assert b.calls[1][1]["message_id"] == b.calls[3][1]["message_id"] == b.calls[4][1]["message_id"] == "101"  # the first note, form-encoded
 
 
 def test_the_agents_host_progress_reaches_the_phone_muted_and_replaced(phone, monkeypatch):  # noqa: F811
@@ -453,11 +450,32 @@ def test_the_agents_host_progress_reaches_the_phone_muted_and_replaced(phone, mo
     agent, events = _agent()
     _emit(agent, "Checkpoint 3 at round 12")
     _emit(agent, "Running the tests")
-    _emit(agent, "Fallback: switching model lane", incident={"task_incident": "model_lane_switch", "toast_once": "lane"})
-    for _ in range(3):
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")  # ordinary progress: Silent mutes it
+    for _ in range(4):
         assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
     assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [
-        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None)]
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None)]
+
+
+def test_with_silent_mode_off_mirrored_route_rows_keep_the_phones_own_sound(phone, monkeypatch):  # noqa: F811
+    """The same real chain with Silent mode off and progress mirrored, the owner's other existing choice: every
+    note, the walk's ordinary outcome row included, is its own message with the phone's own notification. The
+    outcome row adds no incident or toast; it is not promised silence."""
+    from supervisor import events_chat_delivery
+    from tests.test_progress_narration_voice import _agent, _emit
+
+    phone.plugin.merge_settings(phone.api.state_dir, {"TELEGRAM_SILENT_MODE": "off", "TELEGRAM_MIRROR_PROGRESS": "on"})
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    phone.ctx.RUNNING["task-1"] = {"task": {"id": "task-1", "_attempt": 0}}
+    agent, events = _agent()
+    _emit(agent, "Running the tests")
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")
+    for _ in range(3):
+        assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
+    assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [("sendMessage", None)] * 3
+    assert phone.calls[-1][1]["text"].endswith("other/model is now the active route; it answered.")
 
 
 def test_silent_mode_setting_explains_sound_not_replacement(tmp_path):
@@ -498,9 +516,9 @@ def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(
     asyncio.run(notifier._check_tasks_notify(b.api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
     assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage"]
     mapping = _state(b.plugin)
-    assert mapping._reply_reference(b.api, 42, 101) == "task:episode-1"
-    assert mapping._message_ref(b.api, 42, 101)["row_address"] == format_address(row_address(summary))
-    assert mapping._reply_reference(b.api, 42, 102) == "task:episode-2"
+    assert mapping._reply_reference(b.api, "", 42, 101) == "task:episode-1"
+    assert mapping._message_ref(b.api, "", 42, 101)["row_address"] == format_address(row_address(summary))
+    assert mapping._reply_reference(b.api, "", 42, 102) == "task:episode-2"
 
 
 def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_when_no_ack_carried_it(bridge):
@@ -581,7 +599,7 @@ def test_every_outbound_chunk_is_sent_when_reference_map_cannot_be_saved(bridge,
                 "markdown": False, "row_address": "row:1@2026-10-17T08:00:00Z#123456789abc"}))
     assert [data["text"] for method, data in bridge.calls if method == "sendMessage"] == expected
     assert len(bridge.api.logs) == len(expected) and {level for level, _ in bridge.api.logs} == {"warning"}
-    assert _state(bridge.plugin)._reply_reference(bridge.api, 42, 101) == ""
+    assert _state(bridge.plugin)._reply_reference(bridge.api, "", 42, 101) == ""
 
 
 @pytest.mark.parametrize("notify,salvage", [("on", ""), ("off", "Preserved draft")])

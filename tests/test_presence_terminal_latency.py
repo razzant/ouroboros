@@ -46,8 +46,8 @@ def test_native_agent_returns_durable_result_before_synthesis_and_retry_reuses_i
         assert release.wait(120), "test releases the existing synthesis worker"
         stages.append("consolidation")
 
-    # The first paid late stage (scratchpad consolidation since the dialogue writer is retired).
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", consolidate)
+    # The first paid late stage (the fallback draft since the scratchpad pass is retired, #918).
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", consolidate)
     monkeypatch.setattr(pipeline, "_record_task_facts", lambda *_a, **_k: stages.append("facts"))
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (_call(outcome, "Reply" if outcome == "message" else ""), 0.0))
 
@@ -116,7 +116,7 @@ def test_native_agent_returns_durable_result_before_synthesis_and_retry_reuses_i
 
 @pytest.mark.parametrize("worker,split,presence,expected", [
     (False, False, True, False), (True, False, True, True),
-    (False, True, True, True), (False, False, False, True),
+    (False, False, False, True),
 ])
 def test_only_native_unsplit_presence_changes_post_task_wait(tmp_path, monkeypatch, worker, split, presence, expected):
     monkeypatch.setattr(pipeline, "in_worker_process", lambda: worker)

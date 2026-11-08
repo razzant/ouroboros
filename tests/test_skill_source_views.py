@@ -185,7 +185,10 @@ def test_two_paths_share_a_clone_but_keep_distinct_snapshots(tmp_path):
     assert [{e["name"] for e in catalog.read_snapshot(drive, row)["entries"]} for row in rows] == [{"alpha"}, {"beta"}]
     for row, name in zip(rows, ("alpha", "beta")):
         snapshot = catalog.read_snapshot(drive, row)
-        assert catalog.entry_payload_dir(drive, row, snapshot, name) == transport.clone_dir(drive, row) / row["path"] / name
+        payload = catalog.entry_payload_dir(drive, row, snapshot, name)
+        assert payload != transport.clone_dir(drive, row) / row["path"] / name
+        assert git("rev-parse", "HEAD", cwd=payload).strip() == snapshot["commit"]
+        assert (payload / "SKILL.md").read_bytes() == (work / row["path"] / name / "SKILL.md").read_bytes()
     shared = {**rows[0], "id": "another", "part": "community"}
     assert catalog.read_snapshot(drive, shared) == catalog.read_snapshot(drive, rows[0])
 
@@ -308,4 +311,3 @@ def test_listing_serves_check_and_update_outcomes_without_private_details(tmp_pa
         "release": {"version": "1", "digest": digest}, "base_digest": digest})
     plain = catalog.install_listing(drive, find_skill(drive, "notes"), {})["install"]
     assert not {"check", "pending_update", "update_rejected"} & set(plain)
-

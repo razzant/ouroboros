@@ -1,10 +1,11 @@
 """The Costs budget save is feedback about an action just taken (DESIGN §4 "Status and chips").
 
 The real SPA and the shared HTTP client in Chromium and WebKit, the Dashboard's Costs tab, with the settings endpoint
-answered per scenario and time moved by the browser clock: a plain acknowledgement ends by itself after its time, while
-a restart still required (by this save or an earlier one), a warning and an error stay until the next save replaces
-them, and an older acknowledgement never erases what a newer save says or its tone (a validation message included).
-Light and dark, phone and window.
+answered per scenario and time moved by the browser clock: the result stands in Save's own action row right after it;
+a plain acknowledgement ends by itself after its time, while a restart still required (by this save or an earlier
+one), a warning and an error stay until the next save or an edit of the form replaces them, and an older
+acknowledgement never erases what a newer save says or its tone (a validation message included). A failure says it in
+owner words, the server's text one disclosure away. Light and dark, phone and window.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ACK_MS = 4000
 
 
@@ -52,12 +53,28 @@ def _open_costs(ui, *, width, theme, answers):
     page.click('[data-nav-page="dashboard"]')
     page.click('[data-dashboard-tab="costs"]')
     page.wait_for_selector("#btn-save-budget", state="visible")
+    page.wait_for_function("document.getElementById('costs-budget-help').textContent.includes('confirmed and estimated prices count')")
     return page, saves
 
 
 def _words(page):
+    # The result's sentence (its own text node) and tone; the raw text, if any, is the disclosure after it (setResult).
     return page.evaluate("""() => { const el = document.getElementById('budget-save-status');
-        return [el.textContent, el.dataset.tone || '']; }""")
+        const said = [...el.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join('');
+        return [said, el.dataset.tone || '']; }""")
+
+
+def _raw(page):
+    return page.evaluate("() => document.querySelector('#budget-save-status .ui-result-details')?.textContent || ''")
+
+
+def _beside_save(page):
+    """The result stands in Save's own row, right after it: never under it, never at the far end."""
+    return page.evaluate("""() => { const save = document.getElementById('btn-save-budget');
+        const result = document.getElementById('budget-save-status');
+        const b = save.getBoundingClientRect(), r = result.getBoundingClientRect();
+        return save.parentElement.classList.contains('ui-action-row') && save.nextElementSibling === result
+            && r.left >= b.right && r.left - b.right <= 16 && r.top < b.bottom && r.bottom > b.top; }""")
 
 
 def _save(page, *, budget="200", per_task="50"):
@@ -71,7 +88,7 @@ def _shot(page, ui, name):
     root = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
     if root:
         Path(root).mkdir(parents=True, exist_ok=True)
-        page.locator(".costs-budget-card").screenshot(path=str(Path(root) / f"costs-{name}-{ui['engine']}.png"))
+        page.locator(".costs-budget").screenshot(path=str(Path(root) / f"costs-{name}-{ui['engine']}.png"))
 
 
 @pytest.mark.parametrize("theme,width", [("dark", 1100), ("light", 390)])
@@ -86,6 +103,7 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     # A plain acknowledgement of what the owner just did: there, then gone after its time, with its tone.
     _save(page)
     assert _words(page) == ["Saved. Took effect immediately.", "ok"]
+    assert _beside_save(page), "the result sits right after Save in its row"
     page.clock.fast_forward(ACK_MS - 200)
     assert _words(page)[0] == "Saved. Took effect immediately.", "still there before its time"
     page.clock.fast_forward(400)
@@ -96,6 +114,9 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     _shot(page, costs_ui, f"restart-required-{tag}")
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
     assert _words(page) == ["Saved. Restart required.", "warn"]
+    # What time never ends, an edit of the same form does: the next value is a new subject.
+    page.fill("#s-per-task-cost", "51")
+    assert _words(page) == ["", ""], "an edit clears the last save's words"
     # The same values again change nothing, and the restart is still owed: the line says so, and stays.
     _save(page)
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
@@ -108,11 +129,13 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     # An error is never an acknowledgement.
     _save(page)
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
-    assert _words(page) == ["Error: Settings file is read-only.", "error"]
+    assert _words(page) == ["Not saved. Settings file is read-only.", "danger"], "the server's own reason is its words"
+    assert _raw(page) == "Settings file is read-only.", "the raw text stays one disclosure away"
+    assert _beside_save(page)
     _shot(page, costs_ui, f"error-{tag}")
     assert len(saves) == 5 and all(save == {"TOTAL_BUDGET": 200, "OUROBOROS_PER_TASK_COST_USD": 50} for save in saves), saves
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    assert page.evaluate("""() => { const c = document.querySelector('.costs-budget-card');
+    assert page.evaluate("""() => { const c = document.querySelector('.costs-budget');
         return c.scrollWidth <= c.clientWidth + 1; }""")
 
 
@@ -125,7 +148,8 @@ def test_an_older_acknowledgement_never_erases_a_newer_save_or_a_validation_mess
     page.clock.fast_forward(ACK_MS - 1000)  # the first acknowledgement is one second from ending
     _save(page)                              # a failing save inside that second
     page.clock.fast_forward(ACK_MS)          # past the first timer's deadline: the error is still the answer
-    assert _words(page) == ["Error: Offline.", "error"]
+    assert _words(page) == ["Not saved. Offline.", "danger"]
+    assert _raw(page) == "Offline."
     # An invalid value after an acknowledgement is answered at once and is not erased by that acknowledgement's timer.
     _save(page)
     assert _words(page) == ["Saved. Applies on the next task.", "ok"]
@@ -133,5 +157,5 @@ def test_an_older_acknowledgement_never_erases_a_newer_save_or_a_validation_mess
     page.fill("#s-budget", "0")
     page.click("#btn-save-budget")
     page.clock.fast_forward(ACK_MS)
-    assert _words(page) == ["Budget values must be at least 0.01.", "error"], "it outlives the old timer, never in its tone"
+    assert _words(page) == ["Budget values must be at least 0.01.", "danger"], "it outlives the old timer, never in its tone"
     assert len(saves) == 3, "an invalid value is never sent"

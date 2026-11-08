@@ -28,7 +28,7 @@ from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CONTEXT = "#page-chat .chat-context-mode"
 EFFORT = "#page-chat .chat-effort-range"
@@ -479,7 +479,9 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
             _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.subShown")
             page.keyboard.press("Escape")
             # Probe both sides of the actual named row's width. System fonts differ between
-            # Linux and macOS; 390/340 are not product breakpoints (DESIGN).
+            # Linux and macOS; 390/340 are not product breakpoints (DESIGN). Just short of it the names
+            # give way one at a time, the longest first, and the row is compacted only when none can
+            # stay (#2886 7426e9fbf, U123): here the longest name alone goes.
             _until(page, "r.eff.open === 'false' && r.namesShown.every(Boolean) && r.oneLine")
             page.wait_for_function("""sel => !document.querySelector(sel).style.getPropertyValue('--capsule-body-width')""", arg=EFFORT)
             named_width = page.evaluate("""() => {
@@ -488,9 +490,12 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
                 return Math.ceil(kids.reduce((sum, n) => sum + n.getBoundingClientRect().width, 0)
                     + parseFloat(css.columnGap) * (kids.length - 1) + parseFloat(css.paddingLeft) + parseFloat(css.paddingRight));
             }""")
-            for index, (width, names) in enumerate(((named_width + 4, True), (named_width - 4, False), (named_width + 4, True))):
+            name_widths = page.evaluate("""() => [...document.querySelectorAll('#page-chat .chat-toolbar-row .chat-capsule-name')]
+                .map((name) => name.getBoundingClientRect().width)""")
+            every, short = [True] * len(name_widths), [width < max(name_widths) for width in name_widths]
+            for index, (width, names) in enumerate(((named_width + 4, every), (named_width - 4, short), (named_width + 4, every))):
                 page.locator('#page-chat .chat-toolbar-row').evaluate('(row, width) => row.style.width = width + "px"', width)
-                _until(page, f"r.namesShown.every(n => n === {str(names).lower()}) && r.oneLine")
+                _until(page, f"{str(names).lower()}.every((n, i) => n === r.namesShown[i]) && r.compact === '' && r.oneLine")
                 facts[f"closed-{index}-{width}"] = _row(page)
                 _shot(page, tmp_path, f"capsules-closed-names-{engine}-{index}-{width}")
             assert not errors, errors

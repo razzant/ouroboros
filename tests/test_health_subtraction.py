@@ -23,9 +23,42 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
     text = context_health.build_health_invariants(env)
     assert "identity.md last updated 0.0 h ago" in text
+    # Windows' coarse clock can read before the write's own timestamp (run 42412859782: "-0.0 h ago").
+    import os
+    import time
+
+    ahead = time.time() + 1
+    os.utime(tmp_path / "memory" / "identity.md", (ahead, ahead))
+    assert "identity.md last updated 0.0 h ago" in context_health.build_health_invariants(env)
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
-                 "budget drift within"):
+                 "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
+
+
+def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting
+
+    def no_usage_read(*_a, **_k):
+        raise AssertionError("a context build must not open the usage store for the drift line")
+
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", no_usage_read)
+    env = _make_health_env(tmp_path)
+    assert "BUDGET DRIFT" not in context_health.build_health_invariants(env)  # no alert: no line, no read
+    # The percentage compares the two changes since the check's baseline; the line says those, not lifetime totals.
+    (tmp_path / "state" / "state.json").write_text(json.dumps({
+        "budget_drift_alert": True, "budget_drift_pct": 76.1, "openrouter_total_usd": 30176.79,
+        "session_total_snapshot": 30150.0, "openrouter_checked_ledger_settled_usd": 29331.41,
+        "session_openrouter_settled_snapshot": 29325.0}), encoding="utf-8")
+    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
+    assert "76.1%" in line and "$6.41" in line and "$26.79" in line
+    assert "29331" not in line and "30176" not in line
+    # A state written before the checked field keeps its older ledger field (/status reads the same).
+    (tmp_path / "state" / "state.json").write_text(json.dumps({
+        "budget_drift_alert": True, "budget_drift_pct": 76.1, "openrouter_total_usd": 30176.79,
+        "session_total_snapshot": 30150.0, "openrouter_ledger_settled_usd": 29331.41,
+        "session_openrouter_settled_snapshot": 29325.0}), encoding="utf-8")
+    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
+    assert "$6.41" in line and "$26.79" in line
 
 
 def test_counts_and_obligations_with_an_action_stay(tmp_path):

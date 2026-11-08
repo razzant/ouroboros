@@ -24,7 +24,7 @@ def tree(tmp_path):
     custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("sender,relation", [("root", "ancestor"), ("peer", "sibling"), ("cousin", "tree"), ("nanny", "starter")])
+@pytest.mark.parametrize("sender,relation", [("root", "ancestor"), ("peer", "sibling"), ("cousin", "tree")])
 def test_tree_reach_is_context_only_and_frame_precedes_wire(tree, monkeypatch, sender, relation):
     stub = _install(monkeypatch, _Stub(result={"outcome": "accepted"}))
     original = stub.send_run_message

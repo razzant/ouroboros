@@ -5,8 +5,8 @@
 import { escapeHtmlAttr as escape, formatMsgTime } from './utils.js';
 import { taskReviewSourceUrl, taskSkillReviewSourceUrl } from './api_client.js';
 import {
-    actorAnswered, panelPoolLines, panelPoolRecorded, reviewStateWords, seatAdviser, seatCauseText, seatCostText, seatLimitText, seatOwed,
-    seatStateView,
+    actorAnswered, landingWords, panelPoolLines, panelPoolRecorded, reviewStateWords, seatAdviser, seatCauseText, seatCostText, seatLimitText,
+    seatOwed, seatStateView,
 } from './review_record_card.js';
 import { statusMarkHtml } from './status_mark.js';
 
@@ -14,7 +14,7 @@ const text = value => String(value ?? '').trim();
 const list = value => (Array.isArray(value) ? value : []).filter(item => item && typeof item === 'object');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const shortSha = value => (/^[0-9a-f]{12,}$/i.test(text(value)) ? text(value).slice(0, 7) : text(value));
-const SURFACE_LABELS = {
+export const SURFACE_LABELS = {
     commit_gate: 'Code review', change: 'Code review', preflight: 'Early look', result: 'Result review', system: 'System review',
     plan: 'Plan', skill: 'Skill review', review_record: 'Review records', task_acceptance: 'Result review',
 };
@@ -45,12 +45,18 @@ const subjectOf = (panel) => {
 };
 
 export function reviewViews(groups) {
-    return groups.flatMap(group => (group.surface === 'review_record' && group.attempts.length ? group.attempts.map(attempt => ({
-        ...group, id: `${group.id}:${attempt.id}`, attempts: [attempt], verdict: attempt.verdict, tone: attempt.tone,
-        progress: attempt.progress || '', state: attempt.state,
-        label: attempt.gap ? 'Review record unavailable' : SURFACE_LABELS[attempt.panel?.surface] || 'Review',
-        subject: attempt.gap ? '' : subjectOf(attempt.panel),
-    })) : [group]));
+    return groups.flatMap(group => (group.surface === 'review_record' && group.attempts.length ? group.attempts.map((attempt) => {
+        // The record's relation to the code that landed (owner 29.10, A): its head names an earlier version, its
+        // opened row says the rest. An unreadable record says nothing about any commit.
+        const landed = attempt.gap ? landingWords(null) : landingWords(attempt.panel, group.adoptions);
+        return {
+            ...group, id: `${group.id}:${attempt.id}`, attempts: [attempt], verdict: attempt.verdict, tone: attempt.tone,
+            progress: attempt.progress || '', state: attempt.state,
+            label: attempt.gap ? 'Review record unavailable'
+                : `${SURFACE_LABELS[attempt.panel?.surface] || 'Review'}${landed.earlier ? ' · earlier version' : ''}`,
+            subject: attempt.gap ? '' : subjectOf(attempt.panel), landingLine: landed.line, authorReason: landed.reason,
+        };
+    }) : [group]));
 }
 
 const ledgerTally = (panel) => {
@@ -102,9 +108,10 @@ function readButtons(sources, { owner, recordId, seatId, name, domain }) {
     }).join('');
 }
 
-function line({ sev = '', sevTone = 'neutral', by = '', words = '', wrap = false, quiet = false }) {
+// `wrap` gives a line two lines before it is cut; a `whole` line is never cut, at any width.
+function line({ sev = '', sevTone = 'neutral', by = '', words = '', wrap = false, whole = false, quiet = false }) {
     if (!words) return '';
-    return `<p class="review-line${wrap ? ' review-line-wrap' : ''}${quiet ? ' review-line-quiet' : ''}">`
+    return `<p class="review-line${wrap ? ' review-line-wrap' : ''}${whole ? ' review-line-whole' : ''}${quiet ? ' review-line-quiet' : ''}">`
         + `${sev ? `<span class="review-sev" data-tone="${escape(sevTone)}">${escape(sev)}</span>` : ''}`
         + `${by ? `<span class="review-line-by">${escape(by)}: </span>` : ''}<span class="review-line-text">${escape(words)}</span></p>`;
 }
@@ -118,8 +125,10 @@ function seatRow({ key, identity = '', name, note = '', role = '', state, said =
 }
 
 // One reviewer's line: the critical finding first (or that it is only in the full answer), else the first
-// note, else why there is no answer, in the engine's own words when it reported them.
-function ledgerSaid(actor, state) {
+// note, else why there is no answer, in the engine's own words when it reported them. In a review Ouroboros
+// itself stopped (`stopped`), a seat it never sent or whose outcome it lost adds no line of its own: the
+// review's line says why. A seat that failed by itself still says what it recorded.
+function ledgerSaid(actor, state, stopped = false) {
     const findings = list(actor.findings);
     const critical = findings.find(finding => text(finding.severity).toLowerCase() === 'critical');
     const criticalTotal = Object.values(actor.answers && typeof actor.answers === 'object' ? actor.answers : {})
@@ -136,13 +145,27 @@ function ledgerSaid(actor, state) {
     }
     if (state.owed) return '';
     const cause = seatCauseText(actor);
-    return cause ? line({ by: cause.by, words: cause.text, wrap: true }) : line({ quiet: true, words: 'No cause was recorded.' });
+    if (cause) return line({ by: cause.by, words: cause.text, wrap: true });
+    const unreached = ['not_dispatched', 'custody_lost'].includes(text(actor.operation_state)) || text(actor.transport_status) === 'not_dispatched';
+    return stopped && unreached ? '' : line({ quiet: true, words: 'No cause was recorded.' });
+}
+
+// A review Ouroboros itself could not complete (the record's `wave_failures`): one sentence in the owner's words
+// leads the seats, Read opens the saved note whole with secrets masked; its code and words stay in Record facts.
+function waveFailureLines(view, attempt) {
+    const panel = attempt.panel;
+    return list(panel.wave_failures).map((note, index) => `<div class="review-seat-line" data-review-wave-failure="${escape(`${attempt.id}:${index}`)}">`
+        + line({ words: 'Ouroboros could not complete this review; its note says which step failed.', wrap: true })
+        + readButtons(list([note.source]), { owner: view.presentationOwnerTaskId, recordId: text(panel.record_id),
+            seatId: text(note.source?.seat_id), name: 'Ouroboros', domain: 'ledger' })
+        + '</div>').join('');
 }
 
 function ledgerRows(view, attempt, format) {
     const panel = attempt.panel;
     const live = attempt.live === true && text(panel.record_state) === 'pending';
-    return list(panel.actors).map((actor) => {
+    const stopped = list(panel.wave_failures).length > 0;
+    return waveFailureLines(view, attempt) + (list(panel.actors).map((actor) => {
         const state = seatStateView(actor, panel, { live });
         const observed = text(actor.observed_model || actor.model);
         const requested = text(actor.requested_model);
@@ -155,10 +178,10 @@ function ledgerRows(view, attempt, format) {
             key: `${attempt.id}:${text(actor.slot_id)}`, identity: format.executions?.(actor, { showModel: false }) || '',
             name, note: observed ? '' : (requested ? 'requested · not reported' : 'model not reported'),
             role: text(panel.surface) === 'preflight' ? 'informational' : (seatAdviser(actor) ? 'adviser, not counted' : 'counted'),
-            state, said: ledgerSaid(actor, state), meta,
+            state, said: ledgerSaid(actor, state, stopped), meta,
             read: readButtons(sources, { owner: view.presentationOwnerTaskId, recordId: text(panel.record_id), seatId: text(actor.slot_id), name, domain: 'ledger' }),
         });
-    }).join('') || '<p class="review-line review-line-quiet">No reviewer answer is saved in this record.</p>';
+    }).join('') || '<p class="review-line review-line-quiet">No reviewer answer is saved in this record.</p>');
 }
 
 // A Plan participant's standing comes from the host's fold of objections (`objections` on the ask); nobody votes.
@@ -260,7 +283,26 @@ function ledgerFacts(attempt) {
     const rows = [['Record', `${text(panel.record_id)}${panel.revision != null && panel.revision !== '' ? ` · revision ${panel.revision}` : ''}`],
         ['Wave', text(panel.review_wave_id)], ['Reviewed', [text(panel.goal), describe(panel.subject)].filter(Boolean).join(' · ')],
         ['Saved', formatMsgTime(text(panel.ts))?.full || text(panel.ts)], ['Verdict', [text(panel.aggregate_signal), text(panel.reason)].filter(Boolean).join(' · ')]];
+    // What landed under this record, each with the decision that governed it and its whole reason (the opened
+    // row's reason may be cut); older landings past the panel's bound stay in the record it names.
+    for (const landing of list(panel.commit_landings)) {
+        rows.push(['Committed', describe({ commit: landing.commit_sha, tree: landing.tree_sha, parent: landing.parent_sha,
+            reviewed_subject: landing.reviewed_subject, author_subject: landing.author_subject,
+            author_disposition: landing.author_disposition, recorded_at: landing.recorded_at })], ['Author reason', text(landing.author_reason)]);
+    }
+    const omitted = Number(panel.commit_landings_omitted) || 0;
+    if (omitted > 0) rows.push(['Earlier landings', `${omitted} not shown · ${text(panel.source_ref?.path) || 'in the record'}`]);
+    const decided = panel.author_decision && typeof panel.author_decision === 'object' ? panel.author_decision : null;
+    if (decided) {
+        rows.push(['Author decision', describe({ disposition: decided.disposition, reviewer_signal: decided.reviewer_signal,
+            enforcement: decided.enforcement, subject: decided.subject_hash, recorded_at: decided.recorded_at })],
+        ['Author reason', text(decided.rationale)]);
+    }
     rows.push(...factRows(attempt.detailText));
+    for (const note of list(panel.wave_failures)) {
+        const source = note.source && typeof note.source === 'object' ? note.source : {};
+        rows.push(['Saved wave failure note', describe({ status: source.status, sha256: source.sha256, size: source.size, chars: source.chars })]);
+    }
     // A pool-era record prints each seat's cost in its reviewer line; an earlier one says it here.
     const pooled = text(panel.surface) !== 'preflight' && panelPoolRecorded(panel.panel_facts);
     for (const actor of list(panel.actors)) {
@@ -349,7 +391,11 @@ function checkBody(view, format) {
         view.authorDecisionText ? `<p class="review-line review-line-quiet" data-review-author-decision><span class="review-line-text">${escape(view.authorDecisionText.split(' · ')[0])}</span></p>` : '',
     ].join('');
     const lead = panelLine(view);
-    return `${notes}<div class="review-seats">${rows}</div><div class="review-check-foot">${lead ? `<span class="review-check-line">${escape(lead)}</span>` : ''}${recordFacts(view)}</div>`;
+    // The record's relation to the landed code leads the seats in body ink and is never cut; then the author's
+    // own reason, quiet and attributed, at most two lines, Record facts keeping the whole reason.
+    const landed = view.landingLine ? `<div class="review-landing" data-review-landing>${line({ words: view.landingLine, whole: true })}`
+        + `${line({ by: 'Reason', words: view.authorReason, wrap: true, quiet: true })}</div>` : '';
+    return `${notes}<div class="review-seats">${landed}${rows}</div><div class="review-check-foot">${lead ? `<span class="review-check-line">${escape(lead)}</span>` : ''}${recordFacts(view)}</div>`;
 }
 
 export function renderOpinionReviews(groups, disclosure, format = {}) {

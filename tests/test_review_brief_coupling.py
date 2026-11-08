@@ -32,6 +32,7 @@ from ouroboros.reviewer_window import REVIEWER_FULL_WINDOW, ReviewerWindow
 from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
 from ouroboros.tools import scope_window as sw
 from ouroboros.triad_review import parse_seat_answers
+from tests._cases import case_folders
 
 REQUIRED = sorted(SCOPE_REQUIRED_ITEMS)
 
@@ -284,29 +285,32 @@ def _dispatch_ctx(tmp_path):
     )
 
 
-@pytest.mark.parametrize("crit_item", REQUIRED)
-def test_advisory_downgrades_every_critical_coupling_item(crit_item, tmp_path, monkeypatch):
+def test_advisory_downgrades_every_critical_coupling_item(subtests, tmp_path, monkeypatch):
     """NW-2 guardrail (58a52c4 class): under owner-chosen advisory enforcement a
     critical coupling finding for ANY required item must NOT block. The
     dispatch seam runs the real enforcement branch for every item with a
     complete matrix (one critical FAIL + the rest valid PASS), so a per-item
     always-block hardcode fails here."""
-    from ouroboros.tools import review as review_mod
+    case_paths = case_folders(tmp_path)
+    for crit_item in REQUIRED:
+        tmp_path = next(case_paths)
+        with subtests.test(crit_item=crit_item), monkeypatch.context() as monkeypatch:
+            from ouroboros.tools import review as review_mod
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    answer = json.dumps({"change": [], "change_clean": True, "coupling": _matrix(fail=crit_item)})
-    results = [{"model": "m/1", "slot_id": "slot_1", "verdict": "OK", "text": answer},
-               {"model": "m/2", "slot_id": "slot_2", "verdict": "OK", "text": answer}]
-    monkeypatch.setattr(review_mod, "_handle_multi_model_review", lambda *a, **kw: json.dumps({"results": results}))
-    ctx = _dispatch_ctx(tmp_path)
+            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+            answer = json.dumps({"change": [], "change_clean": True, "coupling": _matrix(fail=crit_item)})
+            results = [{"model": "m/1", "slot_id": "slot_1", "verdict": "OK", "text": answer},
+                       {"model": "m/2", "slot_id": "slot_2", "verdict": "OK", "text": answer}]
+            monkeypatch.setattr(review_mod, "_handle_multi_model_review", lambda *a, **kw: json.dumps({"results": results}))
+            ctx = _dispatch_ctx(tmp_path)
 
-    result = review_mod._dispatch_unified_review(ctx, "test commit", _prepared(ctx.repo_dir, [("change", "coupling")] * 2))
+            result = review_mod._dispatch_unified_review(ctx, "test commit", _prepared(ctx.repo_dir, [("change", "coupling")] * 2))
 
-    assert result is None, f"advisory mode must NOT block critical coupling item {crit_item!r}"
-    assert ctx._last_review_verdict["aggregate"] == "FAIL"
-    assert ctx._last_coupling_result.blocked is False
-    assert any(f.get("item") == crit_item for f in ctx._last_coupling_result.critical_findings)
-    assert any(crit_item in str(note) for note in ctx._review_advisory)
+            assert result is None, f"advisory mode must NOT block critical coupling item {crit_item!r}"
+            assert ctx._last_review_verdict["aggregate"] == "FAIL"
+            assert ctx._last_coupling_result.blocked is False
+            assert any(f.get("item") == crit_item for f in ctx._last_coupling_result.critical_findings)
+            assert any(crit_item in str(note) for note in ctx._review_advisory)
 
 
 def test_blocking_keeps_authority_on_a_critical_coupling_item(tmp_path, monkeypatch):
@@ -397,14 +401,6 @@ class TestCouplingPromptMatrixContract:
         prompt = _brief(tmp_path)
         for item in ("intent_alignment", "forgotten_touchpoints", "cross_surface_consistency", "regression_surface"):
             assert item in prompt, f"Coupling question `{item}` missing"
-
-    def test_brief_loads_the_coupling_checklist(self):
-        import inspect
-
-        from ouroboros.tools import review_brief_coupling as rbc
-
-        assert rbc.COUPLING_CHECKLIST_SECTION == "Coupling questions"
-        assert "load_checklist_section(COUPLING_CHECKLIST_SECTION)" in inspect.getsource(rbc.build_retrieving_brief)
 
 
 def test_coupling_history_keeps_all_rounds_and_structured_ids():

@@ -136,6 +136,8 @@ class SetupInitialState(TypedDict):
     ``contract.providerFields[].stateKey`` (a configured secret reads as ``secretPlaceholder``,
     never the secret), per ``contract.budgetFields[].stateKey`` and per ``contract.modelSlots[].stateKey``."""
 
+    connections: List[Dict[str, Any]]  # masked OUROBOROS_CONNECTIONS rows, keyed by kind/name
+    legacyCompatibleBaseUrl: str  # saved OPENAI_BASE_URL, display only: completion never writes it
     safetyModel: str
     providerProfile: str
     reviewEnforcement: str
@@ -154,6 +156,16 @@ class SetupInitialState(TypedDict):
     modelProcessingPreferences: Dict[str, Any]
 
 
+class SetupConsciousnessOffer(TypedDict):
+    """``settings_setup_contract.consciousness_offer``: the Summary's optional, unticked Consciousness row."""
+
+    offered: bool  # setup has never completed on this install; a completed setup shows no row
+    enabled: Optional[bool]  # the control as the state shows it; null = unknown
+    autonomy: Literal["observe", "act", "full"]
+    dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
+    maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
+
+
 class SetupBootstrap(TypedDict):
     """``settings_setup_contract.build_setup_bootstrap``: what the builtin wizard page embeds."""
 
@@ -167,6 +179,7 @@ class SetupBootstrap(TypedDict):
     secretPlaceholder: str  # a prefilled credential that is configured holds this marker
     contract: SetupContract
     initialState: SetupInitialState
+    consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
 
 
 class OnboardingBootstrapResponse(TypedDict):
@@ -256,6 +269,7 @@ class GatewayContractResponse(TypedDict):
     interface_paths: List[str]  # the replaceable main interface ("/" and "/static")
     http: List[ContractHttpEntry]
     ws: ContractWs
+    call_socket: NotRequired[Dict[str, Any]]  # separate PCM/media protocol, see CallSocketContract
     schemas: Dict[str, Dict[str, Any]]
 
 
@@ -508,9 +522,11 @@ class ChatUploadDeleteResponse(TypedDict):
 
 
 class ProjectListResponse(TypedDict):
-    """``GET /api/projects``: active and deleting projects, at most 200, most recently active first.
+    """``GET /api/projects``: active and deleting projects, at most 200, most recently active first; ``?all=1``
+    lists every one of them. ``?id=<project_id>`` answers that project while active or deleting, ``?chat_id=<n>``
+    the active project of that room; either answers none otherwise.
     Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
-    provenance, last_active_at, lifecycle, routing_generation, visible_revision, delete_error and
+    provenance, last_active_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error and
     has_thread_activity."""
 
     projects: List[ProjectEntry]
@@ -528,10 +544,11 @@ class ProjectCreateResponse(TypedDict):
 
 
 class ProjectUpdateRequest(TypedDict, total=False):
-    """``POST /api/projects/{project_id}/update``: name and/or pin; at least one."""
+    """``POST /api/projects/{project_id}/update``: name, pin or closure; at least one."""
 
     name: str  # 1 to 80 characters
     pinned: bool
+    closed: bool  # true closes as owner; false removes the closure record
 
 
 class ProjectUpdateResponse(TypedDict):
@@ -733,6 +750,10 @@ class TaskResumeResponse(TypedDict, total=False):
     held_siblings: List[str]
     rebound_held_siblings: List[str]
     released_hold: str
+    # A Continue whose earlier attempt's writers all still run returned to its own writer hold: it starts by itself
+    # once ``blockers`` (that census) settle, unless a newer Pause, Stop or Panic replaces the wait.
+    held: bool
+    blockers: List[Dict[str, Any]]
     # The still-closed Pause's census settled without these unreadable rows nothing ties to the task:
     # {"rows": [{"task_id", "reason"}] (at most 20), "count"}; ``message`` words them.
     membership_gaps: Dict[str, Any]
@@ -747,7 +768,7 @@ __all__ = [
     "ServedUiState",
     "SetupStep", "SetupProviderField", "SetupProviderProfile", "SetupModelSlot", "SetupModeChoice",
     "SetupLocalRoutingMode", "SetupBudgetField", "SetupSubscriptionField", "SetupContract",
-    "SetupLocalPreset", "SetupInitialState", "SetupBootstrap", "OnboardingBootstrapResponse",
+    "SetupLocalPreset", "SetupInitialState", "SetupConsciousnessOffer", "SetupBootstrap", "OnboardingBootstrapResponse",
     "SettingsReadResponse", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",

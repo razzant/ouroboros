@@ -36,7 +36,7 @@ import math
 import pathlib
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ouroboros.tool_capabilities import PAGEABLE_TOOL_RESULTS, requested_result_view
+from ouroboros.tool_capabilities import PAGEABLE_TOOL_RESULTS, requested_call_view
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +159,7 @@ def render_result_view(
     text: str, *, head_chars: int, tail_chars: int, tool_name: str = "",
     source_ref: Optional[Mapping[str, Any]] = None, facts: Optional[Mapping[str, Any]] = None,
     delivery: Optional[Mapping[str, Any]] = None,
+    reader_available: bool = True,
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Head+tail view of ``text`` with exact ranges, or ``text`` itself.
 
@@ -178,6 +179,8 @@ def render_result_view(
     omitted = [head, total - tail]
     shown = [[lo, hi] for lo, hi in ([0, head], [total - tail, total]) if lo < hi]
     ref = dict(source_ref) if isinstance(source_ref, Mapping) and source_ref else {}
+    if not reader_available:
+        ref.pop("read", None)
     view: Dict[str, Any] = {
         "complete_chars": total,
         "complete_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -189,7 +192,7 @@ def render_result_view(
     if delivery is not None:
         # Host allocation facts never become producer stdout or producer status.
         view["delivery"] = {**delivery, "source_status": "ready" if ref else "source_unavailable"}
-    if ref:
+    if ref and reader_available:
         view["read_omitted"] = {
             "tool": "read_file", "root": str(ref.get("root") or "artifact_store"), "path": ref.get("path"),
             "start_line": 1, "max_lines": max(1, len(text.splitlines())),
@@ -202,7 +205,10 @@ def render_result_view(
     lines = [RESULT_VIEW_MARKER + json.dumps(view, ensure_ascii=False, sort_keys=True, separators=(",", ":"))]
     if ref:
         lines.append(FULL_SOURCE_MARKER + json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        lines.append(RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+        lines.append((RECOVER_PAGEABLE if tool_name in PAGEABLE_TOOL_RESULTS else RECOVER_OTHER)
+                     if reader_available else "The exact source is retained, but no reader is loaded in this connection. "
+                     + ("Another range is available using this tool's declared parameters."
+                        if tool_name in PAGEABLE_TOOL_RESULTS else "Do not rerun this tool to recover omitted output."))
     else:
         lines.extend([FULL_SOURCE_UNAVAILABLE, SOURCE_UNAVAILABLE_NOTE])
     delivered = text[:head] + marker + text[total - tail:] + "\n" + "\n".join(lines)
@@ -250,7 +256,9 @@ def _positive(value: Any) -> Optional[int]:
 
 
 def _tokens(measurement: Mapping[str, Any]) -> int:
-    return max(0, int(measurement.get("estimated_input_tokens") or 0))
+    """The input a batch is sized against: a directly required handbook is the next admission's to charge (owner
+    1.11.2026), so every unasked share, target and window room is the one the same view without it gets."""
+    return max(0, int(measurement.get("estimated_input_tokens") or 0) - int(measurement.get("required_book_tokens") or 0))
 
 
 def frame_bounds(measurement: Mapping[str, Any]) -> Tuple[Optional[int], int, int]:
@@ -278,7 +286,7 @@ def _standin_source_ref(call_id: Any, text: str, digest: str) -> Dict[str, Any]:
 def project_tool_result_batch(
     results: List[Dict[str, Any]], messages: List[Dict[str, Any]], tool_schemas: list,
     *, drive_root: pathlib.Path, task_id: str, fit_candidate: FitCandidate,
-    policy: str = "accepted_prefix",
+    policy: str = "accepted_prefix", as_message: Optional[Callable[[Mapping[str, Any], str], Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Retain full results before constructing a fitting multi-result view.
 
@@ -293,17 +301,18 @@ def project_tool_result_batch(
     row, ``result_partial``, ``result_source_ref``, ``result_source_status`` and
     ``result_source_view``; plus a receipt whose ``status`` is ``complete``,
     ``projected``, ``minimum_view_unfit`` or (the measured policy only)
-    ``capacity_unknown``.
+    ``capacity_unknown``. ``as_message`` renders the message the caller will actually append (a
+    host notice rather than a tool response), so the measured candidate is that request itself.
     """
     rows = [{**row, **({"result_meta": dict(row["result_meta"])} if isinstance(row.get("result_meta"), dict) else {})}
             for row in results]
     full = [str(row["result"]) for row in rows]
+    render = as_message or (lambda row, text: {"role": "tool", "tool_call_id": row["tool_call_id"], "content": text})
 
     def measure(contents: Sequence[str]) -> Dict[str, Any]:
         # A fresh list over the live message dicts: the callback measures and
         # must not mutate (``measure_main_fit`` only serializes its inputs).
-        candidate = [*messages, *({"role": "tool", "tool_call_id": row["tool_call_id"], "content": text}
-                                  for row, text in zip(rows, contents))]
+        candidate = [*messages, *(render(row, text) for row, text in zip(rows, contents))]
         return dict(fit_candidate(candidate, list(tool_schemas or [])))
 
     if policy == "measured_frame":
@@ -375,7 +384,7 @@ def _measured_frame(
     digests = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
     names = [str(row.get("fn_name") or row.get("tool") or "") for row in rows]
     facts = [typed_result_facts(row) for row in rows]
-    requests = [requested_result_view(row.get("tool_args")) for row in rows]
+    requests = [requested_call_view(name, row.get("tool_args")) for name, row in zip(names, rows)]
 
     whole = measure(full)
     boundary, reserve, eighth = frame_bounds(whole)

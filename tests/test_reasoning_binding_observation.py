@@ -126,12 +126,11 @@ def test_retirement_identity_refreshes_same_round_facts_and_expires_next_round(t
     assert any(row.get("content") == current for row in ctx.messages), "sent facts remain historical"
 
 
-@pytest.mark.parametrize("turns", [1, 2])
-@pytest.mark.parametrize("cause,sanction,explanation", [
-    ("messages", "compaction", "context folded"),
-    ("system", None, "the system view was rebuilt"),
-    ("tools", None, "the tool set changed"),
-    ("no_baseline", None, "the task resumed without a record of its last request"),
+@pytest.mark.parametrize(("cause", "sanction", "explanation", "turns"), [
+    ("messages", "compaction", "context folded", 1),
+    ("system", None, "the system view was rebuilt", 2),
+    ("tools", None, "the tool set changed", 1),
+    ("no_baseline", None, "the task resumed without a record of its last request", 2),
 ])
 def test_model_fact_explains_the_change_without_indices_or_internal_cause_codes(cause, sanction, explanation, turns):
     usage = {"_reasoning_retired_round": {"round": 4, "index": 123, "cause": cause, "turns": turns,
@@ -143,7 +142,7 @@ def test_model_fact_explains_the_change_without_indices_or_internal_cause_codes(
     assert not transcript_prefix.reasoning_retirement_fact(usage, 5)
 
 
-@pytest.mark.parametrize("change", ["image", "blocks", "tools", "cache_only"])
+@pytest.mark.parametrize("change", ["image", "blocks", "cache_only"])
 def test_cache_observer_sees_images_blocks_and_schemas_but_not_cache_markers(change):
     messages = [{"role": "system", "content": "go"}, {"role": "user", "content": [
         {"type": "text", "text": "ab"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},

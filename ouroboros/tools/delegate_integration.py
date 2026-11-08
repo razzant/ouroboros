@@ -15,7 +15,7 @@ import json
 import logging
 import pathlib
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_custody import RunCustody as _RunCustody
@@ -255,6 +255,7 @@ class _RetryBinding(NamedTuple):
     max_seconds_basis: str
     continuation: Any   # delegate_continuation.ContinuationStart: the recorded lineage
     prompt_cache_ttl: Dict[str, Any]
+    input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -388,6 +389,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         max_seconds_basis=str(record.get("max_seconds_basis") or ""),
         continuation=replayed_custody(record),
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
+        input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
     ), None
 
 
@@ -672,6 +674,26 @@ def _capture_terminal_patch(ctx: ToolContext, entry: Optional[_RunCustody], *, g
     return block
 
 
+def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
+    """A gone checkout whose record still pins result commit C is checked out again from it, as a
+    continuation's hand-over restores one, so a capture pinned before its manifest landed (or whose
+    saved files went) is captured again instead of reported missing (#1651). Only when the pin is
+    this run's own: a run owning its copy outright is the only one pinning it until a successor
+    supersedes it; a same-tree continuation shares its predecessor's record, so its pin is its own
+    only once its PATCH_CAPTURED landed (its capture re-pins before that row) and no successor took over."""
+    if (not record.get("result_sha") or record.get("standalone") or entry.superseded_by
+            or entry.capture_id and not entry.patch_captured):
+        return False
+    from ouroboros.subagent_worktrees import recreate_snapshot_checkout
+
+    try:
+        recreate_snapshot_checkout(entry.snapshot_id)
+    except Exception:
+        log.warning("Restoring run %s's checkout from its pinned result failed", entry.run_id, exc_info=True)
+        return False
+    return pathlib.Path(entry.execution_root).exists()
+
+
 def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=None,
                                      retain_investigation: bool = True, publish: bool = True) -> Optional[Dict[str, Any]]:
     """The drive-rooted core of the terminal capture — same contract, no ToolContext.
@@ -692,7 +714,10 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         return None  # the review owner compares against its frozen subject, never a product baseline
     from ouroboros.delegate_directory import in_place_block, is_in_place_run
     if is_in_place_run(entry):
-        return in_place_block(entry)  # its edits are already in its starter's folder: nothing to capture
+        from ouroboros.headless import refresh_in_place_native_capture
+        note = refresh_in_place_native_capture(drive, entry)
+        block = in_place_block(entry)  # no run patch, disposition or fictitious apply
+        return {**block, "native_capture": note} if note else block
 
     def finish(block, transport=None):
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block
@@ -716,6 +741,12 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
                 owned_gateway.close()
     if entry is None or not entry.execution_root or (entry.superseded_by and not entry.patch_captured):
         return None  # a superseded run's snapshot now holds its successor's work
+    if entry.patch_result_lost:
+        # A later collection reads what survived the decision; it must not turn an unreadable
+        # saved manifest into absence or overwrite it while trying to recapture a decided loss.
+        from ouroboros.delegate_collection import capture_projection
+
+        return capture_projection(drive, entry)
     from ouroboros.headless import (
         ARTIFACT_STATUS_READY_NO_CHANGES,
         ARTIFACT_STATUS_READY_WITH_CHANGES,
@@ -739,7 +770,7 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             return finish(_capture_block(entry, cap_dir, manifest))
     from ouroboros.subagent_worktrees import find_execution_snapshot
     snapshot = find_execution_snapshot(entry.snapshot_id) or {}
-    exec_root = pathlib.Path(entry.execution_root)
+    exec_root, saved = pathlib.Path(entry.execution_root), {}
     if not exec_root.exists():
         saved = manifest if manifest_path.exists() else {}
         if (str(saved.get("status") or "") in ready and saved.get("result_commit")
@@ -751,15 +782,25 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
                                               sha256=str(saved.get("sha256") or ""),
                                               patch_size=saved.get("patch_size"), capture_dir=str(cap_dir))
             return finish(_capture_block(entry, cap_dir, saved))
+    if not exec_root.exists() and not _restored_from_pin(entry, snapshot):
+        # A legacy capture saves file outputs before its diff: a later failure keeps them (#1651).
+        kept = len(saved.get("file_output_changes") or []) if saved.get("status") == "failed" else 0
         return {
+            **(_capture_block(entry, cap_dir, saved) if kept else {}),
             "status": "missing",
             "baseline_id": entry.baseline_sha,
             "execution_root": entry.execution_root,
             "authority_target_root": entry.target_root,
             "patch_artifact": None,
-            "manifest_artifact": None,
-            "note": "the private copy no longer exists on disk and no saved result names it, so the "
-                    "run's changes cannot be captured. Nothing was applied anywhere.",
+            "manifest_artifact": str(manifest_path) if kept else None,
+            "note": (f"the private copy no longer exists on disk and was not restored from the pinned result "
+                     f"{str(snapshot['result_sha'])[:12]}; the pin is kept. Nothing was applied anywhere."
+                     if snapshot.get("result_sha") else
+                     f"the private copy no longer exists on disk and its earlier capture failed after saving {kept} file "
+                     f"change{'s' * (kept != 1)}, which manifest_read names; the run's other changes cannot be captured. "
+                     "Nothing was applied anywhere." if kept else
+                     "the private copy no longer exists on disk and no saved result names it, so the "
+                     "run's changes cannot be captured. Nothing was applied anywhere."),
         }
     try:
         cap_dir.mkdir(parents=True, exist_ok=True)
@@ -839,6 +880,208 @@ def captured_patch_result(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _gone_checkout_holds(repo: pathlib.Path, copy: pathlib.Path, baseline: str) -> str:
+    """What Git's administrative entry for a hand-deleted checkout still holds, read-only, and how to
+    keep or give it up: a HEAD the child moved off its baseline, changes it staged (its index) or a
+    commit its HEAD history still reaches (ORIG_HEAD, the HEAD reflog), any of which goes with the
+    entry's prune; "" when none or no entry. The entry names its checkout absolutely or, under
+    ``worktree.useRelativePaths``, relative to itself. Git reads an unreadable ORIG_HEAD or reflog
+    file as empty, so each is read first. A present one is never absence: ORIG_HEAD must name a
+    commit, and as Git skips (exit 0) each reflog line it cannot parse, a final one without its
+    newline included, each non-blank line of the reflog must be an entry Git returns. Each way on is a
+    run_command argv, not a line for a terminal, so no shell's quoting can split its paths. Raises
+    OSError/ValueError."""
+    import contextlib
+
+    from ouroboros.subagent_worktrees import _git
+
+    def way(*argv: Any) -> str:
+        return f"run_command(cmd={json.dumps([str(arg) for arg in argv], ensure_ascii=False)})"
+
+    common = _git(repo, "rev-parse", "--git-common-dir", check=False)
+    if common.returncode:
+        return (f"its repository {repo} could not name its Git directory ({common.stderr.strip()[:200]}); "
+                "call again once it can")
+    root = pathlib.Path(common.stdout.strip())
+    try:
+        entries = sorted((root if root.is_absolute() else repo / root).joinpath("worktrees").iterdir())
+    except FileNotFoundError:
+        return ""
+    for admin in entries:
+        if (admin / (admin / "gitdir").read_text(encoding="utf-8").strip()).parent.resolve(strict=False) != copy:
+            continue
+        entry, again = f"Git's entry for the gone checkout ({admin})", "; call again once it can be read"
+        remove = way("git", "-C", repo, "worktree", "remove", "--force", "--force", copy)
+        give_up = f"then give that entry up ({remove}) and call again: reject then records the loss"
+        head = _git(repo, f"--git-dir={admin}", "rev-parse", "--verify", "--quiet", "HEAD", check=False)
+        if head.returncode:
+            return f"{entry} has an unreadable HEAD{again}"
+        if (moved := head.stdout.strip()) != baseline:
+            return (f"{entry} still names commit {moved[:12]}, not its baseline: keep it if needed "
+                    f"({way('git', '-C', repo, 'branch', '<name>', moved)}), {give_up}")
+        if (admin / "index").exists():
+            staged = _git(repo, f"--git-dir={admin}", "diff-index", "--cached", "--quiet", baseline, check=False)
+            if staged.returncode == 1:  # --binary --full-index keeps a staged binary file's bytes, not "differ"
+                keep = way("git", f"--git-dir={admin}", "diff", "--cached", "--binary", "--full-index", baseline,
+                           "--output=<file>")
+                return (f"{entry} still stages changes against its baseline: keep them if needed as a patch git apply "
+                        f"restores ({keep}), {give_up}")
+            if staged.returncode:
+                return f"{entry} could not be compared ({staged.stderr.strip()[:200]}){again}"
+        present = {}
+        for name in ("ORIG_HEAD", "logs/HEAD"):
+            with contextlib.suppress(FileNotFoundError):
+                present[name] = (admin / name).read_bytes()
+        orig = _git(repo, f"--git-dir={admin}", "rev-parse", "--verify", "--quiet", "ORIG_HEAD", check=False)
+        if orig.returncode and "ORIG_HEAD" in present:
+            return f"{entry}'s HEAD history could not be read (its ORIG_HEAD names no commit){again}"
+        log = _git(repo, f"--git-dir={admin}", "log", "-g", "--no-color", "--no-show-signature", "--format=%H",
+                   "HEAD", "--", check=False)  # the common Git directory (``repo``) holds a file named HEAD
+        seen = log.stdout.split()
+        records = [line for line in present.get("logs/HEAD", b"").split(b"\n") if line.strip()]
+        if log.returncode or ("logs/HEAD" in present and len(seen) != len(records)):
+            why = log.stderr.strip()[:200] or f"Git reads {len(seen)} of its {len(records)} reflog records"
+            return f"{entry}'s HEAD history could not be read ({why}){again}"
+        # log -g names only new values. Expiry/deletion without --rewrite can leave a child's commit
+        # only in an old-value field, which pruning this entry would also discard.
+        old = [line.split(b" ", 1)[0].decode("ascii") for line in records]
+        for oid in dict.fromkeys(old):
+            if oid in (baseline, "0" * len(baseline)):
+                continue
+            if (len(oid) != len(baseline) or set(oid) - set("0123456789abcdef")
+                    or _git(repo, "cat-file", "-t", oid, check=False).stdout.strip() != "commit"):
+                return f"{entry}'s HEAD history could not be read (a reflog old value names no commit){again}"
+        held = [oid for oid in dict.fromkeys(orig.stdout.split() + seen + old)
+                if oid not in (baseline, "0" * len(baseline))]
+        return (f"{entry} still records commit {held[0][:12]}{f' and {len(held) - 1} more' if held[1:] else ''} in "
+                f"its HEAD history (ORIG_HEAD or the HEAD reflog): keep it if needed "
+                f"({way('git', '-C', repo, 'branch', '<name>', held[0])}), {give_up}" if held else "")
+    return ""
+
+
+def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
+    """``(facts, "")`` when a terminal Git writer's result is proven gone for good, else ``({}, why)``
+    (#1651; the owner chose an ordinary reject that records the result as lost).
+
+    Asked only after the core above found nothing to capture or restore. Loss needs positive
+    absence on every carrier, each read strictly: the private copy (ENOENT), its saved capture
+    (none, or a readable failed one, whose file changes saved before a legacy diff failed stay
+    and are counted as ``saved_files``), the copy record's result pin, the pinned ref itself and
+    whatever Git's own entry for a hand-deleted checkout still holds: a commit the child made,
+    changes it staged or its HEAD history (a repository that no longer exists holds none). A read
+    failure, a malformed or corrupt record, a saved result or any surviving carrier proves nothing,
+    and ``why`` names it with the way on. Skill payloads and engine directories keep their own
+    reject contracts."""
+    import os
+
+    from ouroboros.delegate_directory import is_directory_run
+    from ouroboros.subagent_worktrees import _RESULT_REF_PREFIX, _git, _records, _safe_name
+    from ouroboros.workspace_file_outputs import file_output_changes
+
+    if entry.authority_source == "skill_payload" or is_directory_run(entry) or not entry.execution_root:
+        return {}, "a skill-payload or engine-directory result keeps its own reject contract"
+
+    def unread(what: str, exc: BaseException) -> Tuple[Dict[str, Any], str]:
+        return {}, f"{what} could not be read ({type(exc).__name__}: {exc}); call again once it can be read"
+
+    def kept(what: str) -> Tuple[Dict[str, Any], str]:
+        return {}, f"{what}; call again once what it names is restored or readable"
+
+    manifest = custody.delegated_capture_dir(drive, entry.task_id, custody.capture_key(entry)) / "workspace_patch.json"
+    try:
+        os.lstat(entry.execution_root)
+        return kept(f"its private copy {entry.execution_root} is present")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return unread(f"its private copy {entry.execution_root}", exc)
+    try:
+        saved = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict):
+            raise ValueError(f"a JSON {type(saved).__name__}, not a manifest")
+    except FileNotFoundError:
+        saved = None
+    except (OSError, ValueError) as exc:
+        return unread(f"its saved capture {manifest}", exc)
+    if saved is not None and not (saved.get("status") == "failed" and not saved.get("result_commit")
+                                  and "authority_drift" not in saved):
+        return kept(f"its saved capture {manifest} (status {str(saved.get('status') or '')!r}) may hold a result")
+    try:  # what a failed legacy capture saved before its diff failed stays; only the rest can be lost
+        files = file_output_changes(saved, manifest.parent) if saved else []
+    except Exception as exc:
+        return unread(f"the file changes its failed capture {manifest} saved", exc)
+    try:
+        record = next((row for row in _records(op="result_loss", strict=True)
+                       if row.get("kind") == "delegated_exec" and row.get("snapshot_id") == entry.snapshot_id), None)
+    except Exception as exc:
+        return unread("the private-copy records", exc)
+    if record and record.get("result_sha") and entry.capture_id and not entry.patch_captured:
+        return {}, (f"its copy record pins {str(record['result_sha'])[:12]}, but this continuation never recorded a "
+                    f"capture of its own, so that pin may be its predecessor {entry.continuation_of}'s result: it is "
+                    "kept, neither restored as this run's result nor released. Closing this run here would discard "
+                    "it, so repeating this call fails the same way")
+    if record and (record.get("result_sha") or os.path.lexists(str(record.get("path") or ""))):
+        return kept(f"its copy record still names result {record.get('result_sha') or record.get('path')}")
+    lost = {"execution_root": entry.execution_root, "saved_capture": "failed" if saved else "none",
+            **({"saved_files": len(files)} if files else {}), "copy_record": "without_result" if record else "absent"}
+    repo = pathlib.Path(str((record or {}).get("git_dir") or entry.target_root or ""))
+    ref = f"{_RESULT_REF_PREFIX}{_safe_name(entry.snapshot_id)}"
+    if not str(repo).strip("."):
+        return kept(f"no repository is recorded to rule out the result pin {ref}")
+    try:
+        os.lstat(repo)
+    except FileNotFoundError:
+        return lost, ""
+    except OSError as exc:
+        return unread(f"its repository {repo}", exc)
+    try:  # the pin, then Git's own entry for the gone checkout
+        pin = _git(repo, "for-each-ref", "--format=%(objectname)", ref, check=False)
+        if pin.returncode:
+            return {}, f"its repository {repo} could not be read ({pin.stderr.strip()[:200]}); call again once it can be read"
+        if pin.stdout.strip():
+            return kept(f"the result pin {ref} still names {pin.stdout.strip()[:12]} in {repo}")
+        held = _gone_checkout_holds(repo, pathlib.Path(entry.execution_root).resolve(strict=False), entry.baseline_sha)
+    except (OSError, ValueError) as exc:  # no git, the repository went meanwhile, undecodable metadata
+        return unread(f"its repository {repo}", exc)
+    return ({}, held) if held else (lost, "")
+
+
+def _saved_words(drive: Any, entry: _RunCustody, count: int) -> str:
+    """The file changes a failed legacy capture saved before its diff, named from its manifest."""
+    manifest = custody.delegated_capture_dir(drive, entry.task_id, custody.capture_key(entry)) / "workspace_patch.json"
+    try:
+        names = [str(row["path"]) for row in json.loads(manifest.read_text(encoding="utf-8"))["file_output_changes"]]
+    except Exception:  # the count stands without its names
+        names = []
+    shown = f" ({', '.join(names[:5])}{f' and {len(names) - 5} more' if names[5:] else ''})" if names else ""
+    return (f"the {count} file change{'s' * (count != 1)} that failed capture saved{shown} stay{'s' * (count == 1)} "
+            "with it, readable through manifest_read and never applied")
+
+
+def lost_words(drive: Any, entry: _RunCustody, lost: Dict[str, Any]) -> str:
+    """What a proven loss took and what stays (#1651), for the reject that records it."""
+    if not (count := int(lost.get("saved_files") or 0)):
+        return f"its private copy {entry.execution_root} is gone and no saved or pinned result names it, so nothing was kept"
+    return (f"its private copy {entry.execution_root} is gone and its earlier capture failed before saving a patch, "
+            f"so the changes it did not save are lost; {_saved_words(drive, entry, count)}")
+
+
+def loss_refusal(drive: Any, entry: _RunCustody, lost: Dict[str, Any], why: str) -> Tuple[str, str]:
+    """``(note, step)`` of a refusal over a gone copy: a proven loss names reject as the way out
+    (and what it keeps); an unproven one gives ``why`` in full, carrier and way on included."""
+    if not lost:
+        return "its private copy is gone, but the loss is not proven", f"{why[:1].upper()}{why[1:]}. Nothing was released."
+    if not (count := int(lost.get("saved_files") or 0)):
+        return (f"its private copy {entry.execution_root} is gone and no saved or pinned result names it: the result "
+                "is lost and there is nothing to apply",
+                "integrate_delegated_patch(decision='reject') records the loss and closes this obligation.")
+    words = _saved_words(drive, entry, count)
+    return (f"its private copy {entry.execution_root} is gone and its earlier capture failed before saving a patch: "
+            "the changes it did not save are lost and there is nothing to apply",
+            f"{words[:1].upper()}{words[1:]}. integrate_delegated_patch(decision='reject') records the loss, keeps "
+            "what that capture saved and closes this obligation.")
+
+
 # -- exact skill-payload delegation (R1) ---------------------------------------
 #
 # The restored delegated coding target class: an ordinary top-level task selects
@@ -896,8 +1139,8 @@ def payload_host_instructions(text: str, skill_name: str) -> str:
     explicit, truthful permission block is appended.
     """
     adjusted = text.replace(
-        "do not touch the host's runtime controls or memory, or modify its skills",
-        "do not touch the host's runtime controls or memory")
+        "do not touch the host's runtime controls, or modify its memory or skills;",
+        "do not touch the host's runtime controls, or modify its memory;")
     return adjusted + (
         "\nPAYLOAD ASSIGNMENT: this working tree is a PRIVATE standalone copy of "
         f"the installed skill payload '{skill_name}'. Editing its user-authored "

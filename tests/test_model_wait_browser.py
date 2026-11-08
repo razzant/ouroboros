@@ -12,7 +12,7 @@ from tests.test_reconnect_feed_browser import HISTORY_LANDED
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "analysis-task"
 # The wait picker offers an API lane per provider whose credential is stored.
 API_LANE = "api:openai"
@@ -255,6 +255,7 @@ def test_network_retry_reuses_request_and_terminal_history_suppresses_old_waits(
     page.wait_for_selector('.model-wait-row', state='detached')
     ui['emit']({**ui['rows']['light-wait'], 'revision': 99})
     assert page.locator('.model-wait-row').count() == 0
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector(f'.chat-live-card[data-task-id="{TASK}"][data-finished="1"]')
     assert page.locator('.model-wait-row').count() == 0
@@ -281,6 +282,7 @@ def test_wait_updates_preserve_reading_position_away_from_the_live_edge(waiting_
         'role': 'user', 'text': f'Earlier message {index}: ' + 'Context retained for the task. ' * 12,
         'client_message_id': f'earlier-{index}', 'ts': f'2026-09-06T21:{index:02d}:00Z',
     } for index in range(24)]
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('.chat-bubble.user')
     page.wait_for_selector('[data-wait-id="light-wait"]')
@@ -314,6 +316,7 @@ def test_mixed_access_wait_replays_and_opens_accounts_without_automatic_login(wa
     assert mixed.locator('[data-wait-auto-label]').inner_text() == 'Continue automatically when access is restored'
     assert 'Some accounts need sign-in; others are waiting for quota.' in mixed.inner_text()
     assert 'Auto rotation' in mixed.inner_text() and 'Account:' not in mixed.inner_text()
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert mixed.locator('[data-wait-reason]').inner_text() == 'Waiting for access'
@@ -352,6 +355,7 @@ def test_dated_unavailable_pool_waits_visibly_without_a_sign_in_prompt(waiting_u
     ui['rows']['light-wait'].update(revision=3, reset_at=None)
     ui['emit'](ui['rows']['light-wait'])
     page.wait_for_function("() => document.querySelector('[data-wait-id=light-wait] [data-wait-reset]').textContent.includes('The reset time is not known.')")
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert pool.locator('[data-wait-reason]').inner_text() == 'Waiting for an account'
@@ -372,6 +376,7 @@ def test_direct_api_wait_never_offers_subscription_login_or_auto_rotation(waitin
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     capture(page, 'waiting-direct-api-access-narrow')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="light-wait"]')
     assert card.locator('[data-wait-login]').is_hidden()
@@ -490,6 +495,7 @@ def test_paid_review_controls_survive_author_terminal_and_reload(waiting_ui, tmp
     waiter.locator('[data-wait-notice]').filter(has_text='Request accepted').wait_for()
     assert ui['controls'][-1]['decision_id'] == f'model_wait:{TASK}:light-wait'
     ui['apply']('light-wait')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     card.wait_for()
     waiter.wait_for()

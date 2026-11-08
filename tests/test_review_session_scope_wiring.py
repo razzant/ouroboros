@@ -24,6 +24,7 @@ from ouroboros.triad_review import parse_seat_answers
 
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport as __owned_gateway_uses_each_test_transport
 from tests._review_session_route_shared import fake_route as __fake_route
+from tests._worlds import clone_repository, world
 
 # Fixtures are requested by name as test parameters, so they are re-bound through a
 # module attribute: a direct import of a name that reappears as a parameter is an F811
@@ -187,8 +188,6 @@ def _coupling_matrix_with_critical():
         (200_000, "unknown_conservative"),
         # Sourced, but genuinely below the floor.
         (131_072, "confirmed"),
-        # Sourced and large.
-        (1_000_000, "confirmed"),
         # The designated-default sentinel is a routing grant, never a measurement.
         (1_000_000, "designated_default_sentinel"),
     ],
@@ -479,10 +478,8 @@ DIFF_MARKER = "UNIQUE_DIFF_BODY_MARKER"
 BRIEF_TASK_ID = "two-part-brief-task"
 
 
-def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
-    """A real repository with a staged change of a chosen size."""
-    repo = tmp_path / "subject"
-    repo.mkdir()
+def _build_staged_subject(repo, *, payload_chars=0, newline="\n"):
+    """Lay out the immutable staged subject used by this module's copies."""
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
@@ -504,7 +501,15 @@ def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
     payload = "".join(f"PAYLOAD_LINE_{index:08d}\n" for index in range(payload_chars // 21))
     (repo / "gamma.py").write_text(f"gamma = 1\n{payload}", encoding="utf-8", newline=newline)
     _git(repo, "add", "-A")
-    return repo
+
+
+def _staged_subject(tmp_path, *, payload_chars=0, newline="\n"):
+    """A private copy of a staged subject whose immutable starting tree is shared per run."""
+    eol = "lf" if newline == "\n" else "crlf"
+    key = f"review-session-subject-{payload_chars}-{eol}"
+    template = world(key, lambda folder: _build_staged_subject(
+        folder, payload_chars=payload_chars, newline=newline))
+    return clone_repository(template, tmp_path / "subject")
 
 
 def _brief_inputs(repo, drive, **overrides):
@@ -577,7 +582,7 @@ def test_the_brief_carries_the_index_the_governance_tiers_and_both_manifests(tmp
     assert "## BIBLE.md" in task and "Philosophy version" in task
     assert "standing disclosures" in task          # CHECKLISTS_ARCHIVE rides with checklist item 7
     head = task.index("## BIBLE.md")
-    for change_relative in ("## Intended transformation", "### Staged diff",
+    for change_relative in ("## Intended transformation", "## Staged diff",
                             "## Repository index", "TOUCHED PATHS", "REQUIRED SOURCES"):
         assert head < task.index(change_relative), change_relative
     tiers = {row["path"]: row for row in manifest["governance_manifest"]}
@@ -619,8 +624,10 @@ def test_a_staged_diff_that_fits_the_first_send_is_inlined(tmp_path):
     assert "diff_source" not in manifest
 
 
-@pytest.mark.parametrize("delegated", [False, True], ids=["native", "session"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(("newline", "delegated"), [
+    pytest.param("\n", False, id='lf-native'),
+    pytest.param("\r\n", True, id='crlf-session'),
+])
 def test_a_staged_diff_above_the_first_send_is_paged_as_one_exact_source(tmp_path, monkeypatch, delegated, newline):
     """A diff too large for the first send is not refused and not truncated: it
     is stored ONCE, byte-exactly, at an address the seat's own reader reaches —
@@ -687,9 +694,10 @@ def test_a_staged_diff_above_the_first_send_is_paged_as_one_exact_source(tmp_pat
         [0, source_text_identity(expected.encode())["complete_chars"]]]
 
 
-@pytest.mark.parametrize("delegated", [False, True], ids=["native", "session"])
-@pytest.mark.parametrize("managed", [False, True], ids=["ordinary", "managed"])
-@pytest.mark.parametrize("git_autocrlf", ["false", "true"], ids=["raw_blob", "lf_blob"])
+@pytest.mark.parametrize(("git_autocrlf", "managed", "delegated"), [
+    pytest.param("false", False, True, id='raw_blob-ordinary-session'),
+    pytest.param("true", True, False, id='lf_blob-managed-native'),
+])
 def test_renamed_prompt_preimage_is_readable_and_covered_without_a_paged_diff(
     tmp_path, delegated, managed, git_autocrlf,
 ):

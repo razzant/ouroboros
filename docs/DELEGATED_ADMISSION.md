@@ -72,32 +72,51 @@ before it runs.
 When a private snapshot exists, the host appends a separate typed execution
 binding after the immutable inherited work order: the snapshot is the root of the
 run's work product and the stable project root is a read-only identity until
-explicit integration. Legacy engines that expose only the snapshot as `scope.root`
-receive the same binding using that root. The binding, the `workspace_write`
+explicit integration. Legacy engines exposing only the snapshot as `scope.root` get
+the same binding. A resumed session may keep earlier instructions, so each access
+line scopes run facts (access; edit, evidence, scratch, copy-local places; a copy's
+read-only target) to one run and finds the current binding by identity, not position:
+this turn's host facts, at the harness's starting directory; quoted ones are history.
+Each ordinary continuation's prompt restates its access and binding (else its directory). The binding, the `workspace_write`
 access line and the unproven-boundary sentence state one write rule, because
 verification needs writes no copy may hold: disposable process state (test
-scratch, package-manager temporaries) goes outside every Git working tree, the
+scratch, package-manager temporaries, build or dependency output that only serves
+checks) goes outside every Git working tree, the
 binding naming safe_test's default parent through the launcher's own predicate,
 so its ancestor guard stays intact (only a body copy's facts name safe_test itself);
+output a tool must keep in the project tree stays only in new files Git ignores: generated
+build/dependency output is not automatically excluded from the result-commit capture, Git
+ignore rules keep new untracked files out, and tracking overrides them;
 durable package downloads go only to the shared download cache the environment facts
-name; evidence goes under the copy's `.review-evidence/`. Where the route's catalog row
+name; evidence (reports, logs, sources, repro scripts, intended binaries of any size) goes
+under the copy's `.review-evidence/`, whose retention applies no cache, binary, size or
+ignore filter. Where the route's catalog row
 negotiates `accessControl.auxiliaryWritableRoots` (never a guess from a harness name or
 write mechanism) and the start is an Agent `workspace_write` one, the host makes the run's
-exact short scratch under `test_environment.default_temp_parent()` (`/tmp/obs-<random>` on
-macOS, resolved physically), with its path/inode record in the ungranted task drive at
-`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json` (a reviewer seat's
-`seat-<seat>`), and the cache's `uv`/`pip`/`npm` folders, real directories outside every Git
-tree and never reached through a link, and adds only these exact directories as
+exact short scratch under `test_environment.session_scratch_parent()` (`/var/tmp/obs-<random>`
+on macOS/Linux, resolved physically), with its path/inode record in the ungranted task drive at
+`task_drives/<task>/session_scratch_owners/<snapshot>/scratch.json`; a reviewer seat keeps its
+`session_scratch_owners/seat-<seat>/scratch.json` in its own home. The cache's `uv`/`pip`/`npm` folders
+and scratch are real directories outside every Git
+tree and never reached through a link. The host adds only these exact directories as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
+A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
+sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
+Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
+captured, released when its task ends (`workspace_preflight.release_finished_scratch`) or its seat copy goes
+(`session_scratch.release_seat_scratch`), nothing
+reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
 The native profile's existing temporary-directory permissions are unchanged. Directory grants do
 not grant IPC or process inspection: a blocked check stays unverified, with its command and
 diagnostics retained. After inspecting the candidate, the integrating mind may run it through
 existing host tools under its own authority. This runs candidate code with ordinary OS-user rights;
 safe_test isolates environment and process custody, not the OS. No automatic Full, network change,
 new verifier or weakened check follows from a refusal.
-Any other route gets no such field and a typed limitation in its facts; read-only, full
-access and a `tool_policy` route (an unconfined shell) keep their on-demand behavior; an exact
+Any other route gets no such field and a typed limitation in its facts (at full access, a scratch
+that cannot be made is `scratch_unavailable`); read-only, a `workspace_write` `tool_policy` route,
+an in-place `workspace_write` run, an engine folder copy and a review thread's turns keep their
+on-demand behavior, with no owned scratch; an exact
 retry replays its recorded request, without recreating paths the OS or the original task's
 drive may already have retired. A continuation binds its own start's rights; one from another
 task need not reuse prior scratch; a new start replaces scratch removed by OS aging, never a
@@ -140,7 +159,8 @@ inputs (`delegate_readonly_inputs`, `resource_ref.source_root`), never from the
 live scratch. Folderless readonly and investigation starts stage every permitted
 lineage file, a scheduled origin's whole `task_drive`/`artifact_store` included
 (`tool_access_reads.scheduled_origin`): the copy grows with that scratch, and one
-unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`). A folder no private copy serves (a data-drive subfolder, an
+unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`);
+explicit `input_files` are separate (3b). A folder no private copy serves (a data-drive subfolder, an
 ignored starting folder) refuses typed, naming `access='readonly'`. A read-only child
 (an explicit `readonly` lowering, Observe, or a Presence ceiling without a
 delegated write grant) defaults to `mode: ask`, `access: readonly`. Explicit
@@ -168,7 +188,12 @@ to the immutable stored request (`execution.workspaceRoot` + `access`) at recove
 recomputed from a live engine. Older engines keep the legacy snapshot-in-`scope.root`
 shape: that host-minted snapshot declares `scope.ephemeral` and registers nothing where
 the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`), and otherwise
-retires its one-shot registration as before.
+retires its one-shot registration as before. A target Ouroboros minted itself
+(`delegate_registration_policy.minted_root`: a folder inside a task's own drive, a review
+tree, a registry copy) is no user identity either and declares `scope.ephemeral` the same
+way; a sticky thread on such a root does so from `CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION`,
+the engine release that sweeps the lanes those threads leave, and below it keeps the
+registration the thread is bound to.
 
 ## 3. What Ouroboros actually controls
 
@@ -251,20 +276,125 @@ A lookup 404 is a retained-binding gap and a cancelled, conflicting or content-r
 is finished: all refuse typed and never mint a key on their own. `attachment_import='new'`
 is the explicit decision to begin another import in the serving store (another resource may
 result); one new key per invocation, kept across a restarted host first start; earlier
-records stay on the marks row and in the chain. A child's copied rows carry the parent's
-ready receipts (`engine_imports`, kept only when their request declares exactly the row's
-bytes, kind, MIME and name), so the child replays the parent's key and reuses its
-resourceId. Every schedule that copies a staged non-image input therefore reads the parent's
+records stay on the marks row and in the chain. Copied rows carry observed imports, gaps and
+finished keys included (`engine_imports`, bound to the row's bytes, kind, MIME and name): children
+keep the same identity and state, so only an explicit `new` can replace a finished import. Every schedule copying a non-image input reads the parent's
 custody marks once, whether or not it selects anything, and refuses typed
 (`document_import_custody_unavailable`) before the child exists when they cannot be read,
 rather than letting a copy mint a fresh import; copies of images alone read nothing.
 Scheduling still copies each inherited input's retained staged copy, so a gone copy refuses
 the schedule (`SUBTASK_ATTACHMENT_ERROR`) even when its ready receipt could serve the child;
-only a direct `delegate_start` replays a ready receipt without that copy. Continuations
-inherit no documents: a successor selects again. New stagings get the same Markdown and
-DOCX labels on every interpreter; rows recorded earlier with an unprovable MIME (for example
-Markdown staged as `application/octet-stream`) keep their label and refuse on routes that do
-not declare it.
+only a direct `delegate_start` replays a ready receipt without that copy. A `continue_from`
+continuation inherits no documents and selects again; an owner Continue's successor copies
+the work's inputs with its predecessor's observed receipts (unreadable marks refuse
+`continuation_inputs_unavailable`), so its selection reuses them.
+New stagings get the same Markdown and DOCX labels on every interpreter; rows recorded
+earlier with an unprovable MIME (for example Markdown staged as `application/octet-stream`)
+keep their label and refuse on routes that do not declare it.
+
+Managed lifetime is the engine's opt-in, used only where its catalog lists the exact release
+row (`POST /v2/resources/:id/release`, `ControlResourceReleaseRequest`); no version is
+inferred, and without that row nothing sends `lifetime` or releases anything. There every
+fresh intent declares `lifetime: "managed"`, bound into its key, so each replay (lookup-only
+included) resends it; receipts keep it and name the task that owes the release
+(`owner_task_id`), and earlier requests replay byte-unchanged. The intent's own REQUESTED
+fact opens the obligation on the minting task's custody marks (`managed_imports`, by key,
+never capped), so every explicit `new`, an unknown outcome and an import whose start never
+ran stay owed until settled; a child, a successor or any other holder only replays the
+receipt. The `runtime_retirement` pass reads the owner when its row is written terminal (or
+its timeout retry's is), keeps it waiting while the release is held, and releases only when
+nothing can name the resource in a new operation: the owner's tree has ended (no live,
+unsettled or queued member, open review or pending delegated start), so has every root its
+owner's Continue admitted after it with that root's tree, no Keep stands on the owner, and no
+Continue is offered or still undecided. Unlike native registration retention, an author's
+stop, a bound or unverifiable claim, an interruption whose cause is not recorded and an offer
+whose budget close or deadline is unknown all hold; an ordinary completion is decided. An
+obligation opened before that pass records a terminal-write floor consumed on its first pass;
+an ended owner schedules the pass even without local files or START. Thread cutover keeps
+the first pass's own time. After waits, closure is rechecked; release intent binds under
+Keep's existing custody lock, HTTP runs outside it. Earlier Keep prevents release; later
+Keep saves with `release_unconfirmed`. Managed imports remain Keep material without local
+files. A key with no observed resource is looked up; an open upload is cancelled before its
+obligation settles. Unknown cancellation keeps its identity for readback. Release names the
+recorded store and digest; an unknown outcome, another serving store or an engine without the
+row waits and is sent again unchanged on a later pass. A release closes future references
+only: what an accepted command, turn, draft or export holds keeps its bytes. A `retry_of` that
+re-sends the saved START key and body is that accepted operation, answered as such while the
+engine keeps the command; a new operation naming the resource (a new start, `continue_from`,
+the engine's Exact Retry, or that body once the command was pruned) refuses typed
+(`resource_released`). An import replay of a released key answers `released`, finished like
+`cancelled`, so only `attachment_import='new'` begins another import.
+
+## 3b. Selected input files (#2593)
+
+Owner: `ouroboros/delegate_readonly_inputs.py`. `input_files` on `delegate_start` and on a
+read-only `schedule_subagent` (API or agent-session child) names ordinary files the caller can
+already read, each `{path, root?}`. `root` is one of `active_workspace`, `system_repo`,
+`runtime_data`, `task_drive`, `artifact_store`, `user_files`, `subagent_projects`,
+`deliverables`; omitted, it is inferred from an absolute path as `read_file` infers it, else
+`active_workspace`. `skill_payload` (which needs a bucket and skill name) and unknown labels
+refuse per entry as `unsupported_root`. A path written only in the prompt is never a selection,
+and these are not engine documents (`attachment_paths`, 3a). Every entry is mandatory. Before
+anything is sent, each entry passes `read_file`'s own admission (`core_file_tools.read_admission`:
+root access, the Presence ceiling, runtime-data and protected-artifact policy), then packed-checkpoint
+read-back and a regular-file check, for BOTH the caller and the receiving read-only reader; a
+scheduled child adds its own resource policy on each contract carrier. One entry that is denied,
+missing, not a file, on an unsupported root, or changed or failed while copied refuses the whole
+start (`input_files_unavailable`, `definitely_unrun`, from the pre-check or the start alike) with one
+result row per entry; no failed row reads `prepared`. Only a nonempty selection refuses a writable start
+(`input_files_readonly_only`) or an acting `write_surface`. Omitted, null and `[]` send the same
+request as before, and only `[]` reports an empty receipt (`input_files: []`). There is no count
+or size cap. Retention and folderless restaging stream and hash each file. Preparation may
+outlive the ordinary tool wait and finish as a late start result; a tool timeout proves no
+non-dispatch, so inspect that start before requesting another.
+
+The exact bytes are retained first (`artifacts.copy_artifact_file`), named by content, in the
+selecting task's canonical artifact store:
+`source_handles/delegated_readonly_inputs/<invocation|scheduled-<child>>/inputs/selected/<sha256[:16]>/<name>`
+beside an `inputs.json` source map; the receipt keeps the whole digest, and an address already
+holding other bytes refuses rather than being overwritten. The short folder leaves room under
+Windows' 260-character path limit (not probed natively): a deep data root and a long name can
+still refuse typed `copy_failed`. This is the `source_handles/review_inputs` snapshot pattern:
+no deliverable (`collect_task_artifact_records` skips `source_handles`), kept with the task's
+artifacts past drive retirement, pruned by name from automatic lineage staging at any depth, while an
+explicit entry may still select an earlier copy.
+
+A folderless start also restages the bytes once into its per-invocation scope
+(`carrier: scope`; its `inputs.json` rows carry `selected_path`). A start in a repository or folder
+keeps it as `scope.root` and cwd; `readonly_root` is not reused and no task-drive copy
+is made. It names the retained copies by absolute path outside its folder
+(`carrier: outside_scope_path`): the engine has no readable-root field, so reaching them is the
+harness's native read reach, which the instruction says without promising it. The receipt
+(`input_files` in the started result and on the durable START_REQUESTED row, read back by
+`invocation_record`) lists exactly the selected entries with source, local copy, retained copy,
+sha256 and size, never the automatic lineage inputs. Preparation is not reading. `retry_of` refuses
+a new selection, replays the recorded body and paths without rereading or recopying, and returns
+the recorded receipt. `continue_from` retains only its own new selection and restates its map in
+the continuation prompt, even an empty one. A plan-thread turn keeps its thread's original folder (the
+engine drops a new scope), so its copies are named outside it (`outside_scope_path`).
+
+`schedule_subagent` retains before queueing under `scheduled-<child>` and saves the receipt as
+`prepared_input_files`, scheduling intent (`SUBAGENT_INTENT_FIELDS`) that crosses admission, the
+queue snapshot and the worker payload. Admission freezes a host `[SELECTED INPUT FILES]` block into
+the child's task text, outside the parent's reference context, so an API child's first input
+names each retained copy for `read_file(path=<copy>)`. Its parent's `artifact_store` is lineage, so
+this adds no read root and changes no read boundary (the runtime-data read alias reaches the same
+path). Under an inherited Presence ceiling, the registry admits a read of exactly one listed copy
+whose bytes still match (`prepared_copy_read`): its source passed that ceiling when selected; the
+rest of the store stays outside it. `read_file` reads UTF-8 text and reports a binary copy as an error. A session child's work
+order lists the selection (`SELECTED INPUT FILES`), and the first start of that work order verifies
+the bytes against the receipt: restaged once into a folderless scope, named in place otherwise.
+A later start, continuation or replacement selects its own.
+
+A scheduled child also carries the parent's `resource_intent` through admission. A folderless non-project
+child must retain `{"kind": "explicit_none"}` so its first session gets the delegated readonly scope;
+an explicit `workspace_root` is recorded as `{"kind": "explicit_resource", "root": ...}` after
+schedule-time folder selection. The scheduling acknowledgement for an `agent_session` describes the
+selected sources separately from the nanny's broad `read_file` profile; first start confirms the
+scope or private checking copy, never the leaf's reading. A path
+written only in prose is not prepared. One session binds one directory; three worktrees require three
+read-only children or explicit regular-file selections. This preserves the existing contract without
+staging whole trees or adding an engine multi-root.
 
 ## 4. Compatibility floors and applied evidence
 
@@ -327,7 +457,8 @@ below every floor.
 Refusal never degrades into metered native execution on a PIN. An explicit `executor="harness"`
 request that cannot be served becomes `blocked` — `agent.executor_blocked_outcome` ends the
 child unrun — because silently spending API money is the one outcome an explicit pin must
-never produce. An `auto` request becomes an ordinary native subagent with a visible marker.
+never produce. A child without a configured subagent row runs natively with no marker; `auto` is not a request
+(owner decision D23).
 
 ## 7. What this does NOT cover
 

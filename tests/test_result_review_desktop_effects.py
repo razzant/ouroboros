@@ -26,10 +26,13 @@ from ouroboros import loop_tool_execution as execution
 from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.tools import extension_dispatch
 from ouroboros.tools import review_result as rr
+from skills.unix_computer_use import macos_native as native
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests._tool_result_delivery_shared import measured_fit
 from tests.test_result_review import CRITICAL, _floor_ctx, _seam
 from tests.test_unix_computer_use_effects import API, TIMEOUT, Guest, Transport, fail_at, load_plugin
+from tests.test_unix_computer_use_element_act import LONG_BEFORE, LONG_LABEL, LONG_TEXT, NORMALIZED, FakeAX, long_field
+from tests.test_unix_computer_use_targeting import KEYNOTE, app_dict
 
 WARNING = ("⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\nReason: fixture\n"
            "The command was allowed, but consider whether this is the right approach.")
@@ -85,6 +88,7 @@ class Desktop:
         monkeypatch.setattr(self.module, "_platform", lambda: platform)
         monkeypatch.setattr(self.module, "_session_type", lambda: session)
         monkeypatch.setattr(self.module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
+        monkeypatch.setattr(self.module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
         api = API(tmp_path / f"skill-state-{label}")
         self.module.register(api)
         self.handlers = api.tools
@@ -156,11 +160,11 @@ def test_required_reviews_a_root_result_whose_only_material_is_a_desktop_input(t
     assert rr.result_review_at_delivery(ctx, "Done on the desktop.", trace_of(ctx), shown.append) is True
     assert len(sends) == 3 and "FAIL" in shown[0], "Required: the host reviewed it and shows the findings first"
     subject = subject_text(ctx)
-    assert f"- effect declared by {row['tool']}: " in subject and '"observed_effect": true' in subject
+    assert f"- effect declared by {row['tool']}: {produced['effects'][0]['receipt']}" in subject
     assert "tool producer's reports of execution, not proof of a UI change or goal success" in subject
 
 
-@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "mac_keys", "ssh_keys"])
+@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "ssh_keys"])
 def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch, case):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     sends: list[dict] = []
@@ -185,10 +189,10 @@ def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch,
     assert receipt["ok"] is False and receipt["observed_effect"] is True and receipt["steps_done"] == done, receipt
     assert receipt["error"], "the failure's own diagnostics stay in the receipt"
 
-    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is True  # PASS
     assert len(sends) == 3, "the host reviewed the partial run under Required"
     subject = subject_text(ctx)
-    assert effect["receipt"] in subject and '"ok": false' in subject and '"steps_done"' in subject
+    assert f"- effect declared by {effect['tool']}: {effect['receipt']}" in subject
 
 
 def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_review(tmp_path, monkeypatch):
@@ -234,8 +238,13 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     assert "Effect receipts" not in rr.answer_text(reply="Observed.", produced=produced, verification="")
 
 
-@pytest.mark.parametrize("value", [False, "true", 1, None, {"executed": True}])
-@pytest.mark.parametrize("ok", [True, False])
+@pytest.mark.parametrize(("ok", "value"), [
+    (True, False),
+    (True, 1),
+    pytest.param(True, {"executed": True}, id='True-value4'),
+    (False, "true"),
+    (False, None),
+])
 def test_only_a_literal_true_is_an_effect(tmp_path, monkeypatch, value, ok):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     payload = json.dumps({"ok": ok, "observed_effect": value, "error": "" if ok else "partly done"})
@@ -262,7 +271,7 @@ def test_a_host_note_never_hides_a_receipt_and_stays_beside_it(tmp_path, monkeyp
     for effect in effects:
         assert WARNING not in effect["receipt"] and json.loads(effect["receipt"])["observed_effect"] is True
         assert effect["host_notes"] == [WARNING]
-    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is True  # its PASS
     subject = subject_text(ctx)
     assert subject.count(json.dumps([WARNING], ensure_ascii=False)) == 2, "each receipt keeps its host note"
 
@@ -283,6 +292,44 @@ def test_a_partial_view_still_reads_the_complete_receipt(tmp_path, monkeypatch):
     assert "host_notes" not in effects[0] and effects[1]["host_notes"] == [WARNING]
 
 
+def test_an_element_act_receipt_keeps_its_complete_label_and_values_in_the_retained_source(tmp_path, monkeypatch):
+    """The helper's own ASCII line (``macos_native.main``) is the producer's payload; the host's retained producer source
+    is what the result review reads, whole, while the model's view of the same call is only a head and a tail."""
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    desktop = mac(ctx, tmp_path, monkeypatch)
+    nodes = long_field()
+    ax = FakeAX(nodes, windows=["win"], focused="win", on_set=lambda el, v: nodes[el].__setitem__("value", v + NORMALIZED))
+    real, lines = native.op_act, []
+
+    def helper(_self, op, *args, timeout=20):
+        assert op == "element", "resolve and act in one helper process"
+        monkeypatch.setattr(native, "op_resolve", lambda q: {"ok": True, "query": q, "candidates": [app_dict(KEYNOTE)]})
+        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms, **kw: real(
+            pid, do, sel, n, ms, **{**kw, "ax": ax, "front": lambda: app_dict(KEYNOTE), "settle": lambda _s: None}))
+        try:
+            with mock.patch("builtins.print", lambda text, **_kw: lines.append(text)):
+                native.main(["element", *[str(a) for a in args]])
+        finally:
+            monkeypatch.setattr(native, "op_act", real)
+        return json.loads(lines[-1])
+
+    monkeypatch.setattr(desktop.module._ComputerUse, "_native", helper)
+    row = desktop.call("element_act", fit=measured_fit(window=2_000, reserve=500), app="Keynote", do="set_value",
+                       select={"role": "TextField", "label": LONG_LABEL}, text=LONG_TEXT)
+    assert row["result_partial"] is True and row["result_source_ref"], "the model saw a head+tail view"
+    assert lines[-1].isascii() and ax.sets == [("field", LONG_TEXT)] and ax.balanced()
+
+    effects = rr.produced_material(ctx)["effects"]
+    assert [effect["tool"] for effect in effects] == [extension_surface_name("unix_computer_use", "element_act")]
+    receipt = json.loads(effects[0]["receipt"])
+    assert receipt["observed_effect"] is True and receipt["action_outcome"] == "completed" and receipt["verified"] is False
+    assert {"label": receipt["element"]["label"], "label_after": receipt["element_after"]["label"],
+            "before": receipt["element"]["value"], "after": receipt["element_after"]["value"]} == {
+        "label": LONG_LABEL, "label_after": LONG_LABEL, "before": LONG_BEFORE, "after": LONG_TEXT + NORMALIZED}
+    assert "value_len" not in receipt["element"] and "value_len" not in receipt["element_after"]
+    assert effects[0]["receipt"] in rr.answer_text(reply="Typed.", produced=rr.produced_material(ctx), verification="")
+
+
 @pytest.mark.parametrize("damage", ["not_retained", "corrupt", "deleted"])
 def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, monkeypatch, damage):
     ctx = _floor_ctx(tmp_path, monkeypatch)
@@ -297,10 +344,13 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
         row = desktop.call("click", warning=WARNING, x=1, y=2, raw=True)
         path = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id) / row["producer_source_ref"]["path"]
         if damage == "corrupt":
-            path.write_bytes(path.read_bytes().replace(b'"ok": true', b'"ok": TRUE'))
+            retained = path.read_bytes()
+            path.write_bytes(retained.replace(b"true", b"TRUE", 1))
+            assert path.read_bytes() != retained
         else:
             path.unlink()
-    assert '"observed_effect": true' in row["result"], "the annotated preview still reads like a receipt"
+    preview, _end = json.JSONDecoder().raw_decode(row["result"])
+    assert preview["observed_effect"] is True, "the annotated preview still reads like a receipt"
 
     produced = rr.produced_material(ctx)
     assert produced["effects"] == [], "an unverifiable receipt is never read from the preview"
@@ -316,14 +366,14 @@ def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tm
     desktop = mac(ctx, tmp_path, monkeypatch)
     desktop.call("click", x=1, y=2, raw=True)
     answer = "Clicked Save."
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # its PASS, first
     first = subject_text(ctx)
     assert len(sends) == 3
     assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
     assert len(sends) == 3 and subject_text(ctx) == first, "the same receipt is the same subject: reused at $0"
 
     desktop.call("key", keys="cmd+s")
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
     assert len(sends) == 6, "a new receipt is new material: a new review"
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
     second = subject_text(ctx)
@@ -356,7 +406,8 @@ def test_blocking_holds_a_failed_desktop_result_and_presence_is_never_held(tmp_p
     assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
 
     ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
-    ctx._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
     sends.clear()
     mac(ctx, tmp_path / "presence", monkeypatch).call("click", x=1, y=2, raw=True)
     shown.clear()

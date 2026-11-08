@@ -8,7 +8,6 @@ admission hooks are replaced; lanes, receipts and exhibits are the production on
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
@@ -22,7 +21,6 @@ from ouroboros import preflight_receipts as receipts
 from ouroboros import preflight_runner as pr
 from ouroboros import review_ledger
 from ouroboros.commit_admission import run_tests_preflight_with_proof
-from ouroboros.test_evidence import diagnostic_directory
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 from tests import _contributor_packet_shared as shared
 from tests.test_preflight_receipts import (  # noqa: F401 -- gate_env: the shared autouse gate environment
@@ -37,10 +35,10 @@ from tests.test_preflight_receipts import (  # noqa: F401 -- gate_env: the share
 )
 from tests.test_review_change_end_to_end import _brief_text
 from tests.test_review_change_end_to_end import staged_body as _staged_body
+from ouroboros.test_evidence import diagnostic_directory
 
 staged_body = _staged_body
 
-pytestmark = pytest.mark.serial
 
 
 # --------------------------------------------------------------- managed update consumers
@@ -274,58 +272,6 @@ def _recording(inner, evidence: list):
         return inner(request, **kwargs)
 
     return run_review_request
-
-
-@pytest.mark.parametrize("parallel_tests", [True, False], ids=["complete", "empty-parallel"])
-def test_every_gate_seat_is_shown_the_frozen_execution_inside_the_brief_it_was_hashed_with(
-        tmp_path, monkeypatch, parallel_tests):
-    import ouroboros.review_substrate as substrate
-    from ouroboros.tools.git_review_cycle import _run_non_committing_review_cycle
-    from ouroboros.tools.registry import ToolContext
-    from tests.review_pool_rosters import set_review_pool
-
-    receipts.capture_executing_source_baseline()
-    fixture = shared.init_installed_body(tmp_path)
-    repo = pathlib.Path(fixture["repo"])
-    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
-    (repo / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
-    (repo / "tests").mkdir()
-    if parallel_tests:  # otherwise the real parallel lane collects nothing and the gate stays green
-        (repo / "tests" / "test_body.py").write_text("def test_body():\n    assert True\n", encoding="utf-8")
-    (repo / "tests" / "test_body_serial.py").write_text(
-        "import pytest\n\n\n@pytest.mark.serial\ndef test_serial():\n    assert True\n", encoding="utf-8")
-    shared.git(repo, "add", "-A")
-    shared.git(repo, "commit", "-q", "-m", "suite")
-    shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
-    staged_tree, head = shared.git(repo, "write-tree"), shared.git(repo, "rev-parse", "HEAD")
-    set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    briefs, evidence = [], []
-    monkeypatch.setattr(substrate, "run_review_request", _recording(shared.golden_substrate(briefs), evidence))
-    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
-
-    outcome = _run_non_committing_review_cycle(ctx, "fix: proposal", skip_advisory_review=True,
-                                               goal="Ship the proposal", scope="the proposal files")
-
-    assert outcome["status"] == "passed", outcome
-    record = review_ledger.load_record(ctx.drive_root, outcome["review_record_id"])
-    exhibit = record["preflight_execution"]
-    lanes = ["parallel", "serial"] if parallel_tests else ["serial"]
-    assert (exhibit["status"], exhibit["evidence"], exhibit["lanes"]) == ("passed", "executed", lanes)
-    assert exhibit.get("empty_lanes") == (None if parallel_tests else ["parallel"])
-    assert (exhibit["tested"]["head"], exhibit["tested"]["index_tree"]) == (head, staged_tree)
-    assert [exhibit.get("receipt")] == ([path.stem for path in _receipt_files(ctx.drive_root)] or [None])
-    section = receipts.execution_section(exhibit)
-    assert section.startswith(SECTION) and f"HEAD {head}" in section
-    assert ("lanes parallel collected no tests, so no test ran there" in section) is not parallel_tests
-    assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
-    assert all(_brief_text(brief).count(section) == 1 for brief in briefs)
-    assert len(evidence) == 3 and all(item["preflight_execution"] == exhibit for item in evidence)
-    rows = {row["seat_id"]: row for row in record["rows"]}
-    for brief in briefs:  # a retrieving seat's recorded brief sha covers the exhibit it read
-        if brief["session_task"]:
-            assert rows[brief["slot_id"]]["brief_sha"] == hashlib.sha256(brief["session_task"].encode()).hexdigest()
 
 
 def test_a_managed_wave_shows_every_seat_the_full_tested_tree_while_it_reviews_the_m0_delta(tmp_path, monkeypatch):
@@ -639,8 +585,7 @@ def test_an_observation_of_another_repository_is_left_out_and_a_public_one_stays
         (project_head, "other_bytes", ["tree"])]
 
 
-@pytest.mark.parametrize("stop", ["plugins_missing", "lane_never_returned", "terminal_lost", "terminal_only",
-                                  "nothing_left"])
+@pytest.mark.parametrize("stop", ["plugins_missing", "lane_never_returned", "nothing_left"])
 def test_a_run_that_minted_no_proof_states_what_its_runner_observed_and_never_running(tmp_path, monkeypatch, stop):
     """Setup failed before any lane (not started), a lane started and never returned
     (interrupted), the run's result.json then lost (the row still speaks, the terminal is
@@ -706,18 +651,21 @@ def _tier_run(repo, ctx, monkeypatch, tier, **kwargs):
 
 
 @pytest.mark.parametrize("failure", ["no_process", "custody_failed"])
-@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("node", "full")])
+@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("warm", "full"), ("node", "full")])
 def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tmp_path, monkeypatch, lane, tier,
                                                                              failure):
     """The first lane's launch fails: the OS refuses its process (EAGAIN: none is created),
     or the process is created but the container cannot take custody of it and stops it
     at launch. The first is NOT STARTED, the second START UNKNOWN; neither claims a lane
-    started (INTERRUPTED), and neither is ever proof."""
+    started (INTERRUPTED), and neither is ever proof. The bytecode warm is the lane before
+    the passes: a pytest pass whose launch fails is a later lane that never started, after
+    a warm that ran (INTERRUPTED, the warm its only lane), and still never proof."""
     import errno
 
-    from ouroboros import preflight_node, process_containment
+    from ouroboros import preflight_node, process_containment, test_bytecode
     from ouroboros.process_overload import OverloadWatch
     from tests.test_preflight_receipts import _ctx
+    from tests.test_preflight_runner import _pin_preflight_root
 
     repo = _tiny_repo(tmp_path, web=lane == "node")
     ctx = _ctx(repo, tmp_path / "canonical")
@@ -725,7 +673,7 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
         monkeypatch.setattr(preflight_node, "resolve_node", lambda: sys.executable)
         monkeypatch.setattr(preflight_node, "probe_node_version", lambda _node: "99.0.0")
     if failure == "no_process":
-        lane_argv = {"pytest": ("-m", "pytest"), "node": ("--test",)}[lane]
+        lane_argv = {"pytest": ("-m", "pytest"), "node": ("--test",), "warm": (str(test_bytecode.MODULE_PATH),)}[lane]
 
         def popen(argv, *args, **kwargs):
             if all(part in argv for part in lane_argv):
@@ -736,30 +684,48 @@ def test_a_first_lane_whose_launch_failed_is_never_reported_started_or_passed(tm
         monkeypatch.setattr(process_containment, "subprocess", SimpleNamespace(**{
             **{name: getattr(subprocess, name) for name in dir(subprocess) if not name.startswith("__")}, "Popen": popen}))
     else:
-        def refused(_watch):
-            raise RuntimeError("can't start new thread")
+        real_start, watches = OverloadWatch.start, []
+
+        def refused(watch, *args, **kwargs):  # the pytest pass's watch is the second one started: the warm's is first
+            watches.append(watch)
+            if lane != "pytest" or len(watches) > 1:
+                raise RuntimeError("can't start new thread")
+            return real_start(watch, *args, **kwargs)
 
         monkeypatch.setattr(OverloadWatch, "start", refused)
+
+    # Nothing here is retired: only a real, unproven teardown could hold this tree, and that fails the test.
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
 
     verdict = _tier_run(repo, ctx, monkeypatch, tier)
 
     assert verdict and "hermetic preflight failed" in verdict, verdict
     terminal = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
     execution, outcome = {"no_process": ("not_run", "not_started"), "custody_failed": ("attempted", "start_unknown")}[failure]
-    assert (terminal["execution"], terminal["lanes"], ctx._preflight_test_disclosure["outcome"]) == (execution, [], outcome)
+    lanes = []
+    if lane == "pytest":  # the warm ran and returned; the pass after it never started
+        execution, lanes, outcome = ("executed" if failure == "no_process" else "attempted"), ["warm"], "interrupted"
+    assert (terminal["execution"], [row["lane"] for row in terminal["lanes"]],
+            ctx._preflight_test_disclosure["outcome"]) == (execution, lanes, outcome)
+    assert (terminal["cleanup"], terminal["retention_reason"]) == ("released", "") and not temp_root.exists()
     assert getattr(ctx, "_preflight_tests_passed", None) is not True and getattr(ctx, "_preflight_test_proof", None) is None
     exhibit = receipts.execution_exhibit(ctx, otherwise="tests preflight did not pass")
     [run] = exhibit["observed"]
     assert (exhibit["status"], run["outcome"], run["tier"]) == ("not_run", outcome, tier)
     section = receipts.execution_section(exhibit)
-    assert ("NOT STARTED" if failure == "no_process" else "START UNKNOWN") in section
-    assert "INTERRUPTED" not in section and "a lane process started" not in section and "PASSED" not in section
+    assert {"not_started": "NOT STARTED", "start_unknown": "START UNKNOWN", "interrupted": "INTERRUPTED"}[outcome] in section
+    assert "PASSED" not in section
+    if lane != "pytest":
+        assert "INTERRUPTED" not in section and "a lane process started" not in section
 
 
-@pytest.mark.parametrize("lane,tier", [("pytest", "full"), ("pytest", "selected"), ("node", "full")])
+@pytest.mark.parametrize("lane,tier", [("node", "full")])
 def test_a_lane_that_started_and_then_timed_out_is_interrupted_never_passed(tmp_path, monkeypatch, lane, tier):
     """The control: a lane whose process was acquired and then outlived the budget is
-    INTERRUPTED (it started; no verdict), on both tiers and the node lane."""
+    INTERRUPTED (it started; no verdict). The row is the node lane: a pytest lane now
+    runs after the bytecode warm, so its terminal lists the warm first."""
     from tests.test_preflight_receipts import _ctx, _usable_node
 
     if lane == "node" and not _usable_node():

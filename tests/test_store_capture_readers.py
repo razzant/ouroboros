@@ -215,6 +215,10 @@ def test_task_readers_answer_what_the_pre_change_readers_answered(tmp_path, monk
         str(tid): (str(status or ""), str(drive or "")) for tid, status, drive in _old_scalar(
             tmp_path, "SELECT task_id, status, COALESCE(child_drive_root, headless_child_drive_root, drive_root) "
             "FROM tasks")}
+    assert task_store.collection_flags(tmp_path, ids) == {
+        str(tid): (None if review is None else bool(review), None if plan is None else bool(plan))
+        for tid, review, plan in _old_scalar(
+            tmp_path, "SELECT task_id, review_collection_pending, plan_collection_pending FROM tasks")}
     with store.open_store(tmp_path, write=False) as txn:
         assert task_store.task_ids(tmp_path) == txn.task_ids()
     newest = [tid for (tid,) in _old_scalar(tmp_path, f"SELECT task_id FROM tasks {task_store._NEWEST_ORDER}")]
@@ -416,6 +420,7 @@ def test_captured_readers_hand_python_rows_by_statement_not_by_row(tmp_path):
         "task_facts": lambda root, ids: task_store.task_facts(root),
         "task_versions": lambda root, ids: task_store.task_versions(root, ids),
         "task_drive_status": lambda root, ids: task_store.task_drive_status(root, ids),
+        "collection_flags": lambda root, ids: task_store.collection_flags(root, ids),
         "task_ids": lambda root, ids: task_store.task_ids(root),
         "newest_ids": lambda root, ids: task_store.newest_ids(root),
         "terminal_writes_since": lambda root, ids: task_store.terminal_writes_since(root, 0),
@@ -453,11 +458,13 @@ def test_the_open_usage_set_crosses_once_per_statement(data_root):  # noqa: F811
 
 def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_path):
     """The held custody runs and the live tasks are a few rows among the whole closed history: once the
-    maintenance child's ANALYZE wrote planner statistics, their reads stay on their indexes and cost the same
-    SQLite VM steps over 10 and 300 closed rows of each. Without it SQLite walks every row: before 3.46 to spare
-    sorting the held few in key order (tests/test_cost_contract.py B7 on the PERSIST leg's SQLite 3.45.1), on every
-    version for the live tasks and the packer's keep rows, and from 3.46 for the context's run lines."""
+    maintenance child's ``sqlite_analyze`` wrote planner statistics, their reads stay on their indexes and cost the
+    same SQLite VM steps over 10 and 300 closed rows of each, a new connection's schema load included. Without it
+    SQLite walks every row: before 3.46 to spare sorting the held few in key order (tests/test_cost_contract.py B7 on
+    the PERSIST leg's SQLite 3.45.1), on every version for the live tasks and the packer's keep rows, and from 3.46
+    for the context's run lines."""
     from ouroboros import delegate_custody as custody, delegate_custody_current as current, evidence_packer, obligations
+    from ouroboros import maintenance
     from tests._cost_meter import VM_STEP
     from tests.test_store import publish
 
@@ -465,7 +472,9 @@ def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_p
     for history in (10, 300):
         root = tmp_path / f"history-{history}"
         publish(root, *({"task_id": f"done-{n}", "status": "completed", "_schema_version": 1} for n in range(history)),
-                *({"task_id": f"live-{n}", "status": "running", "_schema_version": 1} for n in range(3)))
+                *({"task_id": f"live-{n}", "status": "running", "_schema_version": 1} for n in range(3)),
+                {"task_id": "planning", "status": "completed", "_schema_version": 1,
+                 "plan_record": {"schema_version": 3, "asks": [{"participants": [{"status": "pending"}]}]}})
         custody.emit(root, custody.STARTED, {"run_id": "run-template", "task_id": "done-0"})
         custody.emit(root, custody.SETTLED, {"run_id": "run-template", "task_id": "done-0", "state": "succeeded"})
         obligations.remove(root, "delegated_runs", "done-0")  # its closing receipt acknowledged, as the scale root does
@@ -476,8 +485,7 @@ def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_p
                 txn.put_custody(run_id, {**closed, "run_id": run_id, "task_id": f"done-{n}"}, state="closed")
         for n in range(3):
             custody.emit(root, custody.STARTED, {"run_id": f"run-live-{n}", "task_id": f"live-{n}"})
-        with store.open_store(root, write=True) as txn:
-            txn.conn.execute("ANALYZE")
+        assert maintenance.run_job(root, "sqlite_analyze")["state"] == "done"
         store.close_connections()  # the reads below open their connections under the meter
         with CostMeter(root) as meter:
             held = tagged("held", lambda: current.snapshot(root)["state"])
@@ -487,7 +495,7 @@ def test_the_few_current_rows_cost_the_same_over_any_history_once_analyzed(tmp_p
         assert sorted(held) == [f"run-live-{n}" for n in range(3)], sorted(held)
         assert {f"live-{n}" for n in range(3)} <= set(live) and not set(live) & {"done-0", "done-1"}, sorted(live)
         assert sorted(health) == ["run-closed-1", *sorted(held)], sorted(health)
-        assert sorted(keep) == [f"live-{n}" for n in range(3)], sorted(keep)
+        assert sorted(keep) == [*[f"live-{n}" for n in range(3)], "planning"], sorted(keep)
         tags = ("held", "live", "health", "keep")
         steps[history] = {tag: meter.snapshot(tag)["counts"].get("vm_steps", 0) for tag in tags}
     assert all(steps[300][tag] - steps[10][tag] <= VM_STEP for tag in tags), steps

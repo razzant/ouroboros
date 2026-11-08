@@ -5,14 +5,14 @@ split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-from ouroboros.context_fit import _physical_context_for_fit
+from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content
 
 from ouroboros.config import runtime_setting
 
 import logging
 import contextlib
 import copy
-import json
+from datetime import datetime, timezone
 import pathlib
 import queue
 import time
@@ -22,12 +22,14 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros import loop_output_exhaustion as output_recovery
+from ouroboros.context_anchor import main_input_anchor, measured_units, record_input_anchor, refused_request_density
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -107,9 +109,9 @@ def _adopt_fallback_route(
     handover_reason: str = "fallback",
     tool_calls_at_handover: Optional[int] = None,
 ) -> tuple:
-    """Round-4 C1.1: adopt a SUCCESSFUL cross-family fallback for the rest of the loop with its sanitized transcript, so a
-    later round never replays THIS fallback's reasoning to the primary family unsanitized; the caller already rebound the
-    context-fit plan to this route. Returns ``(active_model, active_use_local, context_fit_plan, context_mode)``."""
+    """Round-4 C1.1: adopt a cross-family fallback (usable, or its reply allowance spent) for the rest of the loop with its
+    sanitized transcript, so a later round never replays THIS fallback's reasoning to the primary family unsanitized; the caller already
+    rebound the context-fit plan to this route. Returns ``(active_model, active_use_local, context_fit_plan, context_mode)``."""
     ctx.active_model = fallback_model
     ctx.active_use_local = fallback_use_local
     messages[:] = fallback_messages
@@ -198,24 +200,21 @@ def _run_cross_model_fallback_chain(
     one (an accepted operation still readable) or a spent deadline stops the walk. A round whose own
     failure is an outage or an unknown outcome keeps that failure as its wait when none answers."""
     from ouroboros import fallback_cooldown as _fcd
-    from ouroboros.loop_transport import append_unknown_recovery_input, fallback_reason_text
-    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, task_model_binding, route_binding
+    from ouroboros.loop_transport import append_unknown_recovery_input, fallback_last_attempt_words, fallback_reason_text
+    from ouroboros.model_slots import task_model_binding, route_binding
     from ouroboros.model_wait import current_model_wait
     from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS as _cooldown_kinds
-    from ouroboros.primary_route_observation import failure_facts, route_facts_text
-    from ouroboros.provider_models import provider_for_model
+    from ouroboros.primary_route_observation import failure_facts, fallback_adoption_text, fallback_route_words, own_call_record, route_facts_text
 
     def _cooled(model: str, use_local: bool, role: str) -> None:
         if str(accumulated_usage.get("_last_llm_error_kind") or "") in _cooldown_kinds:
             _fcd.mark_cooldown(*route_binding(model, use_local, role, overrides=waiter.overrides if waiter else None))
 
-    def _disclose_unknown(target: List[Dict[str, Any]], route: str) -> None:
-        # A NEW generation after an eligible unknown outcome names the unknown attempt it follows.
+    def _disclose_unknown(target: List[Dict[str, Any]], lead: str) -> None:
+        # A NEW generation after an eligible unknown outcome names the unknown attempt it follows; each caller says what it sends.
         if accumulated_usage.get("_pending_transport_outcome") or str(accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
-            append_unknown_recovery_input(
-                target, accumulated_usage, dict(accumulated_usage.get("_pending_transport_outcome") or {}),
-                lead=f"The previous attempt ended without a usable answer; the configured route {route} continues.",
-                continuation="configured_route")
+            append_unknown_recovery_input(target, accumulated_usage, dict(accumulated_usage.get("_pending_transport_outcome") or {}),
+                                          lead=lead, continuation="configured_route")
 
     waiter = current_model_wait()
     _cooled(active_model, active_use_local, str(getattr(context_fit_plan, "model_role", "") or "main"))
@@ -235,41 +234,26 @@ def _run_cross_model_fallback_chain(
                              str(getattr(context_fit_plan, "model_role", "") or ""), waiter)
     tried = []
     recovering_output = output_recovery.ready_for_fallback(accumulated_usage)
-    if recovering_output:
-        rows = [row for row in rows if list(route_binding(row[0], row[2], row[1],
-                overrides=waiter.overrides if waiter else None)) not in accumulated_usage[output_recovery.KEY]["tried"]]
-    # The notice names the model that was actually just tried. `active_model`
-    # stays the acting route until a candidate succeeds, so a second switch would
-    # otherwise read "primary -> B" beside B's predecessor's failure reason.
-    previous_model, previous_tag = active_model, " (local)" if active_use_local else ""
-    msg = None
+    # The notice names the model that was actually just tried. `active_model` stays the acting route until a
+    # candidate is adopted, so a second attempt would otherwise blame the primary beside B's predecessor's failure.
+    previous_model, previous_use_local = active_model, active_use_local
+    msg, adopted, fresh = None, False, True  # fresh: the last call left a failure row of its own (fallback_reason_text)
     # ABI-4: typed ResolvedModelTarget rows cross to strings only at the transport boundary; every chain
     # row uses the single global USE_LOCAL_FALLBACK flag, the primary keeps its own locality.
     for index, (fallback_model, fallback_role, fallback_use_local, is_primary) in enumerate(rows):
-        if _fcd.is_cooling_down(*route_binding(fallback_model, fallback_use_local, fallback_role,
-                                             overrides=waiter.overrides if waiter else None)):
-            continue
+        binding = route_binding(fallback_model, fallback_use_local, fallback_role, overrides=waiter.overrides if waiter else None)
+        if _fcd.is_cooling_down(*binding) or (recovering_output and not output_recovery.fallback_untried(accumulated_usage, binding)):
+            continue  # a skipped route is not announced or prepared, and leaves the walk's facts as they were
         deadline = _loop()._task_deadline_epoch(tools)
         if deadline and time.time() >= deadline:
             break
-        ftag = " (local)" if fallback_use_local else ""
-        # Name the account the dispatch will actually use: a task-local wait
-        # override replaces the configured one for this role, or selects Auto,
-        # so the same binding must speak here as at the send.
-        _bound_role, bound_account = task_model_binding(
-            {"model_role": fallback_role, "task_metadata": getattr(tools._ctx, "task_metadata", {})},
-            overrides=waiter.overrides if waiter else None)
-        fallback_account = (bound_account.strip() if bound_account is not None
-                            else str(model_role_option(MODEL_ACCOUNTS_KEY, fallback_role) or ""))
-        account_route = provider_for_model(fallback_model) == "claudexor"
-        account_note = f"; account: {fallback_account or 'Auto'}" if account_route else ""
         reason = str(accumulated_usage.get("_last_llm_error_kind") or "")
-        emit_progress(f"⚡ Fallback: {previous_model}{previous_tag} → {fallback_model}{ftag}"
-                      f"{' (primary)' if is_primary else ''}{account_note}"
-                      f"{'; pinned account: siblings were not tried' if account_route and fallback_account else ''}."
-                      f"{fallback_reason_text(accumulated_usage)}",  # the predecessor's class and own sentence
-                      incident={"task_incident": "model_lane_switch", "toast_once": f"{task_id}:model_lane_switch:{round_idx}:{fallback_model}"})
-        _disclose_unknown(messages, fallback_model)
+        # An attempt, never a result: adoption and the walk's end say what came of it.
+        emit_progress(f"⚡ Fallback: trying {fallback_route_words(tools._ctx, fallback_model, fallback_use_local, fallback_role, waiter, pin_note=True)}"
+                      f"{' (primary)' if is_primary else ''}"
+                      f"{fallback_reason_text(accumulated_usage, previous_model, previous_use_local, entry=not tried, fresh=fresh)}",  # the predecessor's class and own sentence
+                      incident={"task_incident": "model_lane_attempt", "toast_once": f"{task_id}:model_lane_attempt:{round_idx}:{fallback_model}"})
+        _disclose_unknown(messages, "The previous attempt ended without a usable answer; the host is trying a configured alternative.")
         # Cross-FAMILY fallback must not replay the primary's
         # provider-private reasoning to a different family (the GLM->Claude
         # 400 "Invalid signature" death); the SSOT sanitizer no-ops same-family.
@@ -317,12 +301,15 @@ def _run_cross_model_fallback_chain(
                                      or _route_follows(rows[index + 1:])),
                 output_recovery_fallback=recovering_output,
             )
-        if recovering_output and not output_recovery.fallback_untried(candidate_call):
-            continue
+        if recovering_output and not output_recovery.fallback_untried(accumulated_usage, output_recovery.binding(candidate_call)):
+            continue  # preparation may outlive a change to an already-spent account; keep the existing late check
         tried.append(fallback_model)
         resident = (None if tool_schemas is None else list(tool_schemas),
                     getattr(tools._ctx, "_route_left_out_tool_names", None))
+        failure_before, meta_before = accumulated_usage.get("_last_llm_failure"), accumulated_usage.get("_last_llm_call_meta")
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
+        previous_model, previous_use_local = candidate_call.active_model, candidate_call.active_use_local
+        fresh = accumulated_usage.get("_last_llm_failure") is not failure_before  # output recovery's gate sends nothing, keeps it
         if deferred is None and msg is None and not recovering_output:
             # Each fallback clears the transient context slot before its own send. Keep the
             # first actual resource refusal for this chain: a later bad request cannot
@@ -350,20 +337,19 @@ def _run_cross_model_fallback_chain(
                 # failed before the successful candidate ever authored a turn.
                 handover_from_model=active_model,
                 handover_reason=reason or "fallback",
-                tool_calls_at_handover=len(
-                    ((getattr(tools._ctx, "_execution_trace", {})
-                      if isinstance(getattr(tools._ctx, "_execution_trace", {}), dict) else {})
-                     .get("tool_calls") or [])
-                ),
             )
+            own_call = own_call_record(accumulated_usage, msg is not None, meta_before, failure_before)
             tools._ctx._route_facts_pending = "" if is_primary else route_facts_text(
-                tools._ctx, model=fallback_model, use_local=fallback_use_local, role=fallback_role,
+                tools._ctx, model=active_model, use_local=active_use_local, role=fallback_role,
                 failed_model=entry_model, failure=entry_failure, waiter=waiter, usage=accumulated_usage,
-                round_idx=round_idx)
+                round_idx=round_idx, answered=msg is not None, own_call=own_call)
             from ouroboros.route_choice import after_fallback
             tools._ctx.route_choice = after_fallback(tools._ctx, is_primary)  # a chain entry is the task's own route
             if not is_primary:
                 tools._ctx.route_wait_on_primary = False  # a declared wait belonged to the primary route
+            adopted = True
+            emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, fallback_role, waiter,
+                                                 accumulated_usage, answered=msg is not None, own_call=own_call, fresh=fresh))
             break
         tools._ctx.context_fit_plan = context_fit_plan
         tools._ctx.messages = messages
@@ -371,7 +357,7 @@ def _run_cross_model_fallback_chain(
         if context_fit_plan is not None:  # a failed candidate's view leaves with it (the primary row's resumed one too)
             if fallback_messages is messages:  # a same-family candidate rebound the shared transcript
                 messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
-                invalidate_task_cache_splits(task_id)
+                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
             _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
         if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
@@ -379,12 +365,14 @@ def _run_cross_model_fallback_chain(
             # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
             # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
             tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
-            invalidate_task_cache_splits(task_id)
+            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
         if _walk_fenced(tools._ctx, accumulated_usage) or (not recovering_output and str(
                 accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"):
-            break  # an exhausted candidate answered: its outcome is the round's, no further route is dialed
+            break  # an exhausted candidate replied unusably: its outcome is the round's, no further route is dialed
         _cooled(fallback_model, fallback_use_local, fallback_role)
-        previous_model, previous_tag = fallback_model, ftag
+    if tried and not adopted:  # this last attempt's own result, before any wait or re-aim; each earlier one opened the next attempt's row
+        emit_progress(f"⚡ Fallback: the last attempt, on {previous_model}{' (local)' if previous_use_local else ''}"
+                      f"{fallback_last_attempt_words(accumulated_usage, previous_model, fresh=fresh)}")
     fenced = msg is None and _walk_fenced(tools._ctx, accumulated_usage)
     if msg is None and tried and not fenced and str(accumulated_usage.get("_last_llm_error_kind") or "") != "llm_output_exhausted":
         accumulated_usage["_acting_route_failure"] = entry_failure  # its own failure decides its salvage; the last row stays the walk's
@@ -405,7 +393,8 @@ def _run_cross_model_fallback_chain(
             active_use_local=active_use_local, active_context_mode=active_context_mode,
             drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
         retry_call.defer_resource_wait = False
-        _disclose_unknown(retry_call.messages, retry_call.active_model)
+        _disclose_unknown(retry_call.messages, "The previous attempt ended without a usable answer; "
+                                               "the host is preparing another request after the owner's answer.")
         # An owner may select a DIFFERENT account on either the primary or a
         # fallback model. Rebind the retained call before measurement and physical
         # send; the pre-wait account's fingerprint/capacity is not evidence for B.
@@ -418,8 +407,10 @@ def _run_cross_model_fallback_chain(
             model=retry_call.active_model, use_local=retry_call.active_use_local,
             start_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
             model_role=role, model_route={}, credential_profile_id=account)
+        meta_before = accumulated_usage.get("_last_llm_call_meta")
         msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
         if msg is not None and deferred_candidate is not None:
+            own_call = own_call_record(accumulated_usage, True, meta_before, None)
             active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
                 ctx, tools, retry_call.active_model, retry_call.active_use_local,
                 messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
@@ -427,7 +418,9 @@ def _run_cross_model_fallback_chain(
                 handover_reason="owner_wait")
             tools._ctx._route_facts_pending = route_facts_text(
                 tools._ctx, model=active_model, use_local=active_use_local, role=role, failed_model=entry_model,
-                failure=entry_failure, waiter=waiter, usage=accumulated_usage, round_idx=round_idx)
+                failure=entry_failure, waiter=waiter, usage=accumulated_usage, round_idx=round_idx, own_call=own_call)
+            emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, role, waiter,
+                                                 accumulated_usage, answered=True, own_call=own_call))
         else:
             active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
             context_fit_plan = retry_call.context_fit_plan
@@ -566,7 +559,6 @@ def _rebind_context_fit_plan(
             "CONTEXT_FIT_REBUILD_FAILED: immutable context core is unavailable for route switch"
         )
     from ouroboros.context import _context_fit_route
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.primary_route_observation import held_primary_view
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
@@ -585,31 +577,30 @@ def _rebind_context_fit_plan(
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
         "credential_profile_id": credential_profile_id,
     }
-    is_subagent = str(metadata.get("delegation_role") or "").lower() == "subagent"
     try:
-        route, evidence = _context_fit_route(task, allow_fetch=not is_subagent)
+        route, evidence = _context_fit_route(task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
+    from ouroboros.context_window import estimator_ratio, resolve_window, route_window_kwargs
     # Account/server changes have their own anchors and durable window observations.
-    anchor, _accepted = main_input_anchor(getattr(tools._ctx, "_accumulated_usage", None), SimpleNamespace(
-        model=str(route.get("model") or model), provider=str(route.get("provider") or ""),
-        route_fp=route.get("window_observation_fp", evidence.route_fp)))
-    ratio = anchor.density if anchor is not None else _route_calibration_ratio(
-        None,  # canonical evidence root (one observation store)
-        str(getattr(evidence, "route_fp", "") or ""),
-        str(route.get("model") or model),
-        estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
-        view_kind=plan.view_kind,
-    )
-    from ouroboros.context_window import resolve_window
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
     scope = route.get("window_observation_fp", evidence.route_fp)
+    anchor, _accepted = main_input_anchor(getattr(tools._ctx, "_accumulated_usage", None), SimpleNamespace(
+        model=str(route.get("model") or model), provider=str(route.get("provider") or ""), route_fp=scope))
+    preferred = preferred_mode or getattr(plan, "preferred_mode", "")
+    preferred = preferred if preferred in {"low", "max", "nano"} else "max"
+    ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
+        None,  # canonical evidence root (one observation store)
+        str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
+        estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
+        view_kind=plan.view_kind), None
+    if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
+        ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
+            plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, provider=str(route.get("provider") or "")))
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
     bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
     window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)
     window_tokens, known_window = window.total_equivalent, window.usable is not None
-    preferred = preferred_mode or getattr(plan, "preferred_mode", "")
-    preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     rebound = replace(
         plan,
         preferred_mode=preferred,
@@ -626,15 +617,16 @@ def _rebind_context_fit_plan(
             "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
         } if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
-        window_record=window, window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
+        **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
+        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
-        window_tokens=window_tokens, known_window=known_window, ratio=ratio, output_reserve=output_reserve,
-        tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
+        window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried,
+        output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
-    invalidate_task_cache_splits(getattr(tools._ctx, "task_id", ""))
+    rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
     tools._ctx.context_fit_plan = rebound
     tools._ctx.messages = messages
     tools._ctx.active_context_mode = mode
@@ -729,6 +721,8 @@ class _RoundModelCallContext:
     defer_resource_wait: Optional[bool] = None
     output_recovery_fallback: bool = False
     physical_send_claim: Optional[Callable[[Any], None]] = None
+    refused_density: Optional[float] = None  # the size refusal in recovery: its own density, until the recovery sends
+    refusal_policy: Optional[Dict[str, bool]] = None  # a refusal pass's bodies view: did a provider start the round (06.11)
 
 
 def _route_follows(candidates: List[Tuple[str, str, bool, bool]]) -> bool:
@@ -796,7 +790,7 @@ def _remember_main_fit(ctx: _RoundModelCallContext, disposition: Any) -> None:
     usage["_context_target_miss"] = disposition.action == "send_target_miss"
     usage["_context_automatic_pass_used"] = disposition.automatic_pass_used
     usage["_context_predicted_capacity_miss"] = disposition.predicted_capacity_miss
-    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window"):
+    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window", "required_book_tokens"):
         usage[f"_context_{name}"] = getattr(measurement, name)  # the estimate's provenance and the window floor
 
 
@@ -808,9 +802,7 @@ def _measure_round_main_fit(
     plan = ctx.context_fit_plan
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
         return None
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import measure_main_fit
-    from ouroboros.transcript_prefix import rewrite_epoch
 
     rendered_mode = str(ctx.active_context_mode) if str(ctx.active_context_mode) in {"max", "low", "nano"} else "max"
     anchor, accepted = main_input_anchor(ctx.accumulated_usage, plan, rewrite_epoch=rewrite_epoch(ctx.tools._ctx))
@@ -824,11 +816,10 @@ def _measure_round_main_fit(
         automatic_pass_used=automatic_pass_used,
         reasoning_effort=ctx.active_effort,
         anchor=anchor,
-        accepted_input_tokens=accepted,
+        accepted_input_tokens=accepted, refused_density=getattr(ctx, "refused_density", None),
     )
     _remember_main_fit(ctx, disposition)
     return disposition
-
 
 
 def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, usage=None) -> dict:
@@ -839,7 +830,6 @@ def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, 
     ``usage`` (the task's) supplies this conversation's own anchor; a candidate
     view is a rewrite, so its estimate is labelled as one.
     """
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import estimate_context_prompt_tokens, measure_main_fit
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
 
@@ -860,21 +850,23 @@ def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, 
 
 
 @contextlib.contextmanager
-def _presend_context_fit(ctx: _RoundModelCallContext):
-    """Use the final physical candidate for the existing strict-shrink recovery, without a paid send."""
+def _presend_context_fit(ctx: _RoundModelCallContext | None = None, admitted: Optional[Dict[str, int]] = None):
+    """Use the final physical candidate for the existing strict-shrink recovery, without a paid send;
+    ``admitted`` keeps each admitted candidate's estimator count by its bytes, an exact local one's too."""
     from ouroboros.llm_attempt import main_context_fit_refusal
 
     refused = None
 
     def admit(request):
         nonlocal refused
-        refused = main_context_fit_refusal(request)
+        if (refused := main_context_fit_refusal(request)) is None and admitted is not None and request.candidate_raw_sha256:
+            admitted[request.candidate_raw_sha256] = int(request.prompt_tokens_bounded_estimate or 0)
         return refused is None
 
     try:
         yield admit
     except PhysicalAttemptPreconditionFailed:
-        if refused is None:
+        if refused is None or ctx is None:
             raise  # a failed strict-shrink or custody check is not a size prediction
         ctx.accumulated_usage.update({
             REFUSED_CANDIDATE_KEY: refused, "_last_llm_error_kind": "context_overflow", "reason_code": "context_overflow",
@@ -930,8 +922,8 @@ def _dispatch_round_model(
     trace = getattr(ctx.tools._ctx, "_execution_trace", None) or {}
     ctx.tools._ctx._completion_observation = completion_observation(ctx.tools._ctx, trace)
 
-    result = (None, 0.0)
-    with contextlib.ExitStack() as binding, _presend_context_fit(ctx) as admit:
+    result, admitted = (None, 0.0), {}
+    with contextlib.ExitStack() as binding, _presend_context_fit(ctx, admitted) as admit:
         deferral = None
         if waiter is not None:
             from ouroboros.loop_llm_call import classify_llm_exception
@@ -965,13 +957,12 @@ def _dispatch_round_model(
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
-    if result[0] is not None:  # an accepted request is this conversation's next size anchor
-        from ouroboros.context_anchor import record_input_anchor
-        from ouroboros.transcript_prefix import rewrite_epoch
+    capture = _loop().last_physical_attempt_capture()  # the answer's own receipt, as ``send_clock`` reads it
+    if result[0] is not None:  # an accepted request is this conversation's next size anchor: the bytes it answered
         ctx.accumulated_usage.pop(CONTEXT_REFUSAL_ROUND_KEY, None)  # an answer ends the round's refusal (review r2)
+        sent = admitted.get(capture.candidate_raw_sha256) if getattr(capture, "state", "") in {"settled", "dispatched"} else None
         record_input_anchor(ctx.accumulated_usage, ctx.context_fit_plan, round_idx=ctx.round_idx,
-                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx))
-    capture = _loop().last_physical_attempt_capture()
+                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx), estimate_tokens=sent)
     if primary and deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
@@ -1099,8 +1090,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
 def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
     """Size recovery lowers Max's books; a smaller physical frame may require Nano.
 
-    Only the books change: Low shows my memory from the level the refused Max view showed, never the
-    Low view prepared at startup and not sent (``ContextFitPlan.reproject_for_route``, ``select_mode``)."""
+    Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
     if ctx.active_context_mode != "max" or ctx.context_fit_plan is None:
         return
     plan = ctx.context_fit_plan
@@ -1109,10 +1099,11 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan.reproject_for_route(
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
-        tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low")
+        tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
+        measured_input_tokens=fit.measurement.reprojection_input_tokens)
     mode = ctx.context_fit_plan.initial_mode
     ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry")
     ctx.active_context_mode = mode
     ctx.tools._ctx.messages = ctx.messages
     ctx.tools._ctx.active_context_mode = mode
@@ -1254,8 +1245,8 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     and route of THIS call, so a grown tool set or a switched route is measured
     again), the answer reserve and one clock line against a KNOWN capacity.
     Unknown capacity sends the whole input, as any call does; a real provider
-    overflow may apply the delivery before consumption, as the one retry the
-    strict-shrink predicate admits only when it is actually smaller. Once a
+    overflow may apply the delivery (the bare ``pointer_text`` when bound) before consumption,
+    as the one retry the strict-shrink predicate admits only when smaller. Once a
     response followed the input, the transcript is history and stays as sent.
     Only the delivered first user message changes; the task text, the owner
     corpus and the stored source keep the complete observation (``consciousness_wake``).
@@ -1269,34 +1260,36 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     if index is None or any(isinstance(message, dict) and message.get("role") == "assistant"
                             for message in ctx.messages[index + 1:]):
         return False  # a response already followed the wake input: consumed history, never rewritten
-    if not hasattr(tool_ctx, "_wake_input_full_message"):
-        tool_ctx._wake_input_full_message = copy.deepcopy(ctx.messages[index])
+    from ouroboros.context_input_selection import wake_deliveries, wake_input_checkpoint, whole_wake_input
+    if not hasattr(tool_ctx, "_wake_input_full_message"):  # a projected start's whole input is its plan's
+        tool_ctx._wake_input_full_message = whole_wake_input(ctx.messages[index], ctx.context_fit_plan, wake)
     full = tool_ctx._wake_input_full_message
-    delivery = {"role": "user", "content": str(wake["projection_text"])}
-    if len(json.dumps(delivery, ensure_ascii=False)) >= len(json.dumps(full, ensure_ascii=False)):
-        return False  # a pointer must actually save space
-    projected = overflowed
-    if not overflowed:
-        # Re-evaluate the FULL input on each actual route, even when the last
-        # unconsumed candidate used a pointer. Measurement never rewrites history.
-        current = ctx.messages[index]
-        ctx.messages[index] = full
+    forms = wake_deliveries(wake, full)  # rescue order, the bare pointer last, each smaller than the whole input
+    if not forms:
+        return False  # no bound form saves space
+    from ouroboros.send_clock import main_clock_policy, render_clock_note
+    from ouroboros.utils import estimate_tokens
+
+    policy = main_clock_policy(meta, task_type=ctx.task_type)
+    clock = estimate_tokens(render_clock_note(policy, datetime.now(timezone.utc))) if policy else 0
+
+    def unfit(candidate: Dict[str, Any]) -> bool:  # THIS round's request carrying it exceeds a KNOWN capacity
+        current, ctx.messages[index] = ctx.messages[index], candidate  # measurement never rewrites history
         try:
             disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
         finally:
             ctx.messages[index] = current
         measurement = disposition.measurement if disposition is not None else None
-        from datetime import datetime, timezone
-        from ouroboros.send_clock import main_clock_policy, render_clock_note
-        from ouroboros.utils import estimate_tokens
+        return bool(measurement is not None and measurement.capacity_total_tokens is not None
+                    and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
+                    > measurement.capacity_total_tokens)
 
-        policy = main_clock_policy(meta, task_type=ctx.task_type)
-        clock = estimate_tokens(render_clock_note(policy, datetime.now(timezone.utc))) if policy else 0
-        projected = bool(measurement is not None and measurement.capacity_total_tokens is not None
-                         and measurement.estimated_input_tokens + measurement.response_reserve_tokens + clock
-                         > measurement.capacity_total_tokens)
-    from ouroboros.context_fit import extract_plain_text_from_content
-
+    # The FULL input is measured first on each actual route, even after a pointer, and restored when it fits; else
+    # the first bound form measured to fit, the bare pointer last, as at the start (``rescued_start``).
+    projected = overflowed or unfit(full)
+    delivery = forms[-1]  # a real overflow's one strict-shrink retry, and the last rescue: the smallest form
+    if projected and not overflowed:
+        delivery = next((form for form in forms[:-1] if not unfit(form)), delivery)
     desired = delivery if projected else full
     # Cross-family fallbacks copy the transcript, then restore it on failure.
     # Projection belongs to THESE bytes, never a flag on the shared tool context.
@@ -1306,11 +1299,8 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     invalidate_task_cache_splits(ctx.task_id)
     _loop().seal_task_transcript(ctx.messages)
     tool_ctx.messages = ctx.messages
-    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-        "checkpoint_kind": "wake_input_by_source" if projected else "wake_input_inline",
-        "round": ctx.round_idx, "after_overflow": overflowed,
-        "composition": wake.get("composition"), "source_sha256": (wake.get("source") or {}).get("sha256"),
-    })
+    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, wake_input_checkpoint(
+        wake, delivery["content"] if projected else None, round_idx=ctx.round_idx, after_overflow=overflowed))
     return True
 
 
@@ -1336,14 +1326,15 @@ def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
     schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
                                                      protect=history_tool_names(ctx.messages))
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
     _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
         ctx.active_model, limit, total, left_out, selectors=usable_selectors(ctx.tools, schemas)))
     return True
 
 
 def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
-    return output_recovery.call(ctx, _call_round_model_once)
+    from ouroboros.presence_continuation import covered_send  # only an answered send covers (``reply_anchor``)
+    return covered_send(ctx.tools._ctx, lambda: output_recovery.call(ctx, _call_round_model_once))
 
 
 def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
@@ -1358,6 +1349,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         ctx.tools._ctx._authored_memory_plan = None
     ctx.accumulated_usage.pop("_last_llm_failure", None)
     ctx.accumulated_usage.pop("_acting_route_failure", None)
+    ctx.refused_density = None  # every call measures ordinarily; only a size refusal inside it sets one
     from ouroboros.primary_route_observation import observe_primary_route
     observation = observe_primary_route(ctx)
     if observation:
@@ -1403,14 +1395,11 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared)
 
 
-# Size recovery (owner revision, 20.10.2026): a known-window prediction of no result room or the provider's
-# typed size refusal starts two model-free passes, each earning one strictly smaller check/retry: the
-# first replaces superseded host state and bodies a usable turn already showed; the second, only after a
-# further failed check/refusal, lowers memory granularity (books too when memory falls short of the excess), then
-# changes books before addressing eligible unseen bodies, a just-chosen one last. Each pass runs once
-# per round whatever the route, so a configured fallback receives the view as applied and walks nothing
-# again. The fallback chain and the end of the path follow in the caller.
-REFUSAL_PASSES: Tuple[Tuple[str, ...], ...] = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
+# Size recovery (owner revision, 20.10.2026; sizing 06.11.2026): a known-window prediction of no result room or the
+# provider's typed size refusal starts the model-free passes of ``REFUSAL_PASSES`` (order and sizes there), each
+# earning one strictly smaller check/retry. Each runs once per round whatever the route, so a configured fallback
+# receives the view as applied and walks nothing again. The fallback chain and the end of the path follow in the caller.
+from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
 WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
 #: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
@@ -1461,12 +1450,13 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None) 
     from ouroboros.context_anchor import record_refused_input
 
     measurement = fit.measurement
+    ctx.refused_density = refused_request_density(ctx.accumulated_usage, refused, measurement)  # passes measure at it
     predicted_free = getattr(refused, "predicted_free_tokens", None)
     if predicted_free is not None:  # a prediction never becomes a provider-refused size in the task's history
         slack = refused.predicted_slack_tokens
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply = _refusal_window(ctx, fit, refused)
-    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size)  # the provider's count when it stated one
+    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size, measured=measurement.anchor_input_tokens is not None)  # the provider's count when stated
     if stated:
         return max(0, size + reply - stated) + slack, slack
     accepted = measurement.accepted_input_tokens
@@ -1489,10 +1479,12 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     if not _failed_capture_is_comparable(failed_capture):
         return _skipped("failed_candidate_not_comparable")
     done = _loop()._context_overflow_retries(ctx.tools._ctx)
+    changed = _loop()._context_overflow_retries(ctx.tools._ctx, "_context_overflow_changed")  # owner 2A reads the round
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
     if fit is None:
         return None, cost, ctx.active_context_mode
     target, slack = _refusal_target(ctx, fit, failed_capture)
+    fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=False) or fit) if ctx.refused_density else fit
     real = getattr(failed_capture, "predicted_free_tokens", None) is None  # the round's start: a provider's, not an estimate
     for steps in ((WAKE_DELIVERY_STEP,),) * bool(prepared) + REFUSAL_PASSES:
         if steps != (WAKE_DELIVERY_STEP,):
@@ -1500,8 +1492,10 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             if key in done:
                 continue
             done.add(key)
-            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real):
+            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real, earlier_change=fit.measurement.round_id in changed):
                 continue
+            changed.add(fit.measurement.round_id)  # a fallback's re-entry of this round reads it too
+        density, ctx.refused_density = ctx.refused_density, None  # the retry is measured and sent ordinarily
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
         if fit is None:
             return None, cost, ctx.active_context_mode
@@ -1511,8 +1505,9 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
                 candidate_predicate=_strict_context_shrink_predicate(failed_capture),
                 max_tokens=int(getattr(failed_capture, "max_completion_tokens", 0) or 0) or None,
             )
-        except PhysicalAttemptPreconditionFailed:
+        except PhysicalAttemptPreconditionFailed:  # the changed, unsent view is not the refused request
             _emit_overflow_retry_skipped(ctx, "context_candidate_not_strictly_smaller", rung="+".join(steps))
+            target, slack = measured_units(density, fit.measurement, target, slack)  # its excess in fit's units
             continue  # ``fit`` already measures the changed view the next pass starts from
         cost = float(cost or 0.0) + float(retry_cost or 0.0)
         if retry_msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
@@ -1526,31 +1521,37 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             return _skipped("failed_candidate_not_comparable")
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
         target, slack = _refusal_target(ctx, fit, failed_capture)
+        fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit) if ctx.refused_density else fit
     return None, cost, ctx.active_context_mode
 
 
-def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit: Any,
-                        target: Optional[int], slack: Optional[int] = None, refused: bool = False) -> bool:
+def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit: Any, target: Optional[int],
+                        slack: Optional[int] = None, refused: bool = False, *, earlier_change: bool = False) -> bool:
     """Apply a pass's steps in order until together they shed ``target``; True when the candidate changed.
 
-    Each step is sized by what the earlier steps of the pass left of the target: host copies that
-    already freed the room leave every body in place, and memory the floor narrowed enough addresses
-    no unseen body (the gradual order the owner asked for). An unknown target lets each step take its
-    whole category. A just-chosen body that fits alone goes last, only in a round a provider's refusal
-    started (``refused``) and only for what the late rescue's other steps could not answer: the measured
-    target left, or nothing changed against an unknown one (owner 2A).
+    Each step is sized by what the earlier ones left: host copies that freed the room leave every body in place,
+    bodies that paid the measured excess leave memory the slack (the owner's gradual order); an unknown target lets
+    each step take its whole category. After a further refusal memory pays the rest before a just-chosen body, which
+    goes last, only in a round a provider's refusal started (``refused``): for the measured target left, or against
+    an unknown one when nothing in the round changed (``earlier_change``, owner 2A). No step pays for a directly
+    required handbook (owner 1.11): an excess it alone explains, or an unknown one beside it, stops the pass.
     """
-    changed, remaining = False, target
-    for step in steps:
+    changed, remaining, charged = False, target, 0
+    ctx.refusal_policy = {"provider_refused": bool(refused)}  # a shown chosen read yields only to a provider
+    for step in (*steps, "memory_rest") if "unseen_bodies" in steps else steps:  # memory before a chosen read (2A)
         if remaining is not None and remaining <= 0:
             break
         if getattr(ctx.context_fit_plan, "window_record", None) is not None:
             fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
+        if book := getattr(fit.measurement, "required_book_tokens", 0) - charged:
+            if remaining is None or remaining - (slack or 0) <= book:
+                return changed
+            remaining, charged = remaining - book, charged + book
         shed = _apply_refusal_step(ctx, step, fit, remaining, slack)
         if shed is not None:
             changed = True
             remaining = None if remaining is None else remaining - shed
-    if refused and "unseen_bodies" in steps and (not changed if remaining is None else remaining > 0):
+    if refused and "unseen_bodies" in steps and (not (changed or earlier_change) if remaining is None else remaining > 0):
         changed |= _run_emergency_address_pass(ctx, fit, rung="chosen_bodies", goal_tokens=remaining).status == "applied"
     return changed
 
@@ -1559,39 +1560,37 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
                         slack: Optional[int] = None) -> Optional[int]:
     """Apply one step of a refusal pass to the live transcript: the tokens it shed, None when unchanged.
 
-    Bodies are addressed oldest first until ``target`` (the whole category when it is unknown). The floor
-    narrows memory by the measured excess only, never by the return-after-fold slack: memory is continuity
-    (BIBLE P1), and narrowing it for slack showed this room's own rows by address. Without a target it
-    narrows by the deficit against a known window, and only with neither by everything it can give. Books
-    become navigation before any eligible unseen body leaves; a just-chosen body leaves last.
-    Memory alone satisfying the whole goal leaves the books and bodies untouched.
+    Shown bodies pay the measured excess only, oldest first, a shown chosen read only after a provider's refusal
+    (``refusal_policy``, ``context_source_view``): the work keeps its room (BIBLE P1). Unseen bodies pay what the
+    pass still owes (all when unknown). The floor lowers memory's granularity for the rest and the slack, which
+    only memory detail and ordinary host forms pay, a whole-or-outline section (``memory_floor``) only a measured
+    excess: granularity changes, coverage stays (BIBLE P1). Unknown, it asks a known window's deficit, else memory
+    detail alone; memory's rest after a further refusal asks everything. Its floor lowers the books only where
+    memory cannot make room; the books step waits for the second pass.
     """
+    slack = _refusal_window(ctx, fit)[2] if slack is None else slack
     if step in ("host_copies", "bodies", "unseen_bodies"):
         goal = None if step == "host_copies" else target
+        if step == "bodies" and target is not None and (goal := target - slack) <= 0:
+            return None  # the measured excess is paid; memory pays the slack
         receipt = _run_emergency_address_pass(ctx, fit, rung=step, goal_tokens=goal)
         return max(0, int(receipt.reclaimed_tokens or 0)) if receipt.status == "applied" else None
-    if step not in ("floor", "books") or (step == "books" and ctx.active_context_mode != "max"):
+    if step not in ("floor", "memory_rest", "books") or (step == "books" and ctx.active_context_mode != "max"):
         return None  # outside Max the books already show as navigation
     current = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) if step == "books" else fit
     before = (current or fit).measurement.estimated_input_tokens
 
-    def shed_since_before(default: int) -> int:
+    def shed_since_before() -> int:
         after = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
-        return max(0, before - after.measurement.estimated_input_tokens) if after is not None else default
-
-    def books_to_navigation(saved: int) -> Optional[int]:
-        mode = ctx.active_context_mode
-        _reproject_actual_overflow_low(ctx)
-        return shed_since_before(saved) if ctx.active_context_mode != mode else None
+        return max(0, before - after.measurement.estimated_input_tokens) if after is not None else 0
 
     if step == "books":
-        return books_to_navigation(0)
-    # The measured excess, else the deficit against a known window, else everything memory can give.
-    slack = _refusal_window(ctx, fit)[2] if slack is None else slack
-    excess = max(1, target - slack) if target else (fit.measurement.capacity_deficit_tokens or WHOLE_CATEGORY)
-    coarsened = _coarsen_memory_view(ctx, fit, saving=excess)
-    saved = shed_since_before(0) if coarsened else 0
-    if target and saved >= excess:
-        return saved  # the next step handles any remaining slack
-    shed = books_to_navigation(saved)
-    return shed if shed is not None else (saved if coarsened else None)
+        mode = ctx.active_context_mode
+        _reproject_actual_overflow_low(ctx)
+        return shed_since_before() if ctx.active_context_mode != mode else None
+    # The rest of the measured excess with the slack (a slack-only ask outlines nothing), else a known window's
+    # deficit with it, else memory detail alone, or after a further refusal everything memory can give.
+    deficit = fit.measurement.capacity_deficit_tokens
+    excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
+                     else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, WHOLE_CATEGORY))
+    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked) else None

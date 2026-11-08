@@ -58,13 +58,26 @@ from ouroboros.settings_setup_contract import (
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
-def _live_setup() -> tuple[dict, dict]:
+def _consciousness_enabled(request: Request) -> "bool | None":
+    """The consciousness control as the state shows it, read without writing; unknown when unreadable."""
+    try:
+        from ouroboros.gateway._helpers import request_drive_root
+        from supervisor.state import control_value, read_state
+
+        known, value = control_value(read_state(request_drive_root(request)).projection(), "bg_consciousness_enabled")
+    except Exception:
+        return None
+    return bool(value) if known else None
+
+
+def _live_setup(request: Request) -> tuple[dict, dict]:
     """The install's settings view and the web wizard bootstrap derived from it: the one
     derivation the page and its JSON projection share, computed and never persisted."""
     from ouroboros.config import SETTINGS_PATH
 
     settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
-    return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists())
+    return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
+                                           consciousness_enabled=_consciousness_enabled(request))
 
 
 async def onboarding_page(_request: Request) -> HTMLResponse:
@@ -73,14 +86,14 @@ async def onboarding_page(_request: Request) -> HTMLResponse:
         page = served_ui.custom_page("onboarding.html")
         if page is not None:
             return HTMLResponse(page, headers=_NO_STORE)
-    _settings, bootstrap = _live_setup()
+    _settings, bootstrap = _live_setup(_request)
     head = served_ui.appearance_meta(_request.headers) if served_ui is not None else ""
     return HTMLResponse(render_onboarding_html(bootstrap, head), headers=_NO_STORE)
 
 
 async def api_onboarding_bootstrap(_request: Request) -> JSONResponse:
     """``OnboardingBootstrapResponse``: readiness plus the wizard's bootstrap, written nowhere."""
-    settings, bootstrap = _live_setup()
+    settings, bootstrap = _live_setup(_request)
     return JSONResponse({"ready": has_startup_ready_provider(settings), "bootstrap": bootstrap}, headers=_NO_STORE)
 
 

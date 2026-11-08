@@ -549,7 +549,6 @@ def test_world_profile_gates_npm_on_a_usable_node(tmp_path, monkeypatch):
     assert "node (broken: signal:SIGKILL)" in content
 
 
-@pytest.mark.serial
 def test_node_runtime_imports_clean_in_both_orders():
     """T1 pin (grok-C CRITICAL class): a fresh interpreter must be able to
     import ouroboros.node_runtime BEFORE ouroboros.platform_layer and vice

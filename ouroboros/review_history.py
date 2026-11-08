@@ -496,6 +496,15 @@ def wave_history_input(drive_root: Any, facts: dict, subject: dict, record_id: s
             f"wave input binding could not be read ({type(exc).__name__})", record_id=record_id)]}
 
 
+# The prior-rounds section's own words beside the history it renders.
+_HISTORY_WORDS = {
+    "unreadable": ("\nREVIEW_HISTORY_SOURCE_UNAVAILABLE: durable obligations could not be read ({error}); source: "
+                   "{source}. The available history below is incomplete.\n"),
+    "authored": "\n### Author's selected account of earlier review sources\n\n{view}\n",
+    "index": "\n### Recorded review dispute index\n\n```json\n{index}\n```\n",
+}
+
+
 def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:
     """The prior-rounds section with the repository's durable open obligations
     (anti-thrashing across restarts) — the ONE owner for every brief that carries
@@ -512,9 +521,8 @@ def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
             state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
             open_obligations = state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))
         except Exception as exc:
-            gap = ("\nREVIEW_HISTORY_SOURCE_UNAVAILABLE: durable obligations could not be read "
-                   f"({type(exc).__name__}); source: {pathlib.Path(drive_root) / 'state/advisory_review.json'}. "
-                   "The available history below is incomplete.\n")
+            gap = _HISTORY_WORDS["unreadable"].format(
+                error=type(exc).__name__, source=pathlib.Path(drive_root) / "state/advisory_review.json")
     dispute = review_dispute_history(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
     comparison = dispute.get("comparison")
     if task_id and drive_root is not None:
@@ -523,12 +531,12 @@ def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
     from ouroboros.tools.review_helpers import build_review_history_section
     section = build_review_history_section(dispute["rounds"], open_obligations=open_obligations)
     if dispute.get("authored_view"):
-        section += "\n### Author's selected account of earlier review sources\n\n" + json.dumps(
-            dispute["authored_view"], ensure_ascii=False, sort_keys=True) + "\n"
+        section += _HISTORY_WORDS["authored"].format(view=json.dumps(dispute["authored_view"], ensure_ascii=False,
+                                                                     sort_keys=True))
     if dispute["decision_rows"] or dispute["gaps"]:
-        section += "\n### Recorded review dispute index\n\n```json\n" + json.dumps({
+        section += _HISTORY_WORDS["index"].format(index=json.dumps({
             "status": dispute["status"], "decision_rows": dispute["decision_rows"], "gaps": dispute["gaps"]},
-            ensure_ascii=False, sort_keys=True, default=str) + "\n```\n"
+            ensure_ascii=False, sort_keys=True, default=str))
     return gap + section + render_comparison(comparison)
 
 
@@ -607,3 +615,19 @@ def review_decision_aliases(history: dict, entry: dict) -> list[tuple[list, Any]
                                         **{key: copy.deepcopy(value) for key, value in item.items()
                                            if key not in {"reason", "summary", "recommendation"}}, "authored_view": alias}))
     return paths
+
+
+def history_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the prior-rounds section's own
+    words and the host's comparison with earlier reviews over placeholder anchors in every relation. Rounds,
+    records, decisions and comparisons are data."""
+    old = {"kind": "⟨kind⟩", "root": "⟨root⟩", "base": "⟨base⟩", "tree_sha": "⟨tree⟩"}
+    anchors = [{"review_record_id": "⟨record⟩", "named": named, "surface": "⟨surface⟩", "state": "⟨state⟩",
+                "verdict": "⟨verdict⟩", "author_disposition": "⟨disposition⟩", "subject": old, "relation": relation,
+                "differs": ["⟨field⟩"], "changed": ["⟨path⟩"], "changed_count": 2, "limited_to_touched": True,
+                "base_moved": moved, "full_delta": "⟨delta⟩", "excerpt": "⟨excerpt⟩", "excerpt_chars": 9,
+                "reason": "⟨reason⟩"}
+               for named in (True, False) for relation in ("same_subject", "same_tree_other_subject", "changed", "⟨other⟩")
+               for moved in ({"from": "⟨from⟩", "to": "⟨to⟩", "upstream_paths": 1}, {"from": "⟨from⟩", "unavailable": "⟨why⟩"})]
+    anchors.append({"review_record_id": "⟨record⟩", "relation": "same_subject"})
+    return [*_HISTORY_WORDS.values(), render_comparison({"gap": "⟨gap⟩", "anchors": anchors, "not_compared": ["⟨record⟩"]})]

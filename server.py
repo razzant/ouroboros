@@ -10,8 +10,10 @@ import sys
 import threading
 import time
 import uuid
-# The executing checkout is the implicit repository before any import resolves REPO_DIR; an explicit one wins.
-os.environ.setdefault("OUROBOROS_REPO_DIR", os.path.dirname(os.path.abspath(__file__)))
+# Before any import resolves a path: the executing checkout is the implicit repository and the data root is
+# settled; an explicit value wins, and APP_ROOT alone never silently leaves historical memory (#1239).
+from ouroboros.launch_roots import enter_direct, same_location  # noqa: E402 — standard library only
+os.environ.update(enter_direct(os.path.dirname(os.path.abspath(__file__))))
 from ouroboros.utils import read_json_dict as read_json_dict, utc_now_iso  # noqa: E402
 from typing import Any, Dict, Optional
 
@@ -19,7 +21,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 import uvicorn
 from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl,
-                                      exit_after_shutdown,
+                                      exit_after_shutdown, panic_termination_requested,
                                       restart_current_process as _restart_current_process_impl)  # noqa: F401 — restart lifecycle binding
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
@@ -31,7 +33,7 @@ from ouroboros.server_auth import (
 from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root, bound_service_socket,
                                          find_free_port, parse_server_args, reserved_service_ports, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -53,6 +55,8 @@ from ouroboros.server_process import (  # noqa: F401
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log,
+    FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
+    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -121,10 +125,8 @@ DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
 PORT_FILE = resolve_port_file(DATA_DIR, hosting_data_dir=DATA_DIR)
 
 sys.path.insert(0, str(REPO_DIR))
-if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
-    _agent_python = sys.executable
-    if isinstance(_agent_python, str) and _agent_python:
-        os.environ["OUROBOROS_AGENT_PYTHON"] = _agent_python
+if isinstance(sys.executable, str) and sys.executable:  # this host's interpreter, never an inherited (moved-app) one
+    os.environ["OUROBOROS_AGENT_PYTHON"] = sys.executable
 
 # Logging is configured in main(), not at import: a spawn/forkserver worker re-imports
 # this module as ``__mp_main__`` and configures itself in ``worker_main``
@@ -132,7 +134,7 @@ if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
 _pytest_default_real_data_dir = (
     "pytest" in sys.modules
     and not os.environ.get("OUROBOROS_DATA_DIR")
-    and DATA_DIR == pathlib.Path.home() / "Ouroboros" / "data"
+    and same_location(DATA_DIR, pathlib.Path.home() / "Ouroboros" / "data")
 )
 
 RESTART_EXIT_CODE = 42
@@ -162,11 +164,11 @@ def _has_active_evolution_transaction() -> bool:
 
 
 def _launcher_managed_repo_matches() -> bool:
-    if not _LAUNCHER_MANAGED: return False
-    if not _LAUNCHER_MANAGED_REPO_DIR: return (REPO_DIR / ".git" / "ouroboros-managed.json").is_file()
     try:
-        return pathlib.Path(_LAUNCHER_MANAGED_REPO_DIR).resolve(strict=False) == REPO_DIR.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
+        from supervisor import git_ops as git_ops_module
+        return git_ops_module.launcher_managed_repo_matches(
+            REPO_DIR, managed_by_launcher=_LAUNCHER_MANAGED, managed_repo_dir=_LAUNCHER_MANAGED_REPO_DIR)
+    except (OSError, RuntimeError, ValueError, ImportError):
         return False
 
 
@@ -207,7 +209,7 @@ from ouroboros.consciousness_view import _clock_of as _clock_of, describe_consci
 
 
 def _describe_bg_consciousness_state(requested_enabled: bool | None) -> dict:
-    return describe_consciousness_state(_consciousness.status_snapshot() if _consciousness else {}, requested_enabled)
+    return describe_consciousness_state(_consciousness.status_snapshot() if _consciousness else {}, requested_enabled, supervisor_failed=bool(_supervisor_error))
 
 
 def _start_supervisor_if_needed(settings: dict) -> bool:
@@ -669,14 +671,14 @@ def _run_supervisor(settings: dict) -> None:
         note_current_stamp(DATA_DIR)  # the stamp the bootstrap just wrote: the legacy detector's observation
 
         from supervisor.queue import (
-            enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
-            persist_queue_snapshot, restore_pending_from_snapshot,
-            queue_deep_self_review_task, sort_pending,
+            enqueue_task, enforce_due_task_timeouts, enqueue_evolution_task_if_needed,
+            persist_queue_snapshot, publish_queue_changes, publish_queue_snapshot, restore_pending_from_snapshot,
+            queue_deep_self_review_task, sort_pending, start_queue_writer, stop_queue_writer, tick_publisher_started,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
             spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-            handle_chat_direct, auto_resume_after_restart,
+            handle_chat_direct, auto_resume_after_restart, EventBusLost, event_bus_exitcode,
         )
 
         max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
@@ -717,22 +719,20 @@ def _run_supervisor(settings: dict) -> None:
         _startup_prune_sweeps(preserve_task_sources=bool(
             recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files)
 
-        if restored_pending > 0 or interrupted_running:
+        previous_fault = previous_fault_sentence(held_saved_work_count(PENDING))  # the last generation's fault, if one
+        if restored_pending > 0 or interrupted_running or previous_fault:
             st_boot = load_state()
             if st_boot.get("owner_chat_id"):
-                # The second clause states an INTENT, not an outcome: restore only
-                # fences an interrupted task with a durable cancel intent, and
-                # cancellation custody writes its terminal result a watchdog
-                # window later (task_lifecycle._INTENT_WATCHDOG_MIN_AGE_SEC).
+                # The second clause states an INTENT, not an outcome: restore only fences an interrupted task with a
+                # durable cancel intent; cancellation custody writes its terminal a watchdog window later (task_lifecycle._INTENT_WATCHDOG_MIN_AGE_SEC).
                 notice = ["♻️"]
                 if restored_pending > 0:
                     notice.append(f"Restored pending queue: {restored_pending} tasks.")
                 if interrupted_running:
                     count = len(interrupted_running)
-                    notice.append(
-                        f"Settling {count} task{'' if count == 1 else 's'} that "
-                        f"{'was' if count == 1 else 'were'} still running when the server stopped."
-                    )
+                    notice.append(f"Settling {count} task{'' if count == 1 else 's'} that "
+                                  f"{'was' if count == 1 else 'were'} still running when the server stopped.")
+                notice.extend(filter(None, [previous_fault, places.paused_places_sentence(DATA_DIR)]))
                 send_with_budget(int(st_boot["owner_chat_id"]), " ".join(notice), role="system", system_type="startup_notice")
         _startup_retired_settings_notice(settings)
         _startup_environment_review_notice()
@@ -770,7 +770,7 @@ def _run_supervisor(settings: dict) -> None:
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
             enqueue_task=enqueue_task,
             queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
-            safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
+            publish_queue_snapshot=publish_queue_snapshot, safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
             handle_chat_direct=handle_chat_direct,
             request_restart=_request_restart_exit,
@@ -812,7 +812,8 @@ def _run_supervisor(settings: dict) -> None:
     _last_custody_reap = [0.0]  # recovered checking copies become eligible off-loop after readiness
     _last_review_job_reconcile = [time.time()]
     # The watchdog was started before startup recovery; never start another here.
-
+    tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
+    start_queue_writer()  # ...and their documents are written on the publisher thread, never on this one
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -825,6 +826,7 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "tools.jsonl", "tools")
             rotate_jsonl_log_if_needed(DATA_DIR, "supervisor.jsonl", "supervisor")
             rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
+            get_event_q()  # the bus fact first: no dead worker is handed to the reaper on a dead bus
             ensure_workers_healthy()
 
             # One BOUNDED events batch (count + time; the remainder waits for the next
@@ -847,7 +849,7 @@ def _run_supervisor(settings: dict) -> None:
             flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
-            enforce_task_timeouts(pending_events=pending_idle_observations(get_event_q()))
+            enforce_due_task_timeouts(lambda: pending_idle_observations(get_event_q()))
             _periodic_supervisor_maintenance(  # includes the off-loop schedule duty
                 _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
             )
@@ -867,7 +869,7 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             assign_tasks()
-            if persist_queue_snapshot(reason="main_loop") is False:  # None: a saved queue kept as it is
+            if publish_queue_changes() is False:  # captured here, written by the publisher thread; None: a saved queue kept as it is
                 raise RuntimeError("queue publication failed")
             if _consciousness is not None and not draining and not _restart_lifecycle.agent_restart_pending():
                 try:
@@ -881,32 +883,26 @@ def _run_supervisor(settings: dict) -> None:
                 time.sleep(0.5)  # a turn that hit its events bound drains the backlog at full speed
 
         except Exception as exc:
-            if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set():
-                # A shutdown-torn Manager proxy is not a supervisor crash.
+            if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set() or panic_termination_requested():
+                # A shutdown-torn Manager proxy is not a supervisor crash; nor is the bus Panic itself killed.
                 log.info("Supervisor loop exiting on shutdown: %s", exc)
+                break
+            # Two causes, one door (end_generation_on_fault): the core is lost (the bus fact, confirmed for a proxy error too; no retries) or the third consecutive failure on a live bus.
+            bus_exitcode = exc.exitcode if isinstance(exc, EventBusLost) else event_bus_exitcode()
+            if bus_exitcode is not None:
+                _supervisor_ready.clear()
+                end_generation_on_fault(FAULT_BUS_LOST, exitcode=bus_exitcode, error=exc)
                 break
             crash_count += 1
             log.error("Supervisor loop crash #%d: %s", crash_count, exc, exc_info=True)
             if crash_count >= 3:
-                # Clear readiness and notify: a dead loop must not look healthy.
-                _supervisor_error = f"Supervisor loop died after 3 consecutive crashes: {exc}"
                 _supervisor_ready.clear()
-                log.critical("Supervisor exceeded max retries: %s", _supervisor_error)
-                try:
-                    st = load_state()
-                    if st.get("owner_chat_id"):
-                        send_with_budget(
-                            int(st["owner_chat_id"]),
-                            "🛑 Supervisor loop died after repeated crashes; tasks are no "
-                            "longer being assigned. Saving settings or restarting the app "
-                            f"will revive it. Last error: {exc}",
-                            role="system", system_type="supervisor_failure")
-                except Exception:
-                    log.debug("Failed to notify owner about supervisor death", exc_info=True)
-                break  # this generation is dead: the shared exit below stops its watchdog
+                end_generation_on_fault(FAULT_LOOP_FAILED, error=exc)
+                break
             # Backoff on the stop event, not time.sleep, so a shutdown is prompt.
             _supervisor_stop.wait(min(30, 2 ** crash_count))
     _watchdog_stop.set()  # every ordinary exit (restart, shutdown, crash death) stops this generation's watchdog
+    stop_queue_writer()  # ...and its queue writer: the doors after the loop publish synchronously where they stand
     _supervisor_thread = None
 
 
@@ -941,7 +937,7 @@ def _boot_managed_update_tasks() -> None:
     """Finalize a pending update, restart after rollback, then refresh its feed."""
     try:
         from ouroboros.gateway.update_progress import observe_boot
-        from supervisor.git_ops import compute_managed_update_status
+        from supervisor.git_ops import advance_recovery_point, compute_managed_update_status
         from supervisor.update_merge import active_update_tx, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
@@ -973,6 +969,7 @@ def _boot_managed_update_tasks() -> None:
             close_repo_writer_admission("managed_update:rollback_restart")
             _request_restart_exit()
             return
+        advance_recovery_point(ready and _bootstrap_ok is True and result.get("rolled_back") is not True)
         update_status = compute_managed_update_status(fetch=True)
         try:
             from ouroboros.update_letter import refresh_after_check, runtime_status
@@ -1107,7 +1104,7 @@ async def lifespan(app):
     default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
     pytest_default_real_data_dir = (
         (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
-        and lifespan_drive_root == default_real_data_dir
+        and same_location(lifespan_drive_root, default_real_data_dir)
         and not os.environ.get("OUROBOROS_DATA_DIR")
     )
     if not pytest_default_real_data_dir:  # an imported ASGI app is admitted here; main() already was
@@ -1273,13 +1270,14 @@ async def lifespan(app):
             kill_workers(
                 force=True,
                 terminal_status=cleanup_status,
-                result_reason=cleanup_reason,
+                result_reason=fault_cancel_reason() or cleanup_reason,  # a fault's unsaved rows name their cause
                 stop_source="server_shutdown",
                 **_restart_cleanup_kwargs(),
                 **_managed_update_pending_kwargs(),
             )
+            end_fault_held_runs()  # a fault's held tasks keep their saved work; their own delegated runs end
             # Record an explicit shutdown cause so a task interrupted by the shutdown is
-            # never later read as a worker crash storm. Diagnostic, so it runs AFTER the
+            # never later read as a worker death. Diagnostic, so it runs AFTER the
             # custody write: append_jsonl waits up to two seconds for the log lock, and
             # that wait must never spend the force-exit budget on unterminalized workers.
             try:
@@ -1332,6 +1330,7 @@ async def lifespan(app):
         except Exception:
             pass
         stop_owned_work(lifespan_drive_root)  # the generation's one bounded stop; a started one is joined
+        server_boot.stop_extension_loop()
         try:
             from ouroboros.extension_companion import get_global_supervisor
             supervisor = get_global_supervisor()
@@ -1356,7 +1355,7 @@ app.app.state.supervisor_ready_event = _supervisor_ready  # type: ignore[attr-de
 app.app.state.supervisor_init_done_event = _supervisor_init_done  # type: ignore[attr-defined]
 app.app.state.get_supervisor_error = lambda: _supervisor_error  # type: ignore[attr-defined]
 app.app.state.describe_bg_consciousness_state = _describe_bg_consciousness_state  # type: ignore[attr-defined]
-app.app.state.describe_consciousness = lambda: describe_consciousness(_consciousness)  # type: ignore[attr-defined]
+app.app.state.describe_consciousness = lambda: describe_consciousness(_consciousness, supervisor_failed=bool(_supervisor_error))  # type: ignore[attr-defined]
 app.app.state.startup_owner_command = _startup_owner_command
 app.app.state.request_restart = _request_restart_exit  # type: ignore[attr-defined]
 app.app.state.runtime_branch_defaults = _runtime_branch_defaults  # type: ignore[attr-defined]
@@ -1367,8 +1366,8 @@ app.app.state.start_supervisor_if_needed = _start_supervisor_if_needed  # type: 
 
 
 def _restart_cleanup_kwargs() -> dict:
-    """Keep owner Restart from re-opening daemon custody after its stop; every
-    application stop keeps saved work and accepted queue for the next boot (#1563)."""
+    """Owner Restart already asked its delegated runs to stop (the engine is kept): no second reconcile
+    here; every application stop keeps saved work and accepted queue for the next boot (#1563)."""
     if _owner_restart_requested.is_set():
         return {"reconcile_delegate_custody": False, "retain_saved_work": True}
     return {"retain_saved_work": True}
@@ -1391,7 +1390,7 @@ def _emergency_process_cleanup() -> dict:
         if _restart_requested.is_set():
             # A restart that hung past the uvicorn shutdown timeout still reaches
             # here; finalize running tasks as an honest interrupted-by-restart,
-            # not a worker crash storm.
+            # not a worker death.
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
             cleanup_kwargs.update(terminal_status=cleanup_status, result_reason=cleanup_reason,
                                   stop_source="server_shutdown")
@@ -1546,6 +1545,7 @@ def main() -> int:
                                   server_host_source=host_source) as listener:
             actual_port = listener.getsockname()[1]
             write_port_file(PORT_FILE, actual_port)
+            bind_fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR, cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # the fault door: main's return and its backstop
             log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)
             server.run(sockets=[listener])
     finally:
@@ -1553,7 +1553,7 @@ def main() -> int:
         if _restart_requested.is_set():
             restart_thread.join()  # uvicorn returning does not complete cleanup or direct re-exec
 
-    return 0
+    return fault_exit()  # the bound fault decision, taken once; 0 without a fault
 
 
 def executable_main() -> None:

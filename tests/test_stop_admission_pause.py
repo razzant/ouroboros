@@ -22,7 +22,6 @@ from tests.test_scheduled_receipt_contention import install_worker
 from tests.test_workspace_preparation import _WAIT_SEC
 from tests.test_workspace_preparation import env as env
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -109,7 +108,7 @@ def retiring_worker(env, monkeypatch):
     worker.proc.is_alive = lambda: alive[0]
     worker.proc.join = lambda **_kw: None
     monkeypatch.setattr(workers, "kill_worker_tree", lambda _pid: alive.__setitem__(0, False))
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     monkeypatch.setattr("supervisor.worker_process.close_worker_stop_channel", lambda _proc: None)
     monkeypatch.setattr("supervisor.worker_health.retire_confirmed_worker_consumers", lambda *_a: None)
     return worker, delivered

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.context_budget import (  # the typed overflow lives with the overflow vocabulary
@@ -128,9 +129,11 @@ class _LocalLaneMixin:
         local_target, candidate = self._build_local_candidate(
             messages, tools, max_tokens, tool_choice, timeout, processing_preference)
         # The shared finalizer removes SDK transport options from the measured
-        # and sealed payload. Preserve the builder's positive caller override
-        # separately for the actual send, including chat_async's local thread.
-        transport_kwargs = {"timeout": candidate["timeout"]} if "timeout" in candidate else {}
+        # and sealed payload. Keep the builder's positive caller override (else
+        # the client's own phases) for the actual send, which narrows it to the
+        # caller's bounds left after preparation and the slot wait (#572),
+        # including chat_async's local thread.
+        transport_timeout = candidate.get("timeout", getattr(client, "timeout", None))
         local_target["requested_reasoning_effort"] = reasoning_effort
         from ouroboros.send_clock import stamp_clock_note
 
@@ -159,11 +162,11 @@ class _LocalLaneMixin:
                         raise PhysicalAttemptPreparationFailed("The measured local model instance changed before dispatch")
                 return before(reservation)
 
-            resp = _execute_candidate(
-                request,
-                limit_physical_send(local_target, lambda: client.chat.completions.create(**candidate, **transport_kwargs)),
-                check_instance,
-            )
+            def send():
+                timeout = physical_dispatch_timeout(transport_timeout)
+                return client.chat.completions.create(**candidate, **({"timeout": timeout} if timeout is not None else {}))
+
+            resp = _execute_candidate(request, limit_physical_send(local_target, send), check_instance)
         except UsageAccountingError:
             raise
         except Exception as exc:

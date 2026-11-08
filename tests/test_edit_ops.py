@@ -492,8 +492,11 @@ def _protected_call(tool, path):
     return {"edits": [{"path": path, "old_str": "P1 honest", "new_str": "P1 loose"}]}
 
 
-@pytest.mark.parametrize("tool", ["edit_text", "apply_patch", "edit_batch"])
-@pytest.mark.parametrize("spelling", ["canonical", "absolute", "root_basename"])
+@pytest.mark.parametrize(("spelling", "tool"), [
+    ("canonical", "edit_text"),
+    ("absolute", "apply_patch"),
+    ("root_basename", "edit_batch"),
+])
 def test_protected_path_blocked_in_every_spelling(tmp_path, tool, spelling):
     """A protected path is refused however it is SPELLED.
 

@@ -1,6 +1,8 @@
 """Managed-update CANDIDATE primitives: private-index tree serialization, the
 pinned mechanical-merge baseline's merge flags, the deterministic failed-update
-preservation branch, and the single-run tests-evidence contract (Q10).
+preservation branch, the single-run tests-evidence contract (Q10), and the assisted
+resolver's workers (the pool start it is owed, the apply flow's readiness proof, boot
+recovery's import barrier and its unwind).
 
 Split out of ``supervisor.update_merge`` by the module-size discipline; the
 import direction is one-way (``update_merge`` imports THIS module and re-exports
@@ -13,6 +15,7 @@ Depends on ``git_ops`` via the module object (``_g.X``) so monkeypatched
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -744,7 +747,12 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
     "resolve" it). Returns ``(ok, note, error)``; ok=False means the projection
     could not be completed and the caller must NOT freeze the half-projected
     tree as a merge commit or an M0 baseline (typed failure over silent drift).
-    A target without a VERSION blob mandates nothing (ok=True, empty note)."""
+    A target without a VERSION blob mandates nothing (ok=True, empty note).
+
+    A development-marker target's download links are its README's, written back here:
+    the running body owns this projection, so a body older than the marker rule projects
+    the marker onto them and commits unpublished URLs into its local merge, and only this
+    next projection repairs that. Official refs and fast-forwards never carry it."""
     workdir = str(cwd or _g.REPO_DIR)
     rc_tv, target_blob, _tve = _git_run(["git", "rev-parse", f"{target_sha}:VERSION"], cwd=workdir)
     if rc_tv != 0 or not target_blob:
@@ -763,9 +771,12 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
         return False, note, f"conflict inventory unreadable: {u_error}"
     unmerged = {ln.strip() for ln in unmerged_out.splitlines() if ln.strip()}
     try:
-        from ouroboros.tools.release_sync import sync_release_metadata
+        from ouroboros.tools.release_sync import published_download_version, sync_release_metadata
 
-        changed_carriers = list(sync_release_metadata(workdir) or [])
+        # A marker target's links are not derived from VERSION: they stay its published release.
+        rc_r, target_readme, _re = _git_run(["git", "show", f"{target_sha}:README.md"], cwd=workdir)
+        changed_carriers = list(sync_release_metadata(
+            workdir, published_version=published_download_version(target_readme) if rc_r == 0 else "") or [])
     except Exception as exc:
         return False, note, f"carrier token sync failed: {type(exc).__name__}: {exc}"
     addable = [p for p in changed_carriers if p not in unmerged]
@@ -816,3 +827,111 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
     if desyncs:
         return False, note, "carriers still desynced after token sync: " + "; ".join(desyncs)
     return True, note, ""
+
+
+# The assisted resolver's workers. Its whole-pool start (``workers.spawn_workers``): slot 0, the conversation
+# lane's spare, and slot 1, the resolver's own project slot. Inside the marker window no project slot grows
+# (``worker_pool_lifecycle._spawn_worker_slot``), so this start, on an empty pool, is the resolver's only one.
+RESOLVER_POOL = 2
+
+
+def resolver_slot_owed() -> bool:
+    """Whether the whole-pool start owes a resolver its project slot: a resolver-held update is in flight (its
+    durable transaction in an assisted phase), as at a boot whose recovery resumes it; base's one boot worker
+    was that slot. Unknown owes nothing: an unreadable transaction recovers nothing either."""
+    from supervisor.update_merge import _ASSISTED_PHASES, active_update_tx
+
+    try:
+        return str((active_update_tx() or {}).get("phase") or "") in _ASSISTED_PHASES
+    except Exception:
+        return False
+
+
+def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
+    """Prove every child of the resolver's start imported the exact clean tree before conflicts go live.
+
+    The whole-pool start (``RESOLVER_POOL``) is the one start the marker window allows, on an empty pool while
+    this tree is still clean. The project slot's own ``worker_ready`` at the expected sha proves the resolver
+    (assignment gives queued work to project slots alone; the lane's spare proves nothing here), and no marker
+    lands while another child of this start still imports: each live one reported its own row too."""
+    from supervisor import workers
+    from supervisor.queue import _queue_lock
+    from supervisor.worker_pool_lifecycle import _worker_events_since, is_project_slot
+
+    with _queue_lock:
+        if workers.WORKERS:
+            return False  # update quiescence must leave no ambiguous prior generation
+    events_cursor = workers.events_log_cursor()
+    try:
+        if not workers.ensure_worker_pool_started(n=RESOLVER_POOL, allow_disabled_restart=True):
+            return False
+    except Exception:
+        _g.log.warning("assisted resolver worker start failed", exc_info=True)
+        return False
+    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
+    while time.monotonic() < deadline:
+        with _queue_lock:
+            live = {str(worker.proc.pid): is_project_slot(worker) for worker in workers.WORKERS.values()
+                    if worker.proc.pid and worker.proc.is_alive()}
+        if not any(live.values()):
+            return False  # the resolver's project child is gone
+        ready = {str(row.get("pid") or "") for row in _worker_events_since(events_cursor, "worker_ready")
+                 if str(row.get("git_sha") or "") == expected_sha}
+        if set(live) <= ready:  # a stopped child imports nothing more
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _boot_resolver_ready(timeout_sec: float) -> bool:
+    """Whether, within ``timeout_sec``, no live custodied child of the boot's start still imports (the readiness
+    seam opened each on its own ``worker_ready``) and the resolver's project slot is ready among them. A pool
+    with no child has nothing to wait for: the resolver's enqueue starts one, as before."""
+    from supervisor import workers
+    from supervisor.queue import _queue_lock
+    from supervisor.worker_pool_lifecycle import is_project_slot, is_worker_slot, worker_ready
+
+    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
+    while True:
+        with _queue_lock:
+            children = [slot for slot in workers.WORKERS.values() if is_worker_slot(slot)]
+            importing = any(slot.proc.is_alive() and not worker_ready(slot) for slot in children)
+            resolver = any(is_project_slot(slot) and worker_ready(slot) for slot in children)
+        if not importing and (resolver or not children):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def refuse_unready_boot_resolver(timeout_sec: float = 0.0) -> Dict[str, Any]:
+    """Boot recovery's gate before it re-materializes the conflicts: ``{}`` once the resolver can resume, else the
+    update unwound and told to the owner, never left stalled as an ongoing resolution.
+
+    The wait is the readiness seam's own (its ceiling from a child's birth, plus its teardown): a slow child inside
+    the ceiling is waited for, and one past it the seam has already stopped. Unwinding is the apply flow's refusal
+    at boot: the children stop before the tree changes, then the boot rollback restores the pre-update checkout and
+    the owner's stashed work, keeping custody for the restart ``server._boot_managed_update_tasks`` requests; that
+    function also sends the owner the returned note."""
+    from supervisor.worker_pool_lifecycle import WORKER_READY_CEILING_SEC
+
+    wait = float(timeout_sec) or float(WORKER_READY_CEILING_SEC) + 10.0
+    if _boot_resolver_ready(wait):
+        return {}
+    from supervisor import workers
+    from supervisor.update_merge import _log_supervisor, rollback_managed_update_on_boot
+
+    blockers = workers.kill_workers_for_update(
+        result_reason="Assisted update resolver did not become ready after the restart.",
+        terminal_status="interrupted")
+    ok, msg = rollback_managed_update_on_boot("assisted_resolver_unready")
+    _log_supervisor({"type": "managed_update_assisted_resolver_unready", "ok": ok, "msg": msg, "wait_sec": wait,
+                     **({"blockers": blockers} if blockers else {})})
+    cause = ("the conflicting update could not resume after the restart: its workers were not all ready "
+             f"within {wait:.0f} s")
+    note = (f"{cause}, so it was rolled back before its conflicts were staged again ({msg}). "
+            "Apply the update again to retry." if ok else
+            f"{cause}, and its rollback did not finish ({msg}). Quit and reopen Ouroboros to retry the recovery.")
+    # Workers whose stop is unproven are disclosed with the outcome, never a veto on the rollback.
+    return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": note,
+            **({"blockers": list(blockers)} if blockers else {})}

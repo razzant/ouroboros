@@ -250,14 +250,10 @@ def test_pin_reaches_untranslated_strings_codes_and_plural_forms(tmp_path, monke
 
 @pytest.mark.parametrize(("args", "reason"), [
     ({"action": "pin", "key": "Section", "text": "Проекты"}, "key_unknown"),          # a near key is not a key
-    ({"action": "pin", "key": "Light", "scope": "[data-review]", "text": "x"}, "key_unknown"),  # a scope nothing has
     ({"action": "pin", "key": "{n} notes", "text": "заметки"}, "wording_invalid"),     # dropped placeholder
-    ({"action": "pin", "key": "Sections", "text": "<b>Проекты</b>"}, "wording_invalid"),  # markup the English lacks
     ({"action": "pin", "key": "Sections", "text": "  "}, "wording_invalid"),
     ({"action": "pin", "key": "Sections"}, "wording_invalid"),
-    ({"action": "pin", "key": "Sections", "text": "a", "forms": {"other": "b"}}, "wording_invalid"),
     ({"action": "pin", "key": "{n} notes", "forms": {"plural": "{n} x"}}, "plural_category_unknown"),
-    ({"action": "pin", "key": "code:task.headline.done", "scope": "x", "text": "Готово"}, "key_invalid"),
     ({"action": "pin", "key": "", "text": "x"}, "key_invalid"),
     ({"action": "unpin", "key": "Sections", "text": "Проекты"}, "wording_with_unpin"),
     ({"action": "rename", "key": "Sections"}, "action_invalid"),

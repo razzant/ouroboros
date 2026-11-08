@@ -24,7 +24,7 @@ from tests.test_project_unread_read_band_browser import PANEL, _client, _unread,
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 REPLY = "STANDALONE REPLY: show this on opening"
 _OLDER = "/api/chat/history"
 # The reply's box against the band the reader sees: the feed less the composer drawn over it.
@@ -493,3 +493,124 @@ def test_a_failed_page_ends_the_reach_and_its_repair_moves_no_one(direct_server_
             assert room.page.locator(f"{PANEL} .chat-load-older button").count() == 1, "Retry stays the reader's"
         finally:
             browser.close()
+
+
+# Main opens the same way (owner 06.11): the server names Main's newest arrival too, so an unread Main lands on a reply
+# its later card rows buried, and is read there, however it opens -- the app's start, Main's row pressed from another
+# page (a desk's sidebar, a phone's ☰ drawer) or a Project closed over it. Before, it went to its bottom and read the
+# reply there unseen. Real server, real producer seam, real history endpoint and read cursor.
+MAIN_REPLY = "MAIN REPLY: show this when Main opens"
+_MAIN_SHOWN = """(messages, text) => {
+    const header = document.querySelector('#page-chat .chat-page-header');
+    const composer = document.getElementById('chat-input-area');
+    const feed = messages.getBoundingClientRect();
+    let top = feed.top, bottom = feed.bottom;
+    if (header && header.getClientRects().length) top = Math.max(top, header.getBoundingClientRect().bottom);
+    if (composer && composer.getClientRects().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
+    const gap = Math.round(messages.scrollHeight - messages.scrollTop - messages.clientHeight);
+    const node = [...messages.querySelectorAll('[data-history-id]')].find(n => n.textContent.includes(text));
+    const r = node?.getBoundingClientRect();
+    return {gap, onScreen: Boolean(r) && r.top >= top - 1 && r.top < bottom};
+}"""
+
+
+def _main_bus(data, monkeypatch):
+    from supervisor import message_bus
+
+    bridge = message_bus.LocalChatBridge({})
+    bridge._broadcast_fn = lambda _frame: None
+    monkeypatch.setattr(message_bus, "DATA_DIR", data)
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7, "session_id": "main-opening"})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
+    return message_bus
+
+
+def _bury_main(bus, children=160, cards=40):
+    bus.send_with_budget(1, MAIN_REPLY)
+    for index in range(children):
+        child = f"child-{index % cards}"
+        bus.send_with_budget(1, f"Child word {index}", task_id=child, progress_meta={
+            "delegation_role": "subagent", "subagent_task_id": child, "parent_task_id": "root-1", "root_task_id": "root-1"})
+
+
+@pytest.mark.parametrize("opening, engine", [("start", "chromium"), ("files", "chromium"), ("files-phone", "webkit"),
+                                             ("project-closed", "webkit"), ("pressed-again", "chromium")])
+def test_an_unread_main_opens_on_the_reply_its_cards_buried(direct_server_with_data, monkeypatch, opening, engine):
+    from ouroboros.projects_registry import create_project
+    from playwright.sync_api import sync_playwright
+
+    from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
+
+    data, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    bus = _main_bus(data, monkeypatch)
+    bus.send_with_budget(1, "An earlier reply, read when Main opened")
+    if opening == "project-closed":
+        create_project(data, "side-room", name="Side Room")
+    phone = opening == "files-phone"
+    writes, facts = [], {}
+    badge = '[data-nav-page="chat"] .unread-badge'
+
+    def go(name):
+        if phone:
+            page.locator("[data-mobile-nav-toggle]:visible").first.click()
+            page.wait_for_function("() => document.body.classList.contains('nav-drawer-open')")
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+        page.locator(f'#primary-sidebar [data-nav-page="{name}"]').click()
+        page.locator(f"#page-{name}.active").wait_for(state="attached")
+        page.evaluate(_SETTLE_RESTORE_FRAMES)
+
+    def revision():
+        return page.request.get(f"{url}/api/state").json().get("main_visible_revision")
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 390, "height": 844} if phone else {"width": 1187, "height": 734})
+            page.on("request", lambda r: writes.append(json.loads(r.post_data or "{}").get("main_seen_revision"))
+                    if r.method == "POST" and r.url.endswith("/api/ui/preferences") else None)
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+
+            def load(navigate, drawn="#chat-messages [data-history-id]"):
+                navigate()
+                page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
+                page.locator(drawn).first.wait_for(state="attached", timeout=30_000)
+
+            load(lambda: page.goto(url, wait_until="domcontentloaded"))
+            news = revision()
+            assert _wait_for(page, lambda: news in writes, attempts=200), "Main opened read"
+            if opening == "start":
+                _bury_main(bus, cards=160)  # came while the app was closed: drawn folded, so a card per word
+                news = revision()
+                load(lambda: page.reload(wait_until="domcontentloaded"), "#chat-messages > *")  # its cards, at least
+            else:
+                if opening == "project-closed":
+                    page.locator('.nav-project-row[data-project-id="side-room"]').evaluate("el => el.click()")
+                    page.wait_for_function("() => document.getElementById('project-panel')?.classList.contains('open')")
+                elif opening == "files" or phone:
+                    go("files")
+                _bury_main(bus)
+                news = revision()
+                _emit_ws_frame(page, {"type": "projects_changed"})
+                if opening == "pressed-again":  # news while the owner is on Main: drawn, no count, nothing moves
+                    page.locator("#chat-messages [data-history-id]", has_text=MAIN_REPLY).wait_for(
+                        state="attached", timeout=15_000)
+                else:
+                    page.locator(badge).wait_for(state="attached", timeout=15_000)
+                page.wait_for_timeout(800)
+                facts["read_while_away"] = news in writes
+                if opening == "project-closed":
+                    page.locator("#project-panel-close").evaluate("el => el.click()")
+                else:
+                    go("chat")
+            facts["read"] = _wait_for(page, lambda: news in writes, attempts=200)
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            facts["shown"] = page.locator("#chat-messages").evaluate(_MAIN_SHOWN, MAIN_REPLY)
+            go("files")
+            page.wait_for_timeout(800)
+            facts["badge_after_leaving"] = page.locator(badge).count()
+        finally:
+            browser.close()
+    assert not facts.get("read_while_away"), facts
+    assert facts["read"] and facts["shown"]["onScreen"] and facts["shown"]["gap"] > 1, facts
+    assert facts["badge_after_leaving"] == 0, facts

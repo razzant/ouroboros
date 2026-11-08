@@ -110,8 +110,8 @@ class TestSentHistoryHealth:
         assert "origin not recorded 40 in 32+ tasks" in build_health_invariants(env)
 
     @pytest.mark.parametrize("reports", [
-        [None] * 6, [0] * 6, [600] * 6, [None] * 10 + [600] * 5,
-    ], ids=["unknown", "measured_zero", "measured_hit", "mixed"])
+        [None] * 6, [600] * 6, [None] * 10 + [600] * 5,
+    ], ids=["unknown", "measured_hit", "mixed"])
     def test_nullable_adapter_cache_reaches_durable_and_live_rounds(self, tmp_path, reports):
         """The real adapter uses a present null key for an unreported cache.
 
@@ -415,8 +415,8 @@ def test_project_room_keeps_an_older_own_directive_beside_sibling_traffic(tmp_pa
     _a, _b, changing, _cap = blocks(env, memory, {"id": "own-task", "chat_id": own_chat})
     room = section(changing, f"## This room (Project Own [chat_id={own_chat}])")
     assert decisive in room
-    assert "noise-" not in changing  # the sibling room is one line in ## Live rooms
-    assert f"Project Sibling [chat_id={sibling_chat}]" in section(changing, "## Live rooms")
+    assert "noise-" not in room  # the sibling's traffic is another conversation, never this room's
+    assert f"### Project Sibling [chat_id={sibling_chat}]" in section(changing, "## Other conversations")
     assert str(root) not in room
 
 

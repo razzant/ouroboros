@@ -360,6 +360,23 @@ function keptFrame(frame) {
 }
 
 /**
+ * Where an owner bubble's delivery note stands (docs/DESIGN.md "Chat attachments"). The plain saved fact (its
+ * `[data-ingress-saved]` note, dispatched or still pending, with nothing to act on) is a quiet tick before the message's
+ * time: saved, never read or started; its words stay its text for assistive technology and a pointer's title. A note
+ * with words to read or actions (the delivery doubt, Send again, Send as new) is a row above the time.
+ */
+export function placeIngressNote(bubble, note) {
+    if (!bubble || !note) return;
+    const time = bubble.querySelector('.msg-time');
+    // Only the plain saved states are quiet; every other state (a delivery doubt, a legacy `undispatched`) keeps its words.
+    const quiet = Boolean(time) && ['', 'pending'].includes(note.dataset.ingressSaved)
+        && !note.querySelector('[data-unconfirmed-action]');
+    if (quiet) note.title = note.textContent; else note.removeAttribute('title');
+    if (quiet && note.parentNode !== time) time.insertBefore(note, time.lastChild);
+    else if (!quiet && (note.parentNode !== bubble || note.nextElementSibling !== time)) bubble.insertBefore(note, time);
+}
+
+/**
  * Owner messages the host has not yet confirmed saving: every send, words or attachments (a bare slash
  * command is a command, not a message). A local `send()` is not acceptance; the echo or history row
  * marked `ingress_accepted` is (`settle`, beside `markIngressSaved`). Until then the sent frame (its
@@ -430,11 +447,13 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             return;
         }
         // The doubt waits for the next fact; a pending saved row keeps its note, without actions.
-        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note), true));
+        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
     }
 
-    function clearActions(note) {
+    // Without its actions a pending saved note is the quiet tick again (placeIngressNote).
+    function clearActions(note, bubble = null) {
         for (const button of note.querySelectorAll('[data-unconfirmed-action]')) button.remove();
+        placeIngressNote(bubble, note);
     }
 
     function action(label, kind, onClick) {
@@ -460,7 +479,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             bubble.insertBefore(note, bubble.querySelector('.msg-time'));
         }
         note.append(action(tr('chat.send_again', 'Send again'), 'retry', () => retry(id, note)),
-            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note), true)); }));
+            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
+        placeIngressNote(bubble, note);  // a pending saved note with actions is a row again
         return true;
     }
 
@@ -484,6 +504,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
             note.append(asNew);
         }
+        placeIngressNote(bubble, note);
         return true;
     }
 

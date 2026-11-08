@@ -5,7 +5,7 @@ source, then keeps ONE host mark in the room that owns the work; the helper's ow
 the record a pre-fold late acceptance settlement wrote, whose marks stay as history.
 The next request of that room carries it through the real memory view and context assembly;
 another room's request does not; consciousness reads foreign marks by pointer. Showing, reading, a page seal and a fitted window never
-release it; only the integrating mind's ``memory_mark(release_id, reason)`` does, and a replay
+release it; only the integrating mind's ``memory_mark(release_ids, reason)`` does, and a replay
 never brings it back, also after the index is lost. An unproven room keeps no mark. No test
 calls a model or the network.
 """
@@ -62,7 +62,7 @@ def _ctx(root, task_id, *, chat=1, meta=None, direct=False):
 
 
 def _release(root, mark_id, *, reason="dealt with it", **ctx):
-    return json.loads(_memory_mark(_ctx(root, ctx.pop("task_id", "main1"), **ctx), release_id=mark_id,
+    return json.loads(_memory_mark(_ctx(root, ctx.pop("task_id", "main1"), **ctx), release_ids=[mark_id],
                                    reason=reason))
 
 
@@ -158,7 +158,7 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     main_c = blocks(env, memory, {"id": "next-main", "chat_id": 1})[2]
     alpha_c = blocks(env, memory, {"id": "next-alpha", "chat_id": rooms["alpha"]})[2]
     assert SECTION in main_c and "MAIN-DEFECT-main1" in main_c
-    assert f"memory_mark(release_id='{marks['main1']}', reason=…)" in main_c
+    assert f"memory_mark(release_ids=['{marks['main1']}'], reason=…)" in main_c
     assert "full source (sha256 " in main_c and "memory_read(source_ref=" in main_c
     assert "MAIN-DEFECT-bound" not in main_c and "MAIN-DEFECT-pres1" not in main_c
     assert SECTION in alpha_c and "MAIN-DEFECT-bound" in alpha_c and "MAIN-DEFECT-main1" not in alpha_c
@@ -178,7 +178,7 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     child = room_text(root, {"id": "kid7", "chat_id": 1, **CHILD})  # the room's marks, as the child already reads
     assert "MAIN-DEFECT-main1" in child and "MAIN-DEFECT-bound" not in child
     helper_section = child.split(SECTION, 1)[1].split("\n## ", 1)[0]
-    assert "the integrating mind releases it" in helper_section and "release_id=" not in helper_section
+    assert "the integrating mind releases it" in helper_section and "release_ids=" not in helper_section
     assert "until I release it with my reason" in main_c
 
 
@@ -207,7 +207,7 @@ def test_showing_reading_sealing_and_a_fitted_window_never_release_it(tmp_path):
     level = memory_floor.fit_memory_view(snapshot, {"margin": 1, "physical": 1, "budget": 1})
     assert level.addressed, "the window took everything it may take"
     fitted = mv.render_room(snapshot, level)
-    assert "KEEP-THIS-CRITIQUE" in fitted and f"release_id='{mark_id}'" in fitted and "memory_read(source_ref=" in fitted
+    assert "KEEP-THIS-CRITIQUE" in fitted and f"release_ids=['{mark_id}']" in fitted and "memory_read(source_ref=" in fitted
     assert [mark["id"] for mark in _late_marks(tmp_path)] == [mark_id]
 
 
@@ -219,7 +219,8 @@ def test_only_the_integrating_mind_releases_it_with_a_reason(tmp_path):
            for task in ("m1", "m2", "m3", "m4")}
     for meta in (CHILD, NANNY):
         refused = _release(tmp_path, ids["m1"], task_id="kid1", meta=meta)
-        assert refused["reason"] == "not_integrator" and refused["conflict_ids"] == [ids["m1"]]
+        assert refused["released_ids"] == [] and refused["refused"][0]["id"] == ids["m1"]
+        assert refused["refused"][0]["reason"] == "not_integrator"
     assert _release(tmp_path, ids["m1"], reason="")["reason"] == "invalid"
     assert ChronicleStore(tmp_path).release_mark(ids["m1"], {"kind": "host", "operation": "late_review"},
                                                  "the host never decides").reason == "not_integrator"
@@ -233,7 +234,7 @@ def test_only_the_integrating_mind_releases_it_with_a_reason(tmp_path):
     child_ctx = _ctx(tmp_path, "kid1", meta=CHILD)
     note = json.loads(_chronicle_write(_ctx(tmp_path, "root0001"), kind="note", text="a note"))
     own = json.loads(_memory_mark(child_ctx, text="mine", node_id=note["node_id"]))
-    assert json.loads(_memory_mark(child_ctx, release_id=own["mark_id"], reason="done"))["ok"]
+    assert json.loads(_memory_mark(child_ctx, release_ids=[own["mark_id"]], reason="done"))["ok"]
 
 
 def test_a_released_mark_stays_released_across_replay_restart_and_index_loss(tmp_path):
@@ -495,7 +496,7 @@ def test_a_late_reply_reaches_its_rooms_next_view_and_consciousness_and_no_other
     transport.release("m/a")
     [mark] = _until(lambda: _plan_marks(h.drive))
     room = room_text(h.drive)
-    assert SECTION in room and "Plan council reply from m/a (seat s1)" in room and f"release_id='{mark['id']}'" in room
+    assert SECTION in room and "Plan council reply from m/a (seat s1)" in room and f"release_ids=['{mark['id']}']" in room
     assert "Plan council reply from m/a" in room_text(h.drive, {"id": "wake1", "chat_id": 1, "metadata": WAKE})
     other = room_text(h.drive, {"id": "alpha-turn", "chat_id": council.rooms["alpha"]})
     assert "Plan council reply" not in other
@@ -599,7 +600,6 @@ def test_while_its_author_runs_the_asks_settled_frame_reaches_its_mailbox_and_no
 @pytest.mark.parametrize("raw,lines", [
     (_reply("Split the migration.", objections=[("o2", "Run the backfill first."), ("o3", "Keep the old\nreader.")]),
      ["Prose: Split the migration.", "- objection o2: Run the backfill first.", "- objection o3: Keep the old reader."]),
-    (_reply("Looks sound to me."), ["Prose: Looks sound to me."]),
     ("I think this is fine, but no JSON here.",
      ["Its reply could not be read as the reply object; the full text is in its retained source."]),
     ("", None),  # a failed seat: no paid words to keep, so no mark

@@ -379,6 +379,44 @@ def test_metadata_omits_web_search_when_web_disabled(monkeypatch):
     assert not any("web_search" in r for r in roles_off.values())
 
 
+@pytest.mark.parametrize("env,host,forwarded", [
+    # Nothing forwarded: the container's own blank Model plans the recommended models of its Auto Source.
+    (None, {}, None),
+    ("", {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, None),  # a blank operator variable wins
+    # The adapter forwards the operator variable, else the host settings file: that value is declared verbatim.
+    (None, {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, "anthropic::host-search"),
+    ("openai/gpt-5.2", {"OUROBOROS_WEBSEARCH_MODEL": "anthropic::host-search"}, "openai/gpt-5.2"),
+])
+def test_metadata_declares_the_web_search_models_the_real_adapter_leaves_the_container(
+        tmp_path, monkeypatch, env, host, forwarded):
+    """Traced through the adapter that builds the container's environment: the metadata names what that
+    environment makes the container's own resolver send, and no host Source travels into either."""
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+    from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
+
+    if env is None:
+        monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", env)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "anthropic")  # this process's current Source
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({**host, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}), encoding="utf-8")  # the host's saved one
+    container = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(settings_path))._container_env()
+    assert container.get("OUROBOROS_WEBSEARCH_MODEL") == forwarded and "OUROBOROS_WEBSEARCH_BACKEND" not in container
+    route = resolve_web_search_route(settings=container)  # how the container itself reads that environment
+    assert route["source"] == "auto"
+    roles = run_tb._effective_helper_models("google/gemini-3.5-flash", "", disable_agent_web=False,
+                                            settings=run_tb._host_settings(settings_path))
+    declared = [model for model, role in roles if "web_search" in role]
+    if forwarded:
+        assert declared == [forwarded] and route["model"] == forwarded
+    else:  # planned, as org/model ids; which leg answers depends on the container's keys
+        assert {leg["source"]: leg["model"] for leg in route["legs"] + route["unavailable"]} == SEARCH_MODELS
+        assert declared == list(dict.fromkeys([f"openai/{SEARCH_MODELS['openai']}", SEARCH_MODELS["openrouter"],
+                                               f"anthropic/{SEARCH_MODELS['anthropic']}"]))
+
+
 _HOST_ROSTER = _roster(
     _pool_row("t1", "openai/gpt-5.5", delivery="packet"),
     _pool_row("t2", "codex=gpt-5.6-sol", kind="agent_session"),

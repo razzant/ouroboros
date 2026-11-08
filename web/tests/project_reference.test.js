@@ -72,10 +72,12 @@ test('one intent, one control: both forms are the same node with the same name a
             assert.equal(node.attributes['aria-label'], 'Open project OpenClaw 2.0 <b>x</b>');
             assert.equal(node.title, node.attributes['aria-label']);
         }
-        for (const node of [inline, footer]) node.listeners.get('click')();
-        assert.deepEqual(sent, Array(2).fill({
-            type: 'ouro:open-project', detail: { project, task_id: '', quiz_id: '' },
-        }));
+        // A key's click has no detail; a pointer's counts its press, and the room it opens stays quiet.
+        inline.listeners.get('click')({ detail: 0 });
+        footer.listeners.get('click')({ detail: 1 });
+        assert.deepEqual(sent, [false, true].map((pointer) => ({
+            type: 'ouro:open-project', detail: { project, task_id: '', quiz_id: '', pointer },
+        })));
     });
 });
 
@@ -83,8 +85,9 @@ test('a question reference opens that exact question; any other layout or a stat
     withDom((sent) => {
         const node = projectReference({ id: 'launch', name: 'Launch', chat_id: 7 }, { taskId: 't1', quizId: 'q1' });
         assert.equal(node.attributes['aria-label'], 'Open this question in Launch');
-        node.listeners.get('click')();
-        assert.deepEqual(sent[0].detail, { project: { id: 'launch', name: 'Launch', chat_id: 7 }, task_id: 't1', quiz_id: 'q1' });
+        node.listeners.get('click')({ detail: 1 });
+        assert.deepEqual(sent[0].detail, { project: { id: 'launch', name: 'Launch', chat_id: 7 }, task_id: 't1', quiz_id: 'q1',
+            pointer: true });
         // Two forms only: the retired `bar` layout and `background` words, or any other, read as the inline capsule.
         for (const [layout, state] of [['bar', 'background'], ['sidebar', 'paused']]) {
             const odd = projectReference({ id: 'launch', name: 'Launch' }, { layout, state });
@@ -121,7 +124,7 @@ test('a Project that was never named reads Project, and a name that arrives late
         assert.equal(late.children[1].textContent, 'Launch');
         assert.equal(late.title, 'Open this question in Launch');
         assert.equal(late.attributes['aria-label'], 'Open this question in Launch');
-        late.listeners.get('click')();
+        late.listeners.get('click')({ detail: 0 });
         assert.deepEqual(sent[0].detail.project, { id: 'launch', chat_id: 3, name: 'Launch' });
     });
 });
@@ -188,10 +191,13 @@ test('one recipe in two forms: no outline, hairline, ring or tile, no width of i
         assert.doesNotMatch(body, /text-decoration\s*:\s*underline/, `${sel}: no underline-only state`);
         if (sel.includes('chat-live-project-icon')) assert.doesNotMatch(body, /background/, `${sel}: one fill, no tile`);
     }
-    // Only the recipe's own selectors size the capsule; the one placement that does is a question's voice line,
-    // whose 28px row and meta size it takes beside `Ouroboros` (owner 19.10, A). No other ancestor restyles it.
-    assert.deepEqual([...new Set(rules.map(({ sel }) => sel).filter((sel) => /^\.(system-message-actions|msg-routing-annotation|chat-bubble)/.test(sel)))],
-        ['.chat-bubble-voice > .chat-quiz-project.chat-live-project-card-btn', '.chat-bubble-voice > .chat-quiz-project .chat-live-project-name']);
+    // Only the recipe's own selectors size the capsule: both forms take a row's control height and the meta size, so a
+    // question's voice line (owner 19.10, A) and a System row's actions beside a 28px verb (U011) need no placement of
+    // their own. No ancestor restyles it.
+    assert.deepEqual([...new Set(rules.map(({ sel }) => sel).filter((sel) => /^\.(system-message-actions|msg-routing-annotation|chat-bubble)/.test(sel)))], []);
+    const inline = rules.find(({ sel }) => sel === '.chat-quiz-project.chat-live-project-card-btn').body;
+    assert.match(inline, /min-height: var\(--control-h-sm\)/);
+    assert.match(inline, /font-size: var\(--type-meta\)/);
     for (const { index } of css.matchAll(/\.(chat-live-project-card-btn|chat-quiz-project|chat-live-bound-pointer)[^{},]*:hover/g)) {
         const before = css.slice(0, index);
         const media = before.lastIndexOf('@media');

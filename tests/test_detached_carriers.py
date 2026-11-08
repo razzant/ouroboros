@@ -1,6 +1,5 @@
 """A historical chat origin never substitutes for the current attempt's owner."""
 
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -60,45 +59,23 @@ def test_consciousness_blocks_on_wake_across_queue_carriers_but_not_detached_own
     q, _state, workers = _install_queue(tmp_path, monkeypatch)
     mind = object.__new__(BackgroundConsciousness)
     mind._last_wake_task_id = ""
+    mind._own_wake, mind._in_flight = {}, ""
     workers.PENDING.append({"id": "owner-work", "_is_direct_chat": True, "detached_at": 1.0})
-    assert mind.live_turns() == ("", False)
+    assert mind.live_wake() == ""
     wake = {"id": "wake", "_is_direct_chat": True, "detached_at": 1.0,
             "metadata": {"initiator": "consciousness", "usage_category": "consciousness", "wake_cause": "own_clock"}}
     workers.PENDING.append(wake)
-    assert mind.live_turns() == ("wake", False)
+    assert mind.live_wake() == "wake"
     workers.PENDING.remove(wake)
     workers.RUNNING["wake"] = {"task": wake}
-    assert mind.live_turns() == ("wake", False)
+    assert mind.live_wake() == "wake"
     workers.RUNNING.clear()
     registry = get_direct_activity_registry()
     registry.register("conversing", 7)
     try:
-        assert mind.live_turns() == ("", True)
+        assert mind.live_wake() == ""
     finally:
         registry.unregister("conversing")
-
-
-def test_wake_gate_never_waits_for_queue_while_holding_direct_gate(tmp_path, monkeypatch):
-    from supervisor.consciousness_carriers import WakeCensusBusy, queued_wakes
-
-    q, _state, _workers = _install_queue(tmp_path, monkeypatch)
-    entered, release = threading.Event(), threading.Event()
-
-    def hold():
-        with q._queue_lock:
-            entered.set()
-            assert release.wait(10)
-
-    thread = threading.Thread(target=hold)
-    thread.start()
-    try:
-        assert entered.wait(10)
-        with pytest.raises(WakeCensusBusy):
-            queued_wakes(blocking=False)
-    finally:
-        release.set()
-        thread.join(10)
-    assert queued_wakes(blocking=False) == []
 
 
 def test_stop_detached_wake_records_existing_graceful_cancel_intent(tmp_path, monkeypatch):

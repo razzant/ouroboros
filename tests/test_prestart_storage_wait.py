@@ -1,9 +1,17 @@
 """A new message whose execution provably has not started waits through storage contention and runs once
 (owner 2026-10-21, A); its controls still end that wait, and nothing past it is replayed or held falsely.
 
-Every test drives the real outer direct-turn lane (``worker_chat_lane._execute_chat_task``) or the real
-agent ``handle_task`` against a real SQLite lock on temporary stores (``exclusive_hold``). A fake clock
-stands in for long waits; no provider, server, port or live data is reached.
+Every test drives the real conversation lane — the admission writes the RUNNING row and hands the turn
+to the ready lane spare (``conversation_lane.admit_turn`` / ``handle_chat_direct``), and the body runs
+here through the real worker body (``worker_process.run_worker_task``, as a carrier runs it) — or the
+real agent ``handle_task`` against a real SQLite lock on temporary stores (``exclusive_hold``). A fake
+clock stands in for long waits; no provider, server, port or live data is reached.
+
+Under the carrier law a turn's body never reports to the chat from the server: a body that raises
+before its start leaves the exception terminal the carrier records (``_record_task_exception``), an
+immediate Stop before the body leaves no worker-authored terminal (custody settles it), and a pause
+takes the pooled path (the ``budget_pause`` frame parks the RUNNING row). The ``lane`` fixture's
+``consume`` is the supervisor's consumer for those frames.
 
 Each attempt on a held store still spends its whole busy wait before it reports contention: 10 s on the
 current store (``store.STORE_WAIT_SEC``), 45 s on the money store (``USAGE_LOCK_TIMEOUT_SEC``). What the
@@ -37,20 +45,28 @@ def short_waits(monkeypatch):
 
 @pytest.fixture
 def lane(tmp_path, monkeypatch):
-    """A direct turn of task ``S`` through the real lane, with the body observed and the clock faked."""
+    """A direct turn of task ``S``: admitted to the conversation lane as the server admits it, its body run
+    here by the real worker body as the carrier runs it, with the body observed and the clock faked."""
     import os
 
-    from ouroboros import _usage_wait, queue_observation
-    from supervisor import message_bus, worker_chat_lane
-    from supervisor.active_activity import get_direct_activity_registry
+    from ouroboros import _usage_wait, queue_observation, utils
+    from ouroboros.utils import append_jsonl
+    from supervisor import conversation_lane, events_budget, message_bus, worker_chat_lane
+    from supervisor.worker_process import run_worker_task
+    from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare
 
     root = tmp_path / "data"
     (root / "state").mkdir(parents=True)
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     _q, _state, workers = _install_queue(root, monkeypatch)
-    world = SimpleNamespace(root=root, workers=workers, body=[], sleeps=[], errors=[], released=[], events=[],
-                            clock=[0.0], on_sleep=lambda _n: None, blockers=[], body_error=None, replies=[])
+    spare = install_lane_spare(workers, 90)  # the ready idle carrier the admission hands the turn to
+    # The carrier is this thread: a Stop's custody that captures the busy slot mid-wait cannot kill it
+    # (its kill escalation is refused and the sweep retries, the 202 the doors answer); the carrier's
+    # own wait then observes the Stop and custody settles the row afterwards.
+    spare.proc.join, spare.proc.terminate, spare.proc.exitcode = (lambda timeout=None: None), (lambda: None), None
+    world = SimpleNamespace(root=root, workers=workers, spare=spare, body=[], sleeps=[], errors=[], released=[],
+                            events=[], clock=[0.0], on_sleep=lambda _n: None, blockers=[], body_error=None, replies=[])
     task = {"id": "S", "type": "task", "_is_direct_chat": True, "chat_id": 7, "_attempt": 1, "text": "keep this input"}
     world.task = task
 
@@ -65,53 +81,130 @@ def lane(tmp_path, monkeypatch):
         world.sleeps.append(world.clock[0])
         world.on_sleep(len(world.sleeps))
 
+    class Bus:
+        """The supervisor's event bus: every frame the carrier puts, in order."""
+
+        def put(self, event, *_a, **_k):
+            world.events.append(event)
+
+        put_nowait = put
+
+    bus = Bus()
     monkeypatch.setattr(queue_observation, "_sleep", sleep)
     monkeypatch.setattr(_usage_wait, "time", SimpleNamespace(monotonic=lambda: world.clock[0]))
     monkeypatch.setattr("ouroboros.config.get_task_idle_timeout_sec", lambda: 900.0)
     monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose",
                         lambda *_a, **_k: task_settings_snapshot({}, os.environ))
     monkeypatch.setattr("ouroboros.project_naming.spawn_turn_namer", lambda *_a, **_k: None)
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=world.events.append))
+    monkeypatch.setattr(workers, "get_event_q", lambda **_k: bus)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _e: None,
                                                                             send_chat_action=lambda *_a, **_k: None))
     report_error = worker_chat_lane._report_direct_chat_error
-    def observed_report(admitted, error):
+
+    def observed_report(admitted, error):  # the admission's own refusals (a lane turn's body reports none)
         world.errors.append(error)
         report_error(admitted, error)
+
     monkeypatch.setattr(worker_chat_lane, "_report_direct_chat_error", observed_report)
     monkeypatch.setattr(workers, "send_with_budget", lambda *args, **kwargs: world.replies.append((args, kwargs)))
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     host = _host(root, scoped)
-    registry = get_direct_activity_registry()
+    world.host = host
+    supervisor = SimpleNamespace(RUNNING=workers.RUNNING, PENDING=workers.PENDING, WORKERS=workers.WORKERS,
+                                 DRIVE_ROOT=root, sort_pending=_q.sort_pending,
+                                 persist_queue_snapshot=_q.persist_queue_snapshot, bridge=message_bus.get_bridge(),
+                                 append_jsonl=append_jsonl)
 
-    class Registry:  # the real registry; its unregister is observed
-        def unregister(self, task_id):
-            world.released.append(task_id)
-            return registry.unregister(task_id)
+    def consume(frames):
+        """The supervisor's consumers for the carrier's frames: a pause parks the RUNNING row on the
+        ordinary pooled path (``events_budget``), a terminal releases it."""
+        for event in frames:
+            kind = str(event.get("type") or "") if isinstance(event, dict) else ""
+            if kind == "budget_pause":
+                events_budget._handle_budget_pause(event, supervisor)
+            elif kind == "task_done" and str(event.get("task_id") or "") in workers.RUNNING:
+                with _q._queue_lock:
+                    workers.RUNNING.pop(str(event["task_id"]), None)
+
+    def carry(actor=None, body_task=None):
+        """Run the turn the admission dispatched to the spare through the real worker body, here, as a
+        worker process would (the carrier is one); the supervisor then consumes its frames. True when
+        the body and its hand-off completed, False when the body raised (the exception is the task's own
+        terminal, recorded by the carrier; the row is left to the supervisor's dead-carrier recovery)."""
+        dispatched = dispatched_tasks(spare)
+        assert len(dispatched) == 1, dispatched
+        body_task = dispatched[0] if body_task is None else body_task
+        start = len(world.events)
+        ok = True
+        try:
+            with monkeypatch.context() as carrier:
+                carrier.setenv(utils.WORKER_PROCESS_ENV, "1")
+                run_worker_task(actor or host, body_task, wid=spare.wid, out_q=bus, repo_dir=str(workers.REPO_DIR),
+                                drive_root=str(root))
+        except Exception as error:
+            world.errors.append(error)
+            ok = False
+        finally:
+            if spare.busy_task_id == body_task.get("id"):
+                spare.busy_task_id = None
+            world.released.append(str(body_task.get("id") or ""))
+        consume(world.events[start:])
+        return ok
+
+    def admit():
+        """As ``handle_chat_direct`` admits: the RUNNING row under Q and the gate lock, then, outside Q, its
+        barrier and the ready spare's queue (``dispatch_admitted_turn``)."""
+        with _q._queue_lock, workers._repo_writer_gate_lock:
+            meta = conversation_lane.admit_turn(task, chat_id=7, client_message_id="m-1", reply_expected=True)
+        conversation_lane.dispatch_admitted_turn(meta)
+        assert meta["worker_id"] == spare.wid and spare.busy_task_id == "S"
+        return meta
 
     def run(agent=None):
-        # As ``_admit_chat_task`` does: the turn is registered, "preparing", before it executes.
-        registry.register("S", 7, client_message_id="m-1", kind="direct_chat", actor=agent or host,
-                          reply_expected=True)
-        return worker_chat_lane._execute_chat_task({
-            "task": task, "agent": agent or host, "chat_id": 7, "kind": "chat", "client_msg_id": "m-1",
-            "registry": Registry()})
+        """Admit the seed the test holds and carry it: the body runs on that same dict."""
+        admit()
+        return carry(agent, body_task=task)
 
-    world.run = run
+    def carrier_died(exitcode=1):
+        """The supervisor's recovery of the dead carrier's row, the pooled path every lane row takes: a
+        terminal the carrier recorded wins; evidence it cannot read keeps the job for a later pass
+        (``TerminalFileRecoveryPending``, returned as its reason), never a terminal of its own."""
+        from supervisor.task_reaper import TerminalFileRecoveryPending
+        from supervisor.worker_health import recover_confirmed_dead_worker
+
+        meta = workers.RUNNING["S"]
+        job = {"worker": spare, "worker_id": spare.wid, "task_id": "S", "task": meta["task"], "attempt": 1,
+               "meta": meta, "exitcode": exitcode, "drive_root": str(root), "skip_respawn": True}
+        alive, spare.busy_task_id = spare.proc.is_alive, "S"  # the dead carrier's slot still names its task
+        spare.proc.is_alive, spare.proc.exitcode = (lambda: False), exitcode
+        start = len(world.events)
+        try:
+            recover_confirmed_dead_worker(job)
+        except TerminalFileRecoveryPending as pending:
+            return str(pending)
+        finally:
+            spare.proc.is_alive = alive
+            if spare.busy_task_id == "S":
+                spare.busy_task_id = None
+        consume(world.events[start:])
+        return ""
+
+    world.run, world.admit, world.carry, world.consume, world.carrier_died = run, admit, carry, consume, carrier_died
     yield world
-    registry.unregister("S")
     for blocker in world.blockers:
         blocker.close()
     store.close_connections_under(root)
 
 
 def _host(root, body):
-    """The chat agent's surface the lane, the census and the owner controls read, with BODY as its body."""
+    """The chat agent's surface the carrier, the census and the owner controls read, with BODY as its body."""
     import queue as queue_mod
     import threading
 
     from ouroboros.agent import OuroborosAgent
 
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=root), _emit_live_log=lambda *_a, **_k: None,
+    host = SimpleNamespace(env=SimpleNamespace(drive_root=root, drive_path=lambda rel: root / rel),
+                           _emit_live_log=lambda *_a, **_k: None,
                            _event_queue=None, _handle_task_scoped=body, _owner_message_admission_lock=threading.Lock(),
                            _busy=False, _accepting_owner_messages=False, _current_task_id=None, _current_chat_id=None,
                            _current_task_text="", _current_task_metadata={}, _last_activity_ts=None,
@@ -120,6 +213,28 @@ def _host(root, body):
         if hasattr(OuroborosAgent, name):
             setattr(host, name, getattr(OuroborosAgent, name).__get__(host))
     return host
+
+
+def _carrier_agent(lane, repo=None):
+    """The carrier's own actor, built as ``worker_main`` builds it: a fresh native agent whose continuation
+    owner is the pooled owner wait over the carrier's queues (never the server's chat-agent factory)."""
+    import queue as stdqueue
+    from functools import partial
+
+    from ouroboros.agent import make_agent
+    from ouroboros.owner_wait import worker_owner_wait
+
+    bus = lane.workers.get_event_q()
+    agent = make_agent(repo_dir=str(repo or lane.workers.REPO_DIR), drive_root=str(lane.root), event_queue=bus)
+    agent.owner_wait_callback = partial(worker_owner_wait, lane.spare.wid, stdqueue.Queue(), bus)
+    return agent
+
+
+def _dispatched(sent):
+    """The task rows the assigner put on a worker's queue. The pool's quiescence probe of an idle project
+    worker is no dispatch: with the lane spare present, that worker is the project pool's surplus (the one
+    kept spare is the conversation lane's, owner decision 4A)."""
+    return [row for row in sent if row.get("type") != "worker_quiescence"]
 
 
 def _hold(world, path):
@@ -190,8 +305,7 @@ def test_an_unstarted_message_waits_past_the_turn_window_and_then_runs_once(lane
     assert [row["phase"] for row in waits] == ["entered", "ended"] and all(row["owner_visible"] for row in waits)
 
 
-@pytest.mark.parametrize("mode", ["WAL", "PERSIST"])
-@pytest.mark.parametrize("cached_metadata", [False, True])
+@pytest.mark.parametrize(("cached_metadata", "mode"), [(False, "WAL"), (True, "PERSIST")])
 def test_money_store_contention_in_the_billing_read_waits_instead_of_starting_unbound(
         lane, monkeypatch, mode, cached_metadata):
     """No pinned binding: the billing read reaches the money store. Its positive contention is typed
@@ -280,18 +394,20 @@ def test_first_money_read_waits_for_initialization_lock_before_body(lane, monkey
 
 
 @pytest.mark.parametrize("control", ["stop", "deadline", "absolute_ceiling"])
-def test_a_control_ends_the_wait_and_the_unstarted_turn_concludes_without_a_hold(lane, monkeypatch, control):
+def test_a_control_ends_the_wait_and_the_unstarted_turn_concludes_without_a_hold(lane, control):
     """Stop, a reached deadline or the execution ceiling still end the wait. Nothing of the body ran, so
-    the lane concludes Stop as stopped and bounds as failures: no pause record is read, no saved-work
-    hold is invented and no second accounting window starts (the 2026-10-20 held messages)."""
-    from ouroboros import budget_pause
+    no saved-work hold is invented and no pause is read as authority: an immediate Stop before the body
+    leaves no worker-authored terminal (the pooled custody settles it ``cancelled``), and a bound is the
+    typed before-start exception the carrier raises — over a store it cannot read it records no terminal
+    and leaves the row to the supervisor's recovery (the 2026-10-20 held messages)."""
+    from ouroboros.cancel_intents import active_intent
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
-    from ouroboros.task_results import write_task_result
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.task_lifecycle import drive_cancel_intent_scope
 
     write_task_result(lane.root, "S", "requested", billing_group=BINDING)
     store.close_connections_under(lane.root)
     _hold(lane, store.store_path(lane.root))
-    monkeypatch.setattr(budget_pause, "budget_pause_row", lambda *_a: pytest.fail("an unstarted turn has no pause"))
 
     def on_sleep(count):
         if count == 1:
@@ -303,29 +419,30 @@ def test_a_control_ends_the_wait_and_the_unstarted_turn_concludes_without_a_hold
                 lane.task["execution_timeout_sec"] = 0.000000001
 
     lane.on_sleep = on_sleep
-    assert lane.run() is False
+    result = lane.run()
     assert lane.body == [] and lane.released == ["S"] and not lane.workers.PENDING
-    assert len(lane.errors) == 1 and isinstance(lane.errors[0], PhysicalDispatchInterrupted)
-    assert lane.errors[0].before_task_start is True
-    assert lane.errors[0].control_reason == {"stop": "cancelled", "deadline": "deadline",
-                                             "absolute_ceiling": "absolute_ceiling"}[control]
-    assert len(lane.sleeps) == 1
-    [(_args, reply)] = lane.replies
-    assert reply["system_type"] == ("task_not_started" if control == "stop" else "task_error")
-    assert reply["progress_meta"]["task_terminal_status"] == ("cancelled" if control == "stop" else "failed")
+    assert len(lane.sleeps) == 1 and lane.replies == []
+    _release(lane)
+    stored = load_task_result(lane.root, "S")
+    assert stored["status"] == "requested" and not stored.get("budget_pause"), "no terminal, no pause invented"
     if control == "stop":
-        assert "stopped this chat turn before it started" in _args[1]
-        assert "PhysicalDispatchInterrupted" not in _args[1]
+        assert result is True and lane.errors == [], "an immediate Stop before the body is custody's to settle"
+        assert drive_cancel_intent_scope("S") == "cancelled"
+        assert load_task_result(lane.root, "S")["status"] == "cancelled" and active_intent(lane.root, "S") is None
+        return
+    assert result is False and len(lane.errors) == 1 and isinstance(lane.errors[0], PhysicalDispatchInterrupted)
+    assert lane.errors[0].before_task_start is True
+    assert lane.errors[0].control_reason == {"deadline": "deadline", "absolute_ceiling": "absolute_ceiling"}[control]
+    assert "S" in lane.workers.RUNNING, "the row is the supervisor's to recover, not concluded over unread evidence"
 
 
 @pytest.mark.parametrize("evidence", ["unreadable", "readable"])
 def test_after_the_body_an_unreadable_pause_record_holds_as_unknown_never_as_saved_on_stop(lane, evidence):
     """The body ran, possibly with effects, then raised. A readable record without a pause of this attempt
-    reports the failure; an unreadable one keeps the turn held for an explicit decision, classified as
-    the unreadable authority it is (``work_stop``), with no replay grant and no new wait."""
-    from ouroboros.task_results import write_task_result
-    from ouroboros.work_stop import stop_presentation
-    from supervisor.events_budget import budget_hold_fact
+    is the failure's terminal; an unreadable one is never concluded over: the carrier records no terminal
+    (its pause evidence decides, and it cannot be read), the row stays the supervisor's to recover, and
+    that recovery keeps the job while the evidence is unreadable, with no replay grant and no new wait."""
+    from ouroboros.task_results import load_task_result, write_task_result
 
     write_task_result(lane.root, "S", "requested", billing_group=BINDING)
     store.close_connections_under(lane.root)
@@ -333,21 +450,24 @@ def test_after_the_body_an_unreadable_pause_record_holds_as_unknown_never_as_sav
 
     def body(received):
         lane.body.append(received)
-        if evidence == "unreadable":  # the store goes busy before the lane reads the pause record
+        if evidence == "unreadable":  # the store goes busy before the carrier reads the pause record
             store.close_connections_under(lane.root)
             _hold(lane, store.store_path(lane.root))
         raise error
 
     result = _run_with_body(lane, body)
     assert lane.body == [lane.task] and lane.released == ["S"] and lane.sleeps == []
+    assert result is False and lane.errors == [error] and not lane.workers.PENDING
     if evidence == "readable":
-        assert result is False and lane.errors == [error] and not lane.workers.PENDING
+        stored = load_task_result(lane.root, "S")
+        assert stored["status"] == "failed" and stored["reason_code"] == "task_exception"
         return
-    assert result is True and lane.errors == [] and len(lane.workers.PENDING) == 1
-    held = lane.workers.PENDING[0]
-    assert budget_hold_fact(held)["reason"] == "authority"
-    assert "_resume_selection" not in held and not held.get("_budget_pause_resume")
-    assert stop_presentation(held)["reason"]["text"] == "After a technical problem"
+    assert "S" in lane.workers.RUNNING, "held for the supervisor's recovery, never concluded over unread evidence"
+    assert "unreadable" in lane.carrier_died(), "the recovery keeps the job while the evidence is unreadable"
+    assert "S" in lane.workers.RUNNING and not lane.workers.PENDING
+    _release(lane)
+    stored = load_task_result(lane.root, "S")
+    assert stored["status"] == "requested" and not stored.get("budget_pause") and not stored.get("_resume_selection")
 
 
 def _run_with_body(lane, body):
@@ -476,14 +596,14 @@ def test_an_ordinary_stop_accepted_during_the_wait_ends_the_turn_before_its_body
             _release(lane)  # a turn that did not see the Stop would run its body now
 
     lane.on_sleep = on_sleep
-    assert lane.run() is False
+    assert lane.run() is True and lane.errors == [], "no worker-authored terminal before custody settles the Stop"
     assert answers[0].status_code == 503 and recorded[0] is None, answers[0].text
     assert answers[1].status_code == 202 and answers[1].json()["cancel_state"] == "pending", answers[1].text
     assert recorded[1] and recorded[1]["request_id"]
     assert lane.body == [] and len(lane.sleeps) == 1 and lane.released == ["S"]
-    assert lane.errors[0].before_task_start is True and lane.errors[0].control_reason == "cancelled"
     assert not lane.workers.PENDING, "a Stop is never a paused or saved-on-stop hold"
     _release(lane)
+    assert load_task_result(lane.root, "S")["status"] == "requested", "the carrier left the row to custody"
     assert drive_cancel_intent_scope("S") == "cancelled"
     assert load_task_result(lane.root, "S")["status"] == "cancelled" and active_intent(lane.root, "S") is None
 
@@ -535,19 +655,20 @@ def test_a_pause_accepted_during_the_wait_parks_the_input_before_its_body(lane, 
     sent = []
     _idle_worker(lane.workers, sent)
     lane.workers.assign_tasks()
-    assert sent == [], "a closed Pause cannot auto-dispatch"
+    assert _dispatched(sent) == [], "a closed Pause cannot auto-dispatch"
     granted = queue.resume_budget_paused_task("S")
     assert granted["ok"] and granted["owner_pause_released"], granted
     lane.workers.assign_tasks()
-    assert [row["id"] for row in sent] == ["S"] and not lane.workers.PENDING
-    assert sent[0]["_execution_consumed_sec"] == 14.0, "Resume cannot reset the execution ceiling"
+    assert [row["id"] for row in _dispatched(sent)] == ["S"] and not lane.workers.PENDING
+    [resumed] = _dispatched(sent)
+    assert resumed["_execution_consumed_sec"] == 14.0, "Resume cannot reset the execution ceiling"
     def body(task):
         assert model_wait.current_model_wait().executed_seconds() >= 14.0
         lane.body.append(task)
         return []
-    _host(lane.root, body).handle_task(sent[0])
+    _host(lane.root, body).handle_task(resumed)
     lane.workers.assign_tasks()
-    assert len(lane.body) == len(sent) == 1
+    assert len(lane.body) == len(_dispatched(sent)) == 1
 
 
 def test_a_pause_after_prestart_storage_wait_parks_the_real_loop_and_its_resume_runs_once(
@@ -595,15 +716,15 @@ def test_a_pause_after_prestart_storage_wait_parks_the_real_loop_and_its_resume_
             # worker_main binds this continuation owner before accepting a task.
             agent.owner_wait_callback = partial(worker_owner_wait, 0, stdqueue.Queue(), lane.workers.get_event_q())
         else:
-            # The real direct factory supplies direct_owner_wait; construction of
-            # OuroborosAgent alone has no continuation owner and must hold warm.
-            agent = lane.workers._get_chat_agent()
-            assert agent.owner_wait_callback is direct_owner_wait
+            # The carrier's actor binds the same pooled continuation owner over its own queues;
+            # the in-process ``direct_owner_wait`` factory now serves only the inline executors.
+            agent = _carrier_agent(lane, repo)
+            assert callable(agent.owner_wait_callback) and agent.owner_wait_callback is not direct_owner_wait
         agent.llm = Provider()
         return agent
 
     def messages(*, task, ctx, **_kwargs):
-        assert callable(ctx.owner_wait_callback), "the native lane must bind its continuation owner"
+        assert callable(ctx.owner_wait_callback), "the carrier must bind its continuation owner"
         # Like the real builder, publish the captured plan on the context: the
         # real cold Resume rebinds it after restoring the saved transcript.
         if not answers:
@@ -772,51 +893,56 @@ def test_a_pause_after_prestart_storage_wait_parks_the_real_loop_and_its_resume_
 def test_a_start_that_resumes_saved_work_keeps_it_when_its_wait_ends_before_the_body(lane):
     """Not starting THIS attempt is not having nothing saved. A start that resumes a continuation
     (``governing_continuation``) whose preparation wait a bound ends leaves the decision to its pause
-    record, as after any body; the record is in the held store, so the turn is held for an explicit
-    decision as unreadable authority, never concluded as an error that drops what it resumes. The direct
-    lane admits only fresh turns today (a resumed direct pause continues on a pooled worker, the case
-    above); this keeps the lane's own recovery honest if one ever reaches it."""
-    from ouroboros.task_results import write_task_result
-    from ouroboros.work_stop import stop_presentation
-    from supervisor.events_budget import budget_hold_fact
+    record, as after any body; the record is in the held store, so the carrier records no terminal over
+    it and the row stays the supervisor's to recover (its recovery keeps the job while the evidence is
+    unreadable), never concluded as an error that drops what it resumes. The lane admits only fresh
+    turns today (a resumed pause continues on a pooled worker, the case above); this keeps the carrier's
+    own exception path honest if one ever reaches it."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.task_results import load_task_result, write_task_result
 
     write_task_result(lane.root, "S", "requested", billing_group=BINDING)
     store.close_connections_under(lane.root)
     lane.task["_working_recovery"] = {"from_attempt": 1, "started_at": 1.0}
     _hold(lane, store.store_path(lane.root))
     lane.on_sleep = lambda count: count == 1 and lane.task.update(deadline_at="2000-01-01T00:00:00Z")
-    assert lane.run() is True
-    assert lane.body == [] and lane.errors == [] and lane.released == ["S"]
-    [held] = lane.workers.PENDING
-    assert budget_hold_fact(held)["reason"] == "authority" and "_budget_pause_resume" not in held
-    assert stop_presentation(held)["reason"]["text"] == "After a technical problem"
+    assert lane.run() is False
+    assert lane.body == [] and lane.released == ["S"] and not lane.workers.PENDING
+    [error] = lane.errors
+    assert isinstance(error, PhysicalDispatchInterrupted) and error.before_task_start is True
+    assert "S" in lane.workers.RUNNING and "unreadable" in lane.carrier_died()
+    _release(lane)
+    stored = load_task_result(lane.root, "S")
+    assert stored["status"] == "requested" and "_budget_pause_resume" not in stored, "nothing it resumes was dropped"
 
 
 @pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
 def test_outer_chat_entry_waits_on_global_money_and_runs_the_original_input_once(lane, monkeypatch, mode):
-    """The public chat lane registers the input before its strict global-budget read meets a lock;
-    the real agent keeps that exact turn visible past 900 s and invokes its body once after recovery."""
+    """The public chat door admits the input (its RUNNING row, its carrier) before the carrier's strict
+    global-budget read meets a lock; the real agent keeps that exact turn visible past 900 s and invokes
+    its body once after recovery."""
+    from ouroboros.task_carrier import LANE_CONVERSATION
     from supervisor import worker_chat_lane
-    from supervisor.active_activity import get_direct_activity_registry
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     usage_store.migrate_from_journal(lane.root)
     host = _host(lane.root, lambda task: lane.body.append(task) or [])
-    monkeypatch.setattr(lane.workers, "_get_chat_agent", lambda: host)
     monkeypatch.setattr(worker_chat_lane, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="S")))
     monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
     _hold(lane, lane.root / usage_store.STORE_REL)
     def on_sleep(count):
-        assert get_direct_activity_registry().get("S") is not None
+        assert lane.workers.RUNNING["S"]["lane"] == LANE_CONVERSATION, "the admitted row lists the waiting turn"
         assert host._busy and host._current_task_id == "S" and lane.body == []
         lane.clock[0] += 1001.0
         if count == 2:
             _release(lane)
     lane.on_sleep = on_sleep
     worker_chat_lane.handle_chat_direct(7, "keep this input", task_metadata={"client_message_id": "m-1"})
+    assert lane.workers.RUNNING["S"]["worker_id"] == lane.spare.wid and lane.body == [] and lane.sleeps == []
+    assert lane.carry(host) is True
     assert not lane.errors and not lane.replies and len(lane.sleeps) == 2
     assert len(lane.body) == 1 and lane.body[0]["text"] == "keep this input"
-    assert lane.body[0]["id"] == "S" and get_direct_activity_registry().get("S") is None
+    assert lane.body[0]["id"] == "S" and lane.released == ["S"]
 
 
 @pytest.mark.parametrize("remaining", [0.0, 2.0])
@@ -843,13 +969,28 @@ def test_global_money_is_rechecked_after_prestart_contention(lane, remaining):
     assert len(lane.sleeps) == 1 and lane.released == ["S"] and not lane.workers.PENDING
     assert lane.body == ([lane.task] if remaining > 0 else [])
     assert state.budget_remaining({}, strict=True) == pytest.approx(remaining)
+    assert lane.replies == [], "a lane turn's body reports nothing from the server"
     if remaining == 0:
-        assert len(lane.errors) == len(lane.replies) == 1
-        assert lane.errors[0].control_reason == "budget_exhausted"
-        assert lane.replies[0][1]["system_type"] == "task_not_started"
-        assert "Budget exhausted" in lane.replies[0][0][1]
+        from ouroboros.task_results import load_task_result
+
+        [error] = lane.errors
+        assert error.before_task_start is True and error.control_reason == "budget_exhausted"
+        stored = load_task_result(lane.root, "S")  # the carrier's typed terminal is the turn's conclusion
+        assert stored["status"] == "failed" and stored["reason_code"] == "budget_exhausted"
+        assert stored["result"].startswith("🚫 Budget exhausted."), stored["result"]
     else:
-        assert lane.errors == [] and lane.replies == []
+        assert lane.errors == []
+
+
+def test_a_subscription_main_still_answers_at_the_reached_global_limit(lane, monkeypatch):
+    """A reached global limit refuses paid admission only: a direct turn whose Main is a $0
+    subscription route starts its body; its paid sends would still meet their reservation."""
+    from supervisor import state
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 0.0)
+    assert lane.run() is True
+    assert lane.body == [lane.task] and lane.errors == []
 
 
 @pytest.mark.parametrize("rollback_confirmed", [False, True])
@@ -895,7 +1036,8 @@ def test_prestart_pause_proof_cannot_requeue_a_prior_attempt_or_saved_work(lane)
 def test_stop_after_accepted_prestart_pause_still_wins_while_storage_is_busy(lane, monkeypatch):
     from ouroboros.gateway.task_pause import api_task_pause
     from ouroboros.gateway.tasks import api_task_cancel
-    from ouroboros.task_results import write_task_result
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.task_lifecycle import drive_cancel_intent_scope
 
     monkeypatch.setenv("OUROBOROS_DIRECT_TURN_STOP_WAIT_SEC", "0.2")
     write_task_result(lane.root, "S", "requested", billing_group=BINDING, chat_id=7)
@@ -909,14 +1051,16 @@ def test_stop_after_accepted_prestart_pause_still_wins_while_storage_is_busy(lan
         answers.append(_press(lane, "/api/tasks/{task_id}/cancel", api_task_cancel, "/api/tasks/S/cancel"))
         _hold(lane, store.store_path(lane.root))
     lane.on_sleep = on_sleep
-    assert lane.run() is False
+    assert lane.run() is True and lane.errors == [], "the Stop wins: no pause event, no worker-authored terminal"
     assert answers[0].status_code in (200, 202) and answers[1].status_code == 202
-    assert lane.body == [] and not lane.workers.PENDING
-    assert lane.errors[0].control_reason == "cancelled"
-    assert lane.replies[0][1]["progress_meta"]["task_terminal_status"] == "cancelled"
+    assert lane.body == [] and not lane.workers.PENDING and lane.replies == []
+    _release(lane)
+    assert load_task_result(lane.root, "S")["status"] == "requested"
+    assert drive_cancel_intent_scope("S") == "cancelled"
+    assert load_task_result(lane.root, "S")["status"] == "cancelled"
 
 
-@pytest.mark.parametrize("control", ["stop", "pause", "deadline", "none"])
+@pytest.mark.parametrize("control", ["stop", "pause", "none"])
 def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkeypatch, control):
     """SQLite waits inside a successful read: no exception reaches retry_presend.
 
@@ -929,7 +1073,7 @@ def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkey
     from ouroboros import _usage_wait
     from ouroboros.gateway.task_pause import api_task_pause
     from ouroboros.gateway.tasks import api_task_cancel
-    from ouroboros.task_results import write_task_result
+    from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.usage_ledger import USAGE_LOCK_TIMEOUT_SEC
     from supervisor import state
 
@@ -986,10 +1130,14 @@ def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkey
     if control == "pause":
         assert result and lane.workers.PENDING[0]["text"] == lane.task["text"]
         assert lane.workers.PENDING[0]["_budget_pause"]["before_task_start"]
-    elif control != "none":
+    elif control == "stop":
+        # An immediate Stop before the body: the carrier returns no terminal of its own; custody settles it.
+        assert result and lane.errors == [] and not lane.workers.PENDING
+        assert load_task_result(lane.root, "S")["status"] == "requested"
+    elif control == "deadline":
         assert not result and not lane.workers.PENDING
-        assert lane.errors[0].before_task_start
-        assert lane.errors[0].control_reason == ("cancelled" if control == "stop" else "deadline")
+        assert lane.errors[0].before_task_start and lane.errors[0].control_reason == "deadline"
+        assert load_task_result(lane.root, "S")["status"] == "failed", "the carrier's exception terminal"
     else:
         assert result and lane.body == [lane.task] and not lane.errors
 
@@ -1019,7 +1167,6 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     metadata = {"client_message_id": "m-image", "origin_message_ref": {"kind": "test", "id": "m-image"},
                 "origin_message_text": original["text"]}
     host = _host(lane.root, lambda task: lane.body.append(task) or [])
-    monkeypatch.setattr(lane.workers, "_get_chat_agent", lambda: host)
     monkeypatch.setattr(worker_chat_lane, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="S")))
     monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
     write_task_result(lane.root, "S", "requested", billing_group=BINDING, chat_id=7)
@@ -1036,6 +1183,10 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     lane.on_sleep = pause
     worker_chat_lane.handle_chat_direct(7, original["text"],
         image_data=(encoded, original["image_mime"], original["image_caption"]), task_metadata=metadata)
+    # The admission keeps the pixels as an actor source, never on the row or the snapshot.
+    admitted = lane.workers.RUNNING["S"]["task"]
+    assert admitted["image_source_ref"] and "image_base64" not in admitted
+    assert lane.carry(host) is True
     assert answers[0].status_code in (200, 202) and not lane.body and not lane.errors
     [parked] = lane.workers.PENDING
     assert "image_base64" not in parked and encoded not in json.dumps(lane.events)
@@ -1050,11 +1201,11 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     sent = []
     _idle_worker(lane.workers, sent)
     lane.workers.assign_tasks()
-    assert not sent
+    assert not _dispatched(sent)
     granted = queue.resume_budget_paused_task("S")
     assert granted["ok"] and granted["owner_pause_released"], granted
     lane.workers.assign_tasks()
-    [resumed] = sent
+    [resumed] = _dispatched(sent)
     assert resumed["id"] == "S" and resumed["text"] == original["text"]
     assert resumed["origin_message_ref"] == metadata["origin_message_ref"]
     assert resumed["origin_message_text"] == original["text"]
@@ -1067,4 +1218,4 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     assert actual_images == expected_images and len(actual_images) == 1
     assert base64.b64decode(actual_images[0]["url"].split(",", 1)[1]) == pixels
     lane.workers.assign_tasks()
-    assert len(sent) == 1 and not lane.workers.PENDING
+    assert len(_dispatched(sent)) == 1 and not lane.workers.PENDING

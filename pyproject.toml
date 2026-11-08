@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "7.9.0"
+version = "7.10.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,7 +43,7 @@ dependencies = [
     "starlette",
     "python-multipart",
     "Pillow>=10.0",
-    "pypdf>=4.0",
+    "pypdf>=7.0",
     "uvicorn[standard]",
     "websockets",
     "pytest>=7.0",
@@ -54,7 +54,7 @@ dependencies = [
     # dependencies because the packaged hermetic commit gate invokes them.
     "pytest-xdist>=3.5",
     "pytest-timeout>=2.1",
-    "mcp>=1.10,<2.0",
+    "mcp>=1.29,<2.0",
     "PyYAML>=6.0",
     "croniter",
     # Upper-bounded: tree-sitter 0.25.x + language-pack 1.x changed the grammar/
@@ -122,7 +122,7 @@ markers = [
     "ui_browser: launches the real Ouroboros web UI in host/direct mode; excluded from default local runs",
     "ui_browser_docker: launches UI smoke checks against Docker runtime; excluded from default local runs",
     "portable_detail: portable/build artifact detail checks; excluded from default local runs",
-    "serial: real subprocess / real port / mutable module-global test — run in a serial pass, excluded from the `-n auto` parallel pass via `-m 'not serial'` (see .github/workflows/ci.yml AND the hermetic commit gate ouroboros/preflight_runner.py, which runs the same two-pass split)",
+    "serial: names the host resource a test cannot isolate — `serial(\"<resource>\")`: its tests take turns on one worker of the xdist pass (`xdist_group(\"serial:<resource>\")`, tests/conftest.py); `serial(\"exclusive\")` runs alone in the one-process pass after it (ci.yml and the hermetic commit gate ouroboros/preflight_runner.py); DEVELOPMENT 'Parallel CI and the serial marker'",
     "skill_smoke: real-network OuroborosHub official-skill install + review-flow smoke; excluded from default local runs, opt in via `pytest -m skill_smoke` (canonical lane description: docs/DEVELOPMENT.md 'Pytest marker lanes')",
     "size_ratchet: per-module line/UTF-8 byte and per-function length gates against the live repo (manifest exactness, shrink-only pairwise transition) — a BLOCKING lane only in official-repository CI; excluded from default local runs, which surface the same validator findings as warnings (canonical lane description: docs/DEVELOPMENT.md 'Pytest marker lanes')",
 ]

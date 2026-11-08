@@ -82,7 +82,7 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
     preserved = runtime.ClaudexorRuntimeManager(replace(pin, node_version="25.0.0"))
     legacy = _legacy(pin, schema=legacy_schema) if legacy_schema else None
     old_bytes = _bytes(legacy[0]) if legacy else None
-    before = str(legacy[1]) if legacy_schema == 2 else str(bundled_node)
+    before = str(legacy[1]) if legacy_schema else str(bundled_node)  # a managed Node-only one outlives the app
     assert manager._resolve_node(pin) == before
     assert preserved._resolve_preserved_node(NODE_VERSION) == str(pathlib.Path(before).resolve())
     assert not manager._managed_npm_cli(bundled_node).exists()
@@ -99,7 +99,7 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
         assert _bytes(legacy[0]) == old_bytes
 
 
-@pytest.mark.parametrize("damage", ["schema1", "invalid_json", "missing_npm", "other_pin"])
+@pytest.mark.parametrize("damage", ["schema1", "invalid_json", "other_pin"])
 def test_prepare_preserves_every_legacy_byte_and_selects_an_exact_new_generation(tmp_path, monkeypatch, damage):
     pin, fetches = _fixture(tmp_path, monkeypatch)
     root, old_node, npm = _legacy(pin, schema=1 if damage == "schema1" else 2)

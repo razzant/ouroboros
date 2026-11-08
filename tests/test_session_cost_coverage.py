@@ -25,6 +25,24 @@ def attempts():
             {"usageCost": {"cashUsd": None, "cashKnowledge": "unknown"}}]
 
 
+def card_consumers(frames):
+    """The task card's own JS words for real producer frames: label and detail, frame as context."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    script = """
+        import fs from 'node:fs';
+        import {taskCostMeta, costPresentationDetail} from './web/modules/chat_activity.js';
+        const frames = JSON.parse(fs.readFileSync(0, 'utf8'));
+        console.log(JSON.stringify(frames.map(frame => ({label: taskCostMeta(frame),
+            detail: costPresentationDetail(frame.cost_presentation, frame)}))));
+    """
+    rendered = subprocess.run(['node', '--input-type=module', '-e', script], cwd=Path(__file__).parents[1],
+                              input=json.dumps(frames), capture_output=True, text=True, check=True)
+    return json.loads(rendered.stdout)
+
+
 @pytest.mark.parametrize("ambiguous_failure", [False, True])
 def test_accepted_pending_start_is_not_free_and_final(tmp_path, ambiguous_failure):
     assert custody.record_start_requested(tmp_path, invocation_id="pending", task_id="task-one",
@@ -249,6 +267,10 @@ def test_unreadable_custody_keeps_known_money_but_not_finality(tmp_path, monkeyp
     assert fields["cost_custody"]["status"] == "unavailable"
     assert fields["cost_presentation"]["has_unpriced"] is True
     assert fields["non_final_rows"] == 0
+    # The card keeps the known $2 as a qualified subtotal; only a missing amount reads unknown.
+    [card] = card_consumers([fields])
+    assert card["label"] == ["Tracked: $2.00"]
+    assert "only the priced steps" in card["detail"]
 
 
 @pytest.mark.parametrize("spend,final,tracked", [(0, True, 0), (None, False, None)])
@@ -322,11 +344,14 @@ def test_cli_partial_grace_returns_unsettled_result(tmp_path, monkeypatch):
     assert answer["cost_final"] is False and answer["cost_presentation"]["accounting_open"] is True
 
 
-def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatch, fake_route):  # noqa: F811
+@pytest.mark.parametrize("cost_recorded", [False, True])
+def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatch, fake_route, cost_recorded):  # noqa: F811
+    """Joining a legacy successor records the stopped run's partial cost once, whether an older host left it
+    unrecorded or already collected it. The current host creates no new continuation."""
     from tests._review_session_route_shared import FakeGateway
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
-    _engine(monkeypatch)
+    posts = _engine(monkeypatch)
     get = FakeGateway.get_run
     def detail(self, rid, **kw):
         result = get(self, rid, **kw)
@@ -336,7 +361,17 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
             result["attemptExecution"] = attempts()
         return result
     monkeypatch.setattr(FakeGateway, "get_run", detail)
-    facts = _run(tmp_path, {}, [], [])
+    checkpoints = []
+    with monkeypatch.context() as legacy_host:
+        if not cost_recorded:
+            # The retired automatic loop continued before settling the stopped run.
+            legacy_host.setattr(custody, "settle_run", lambda *args, **kwargs: None)
+        token = legacy_successor(tmp_path, checkpoints)
+    stopped = custody.lookup(tmp_path, "t-review", "run-1")[1]
+    assert stopped.settled is cost_recorded
+    assert len(usage.read_usage_records(tmp_path)) == int(cost_recorded)
+    facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+    assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
     assert facts["run_id"] == "run-2"
     assert facts["spend"] == 2 and facts["spend_estimated"] is False
     assert facts["usage"]["cost_partial"] is True and facts["usage"]["cost_final"] is False
@@ -457,8 +492,6 @@ def test_public_result_queue_gateway_and_heartbeat_carry_pending_cost(tmp_path, 
 
 def test_actual_cost_frames_use_existing_card_labels(tmp_path):
     import json
-    import subprocess
-    from pathlib import Path
 
     from ouroboros.delegate_collection import record_terminal_money
 
@@ -470,16 +503,7 @@ def test_actual_cost_frames_use_existing_card_labels(tmp_path):
     zero = start(tmp_path, run="zero", task="zero", tree="zero")
     record_terminal_money(tmp_path, zero, {"summary": {"state": "succeeded", "spendUsd": 0}})
     frames = [reconstruct_task_cost(tid, fields=True, drive_root=tmp_path) for tid in ("pending", "partial", "zero")]
-    script = """
-        import fs from 'node:fs';
-        import {taskCostMeta, costPresentationDetail} from './web/modules/chat_activity.js';
-        const frames = JSON.parse(fs.readFileSync(0, 'utf8'));
-        console.log(JSON.stringify(frames.map(frame => ({label: taskCostMeta(frame),
-            detail: costPresentationDetail(frame.cost_presentation)}))));
-    """
-    rendered = subprocess.run(['node', '--input-type=module', '-e', script], cwd=Path(__file__).parents[1],
-                              input=json.dumps(frames), capture_output=True, text=True, check=True)
-    cards = json.loads(rendered.stdout)
-    assert [card["label"] for card in cards] == [["Cost unknown"], ["Tracked: $2.00"], ["$0.00"]]
+    cards = card_consumers(frames)
+    assert [card["label"] for card in cards] == [["Cost pending"], ["Tracked: $2.00"], ["$0.00"]]
     assert "only the priced steps" in cards[1]["detail"]
     print(json.dumps({"cost_observations": frames, "card_consumers": cards}, sort_keys=True))

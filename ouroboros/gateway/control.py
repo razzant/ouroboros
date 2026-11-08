@@ -49,9 +49,9 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
     from supervisor.update_merge import active_update_tx
 
     status = compute_managed_update_status(fetch=fetch)
-    # The update letter rides the same payload: written only after a FETCHING
-    # check (never on the passive read), with the running source separate from
-    # the mutable checkout HEAD that binds apply/preflight.
+    # The update description rides the same payload: a FETCHING check records only
+    # facts (never prose, never on the passive read), with the running source separate
+    # from the mutable checkout HEAD that binds apply/preflight.
     letter = None
     try:
         from ouroboros import update_letter as _letter
@@ -75,6 +75,7 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             "phase": str(tx.get("phase") or ""),
             "task_id": str(tx.get("task_id") or ""),
             "restart_required": bool(tx.get("restart_required")),
+            **({"attempt_id": str(tx["attempt_id"])} if tx.get("attempt_id") else {}),
             **({"local_work_recovery": True} if tx.get("stash_restore")
                or tx.get("gate_blocked_reason") == "rollback_restart_pending" else {}),
         }
@@ -148,6 +149,10 @@ async def api_reset(request: Request) -> JSONResponse:
         bridge = try_get_bridge()
         if bridge is not None:
             bridge.panic.invalidate_owner()
+        from ouroboros.launch_roots import durable_basis
+        from supervisor.state_initialization import mark_pending, supervisor_evidence
+
+        basis, _why = durable_basis(data_dir, evidence=supervisor_evidence)  # read before state/ goes: Reset keeps it
         deleted = []
         # Keep synchronization files until restart. Removing the directory that
         # contains the held managed-update lock would let a second updater enter.
@@ -161,10 +166,9 @@ async def api_reset(request: Request) -> JSONResponse:
             settings_file.unlink()
             deleted.append("settings.json")
         # The owner's explicit fresh start (#1307): boot initializes a new state from
-        # this pending witness instead of reading the wiped root as a lost one.
-        from supervisor.state_initialization import mark_pending
-
-        mark_pending(data_dir, origin="owner_reset")
+        # this pending witness instead of reading the wiped root as a lost one; the work
+        # folders it never deletes keep their basis (#1239).
+        mark_pending(data_dir, origin="owner_reset", work_root_basis=basis)
         _request_restart(request)
         return JSONResponse({"status": "ok", "deleted": deleted, "restarting": True})
     except Exception as exc:
@@ -184,7 +188,7 @@ async def api_command(request: Request) -> JSONResponse:
             panic_evidence = source_evidence(request, kind, client_surface=surface)
 
         if not isinstance(body.get("reply_to", ""), str):
-            return json_error("reply_to must be an address string", 400)
+            return json_error("reply_to must be an address string", 400, accepted=False)
         if cmd:
             from supervisor.message_bus import get_bridge, log_chat
 
@@ -199,6 +203,15 @@ async def api_command(request: Request) -> JSONResponse:
                                  startup_owner_command=getattr(request.app.state, "startup_owner_command", None)):
                     return JSONResponse({"status": "ok"})
                 return json_error("Panic emergency owner is unavailable.", 503)
+            if "if_boot" in body:
+                from ouroboros.server_liveness import BOOT
+
+                expected = body["if_boot"]
+                if not isinstance(expected, str) or not expected:
+                    return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
+                if expected != BOOT.snapshot(jobs=False)["since"]:
+                    return json_error("Ouroboros restarted before this command arrived.", 409,
+                                      accepted=False, reason_code="boot_changed")
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
@@ -228,7 +241,7 @@ async def api_command(request: Request) -> JSONResponse:
                 if action is not None:
                     return JSONResponse({"status": "ok"}, background=BackgroundTask(action))
             if bridge is None:
-                return json_error("Complete provider setup before sending this command.", 409)
+                return json_error("Complete provider setup before sending this command.", 409, accepted=False)
             bridge.ui_send(cmd, **send_kwargs)
             if visible_task_id:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
@@ -449,6 +462,67 @@ async def _preflight_description(plan: dict) -> dict:
     except Exception:
         log.warning("update preflight: range description unavailable", exc_info=True)
         return {"letter": None, "qualification": None}
+
+
+async def api_update_description(request: Request) -> JSONResponse:
+    """The owner's Write/Rewrite: ONE ordinary Main task describes the named range.
+
+    The range must be the one the last check offered or the saved description's own; a
+    request whose task has not ended answers 409 with that task. The task is admitted with
+    its scheduled receipt like any host-started root, and runs on the ordinary Main route.
+    """
+    body = await request_json_or(request, {})
+    body = body if isinstance(body, dict) else {}
+    mode = str(body.get("mode") or "")
+    base_sha, target_sha = (str(body.get(name) or "").strip().lower() for name in ("base_sha", "target_sha"))
+    if mode not in ("write", "rewrite") or not base_sha or not target_sha:
+        return json_error("mode (write or rewrite), base_sha and target_sha are required.", 400)
+    try:
+        from ouroboros.update_letter import RecordBusy, request_description
+
+        try:
+            outcome = await asyncio.to_thread(request_description, mode, base_sha, target_sha,
+                                              admit=_admit_description_task)
+        except RecordBusy:
+            return json_error("The update description record is busy; nothing was requested.", 503)
+        if outcome["outcome"] == "in_flight":
+            return json_error("A description is already being written.", 409,
+                              task_id=outcome["task_id"], task_status=outcome["status"])
+        if outcome["outcome"] == "range_not_offered":
+            return json_error("This range is not the offered update or the saved description's range; "
+                              "check for updates first.", 409, legal_ranges=outcome["legal_ranges"])
+        if outcome["outcome"] == "refused":
+            return json_error(f"The writing task was not accepted ({outcome['reason']}).", 503,
+                              reason=outcome["reason"])
+        update_progress.notify_changed()
+        return JSONResponse({"status": "queued", "task_id": outcome["task_id"], "key": outcome["key"]})
+    except Exception as exc:
+        return json_exception(exc)
+
+
+def _admit_description_task(task_id: str, text: str, metadata: Dict[str, Any]) -> str:
+    """Admit the owner's description request as an ordinary root task in the owner chat;
+    returns ``""`` or the refusal reason. Nothing else is started or stopped. Typed as a root
+    like every host-started one, so a host retry stays this request's own attempt. The press
+    is the web panel's: while the binding is known empty (no owner message yet) the task is
+    Main's, where the panel's door opens it; a bound or unreadable binding is used as read."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from supervisor.queue import enqueue_with_admission_receipt, persist_queue_snapshot
+    from supervisor.state import control_value, load_state
+
+    st = load_state()
+    unbound = control_value(st, "owner_chat_id") == (True, None)
+    admitted = enqueue_with_admission_receipt({
+        "id": task_id, "type": "task", "chat_id": WEB_UI_CHAT_ID if unbound else int(st.get("owner_chat_id") or 0),
+        "root_task_id": task_id, "delegation_role": "root",
+        "text": text, "metadata": metadata, "_require_worker_pool": True, "_require_unique_task_id": True,
+    })
+    if not isinstance(admitted, dict):
+        return "refused"
+    if admitted.get("_admission_blocked"):
+        return str(admitted.get("_worker_pool_disabled_reason") or admitted["_admission_blocked"])
+    persist_queue_snapshot(reason="update_description_requested")
+    return ""
 
 
 _KNOWN_UPDATE_PLAN_KINDS = frozenset({"clean", "conflicting"})
@@ -824,9 +898,36 @@ def _unwind_stashed_update(tx: dict, context: str) -> str:
 
     result = restore_stash_with_marker(tx, context)
     note = result.note
-    if result.complete and not clear_update_tx():
-        note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
+    if result.complete:
+        cleared = clear_update_tx()
+        if cleared is None:
+            note = (note + "; " if note else "") + "the update transaction marker remains while another transition is active"
+        elif not cleared:
+            note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
     return note
+
+
+def _assisted_update_pays() -> bool:
+    """Whether an assisted update needs paid admission, all a reached global limit refuses: its resolver
+    (a root task, opening on Main) or a seat of the commit-review wave it asks for. The API rows of the
+    review pool are answered at the global axis by ``review_wave_admission`` (the reservation's own rule);
+    session rows ride subscriptions. An unknown answer pays; every send still meets its reservation."""
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+    from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.usage_admission import review_wave_admission
+    from supervisor import state
+    from supervisor.worker_assignment import needs_paid_admission
+
+    if needs_paid_admission({"metadata": {}}):
+        return True
+    models = [row.model for row in review_pool_slots() if row.model
+              and str(getattr(row.route, "value", row.route) or "") != ReviewRouteKind.AGENT_SESSION.value]
+    return bool(models) and review_wave_admission(
+        drive_root=state.DRIVE_ROOT, root_task_id="managed-update-admission", models=models,
+        prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4, max_completion_tokens=int(_review_output_budget()),
+        global_limit_usd=float(state.TOTAL_BUDGET_LIMIT or 0.0)).get("fits") is not True
 
 
 def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
@@ -873,7 +974,7 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
              **({"stash_note": note} if note else {})},
             status_code=409,
         )
-    if remaining <= 0:
+    if remaining <= 0 and _assisted_update_pays():
         note = _unwind_stashed_update(tx, "assisted_admission_failed")
         _respawn_workers_after_failed_update()
         return JSONResponse(
@@ -883,8 +984,9 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
         )
     # Money admission is the known-spend rule every reviewer seat's reservation
     # applies (#1487), checked just above: known spend below TOTAL_BUDGET admits
-    # the update, and a review that later reaches the limit pauses on its own
-    # fences. One commit-gate wave over the review pool's paid seats is still
+    # the update, a reached limit only one whose every actor is free, and a review
+    # that later reaches the limit pauses on its own fences. One commit-gate wave
+    # over the review pool's paid seats is still
     # priced at the review packs' own worst-case caps by the one explicit
     # estimator (``review_admission.managed_update_wave_estimate``), but as
     # DISCLOSURE, never a second, earlier refusal: a prospective wave larger
@@ -1363,7 +1465,7 @@ async def _apply_replace_recovery(
 
 async def api_update_apply(request: Request) -> JSONResponse:
     """Apply an exact managed plan; replacement is an explicit recovery only."""
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("JSON body must be an object.", 400)
     # Executable gateway ABI (ABI-3, Q7=A): UpdateApplyRequest declares

@@ -43,9 +43,30 @@ def root_present_fields(root, task_id, task, stored, *, settled=False):
 # One neutral sentence of understanding, not a rule: what the list holds and that tidying it is ordinary work.
 _HYGIENE_NOTE = ("Every live, waiting, paused or held work in your rooms, with what it waits for, since when and "
                  "what of it still runs (tails); "
-                 "other_live_work is work whose own root ended while its helpers or external runs go on. Keeping this "
+                 "other_live_work is work whose own root ended while its helpers or external runs go on, and each "
+                 "live place conversation turn (kind inline_presence), busy with its own conversation. Keeping this "
                  "list free of work nobody needs any more is ordinary hygiene: close it, ask the owner, or leave it, "
                  "as you judge.")
+
+
+def live_place_turns(listed, rows, facts):
+    """Every live inline Presence turn no listed root is (a moved one is listed), here or in another process, from
+    the roster's reading (``resolved_presence_turns``): ``kind="inline_presence"`` facts, not a roster row or direct turn.
+    ``tell_task`` can reach a local accepting author. Marks its tree's row."""
+    by_id, turns = {row["work_id"]: row for row in rows}, []
+    for fact in facts:
+        task_id, stored = fact["task_id"], fact["row"]
+        if task_id in listed:
+            continue
+        if task_id in by_id:
+            by_id[task_id]["kind"] = "inline_presence"
+            continue
+        status = stored.get("status") or ("preparing" if fact["state"] == "preparing" else "unknown")
+        turns.append({"work_id": task_id, "kind": "inline_presence", "title": str(stored.get("suggested_name") or ""),
+                      "room": {"chat_id": stored.get("chat_id"), "project_id": str(stored.get("project_id") or "")},
+                      "root_status": str(status), "helpers_running": 0, "helpers_waiting": 0, "tails": [],
+                      **({"unavailable": {"task_result": fact["error"]}} if "error" in fact else {})})
+    return turns
 
 
 def live_works_present(root, *, exclude=""):
@@ -67,14 +88,58 @@ def live_works_present(root, *, exclude=""):
                if key in row}})
     from ouroboros.peer_roster import unlisted_live_work
 
-    other = unlisted_live_work(pathlib.Path(root), {row["task_id"] for row in roster["roots"]})
+    listed = {row["task_id"] for row in roster["roots"]}
+    other = unlisted_live_work(pathlib.Path(root), listed)
+    other += live_place_turns(listed | {exclude}, other, roster.get("presence_turns") or ())
     return {"works": works, "last_line_source": "model_authored_focus",
             "incomplete": roster["incomplete"] or any(row.get("unavailable") for row in other),
             **({"other_live_work": other} if other else {}), "note": _HYGIENE_NOTE,
-            **{key: roster[key] for key in ("queue_snapshot", "direct_roots")}}
+            "queue_snapshot": roster["queue_snapshot"]}
 
 
 def context_present(env, task):
     """Capture at head construction, including queued heads with older ingress metadata."""
     root = task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or env.drive_root
     return live_works_present(root, exclude=str(task.get("id") or ""))
+
+
+def compact_other_live_work(rows):
+    """Count known foreign work; keep unknowns, holds and control facts whole.
+
+    These are not the addressable independent roots. Their exact titles, rooms and
+    run IDs remain in the retained runtime capture, before this form can be shown.
+    """
+    from collections import Counter
+
+    if not isinstance(rows, list):
+        return rows
+    statuses, tails, exceptions = Counter(), Counter(), []
+    running = waiting = 0
+    fields = {'work_id', 'title', 'room', 'root_status', 'helpers_running', 'helpers_waiting', 'tails'}
+    tail_fields = {'kind', 'state', 'code', 'text', 'count', 'ids'}
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) - fields or not row.get('work_id')
+                or row.get('root_status') not in ('completed', 'failed', 'cancelled', 'running')
+                or not isinstance(row.get('tails', []), list)
+                or any(not isinstance(row.get(key, 0), int) for key in ('helpers_running', 'helpers_waiting'))):
+            exceptions.append(row)
+            continue
+        statuses[row['root_status']] += 1
+        running += row.get('helpers_running', 0)
+        waiting += row.get('helpers_waiting', 0)
+        unknown = []
+        for tail in row.get('tails') or ():
+            if (not isinstance(tail, dict) or set(tail) - tail_fields or tail.get('state') != 'live'
+                    or tail.get('kind') not in ('helper', 'run', 'review')
+                    or not isinstance(tail.get('count', 1), int)
+                    or tail.get('code') not in ('delegated_running', 'helpers_running', 'review_work_finishing')):
+                unknown.append(tail)
+            else:
+                tails[tail['code']] += tail.get('count', 1)
+        if unknown:
+            exceptions.append({'work_id': row['work_id'], 'root_status': row['root_status'], 'tails': unknown})
+    return {'count': len(rows), 'counted_root_statuses': dict(statuses),
+            'counted_helpers_running': running, 'counted_helpers_waiting': waiting,
+            'confirmed_tails': dict(tails), 'unabridged': exceptions,
+            'fact': 'Other live work is outside the independent-root roster; an ended root does not confirm its tails ended.',
+            'details': 'retained full runtime section: live_works_present.other_live_work'}

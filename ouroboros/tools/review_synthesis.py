@@ -65,29 +65,18 @@ _SYNTHESIS_PROMPT_TEMPLATE = (
 )
 
 
-def _redact(text: str) -> str:
-    """Redact secret-like values from a string before including it in an LLM prompt."""
-    try:
-        from ouroboros.tools.review_helpers import redact_prompt_secrets
-        redacted, _ = redact_prompt_secrets(str(text or ""))
-        return redacted
-    except Exception:
-        return ""
-
-
 def _format_obligations(open_obligations: List[Any]) -> str:
-    """Render open obligations as compact secret-redacted JSON."""
+    """Render open obligations as compact JSON."""
     if not open_obligations:
         return "[]"
     from ouroboros.utils import truncate_review_artifact
     items = []
     for o in open_obligations:
-        raw_reason = str(getattr(o, "reason", "") or "")
-        redacted_reason = _redact(raw_reason)
+        reason = str(getattr(o, "reason", "") or "")
         items.append({
             "obligation_id": str(getattr(o, "obligation_id", "") or ""),
             "item": str(getattr(o, "item", "") or ""),
-            "reason_excerpt": truncate_review_artifact(redacted_reason, limit=500),
+            "reason_excerpt": truncate_review_artifact(reason, limit=500),
         })
     try:
         return json.dumps(items, ensure_ascii=False, indent=2)
@@ -96,15 +85,9 @@ def _format_obligations(open_obligations: List[Any]) -> str:
 
 
 def _format_claims(findings: List[Dict[str, Any]]) -> str:
-    """Render raw findings as compact JSON with secret-redacted reasons."""
+    """Render raw findings as compact JSON."""
     try:
-        safe = []
-        for f in findings:
-            entry = dict(f)
-            if "reason" in entry:
-                entry["reason"] = _redact(str(entry["reason"] or ""))
-            safe.append(entry)
-        return json.dumps(safe, ensure_ascii=False, indent=2)
+        return json.dumps(list(findings), ensure_ascii=False, indent=2)
     except Exception:
         return "[]"
 

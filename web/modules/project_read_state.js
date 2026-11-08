@@ -31,10 +31,11 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
  *   older?: (current: () => boolean) => Promise<{status?: string}>,  // one older page, while `current()`
  *   present?: (current: () => boolean) => Promise<unknown>,  // the newest page, if not drawn, while `current()`
  *   delivered?: (id: string) => boolean,  // a drawn page holds this row
+ *   onNote?: () => void,  // every reading moment (a scroll edge, a paint, an arrival): read_ahead.js samples there
  * }} facts
  */
 export function createProjectReadReceipt({ read, isShown, isReadingLatest, onReadingLatest = () => {}, land = () => {},
-    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false }) {
+    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false, onNote = () => {} }) {
     let generation = 0;
     let coveredRevision = 0;
     let readingLatest = false;
@@ -101,6 +102,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
     // Scroll edges report arrivals only; a discrete change (the page or the
     // window shown again, another newest message) reports the current position once.
     const note = ({ discrete = false } = {}) => {
+        onNote();
         const latest = isReadingLatest(newest());
         if (latest && (discrete || !readingLatest)) onReadingLatest();
         readingLatest = latest;
@@ -149,6 +151,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
             // Two frames cover layout followed by paint/composite.
             await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             const painted = own === generation && isShown();
+            if (painted) onNote();
             const atLatest = painted && isReadingLatest(newest());
             // A withheld read lowers the edge, so the next arrival retries it.
             if (painted && !atLatest) readingLatest = false;
@@ -220,7 +223,13 @@ export function newestMessageOffset(latest, { delivered, nodes, viewport, header
     const band = readBand(viewport, header, composer);
     const node = nodes(latest.history_id).map(shownBy).find((shown) => shown.getClientRects?.().length);
     if (!node || band.bottom <= band.top || historyNodeOnScreen(node, viewport, band)) return 0;
-    return node.getBoundingClientRect().top - band.top;
+    // Measured on screen, moved in the feed's own pixels: a room scaled mid-motion (the phone drawer's handover) shows
+    // the distance smaller than the scroll it takes. The Interface size never scales the page (interface_size.js).
+    // The feed's own border-box height (style.css), fractional and untransformed, against the one on screen.
+    const own = parseFloat(viewport.ownerDocument?.defaultView?.getComputedStyle?.(viewport)?.height);
+    const height = own > 0 ? own : Number(viewport.offsetHeight) || 0;
+    const scale = height > 0 ? viewport.getBoundingClientRect().height / height : 1;
+    return (node.getBoundingClientRect().top - band.top) / (scale > 0 ? scale : 1);
 }
 
 /**

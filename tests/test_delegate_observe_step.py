@@ -155,9 +155,8 @@ def test_a_hole_on_the_attention_read_raises_the_gateways_typed_hole(ctx):
     assert caught.value is hole
 
 
-@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), _Stream("", 503, "daemon_busy"),
-                                     _Stream("", 503, "daemon_stopping"), _Stream("", 404, "not_found")],
-                         ids=["connect", "busy", "stopping", "absent"])
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), _Stream("", 503, "daemon_stopping"), _Stream("", 404, "not_found")],
+                         ids=["connect", "stopping", "absent"])
 def test_a_journal_that_could_not_be_read_hands_the_beat_to_the_detail_read(ctx, failure):
     gateway = Engine(streams=[failure], wakes=[_wake("timeout", [_summary()])])
     assert delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0) is None

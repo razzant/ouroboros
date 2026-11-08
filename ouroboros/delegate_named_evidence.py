@@ -58,7 +58,8 @@ def retain_files(area, paths, files_dir, *, preserve_mode=True):
         size = source.stat().st_size
         target = files_dir / relative
         private_directory(target.parent, files_dir.parent)
-        # Fresh regular files: ordinary delegates keep writable copies; reviewers preserve modes.
+        # Fresh regular files: ordinary delegates keep writable copies; reviewers preserve modes. Streamed from
+        # the descriptor that proved the file regular, and never a clone: the record compression refuses one.
         with _open_regular(source) as src, target.open("xb") as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
         mode = stat.S_IMODE(source.stat().st_mode)
@@ -122,6 +123,52 @@ def retain_named_evidence(area, files_dir, gaps, *, product_paths=(), preserve_m
                 elif name in files:
                     gaps.append({"path": relative, "reason": "unsupported_entry_type"})
     return retain_files(area, sorted(paths), files_dir, preserve_mode=preserve_mode)
+
+
+def retain_workspace_evidence(area, destination, *, product_paths=(), previous=None):
+    """Retain a copy's evidence folder ONCE for a capture no run retains it for (a task's own workspace at
+    finalization, #2711): ``destination/files/`` byte-exact through ``retain_named_evidence``, beside a
+    ``summary.json`` carrying the folder's witness. ``previous`` is the last published summary of the same
+    workspace: an unchanged folder (same witness, files still there) is not copied again and that summary
+    stands, never a second copy; a changed one replaces this capture's own earlier generation whole. A
+    raised copier leaves no partial files and a ``capture_failed`` summary: the caller then keeps the
+    folder's files in its own capture, so the bytes are never zero copies either."""
+    destination = pathlib.Path(destination)
+    witness = named_evidence_witness(area)
+    if (isinstance(previous, dict) and previous.get("status") == "retained" and witness
+            and previous.get("witness") == witness and pathlib.Path(str(previous.get("evidence_dir") or "")).is_dir()):
+        return previous
+    staging = destination.parent / f".{destination.name}-{uuid.uuid4().hex}.pending"
+    gaps = []
+    try:
+        private_directory(staging, destination.parent) if destination.parent.is_dir() else staging.mkdir(parents=True)
+        files = retain_named_evidence(area, staging / "files", gaps, product_paths=product_paths)
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        return {"status": "capture_failed", "files": [], "gaps": gaps, "error": f"{type(exc).__name__}: {exc}",
+                "witness": witness, "evidence_dir": str(destination)}
+    summary = {"status": "retained", "files": files, "gaps": gaps, "witness": witness,
+               "evidence_dir": str(destination), "summary_path": str(destination / "summary.json")}
+    atomic_write_json(staging / "summary.json", summary)
+    if destination.exists():  # only this capture's own earlier generation of the same workspace
+        shutil.rmtree(destination, ignore_errors=True)
+    staging.rename(destination)
+    return summary
+
+
+def published_workspace_evidence(result):
+    """The last published summary of a task workspace's retained evidence folder (its ``named_evidence_manifest``
+    artifact row), so a later finalization copies an unchanged folder no second time; None when there is none or
+    it cannot be read."""
+    row = next((item for item in reversed(result.get("artifacts") or [])
+                if isinstance(item, dict) and item.get("kind") == "named_evidence_manifest" and item.get("path")), None)
+    if row is None:
+        return None
+    try:
+        saved = json.loads(pathlib.Path(str(row["path"])).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return saved if isinstance(saved, dict) else None
 
 
 def saved_named_evidence(root, entry, *, observe=True):

@@ -20,6 +20,11 @@ ambiguous identities are problems that keep an entry out of the result rather
 than truncating it. The loader's field validators judge imported fields without
 loading settings or connecting.
 
+A stdio entry may also name Ouroboros's own ``task_session`` and ``browser_policy``:
+literal booleans under the loader's rule, judged on the entry alone because the draft
+list carries no flags. So ``browser_policy: true`` needs ``task_session: true`` beside
+it, and ``task_session: false`` clears the draft's policy in the same patch.
+
 The draft list the caller sends carries identities, transports and header names
 only (``MCPImportDraftServer``); values and addresses stay in the browser.
 Display facts carry names and counts; ``patch`` carries the pasted values back
@@ -35,7 +40,7 @@ from typing import Any, Dict, List
 
 from ouroboros.mcp_client import (
     canonical_server_id, raw_server_id, _validate_url,
-    _validate_stdio_args, _validate_stdio_command,
+    _validate_call_lifetime, _validate_stdio_args, _validate_stdio_command,
 )
 from ouroboros.mcp_headers import HEADER_VALUE_PLACEHOLDER, validate_headers
 from ouroboros.workspace_executor import validate_process_env
@@ -43,8 +48,9 @@ from ouroboros.workspace_executor import validate_process_env
 WRAPPERS = ("mcpServers", "servers")
 TRANSPORTS = {"http": "streamable_http", "streamable_http": "streamable_http", "streamable-http": "streamable_http",
               "sse": "sse", "stdio": "stdio"}
-_FIELDS = {"streamable_http": ("url", "headers"), "sse": ("url", "headers"),
-           "stdio": ("command", "args", "env", "cwd")}
+_LIFETIME_FLAGS = ("task_session", "browser_policy")
+_FIELDS = {"streamable_http": ("url", "headers", *_LIFETIME_FLAGS), "sse": ("url", "headers", *_LIFETIME_FLAGS),
+           "stdio": ("command", "args", "env", "cwd", *_LIFETIME_FLAGS)}
 _TYPE_KEYS = ("type", "transport")
 _SUBSTITUTION = re.compile(r"\$\{[^}]*\}")
 _ENV_NOTICE = ("Environment values are saved as ordinary visible settings; keep secrets in Custom keys and "
@@ -83,6 +89,11 @@ def _validate_patch(patch: Dict[str, Any]) -> None:
         cwd = patch.get("cwd", "")
         if not isinstance(cwd, str) or "\x00" in cwd:
             raise ValueError("cwd must be a string without NUL")
+    flags = {key: patch.get(key, False) for key in _LIFETIME_FLAGS}
+    for key, value in flags.items():
+        if not isinstance(value, bool):  # the loader's looser reading of old saved text is not for new input
+            raise ValueError(f"{key} must be true or false")
+    _validate_call_lifetime(patch["transport"], **flags)
 
 
 def _substitution_fields(patch: Dict[str, Any]) -> List[str]:
@@ -219,4 +230,6 @@ def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:
         entry.update(action="update", index=targets[0])
         if entry["transport"] != "stdio":
             _header_changes(entry, target)
+        elif entry["patch"].get("task_session") is False:
+            entry["patch"].setdefault("browser_policy", False)
     return {"ok": True, "wrapper": wrapper, "entries": entries, "ignored_keys": sorted(set(document) - {wrapper})}

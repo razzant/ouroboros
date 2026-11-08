@@ -15,6 +15,7 @@ from ouroboros.owner_mailbox import (
     KIND_HURRY,
     KIND_TASK_MESSAGE,
     drain_owner_entries,
+    place_arrival_wake,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -57,6 +58,9 @@ def _owner_line(ctx: Any, text: str, key: str, tone: str) -> None:
 # the next tick re-reads the descriptor and re-handshakes, and it cannot close an
 # open outage episode either: silence of a different shape is not contact.
 _NO_DAEMON_ANSWER_STATUSES = frozenset({"observation_pending", "refused"})
+# A tick text the host could not read as a JSON object (``_payload``): no daemon
+# answer is established either, whatever the text was.
+_OBSERVATION_MALFORMED = "observation_malformed"
 
 
 def _loop_gateway() -> Any:
@@ -118,12 +122,24 @@ def _emit(ctx: Any, kind: str, payload: dict[str, Any]) -> bool:
     })
 
 
-def _payload(raw: str) -> dict[str, Any]:
+def _payload(raw: Any, run_id: str) -> tuple[dict[str, Any], bool]:
+    """One tick's observation and whether the host could read it at all.
+
+    The observing wait renders a JSON object; anything else is the host's own
+    read failure (#947), not a daemon answer and not a run's state. It keeps the
+    ``fault`` status the hold exits on, carries the family's refusal envelope so
+    it never classifies as a successful observation, and keeps the whole tick
+    text: an oversized wake spills it to its exact source (``_render_wake_payload``).
+    """
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else {"status": "fault", "detail": raw}
     except (TypeError, ValueError):
-        return {"status": "fault", "detail": str(raw or "")}
+        data = None
+    if isinstance(data, dict):
+        return data, True
+    return {"status": "fault", "ok": False, "host_code": refusal_host_code(_OBSERVATION_MALFORMED),
+            "reason": _OBSERVATION_MALFORMED, "run_id": str(run_id),
+            "detail": raw if isinstance(raw, str) else repr(raw)}, False
 
 
 def _coordination_root_id(ctx: Any) -> str:
@@ -484,7 +500,7 @@ def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
             "text": str(entry.get("text") or ""),
             "ts": str(entry.get("ts") or ""),
         }
-        for entry in entries
+        for entry in entries if place_arrival_wake(entry) is not False  # context only: unread for the drain
     ]
 
 
@@ -1019,7 +1035,11 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
     in the engine catalog. A capability, never a liveness verdict; an unreadable
     catalog, an unknown route or a read slower than one beat is ``unknown`` (never a
     refusal, and nothing is read on the wake path). A row without the field is an
-    engine that has no live-input channel at all: ``none``."""
+    engine that has no live-input channel at all: ``none``. One catalog read (the engine's
+    full harness doctor) per exact engine build serves every later wait
+    (``claudexor_run_events.declared_live_input``)."""
+    from ouroboros.gateways.claudexor_run_events import declared_live_input
+
     try:
         _status, entry = custody.lookup(
             custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
@@ -1030,15 +1050,13 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
     if reader is None:
         return "unknown"
     try:
-        catalog = reader.agent_capabilities(timeout_sec=_TICK_SEC)
-        row = next((item for item in (catalog.get("harnesses") or [])
-                    if isinstance(item, dict) and item.get("id") == route), None)
+        value = declared_live_input(reader, route, timeout_sec=_TICK_SEC)
     except Exception:
-        row = None
+        value = None
     finally:
         if reader is not gateway:
             _drop_gateway(reader)
-    return "unknown" if row is None else str(row.get("liveInput") or "none")
+    return "unknown" if value is None else value
 
 
 def _since_last_model_response_sec(ctx: Any) -> Optional[float]:
@@ -1204,6 +1222,9 @@ def supervised_wait(
     # Holding the run is a wait, never this task's own work; what the run does is its
     # recorded observation (``observed_run_activity``, DESIGN §9 Telegram typing).
     hold_key, hold_until, activity = "delegate:" + ",".join(run_ids), 0.0, None
+    from ouroboros.delegate_progress import HoldLease
+
+    lease = HoldLease(ctx)  # the hold's one idle-rail lease, renewed only before it would lapse
     selected_index = 0
     try:
         while True:
@@ -1228,10 +1249,11 @@ def supervised_wait(
             else:
                 if owns_transport and gateway is None:
                     gateway = _loop_gateway()
+                lease.renew(run_id)
                 raw = wait_once(ctx, run_id, _TICK_SEC, int(state.get("journal_cursor") or 0),
                                 **({"gateway": gateway} if gateway is not None else {}))
-            payload = _payload(raw)
-            answered = str(payload.get("status") or "") not in _NO_DAEMON_ANSWER_STATUSES
+            payload, readable = _payload(raw, run_id)
+            answered = readable and str(payload.get("status") or "") not in _NO_DAEMON_ANSWER_STATUSES
             # A typed 503 the engine itself sent to the read reached the daemon over an intact
             # transport: rebuilding it would re-handshake into the same refusal and wake the
             # model, and it is no outage either. Only a read nothing answered is a dead socket.
@@ -1377,6 +1399,7 @@ def supervised_wait(
             if resumed:
                 model_sleep.announce_resumed(ctx)  # the held run works again, as recorded: no new start says so
     finally:
+        lease.release()
         if hold_until:
             model_sleep.end_in_slot_wait(ctx, hold_key)
         _drop_gateway(gateway)

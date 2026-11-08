@@ -6,12 +6,13 @@ requested-status envelope persisted before emission — and then emitted. The
 lane, the model, the effort, the route and the effective executor are resolved
 once at dispatch, not here, so a queued child's record never names a resolution
 nobody has made yet. What comes back to the parent is the request plus the
-schedule-time facts it cannot see for itself: tree slot occupancy, the child's
+schedule-time facts it cannot see for itself: engine and pool counts, the child's
 predicted authority, and any host-minted shared cooperative tree.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -164,48 +165,6 @@ def _emit_swarm_fanout(
         log.debug("Failed to publish swarm_fanout diagnostic event", exc_info=True)
 
 
-def _subagent_slot_note(ctx: ToolContext, root_task_id: str) -> str:
-    """Compact slot-occupancy transparency for the schedule_subagent result (v6.54.3, 1.6).
-
-    Read-only queue-snapshot facts — the LLM decides what to do with them (P5);
-    nothing here gates admission (the supervisor stays authoritative). Counts are
-    from the last persisted snapshot, i.e. BEFORE this wave lands."""
-    try:
-        from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
-
-        status_root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-        snap = _load_queue_snapshot(status_root)
-        observed = queue_snapshot_observation(snap)
-    except Exception:
-        return " [tree slot observation unavailable; current occupancy is unknown]"
-    if (snap.get("_snapshot_missing") or snap.get("_snapshot_invalid")
-            or not isinstance(snap.get("running"), list) or not isinstance(snap.get("pending"), list)):
-        return " [tree slot observation unavailable; current occupancy is unknown]"
-
-    def _is_tree_subagent(row: Any) -> bool:
-        if not isinstance(row, dict):
-            return False
-        task = row.get("task") if isinstance(row.get("task"), dict) else row
-        return (
-            str(task.get("delegation_role") or "") == "subagent"
-            and str(task.get("root_task_id") or "") == str(root_task_id or "")
-        )
-
-    active = sum(1 for r in (snap.get("running") or []) if _is_tree_subagent(r))
-    queued = sum(1 for r in (snap.get("pending") or []) if _is_tree_subagent(r))
-    try:
-        from ouroboros.config import get_max_active_subagents_per_root
-        cap = int(get_max_active_subagents_per_root())
-    except Exception:
-        return ""
-    return (
-        f" [tree slots before this wave: last recorded {active}/{cap} active, {queued} queued; "
-        f"source={status_root / observed['source']}, ts={observed['ts']}, "
-        f"age_sec={observed['age_sec']}, freshness={observed['freshness']}. "
-        "This observation does not reserve or prove current capacity.]"
-    )
-
-
 def _capability_mismatch_message(selected_profile: str, missing_caps: Any) -> str:
     """v6.57.0 (1.6): name the CORRECT spawn so the parent fixes a capability mismatch
     in one move instead of burning a round guessing (the prober-without-shell incidents).
@@ -261,18 +220,18 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     signature inside the <8-parameter contract. Keys: ``task_ids``,
     ``requested_model_lane``, ``objective``, ``role``, ``depth``,
     ``parent_task_id``, ``root_task_id``, ``emitted_modes``, plus optional
-    ``write_surface`` and ``coop_shared_tree``.
+    ``write_surface`` and ``write_root`` (the resolved root and who chose it).
 
     It reports the REQUEST and nothing else. Until v6.87.28 it also printed an
     `effective_lane=` and a `CAPABILITY_DELTA` line, both produced by resolving the
     child inside the scheduling call — an answer about live availability, given
     before the child was queued, let alone started. The reduction now reaches the
     parent where it can act on it: in `[SUBTASK_OUTCOME]`, when it reads the answer
-    and decides how far to trust it. ``coop_shared_tree`` is the ONE exception by
-    design: the host-minted shared coop tree is a SCHEDULE-TIME fact (the parent's
-    effective write_root input, not a dispatch-time resolution), and withholding it
-    forced every wave to rediscover its own tree by trial and error (the submarine
-    waves' 'user_files path blocked' loop)."""
+    and decides how far to trust it. The write root is the ONE exception by design:
+    a SCHEDULE-TIME fact (the caller's, the host-minted shared coop tree or the parent
+    workspace; a self_worktree or genesis root is provisioned at admission), and
+    withholding it forced every wave to rediscover its own tree by trial and error
+    (the submarine waves' 'user_files path blocked' loop)."""
     task_ids = list(emission.get("task_ids") or [])
     requested_model_lane = str(emission.get("requested_model_lane") or "")
     objective = str(emission.get("objective") or "")
@@ -282,7 +241,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     root_task_id = str(emission.get("root_task_id") or "")
     emitted_modes = list(emission.get("emitted_modes") or [])
     write_surface = str(emission.get("write_surface") or "")
-    coop_shared_tree = str(emission.get("coop_shared_tree") or "")
+    write_root, write_source = emission.get("write_root") or ("", "")
     configured = emission.get("configured_subagent") if isinstance(
         emission.get("configured_subagent"), dict
     ) else {}
@@ -316,7 +275,11 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         )
     except Exception:
         pass
-    slot_note = _subagent_slot_note(ctx, root_task_id)
+    try:
+        from ouroboros.engine_facts import engine_pool_line
+        pool_note = "\n" + engine_pool_line(getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
+    except Exception:
+        pool_note = ""
     # v6.57.0 (1.6): preview the child's EFFECTIVE tool profile (shell/writable) so
     # the parent knows up front whether the child can run shell / write — the wasted
     # rounds where a prober child hit workspace_blocked came from neither side
@@ -326,23 +289,33 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     try:
         from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
 
-        profile_note = "\n" + summarize_subagent_profile(
+        profile_note = ("\nsupervisor: " if route_kind == "agent_session" else "\n") + summarize_subagent_profile(
             predicted_subagent_profile(write_surface=write_surface))
     except Exception:
         pass
-    coop_note = ""
-    if str(coop_shared_tree or "").strip():
-        try:
-            import pathlib as _pl
-
-            _tree = _pl.Path(coop_shared_tree)
-            coop_note = (
-                f"\nshared coop tree: {_tree} — children write there "
-                "(write_surface=external_workspace); you read it via "
-                f"root=subagent_projects, path={_tree.name!r}/…"
-            )
-        except Exception:
-            coop_note = f"\nshared coop tree: {coop_shared_tree}"
+    leaf_scope_note = ""
+    if route_kind == "agent_session" and not write_surface:
+        selected = emission.get("input_files")
+        selected_note = " Selected input_files are retained; preparation is not a read." if selected else ""
+        workspace = str(emission.get("workspace_root") or "").strip()
+        if workspace:
+            leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
+        else:
+            intent = emission.get("resource_intent") or {}
+            source = ("folderless task/artifact lineage and selected files" if intent.get("kind") == "explicit_none"
+                      else "inherited repository/folder")
+            leaf_scope_note = f"\nagent_session selected source: {source}."
+        leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
+                            "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
+    if write_surface in {"self_worktree", "genesis"}:
+        write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
+    elif not write_surface:
+        write_note = "\nwrite root: none (read-only child)"
+    else:
+        write_note = f"\nwrite root: {write_root} ({write_source})"
+        if write_source == "host-minted coop tree":
+            write_note += (" — children write there (write_surface=external_workspace); you read it via "
+                           f"root=subagent_projects, path={Path(write_root).name!r}/…")
     commitment = _schedule_commitment(ctx, route_kind, emission)
     legacy_note = (
         "\nDEPRECATED_LEGACY_SELECTOR: deterministically mapped to this exact configured row; "
@@ -354,10 +327,12 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         "(api_model); write_surface controls read/write authority."
         if route_kind == "api_model" and emission.get("requested_access") is not None else ""
     )
+    inputs_note = ("\ninput_files (retained before queueing; prepared is not read): "
+                   + json.dumps(emission["input_files"], ensure_ascii=False) if emission.get("input_files") is not None else "")
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{slot_note}{profile_note}{coop_note}{legacy_note}{access_note}"
+        f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{write_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
 
@@ -682,6 +657,8 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
                 # child verify receipts would "support" claims the child never owned.
                 "acceptance_claims": child_claims,
                 "success_criteria": [],
+                # A direct handbook answer, true or false, is the parent's own: no child inherits it.
+                "context_requires_development": None,
                 **input_source_fields,
             } if isinstance(parent_contract, dict) else {
                 "delegation_budget": delegation_budget,
@@ -785,6 +762,15 @@ def _inherited_execution_allowance(ctx: ToolContext) -> Any:
     from ouroboros.model_wait import explicit_execution_window_remaining
 
     return explicit_execution_window_remaining(ctx)
+
+
+def _schedule_resource_intent(ctx: ToolContext, metadata: Dict[str, Any], workspace_root: str) -> Dict[str, Any]:
+    """Resolve the requested child's resource scope once, before its requested row is persisted."""
+    if workspace_root:
+        return {"kind": "explicit_resource", "root": workspace_root}
+    if folderless_scratch_dir(ctx) is not None:
+        return {"kind": "explicit_none"}
+    return dict(metadata.get("resource_intent") or {})
 
 
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
@@ -934,14 +920,15 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if _drive_err:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", _drive_err)
     child_attachment_authority, attachment_error = ({"attachment_manifest": []}, "")
-    if fields.get("input_sources") != "declared" or fields.get("attachment_paths"):  # selected documents are declared material
+    input_error = _prepare_child_input_files(ctx, fields, tid)  # first: its refusal leaves no copy for the child
+    if not input_error and (fields.get("input_sources") != "declared" or fields.get("attachment_paths")):  # selected documents are declared material
         child_attachment_authority, attachment_error = _materialize_child_attachment_manifest(
             parent_contract, child_drive or status_drive_root, tid, owner_drive=Path(ctx.drive_root),
             owner_task_id=parent_task_id, custody_drive=canonical_data_root(ctx), selected=fields.get("attachment_paths"),
             declared=fields.get("input_sources") == "declared")
-    if attachment_error:
+    if attachment_error or input_error:
         shutil.rmtree(task_state_dir(status_drive_root, tid), ignore_errors=True)
-        return f"⚠️ SUBTASK_ATTACHMENT_ERROR: {attachment_error}"
+        return f"⚠️ SUBTASK_ATTACHMENT_ERROR: {attachment_error}" if attachment_error else input_error
 
     # C3.1: propagate and narrow the parent's typed delegation intent.
     child_delegation_budget = child_budget_for_schedule(
@@ -952,7 +939,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         intent_note=params.get("delegation_intent", ""),
         requested_depth=params.get("requested_depth", 0),
     )
-
     child_contract = _build_child_subagent_contract({
         "tid": tid, "objective": objective, "expected_output": expected_output, "constraints": constraints,
         "workspace_root": workspace_root, "workspace_mode": workspace_mode, "parent_project_id": parent_project_id,
@@ -964,9 +950,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         **({"input_sources": fields["input_sources"]} if "input_sources" in fields else {}),
         **child_attachment_authority,
     })
-    # The requested-status envelope carries the REQUEST. Its derived half stays
-    # empty until dispatch fills it, so a queued child's public description never
-    # names a lane, a model or an effort that no resolution has produced.
+    # Requested-status carries intent; derived dispatch fields stay empty until dispatch.
     envelope = build_subagent_envelope(
         task_id=tid,
         parent_task_id=parent_task_id,
@@ -977,6 +961,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         executor=requested_executor,
         status=STATUS_REQUESTED,
     )
+    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
     intent_fields = {
         "model_lane": requested_model_lane,
         "requested_model_lane": requested_model_lane,
@@ -988,9 +973,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
-                                        "attachment_import", "document_import_intent") if key in fields},
+                                        "attachment_import", "document_import_intent", "prepared_input_files", "memory_view") if key in fields},
+        "resource_intent": resource_intent,
     }
-    owner_origin = {**governing_words_for_schedule(ctx), **declared_words_fact(child_contract)}  # the owner's words, by value
+    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
     child_facts = {
         **({"execution_timeout_sec": execution_left} if execution_left is not None else {}),
         "objective": objective,
@@ -1022,8 +1008,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "depth": new_depth,
         "ts": utc_now_iso(),
         "write_surface": requested_surface,
-        "resource_intent": ({"kind": "explicit_none"} if folderless_scratch_dir(ctx) is not None
-                            else dict(metadata.get("resource_intent") or {})),
+        "resource_intent": resource_intent,
         "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin,
                             **({"evolution_root_task_id": metadata.get("evolution_root_task_id") or root_task_id}
                                if metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction") else {})},  # tree origin: consciousness label/level + owner words
@@ -1074,18 +1059,39 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "root_task_id": root_task_id_seed or current_task_id,
         "emitted_modes": [_emit_control_event(ctx, evt)],
         "write_surface": requested_surface,
+        **{"workspace_root": workspace_root, "workspace_mode": workspace_mode,
+           "resource_intent": evt["resource_intent"]},
         "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
-        "requested_effort": fields["requested_effort"],
-        # Host-minted shared coop tree only (a caller-supplied write_root is the
-        # parent's own knowledge already).
-        "coop_shared_tree": (
-            effective_write_root
-            if effective_write_root and effective_write_root != str(params.get("write_root", "") or "")
-            else ""
-        ),
+        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"),
+        "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
+                       else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),
     })
+
+
+def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_task_id: str) -> str:
+    """Check and retain the child's ``input_files`` before it is queued; "" or the published refusal.
+
+    The caller's read authority and the child's read-only limits under its own resource
+    policy must both admit each file; the receipt rides ``fields['prepared_input_files']``."""
+    if fields.get("input_files") is None:
+        return ""
+    from ouroboros.delegate_readonly_inputs import InputSelectionError, schedule_selected_inputs
+    from ouroboros.delegate_shared import refusal_host_code
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS
+
+    try:
+        fields["prepared_input_files"] = schedule_selected_inputs(
+            ctx, fields["input_files"], child_task_id, fields.get("resource_policy")) if fields["input_files"] else []
+        return ""
+    except InputSelectionError as exc:
+        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "
+                        f"input_files: {json.dumps(exc.results, ensure_ascii=False)}"), exc.code
+    except (OSError, ValueError) as exc:
+        text, reason = f"⚠️ input_files_unavailable: {type(exc).__name__}: {exc} The child was not queued.", "input_files_unavailable"
+    code = refusal_host_code(reason)
+    return _publish_scheduling_refusal(ctx, TOOL_CODE_SPECS[code].status, code, text, reason=reason)
 
 
 def _context_task_depth(ctx: ToolContext) -> tuple[int, str]:

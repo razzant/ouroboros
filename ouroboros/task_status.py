@@ -37,6 +37,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
+from ouroboros.task_reads import TaskReads
 from ouroboros.task_store import select_lineage
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
@@ -52,7 +53,7 @@ from ouroboros.task_results import (
     load_task_result,
     validate_task_id,
 )
-from ouroboros.queue_observation import load_queue_document, queue_stamp
+from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -215,13 +216,13 @@ def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     return load_queue_document(drive_root)
 
 
-# GR7-1a freshness bound for the live-ownership twin. The supervisor persists
-# queue.alive on every main-loop pass (nominally 0.5s apart), so a stamp
-# this old means the writer is gone or badly wedged — the twin can no longer
-# trust it to prove a DEAD worker. Sized well above 2× the nominal tick to
-# absorb ordinary loop hitches (task_done processing, git ops) without turning
-# every cancel into a fail-open pass.
-_SNAPSHOT_OWNERSHIP_FRESH_SEC = 10.0
+# GR7-1a freshness bound for the live-ownership twin. The supervisor refreshes
+# queue.alive inside this bound (``queue_publication.QUEUE_ALIVE_REFRESH_SEC``), so a
+# stamp this old means the writer is gone or badly wedged — the twin can no longer
+# trust it to prove a DEAD worker. Sized well above the refresh cadence to absorb
+# ordinary loop hitches (task_done processing, git ops) without turning every
+# cancel into a fail-open pass. One bound for publisher and readers.
+_SNAPSHOT_OWNERSHIP_FRESH_SEC = QUEUE_ALIVE_FRESH_SEC
 
 
 def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) -> Dict[str, Any]:
@@ -275,6 +276,20 @@ def execution_owner_record(drive_root: Any, task: Dict[str, Any], kind: str) -> 
         from ouroboros.review_operation import controller_identity
 
         record["controller"] = controller_identity()
+    # The carrier facts beside the origin (``task_carrier``): a pooled attempt is a
+    # project-lane worker's; a conversation-lane admission stamped its lane and
+    # executor on the task before this record is (re)bound, and they travel with
+    # the kind. A legacy record names neither (additive; old rows decode).
+    from ouroboros.task_carrier import EXECUTOR_WORKER, EXECUTORS, LANE_CONVERSATION, LANE_PROJECT
+
+    prior = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if kind == "pooled":
+        record.update(lane=LANE_PROJECT, executor=EXECUTOR_WORKER)
+    else:
+        if prior.get("lane") in {LANE_PROJECT, LANE_CONVERSATION}:
+            record["lane"] = prior["lane"]
+        if prior.get("executor") in EXECUTORS:
+            record["executor"] = prior["executor"]
     return record
 
 
@@ -293,6 +308,8 @@ def task_execution_observation(
     Missing inline evidence is unknown, never pooled death. Local observations
     are root-bound. The direct fragment lists addressable turns, not every live
     stack, so absence cannot settle a task. No observation authorizes replay.
+    ``queue_ownership`` is the queue's custody of a row, not admission to run: the
+    effective read adds a PENDING row's ``dispatch`` from its ``current_stop``.
     """
     root = _resolved_root(str(drive_root))
     tid = str(result.get("task_id") or result.get("id") or "")
@@ -325,7 +342,13 @@ def task_execution_observation(
     snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
     queue_seen = queue_snapshot_observation(snapshot)
     queued, _task = _queue_task_status(snapshot, tid)
-    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED}:
+    # The queue never owns a Presence turn's carried body: it runs in a conversation-lane carrier (or the
+    # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
+    # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
+    # the queue-ownership reading (restore relies on it to dedup a live direct root's running row), and so
+    # does a moved turn's saved work the queue keeps: parked, or continued on a project slot (#2566).
+    carried = queued == STATUS_RUNNING and (_task.get("_execution_owner") or {}).get("lane") == "conversation"
+    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and (kind != "presence" or not carried):
         return {**observation, **queue_seen, "kind": "pooled", "state": "active",
                 "reason": "queue_ownership", "status": queued}
     try:
@@ -340,17 +363,7 @@ def task_execution_observation(
             return {**observation, "kind": "direct", "state": "active", "source": "local_direct", "reason": "local_execution"}
     except Exception:
         pass  # absence of a positive witness is never a negative observation
-    fragment = load_queue_document(root, "direct_roots.json")
-    # Both existing supervisor fragments use the same 10s ownership freshness
-    # (peer_roster._projection_observation); retain the distinct source name.
-    direct_seen = {**queue_snapshot_observation(fragment), "source": "state/direct_roots.json"}
-    rows = fragment.get("roots")
-    if direct_seen["fresh"] and isinstance(rows, list) and any(
-        isinstance(row, dict) and str(row.get("task_id") or "") == tid for row in rows
-    ):
-        return {**observation, **direct_seen, "kind": "direct", "state": "active", "reason": "listed_direct"}
-    return {**observation, "queue_snapshot": queue_seen,
-            "direct_roots": {**direct_seen, "incomplete": bool(fragment.get("incomplete"))}}
+    return {**observation, "queue_snapshot": queue_seen}
 
 
 def task_has_live_queue_ownership(drive_root: pathlib.Path, task_id: str) -> bool:
@@ -603,6 +616,8 @@ def _is_stale_orphan_running_task(
 
 
 PRESENCE_ATTEMPT_LOST = "presence_attempt_lost"
+PRESENCE_ATTEMPT_LOST_NOTICE = ("PRESENCE_ATTEMPT_LOST: this Presence turn's executor ended without a terminal result; "
+                                "whether its reply or tools took effect is unknown, and it is never re-run.")
 
 
 def _project_lost_attempt(merged: Dict[str, Any], reason: str, prior_status: str, notice: str) -> None:
@@ -752,6 +767,13 @@ def load_effective_task_result(
     )
 
 
+class _SweepReads(TaskReads):
+    """One sweep's queue document, intents and events tail, read once; WHOLE documents (a heal persists them)."""
+
+    def load(self, root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+        return load_task_result(root, task_id)
+
+
 def reconcile_orphaned_running_tasks(
     drive_root: Any, *, exclude_task_ids: frozenset[str] = frozenset(),
     expired_quizzes: Optional[List[Any]] = None,
@@ -775,12 +797,14 @@ def reconcile_orphaned_running_tasks(
     ``updated_at`` at decision time, and, given ``write_guard`` (the supervisor's
     queue-ownership fence, queue -> row lock order), by live queue ownership; the
     monotonic guard in ``write_task_result`` protects a newer terminal/cancel write.
-    Idempotent; safe at boot and on a periodic tick.
+    Idempotent; safe at boot and on a periodic tick. Candidates are read in one batch, the sweep's other
+    facts once (``_SweepReads``); rows a caller's guard refuses anyway (``queue_owned_task_ids``) are excluded unread.
 
     ``expired_quizzes`` collects ``(task_id, quiz_id)`` for every question this
     sweep expired, so the supervisor-side caller can send the same live frame the
     task-done seam sends. This module stays free of a supervisor import.
     """
+    from ouroboros.cancel_intents import has_active_intent
     from ouroboros.task_custody import attempt_basis
     from ouroboros.task_results import write_task_result
     from ouroboros.obligations import result_rows
@@ -792,9 +816,17 @@ def reconcile_orphaned_running_tasks(
                    if row.get("status") in {STATUS_RUNNING, STATUS_INTERRUPTED}]
     except Exception:
         return 0
+    reads = _SweepReads(root)
     for row in running:
         task_id = str(row.get("task_id") or row.get("id") or "")
         if not task_id or task_id in exclude_task_ids:
+            continue
+        try:
+            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot, reads=reads)
+        except Exception:
+            continue
+        eff_status = str(effective.get("status") or "").strip().lower()
+        if eff_status not in SETTLED_STATUSES:
             continue
         # An ACTIVE cancel intent means cancellation custody already owns this
         # row and will settle it with its own outcome and text; at boot that
@@ -802,20 +834,12 @@ def reconcile_orphaned_running_tasks(
         # would win the race and publish infra_failed for a task the owner was
         # told is being cancelled. An UNREADABLE intent store is the same
         # refusal: this sweep never settles over an unknown cancel authority.
+        # Asked of the rows this sweep would settle, right before the write.
         try:
-            from ouroboros.cancel_intents import has_active_intent
-
             if has_active_intent(root, task_id, strict=True):
                 continue
         except Exception:
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
-            continue
-        try:
-            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot)
-        except Exception:
-            continue
-        eff_status = str(effective.get("status") or "").strip().lower()
-        if eff_status not in SETTLED_STATUSES:
             continue
         persist_fields = {
             key: effective[key]
@@ -1088,11 +1112,21 @@ def effective_task_result(
         queue_snapshot = (reads.queue_snapshot(drive_root) if reads is not None
                           else _load_queue_snapshot(pathlib.Path(drive_root)))
         queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
-        if queue_status and queue_status != "unknown":
+        # The queue never owns a Presence turn (its body runs in a conversation-lane carrier or the
+        # disclosed degraded executor, admitted to a RUNNING snapshot row): a stale lane row a dead
+        # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
+        # liveness is the carrier/controller's, decided below exactly as the Host work view decides it.
+        _meta = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
+        presence_turn = isinstance(_meta.get("presence"), dict) and queue_status == STATUS_RUNNING and (
+            queue_task.get("_execution_owner") or {}).get("lane") == "conversation"  # a moved turn's saved row reads the queue
+        if queue_status and queue_status != "unknown" and not presence_turn:
             merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             from ouroboros.project_admission import project_hold_fact
+            from ouroboros.work_stop import task_current_stop
 
             merged["project_admission_hold"] = project_hold_fact(queue_task)
+            # The census's reading of the same row: a held row stays ``scheduled`` in its queue.
+            merged["current_stop"] = task_current_stop(drive_root, queue_snapshot, task_id)
             for key in (
                 "parent_task_id",
                 "root_task_id",
@@ -1112,9 +1146,7 @@ def effective_task_result(
             if _presence_attempt_lost(pathlib.Path(drive_root), merged, queue_snapshot):
                 # The queue never owns a Presence turn; its own end fact decides, as the work view does.
                 terminal_projection = "presence_attempt_lost"
-                _project_lost_attempt(merged, PRESENCE_ATTEMPT_LOST, parent_status, (
-                    "PRESENCE_ATTEMPT_LOST: this Presence turn's executor ended without a terminal result; "
-                    "whether its reply or tools took effect is unknown, and it is never re-run."))
+                _project_lost_attempt(merged, PRESENCE_ATTEMPT_LOST, parent_status, PRESENCE_ATTEMPT_LOST_NOTICE)
             elif queue_status == "unknown":
                 merged["queue_reconciliation_warning"] = "queue snapshot missing or invalid"
             elif _terminal_failure_from_outcome(merged):
@@ -1149,6 +1181,10 @@ def effective_task_result(
     # projects the same pending state.
     _apply_cancel_state_projection(pathlib.Path(drive_root), task_id, merged, reads)
     merged["execution_observation"] = task_execution_observation(drive_root, merged, queue_snapshot=queue_snapshot)
+    observed = merged["execution_observation"]
+    if observed.get("reason") == "queue_ownership" and observed.get("status") == STATUS_SCHEDULED:
+        held = (merged.get("current_stop") or {}).get("state")
+        observed["dispatch"] = "unknown" if held == "unknown" else "held" if held else "queued"
     if terminal_projection:
         # This read inferred a terminal; a later persisted terminal is a recorded
         # fact even when its historical status_reconciled_from marker survives.
@@ -1206,7 +1242,7 @@ def wait_for_effective_tasks(
     intent to a real terminal shortly after. The wait stays bounded by
     ``timeout_sec`` either way, and ``live_child_status`` reports a pending
     cancellation honestly (``cancel_pending``) instead of collapsing it to
-    terminal/unknown."""
+    terminal/unknown, and a row its ``current_stop`` holds as ``held``."""
     ids = []
     for item in task_ids:
         try:
@@ -1283,6 +1319,8 @@ def wait_for_effective_tasks(
                 # pending) or unknown. Covers the legacy latch too (the effective
                 # read projects it as cancel_state=pending).
                 _st = "cancel_pending"
+            elif (row.get("current_stop") or {}).get("state") == "held" and eff_status not in SETTLED_STATUSES:
+                _st = "held"  # in the queue, but a current stop keeps it from running
             live[tid] = _st or ("terminal" if eff_status in SETTLED_STATUSES else "unknown")
         out["live_child_status"] = live
     except Exception:
@@ -1503,9 +1541,20 @@ def format_subagent_absorption_message(
             f"\n[NOTE] {omitted} child result(s) omitted for the context budget — "
             "pull them explicitly with get_task_result if you need them."
         )
-    if pending:
-        lines.append("\n[STILL RUNNING — not yet absorbable]")
-        for child in pending:
+    import json
+
+    from ouroboros.work_stop import stop_for_reader
+
+    # A queued status is no permission to run: a child its current stop holds is listed apart, beside that stop
+    # as this parent may act on it (``stop_for_reader``: the request door when it is this parent's to ask for).
+    stops = [stop_for_reader(child.get("current_stop") or {}, child, parent) for child in pending]
+    for held, header in ((False, "[STILL RUNNING — not yet absorbable]"),
+                         (True, "[HELD BY A CURRENT STOP — not yet absorbable: each reaches no terminal state until "
+                                "its stop is released; a door named here is a request the supervisor still checks]")):
+        group = [(child, stop) for child, stop in zip(pending, stops) if (stop.get("state") == "held") is held]
+        if group:
+            lines.append("\n" + header)
+        for child, stop in group:
             cancel_note = (
                 " (cancel pending — supervisor teardown in progress)"
                 if str(child.get("cancel_state") or "") == "pending"
@@ -1513,7 +1562,8 @@ def format_subagent_absorption_message(
             )
             lines.append(
                 f"- {child.get('task_id') or child.get('id')}: {child.get('status')}{cancel_note}, "
-                f"child_result_sha256={_child_result_sha256(child)}"
+                + (f"current_stop={json.dumps(stop, ensure_ascii=False, sort_keys=True)}, " if stop else "")
+                + f"child_result_sha256={_child_result_sha256(child)}"
             )
     if descendants:
         lines.append(

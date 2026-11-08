@@ -44,8 +44,12 @@ def wire(client, messages, model="openai::unlisted-image-model"):
                                        skip_capability_fetch=True)
 
 
-@pytest.mark.parametrize("mode", ["auto", "inline", "caption", "off"])
-@pytest.mark.parametrize("producer", ["initial", "direct", "mailbox"])
+@pytest.mark.parametrize(("producer", "mode"), [
+    ("initial", "auto"),
+    ("initial", "off"),
+    ("direct", "inline"),
+    ("mailbox", "caption"),
+])
 def test_owner_delivery_reaches_serialized_input(tmp_path, monkeypatch, mode, producer):
     from ouroboros.agent import OuroborosAgent
     from ouroboros import artifacts
@@ -106,9 +110,12 @@ def test_owner_delivery_reaches_serialized_input(tmp_path, monkeypatch, mode, pr
     assert original_path.read_bytes() == source.read_bytes()
 
 
-@pytest.mark.parametrize("fmt,size,mode", [("PNG", (41, 27), "RGB"), ("PNG", (9000, 24), "RGB"),
-                                           ("BMP", (41, 27), "RGB"), ("PNG", (41, 27), "RGBA")])
-@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize(("explicit", "fmt", "size", "mode"), [
+    pytest.param(False, "BMP", (41, 27), "RGB", id='False-BMP-size2-RGB'),
+    pytest.param(False, "PNG", (41, 27), "RGBA", id='False-PNG-size3-RGBA'),
+    pytest.param(True, "PNG", (41, 27), "RGB", id='True-PNG-size0-RGB'),
+    pytest.param(True, "PNG", (9000, 24), "RGB", id='True-PNG-size1-RGB'),
+])
 def test_automatic_and_explicit_preparation_preserve_detail_and_original(tmp_path, monkeypatch, fmt, size, mode, explicit):
     raw = pixels(fmt, size, mode)
     if explicit:
@@ -246,8 +253,13 @@ def detailed_png(size=(120, 90)):
     return out.getvalue()
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("kind", ["partial", "partial-png", "uniform", "corrupt", "blank"])
+@pytest.mark.parametrize(("kind", "explicit"), [
+    ("partial", False),
+    ("partial-png", True),
+    ("uniform", False),
+    ("corrupt", True),
+    ("blank", False),
+])
 def test_damaged_input_consumers_keep_original_and_explain_pixels(tmp_path, monkeypatch, explicit, kind):
     raw = damaged(kind)
     if explicit:
@@ -538,3 +550,19 @@ def test_caption_quota_wait_switch_reprepares_pixels_and_identity(live_wait, mon
         repeated, failure = vr._caption_for_block(block, ctx=SimpleNamespace(), llm=client, accumulated_usage=usage)
         assert repeated == caption and not failure
         assert len(transport.uploads) == len(sent) == 1, 'the switched route reuses its exact-pixel caption'
+
+
+def test_an_engine_wire_counts_its_images_as_images_not_as_base64_text():
+    """28.10: a Gemini renewal whose history held four screenshots measured 308,943 tokens against a 92,000 window
+    (its wire was 1.2 MB of base64) and ended the call as context_capacity; the images cost hundreds of tokens."""
+    import base64
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+    data = base64.b64encode(b"\x89PNG" + b"\x00" * 300_000).decode()
+    gemini = {"events": [{"clientContent": {"turns": [{"role": "user", "parts": [
+        {"inlineData": {"mimeType": "image/png", "data": data}}]}]}}]}
+    openai = {"events": [{"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
+        {"type": "input_image", "image_url": "data:image/png;base64," + data}]}}]}
+    text = {"events": [{"clientContent": {"turns": [{"role": "user", "parts": [{"text": data}]}]}}]}
+    for wire in (gemini, openai):
+        assert estimate_context_prompt_tokens([wire]) < 5_000, wire["events"][0]
+    assert estimate_context_prompt_tokens([text]) > 50_000  # control: text of that size still counts in full

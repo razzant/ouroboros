@@ -33,7 +33,6 @@ import math
 import os
 import pathlib
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -65,8 +64,19 @@ from devtools.benchmarks.common.server_runner import (
     seed_owner_state,
 )
 from devtools.e2e_live import stub_lane, traces
+from devtools.e2e_live.budget import (  # noqa: F401 - the money ledger's owner; its names stay readable from the runner
+    LANE_BUDGET_FLOOR_USD,
+    RESERVATION_RULE,
+    LaneSpendAbsent,
+    RunBudget,
+    budget_preflight,
+    dispatch_order,
+    lane_spend,
+    lane_spend_fact,
+)
 from devtools.e2e_live.scenarios import SCENARIOS, STAND_PANEL_SETTINGS, LaneContext, diff_sha256, head_sha, now_iso
 from devtools.e2e_live.ui_probe import resolve_ui_client
+from ouroboros.install_identity import acting_as
 from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS, declared_model_settings
 
 MAX_LANES = 6
@@ -89,12 +99,6 @@ PROBE_MIN_INTERVAL_SEC = 60.0  # two provider requests per probe: never more oft
 PROBE_BACKOFF_MAX_SEC = 900.0  # consecutive probe failures double the wait up to here
 SEED_POLICY = "detached_clone_of_ref"
 PROCFS_AVAILABLE = os.path.isdir("/proc")   # the orphan scan reads /proc environ: Linux only
-# A lane's TOTAL_BUDGET must stay POSITIVE: the runtime reads a non-positive value as "no finite
-# global budget" (``settings_setup_contract.resolve_total_budget_usd``), the opposite of a cap.
-LANE_BUDGET_FLOOR_USD = 0.01
-RESERVATION_RULE = (f"max({LANE_BUDGET_FLOOR_USD:g}, per_task_usd x (root_tasks + 1 if --self-mod and the scenario absorbs else root_tasks)) "
-                    "— the runtime fences each root task tree at OUROBOROS_PER_TASK_COST_USD; --self-mod adds one root for the post-task "
-                    "cycle of a lane that promotes (SM1; SW1/SK1 pin it off). The lane's TOTAL_BUDGET is that reservation — the true fence")
 
 
 def _log(msg: str) -> None:
@@ -202,7 +206,9 @@ def write_settings(path: pathlib.Path, cfg: dict) -> str:
     """0600-before-content write; returns the sha256 of the exact bytes on disk."""
     raw = _settings_json_bytes(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Byte-exact: a Windows descriptor is text mode without O_BINARY and would write each LF as CRLF, so the digest
+    # returned here (the one a strict server checks) would name bytes that are not on disk.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, 0o600)   # O_CREAT's mode applies on creation only
@@ -228,161 +234,6 @@ def credit_preflight(key: str, *, timeout: float = 10.0) -> dict:
     bounds = [v for v in (limit, credits) if v is not None]
     return {"key_limit_remaining_usd": limit, "account_credits_usd": credits,
             "remaining_usd": min(bounds) if bounds else None}
-
-
-# --------------------------------------------------------------------------- #
-# The run-wide money ledger
-# --------------------------------------------------------------------------- #
-
-def lane_spend(data_root: pathlib.Path) -> tuple[float, int]:
-    """``(USD over the lane's SETTLED physical-attempt rows, unknown-cost rows)`` from ``state/usage.sqlite``, the money authority (``llm_usage`` misses review/advisory/synthesis: 114.81 vs 141.63), or from the journal of a journal-era ``--seed`` lane, never zero."""
-    store, journal = (pathlib.Path(data_root) / "state" / name for name in ("usage.sqlite", "usage_attempts.jsonl"))
-    if store.is_file():
-        conn = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
-        try:
-            costs = [None if c is None else float(c) for (c,) in conn.execute("SELECT cost_usd FROM attempts WHERE state='settled' AND cost_final=1")]
-        finally:
-            conn.close()
-    else:
-        from ouroboros.utils import iter_jsonl_objects  # skips a torn line, as the journal reader always did
-        costs = [r["cost_usd"] if type(r.get("cost_usd")) in (int, float) else None for r in (iter_jsonl_objects(journal) if journal.is_file() else ()) if r.get("state") == "settled" and r.get("cost_final") is True]
-    priced = [c for c in costs if c is not None]
-    return sum(priced), len(costs) - len(priced)
-
-
-class RunBudget:
-    """The RUN-WIDE ledger behind ``--total-budget`` (the first paid run gave every lane the whole cap).
-
-    Reservation rule, per attempt: ``per_task_usd x (root_tasks + int(self_mod and absorbs))`` — the runtime fences
-    each ROOT task tree at ``OUROBOROS_PER_TASK_COST_USD`` and children spend under their root's ceiling, so SW1 (one
-    root, two scouts) reserves for one root, SK1 (author + dispatch) for two, and ``--self-mod`` adds one root for
-    the post-task cycle of a lane that promotes (SM1 only), all under the lane fence. Admission asks, PER attempt:
-    ``spent + reservation > cap`` — it can NEVER fit, refused and recorded ``not_run`` (a later, smaller attempt is
-    asked on its own; nothing halts the run); otherwise it reserves only when no earlier-dispatched attempt is
-    still asking (FIFO by ``dispatch_index``, see ``admit``) and ``spent + reserved(in flight) + reservation <=
-    cap``, else it waits on the ledger and re-asks after every settle (the first paid run wrote SW1/SK1 off at
-    t=+21 min while the blocker was two SM1 reservations in flight, not the cap). ``spent`` is re-read from the
-    lanes' durable usage on every question (it only grows, so a waiter can end refused — its ``waited_sec`` is
-    recorded). Each lane's TOTAL_BUDGET is its OWN reservation (``ceiling``): the ceilings in flight are disjoint
-    and their sum plus the settled spend never exceeds the cap. No ``halted`` flag: ``refusals`` lists every
-    refused attempt's facts, ``first_refused`` the first.
-    """
-
-    def __init__(self, cap_usd: float, per_task_usd: float, reader: Callable[[pathlib.Path], tuple[float, int]] | None = None,
-                 *, self_mod: bool = False) -> None:
-        self.cap, self.per_task, self.self_mod = float(cap_usd), float(per_task_usd), bool(self_mod)
-        self._read = reader or lane_spend
-        self._lock = threading.Condition()                         # reserve/refuse/settle wake every waiting admission
-        self._pending: dict[int, str] = {}                         # dispatch index -> attempt name, while asking
-        self._live: dict[tuple, tuple[pathlib.Path, float]] = {}   # job -> (data root, reservation)
-        self._final: dict[tuple, tuple[float, int]] = {}           # job -> (spent, unknown rows)
-        self.refusals: list[dict] = []
-        self.not_run: list[str] = []
-
-    def reservation(self, root_tasks: int, absorbs: bool = False) -> float:
-        """The ONE effective ceiling of an attempt (admission, the lane's TOTAL_BUDGET and the reports carry this
-        same number): ``per_task_usd x (root_tasks + int(self_mod and absorbs))``, floored, never rounded up."""
-        return max(LANE_BUDGET_FLOOR_USD, self.per_task * (max(1, int(root_tasks or 1)) + int(self.self_mod and absorbs)))
-
-    def _spent_locked(self) -> tuple[float, int]:
-        rows = list(self._final.values()) + [self._read(root) for root, _reserved in self._live.values()]
-        return sum((usd for usd, _n in rows), 0.0), sum(n for _usd, n in rows)
-
-    def _reserved_locked(self) -> float:
-        return sum(reserved for _root, reserved in self._live.values())
-
-    def admit(self, job: tuple, root_tasks: int, data_root: pathlib.Path, *, dispatch_index: int,
-              on_wait: Callable[[str], None] | None = None, absorbs: bool = False) -> tuple[bool, dict]:
-        """FIFO by ``dispatch_index`` (``dispatch_order``'s position): an attempt reserves only when no earlier-
-        dispatched attempt is still asking and the cap has room beside the reservations in flight; one that can
-        never fit is refused at once and leaves the line. Without the line the freed lane's NEXT job took the lock
-        before the woken waiter every time (300/300: settle in ``run_attempt``'s finally, return, the executor's
-        next job, ``admit`` on the same thread), so a round overflowing the cap let later attempts leapfrog the
-        waiter. No deadlock: a waiter waits only while something is in flight or an earlier attempt is asking; the
-        earliest never waits on the line and, with nothing in flight, either fits or is refused; reserve, refusal
-        and settle wake every waiter, the line predicate re-parks the later ones. Cost: a large head can idle lanes
-        a smaller attempt would use. ``on_wait`` runs UNDER the budget lock (it must not touch the budget), told
-        once, with the reason the wait begins with; ``facts["waited_sec"]`` is how long."""
-        need, name, waited_from = self.reservation(root_tasks, absorbs), f"{job[0]}_a{job[1]}", None
-        with self._lock:
-            self._pending[dispatch_index] = name
-            try:
-                while True:
-                    spent, unknown = self._spent_locked()
-                    reserved = self._reserved_locked()
-                    waited = round(time.monotonic() - waited_from, 3) if waited_from is not None else 0.0
-                    facts = {"cap_usd": self.cap, "spent_usd": round(spent, 4), "reserved_usd": round(reserved, 4),
-                             "reservation_usd": need, "unknown_cost_rows": unknown, "waited_sec": waited}
-                    head = min(self._pending)                      # the earliest attempt still asking
-                    if spent + need > self.cap:                    # can never fit: refused, this attempt only
-                        self.refusals.append({"attempt": name, "reason": "budget_cap", "at": now_iso(), **facts})
-                        self.not_run.append(name)
-                        return False, facts
-                    if head < dispatch_index or (reserved > 0 and spent + reserved + need > self.cap):
-                        if waited_from is None:
-                            waited_from = time.monotonic()
-                            if on_wait is not None:
-                                on_wait((f"waiting — behind {self._pending[head]} in dispatch order" if head < dispatch_index
-                                         else f"waiting — in flight reserved ${reserved:.2f}")
-                                        + f", needs ${need:.2f}, spent ${spent:.2f}, cap ${self.cap:.2f}")
-                        self._lock.wait()
-                        continue
-                    self._live[job] = (pathlib.Path(data_root), need)
-                    return True, facts
-            finally:                                               # out of the line, even on a reader error: the next may reserve
-                del self._pending[dispatch_index]
-                self._lock.notify_all()
-
-    def ceiling(self, job: tuple) -> float:
-        """The lane's TOTAL_BUDGET: its own reservation — immutable, disjoint from every other
-        lane's, never non-positive (the runtime reads a non-positive budget as NO cap)."""
-        with self._lock:
-            entry = self._live.get(job)
-            return entry[1] if entry else LANE_BUDGET_FLOOR_USD   # exactly what admission reserved
-
-    def settle(self, job: tuple) -> None:
-        with self._lock:
-            entry = self._live.pop(job, None)
-            if entry is not None:
-                self._final[job] = self._read(entry[0])
-            self._lock.notify_all()                                # every waiter re-asks against the new ledger
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            spent, unknown = self._spent_locked()
-            return {"cap_usd": self.cap, "per_task_usd": self.per_task, "reservation_rule": RESERVATION_RULE,
-                    "spent_usd": round(spent, 4), "reserved_usd": round(self._reserved_locked(), 4),
-                    "unknown_cost_rows": unknown, "lanes_in_flight": len(self._live), "lanes_settled": len(self._final),
-                    "refusals": [dict(r) for r in self.refusals],
-                    "first_refused": self.refusals[0]["attempt"] if self.refusals else None,
-                    "attempts_not_run": list(self.not_run)}
-
-
-def budget_preflight(budget: RunBudget, scenario_ids: list[str], attempts: int, lanes: int) -> dict:
-    """The reservation arithmetic BEFORE any lane spends, in ``credit_preflight``'s typed shape: a row per
-    scenario, the worst case ``sum(reservation x attempts)`` against the cap, the per-ROUND worst case (the
-    ``lanes`` largest reservations, ONE attempt per scenario — above the cap the round's last lane WAITS on
-    a settle, no refusal; with ``lanes`` above the scenario count it understates what admission can put in
-    flight) and ``unreachable``: a reservation above the cap, or equal to it with attempts >= 2 (the second
-    can never be admitted after any spend). No override flag: the operator changes the flags."""
-    rows = []
-    for sid in scenario_ids:
-        need = budget.reservation(SCENARIOS[sid].root_tasks, SCENARIOS[sid].expects_absorb)
-        rows.append({"scenario": sid, "root_tasks": SCENARIOS[sid].root_tasks, "reservation_usd": need,
-                     "attempts": int(attempts), "worst_case_usd": round(need * attempts, 4),
-                     "unreachable": need > budget.cap or (attempts >= 2 and need >= budget.cap)})
-    return {"cap_usd": budget.cap, "per_task_usd": budget.per_task, "self_mod": budget.self_mod,
-            "reservation_rule": RESERVATION_RULE, "scenarios": rows,
-            "worst_case_usd": round(sum(r["worst_case_usd"] for r in rows), 4), "lanes": int(lanes),
-            "round_worst_case_usd": round(sum(sorted((r["reservation_usd"] for r in rows), reverse=True)[:int(lanes)]), 4),
-            "unreachable": [r["scenario"] for r in rows if r["unreachable"]]}
-
-
-def dispatch_order(budget: RunBudget, requested: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    """Round-robin by attempt (a1 of every scenario, then a2, ...), largest reservation first within a round
-    (stable among equals); admission keeps this order (``RunBudget.admit``). The verdict is pass-of PER
-    scenario, so the MINIMUM admitted attempts per scenario is what the order protects, not the sum."""
-    return sorted(requested, key=lambda job: (job[1], -budget.reservation(SCENARIOS[job[0]].root_tasks, SCENARIOS[job[0]].expects_absorb)))
 
 
 # --------------------------------------------------------------------------- #
@@ -587,7 +438,8 @@ def _lane_row(job: tuple[str, int], args: argparse.Namespace) -> dict:
             "self_mod": bool(args.self_mod), "preflight_test_workers": int(args.preflight_test_workers),
             "started_at": now_iso(), "checks": {}, "facts": {}, "error": "",
             "screenshots": [], "ui": {"available": False, "reason": ""}, "budget": {}, "traces": {"published": False, "reason": "lane_not_started"},
-            "self_mod_absorb": {"expected": bool(args.self_mod) and SCENARIOS[sid].expects_absorb}}
+            "self_mod_absorb": {"expected": bool(args.self_mod) and SCENARIOS[sid].expects_absorb},
+            **({"machinery_only": stub_lane.MACHINERY_ONLY} if args.stub else {})}
 
 
 def _proc_cmdline(pid: int) -> str:
@@ -598,29 +450,61 @@ def _proc_cmdline(pid: int) -> str:
     return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()[:120]
 
 
-def _apply_orphan_scan(row: dict, survivors: list | None) -> None:
+def _apply_orphan_scan(row: dict, survivors: list | bool | None, stop_unconfirmed: list = ()) -> None:
     """The last check of a lane: a process still carrying the lane's data root after stop fails a passing
     lane, and the index never carries a failed row with an empty reason. ``survivors`` are the pids the
     scan still found after the stop wait (empty = clean); ``None`` = no procfs: a typed fact, not a passed
-    check. Survivors are NAMED in ``row["orphans"]`` (pid + cmdline head, first 20): the rc.14 paid run
+    check; ``False`` = the scan itself failed (``finalize_errors`` says why): unproved, so the check fails.
+    Survivors are NAMED in ``row["orphans"]`` (pid + cmdline head, first 20): the rc.14 paid run
     recorded a bare ``no_orphans_after_stop=false`` with no way to tell which processes outlived the stop."""
+    if stop_unconfirmed:  # exits ``IsolatedServer.stop`` could not prove fail the lane like survivors
+        row["server_stop_unconfirmed"], row["checks"]["server_stop_confirmed"] = list(stop_unconfirmed), False
     if survivors is None:
-        row["no_orphans_after_stop"] = None
-        row["orphan_scan"] = "unavailable:no_procfs"
-        return
-    row["no_orphans_after_stop"] = gone = not survivors
-    if not gone:
+        row["no_orphans_after_stop"], row["orphan_scan"] = None, "unavailable:no_procfs"
+    elif survivors is False:
+        row["no_orphans_after_stop"], row["orphan_scan"], row["checks"]["no_orphans_after_stop"] = None, "failed", False
+    else:
+        row["no_orphans_after_stop"] = row["checks"]["no_orphans_after_stop"] = not survivors
+    if survivors:
         row["orphans"] = [{"pid": int(pid), "cmdline": _proc_cmdline(int(pid))} for pid in survivors[:20]]
         if len(survivors) > 20:
             row["orphans_omitted"] = len(survivors) - 20
-        if row["status"] == "pass":
-            row["status"], row["reason_code"] = "fail", "checks_failed"
-    row["checks"]["no_orphans_after_stop"] = gone
+    if (survivors or survivors is False or stop_unconfirmed) and row["status"] == "pass":
+        row["status"], row["reason_code"] = "fail", "checks_failed"
+
+
+def _evidence_missing(row: dict, code: str) -> None:
+    """A required finalization step lost the attempt's bundle or its record: a passing attempt ends ``infra_error``,
+    because the verdict counts ``pass`` rows. An earlier ``fail`` or ``infra_error`` keeps its own reason, and the
+    step's own error stays where it was recorded (``finalize_errors`` or ``traces``)."""
+    if row["status"] == "pass":
+        row["status"], row["reason_code"] = "infra_error", f"infra_error:{code}"
+        row["error"] = f"required finalization failed: {code}"
+
+
+def _retain_attempt(row: dict, ctx: LaneContext | None) -> None:
+    """What the scenario observed, kept on every path before anything later can fail. It never decides a status:
+    an exception stays ``infra_error``, whatever its partial checks say."""
+    if ctx is None:
+        return
+    row["checks"].update(ctx.checks)
+    row.update({"facts": ctx.facts, "screenshots": ctx.screenshots})
+    if "runtime_result" in ctx.facts or "runtime_outcome" not in row:
+        row["runtime_outcome"] = runtime_terminal_disclosure(ctx.facts.pop("runtime_result", None))
+
+
+def _write_result(lane: pathlib.Path, row: dict) -> None:
+    lane.mkdir(parents=True, exist_ok=True)
+    (lane / "result.json").write_text(json.dumps(row, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
 
 def _record_row(out: pathlib.Path, lane: pathlib.Path, row: dict) -> None:
-    lane.mkdir(parents=True, exist_ok=True)
-    (lane / "result.json").write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
+    """The attempt's two records, in this order: ``result.json``, then its row in ``result_index.jsonl``."""
+    _write_result(lane, row)
+    _index_row(out, row)
+
+
+def _index_row(out: pathlib.Path, row: dict) -> None:
     append_result_index(out, task_result_row(
         benchmark="e2e_live", instance_id=f"{row['scenario']}_a{row['attempt']}", status=row["status"],
         reason_code=str(row.get("reason_code") or ""), runtime_result=row.get("runtime_outcome"), error=row["error"],
@@ -644,14 +528,17 @@ def run_attempt(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Pat
     admitted, facts = budget.admit(job, SCENARIOS[sid].root_tasks, lane / "data", dispatch_index=dispatch_index,
                                    on_wait=waiting, absorbs=SCENARIOS[sid].expects_absorb)
     if not admitted:
-        row = {**_lane_row(job, args), "status": "not_run", "reason_code": "budget_cap", "budget": facts,
-               "refusal": {"type": "RunBudgetCap", "code": "budget_cap", "message": "run-wide budget cap reached"},
+        capped = facts["reason"] == "budget_cap"
+        row = {**_lane_row(job, args), "status": "not_run", "reason_code": facts["reason"], "budget": facts,
+               "refusal": {"type": "RunBudgetCap" if capped else "RunBudgetAccountingUnavailable", "code": facts["reason"],
+                           "message": "run-wide budget cap reached" if capped else "unknown lane spend holds the run-wide cap"},
                "ended_at": now_iso(), "duration_sec": 0.0}
-        _log(f"{sid}_a{attempt}: not run — run budget cap: spent ${facts['spent_usd']:.2f} + reserved "
+        _log(f"{sid}_a{attempt}: not run — {'run budget cap' if capped else 'run budget accounting unavailable'}: "
+             f"spent ${facts['spent_usd']:.2f} + unknown ${facts['unknown_liability_usd']:.2f} + reserved "
              f"${facts['reserved_usd']:.2f} + needed ${facts['reservation_usd']:.2f} > cap ${facts['cap_usd']:.2f}"
              + (f" (after waiting {facts['waited_sec']:.0f}s)" if facts["waited_sec"] else ""))
         _record_row(out, lane, row)
-        states[job] = ("not_run (budget cap)", time.time())
+        states[job] = (f"not_run ({'budget cap' if capped else 'accounting unavailable'})", time.time())
         return row
     try:
         return run_lane(job, args, out, template, stagger, states, seed, budget, key=key, seed_sha=seed_sha)
@@ -673,12 +560,25 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
         _log(f"{sid}_a{attempt}: {msg}")
         states[job] = (msg[:60], time.time())
 
-    server = stub = ctx = None
+    server = stub = ctx = harness = None
+    spawned: list[IsolatedServer] = []   # every server whose process started, a start that failed before ``server`` included
     # The absorb wait and check follow ``Scenario.expects_absorb`` (rc.15 SK1_a1: a lane that commits nothing
     # waited --task-timeout for a promotion that could not happen, then failed the check by construction).
     absorb, absorbing = None, row["self_mod_absorb"]["expected"]
-    from tests.system_e2e import harness  # durable readers + /proc oracles (runtime-only import)
+
+    def contained(step: str, action: Callable[[], object], default: object = None) -> object:
+        """One fallible finalization step: its failure is recorded and never costs the steps after it. What it means
+        for the status is its caller's: a lost bundle or record is ``_evidence_missing``, an unproved stop or scan
+        fails its check, an unknown spend or a failed cleanup (the browser, the stub) leaves the status as it is."""
+        try:
+            return action()
+        except Exception as exc:  # noqa: BLE001 - the row and the traces must survive any one of them
+            row.setdefault("finalize_errors", []).append({"step": step, "error": f"{type(exc).__name__}: {exc}"[:300]})
+            log(f"finalize {step} failed: {type(exc).__name__}")
+            return default
+
     try:
+        from tests.system_e2e import harness  # durable readers + /proc oracles (runtime-only import)
         log("cloning seed")
         lane.mkdir(parents=True, exist_ok=True)
         clone_seed(seed, clone)
@@ -692,7 +592,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             cfg["OPENROUTER_API_KEY"] = key
         child_model = str(cfg.get("OUROBOROS_MODEL") or "")
         if args.stub:
-            stub = stub_lane.routed_stub_model(scenario.stub_script(clone)).__enter__()
+            stub = stub_lane.routed_stub_model(scenario.stub_script(clone, data_root)).__enter__()
             child_model = stub_lane.STUB_CHILD_SLUG
             cfg = stub_lane.stub_settings(stub, template)
         cfg.update(scenario.overrides(child_model, cfg))
@@ -711,10 +611,15 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
 
         def start_server(expected_sha: str) -> IsolatedServer:
             srv = IsolatedServer(clone, data_root, settings_path, settings_authoritative_env=True,
-                                 expected_settings_sha256=expected_sha)
+                                 expected_settings_sha256=expected_sha, stdio_path=lane / traces.SERVER_STDIO)
             stagger.wait_turn()
             log(f"starting server on {srv.base_url}")
-            srv.start(ready_timeout=args.ready_timeout)
+            try:
+                srv.start(ready_timeout=args.ready_timeout)
+            finally:
+                if getattr(srv, "proc", None) is not None:   # a started process could spend, ready or not
+                    spawned.append(srv)
+                    budget.note_spawned(job)
             return srv
 
         def wait_absorb() -> dict:
@@ -732,7 +637,8 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
                     raise RuntimeError("server unhealthy after the self-mod restart")
                 return server
             log("restarting server on the committed tree")
-            server.stop()
+            if unconfirmed := server.stop():  # it may still run on this clone and data root
+                raise RuntimeError(f"server stop unconfirmed, no second server started: {'; '.join(unconfirmed)}")
             server = start_server(hashlib.sha256(settings_path.read_bytes()).hexdigest())
             return server
 
@@ -751,12 +657,17 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
         ctx = LaneContext(server=server, clone=clone, data_root=data_root, oracle=oracle, harness=harness,
                           ui_resolver=resolve_ui_client if scenario.needs_ui else None,
                           ui_reason=row["ui"]["reason"], shots=shots, log=log,
-                          task_timeout=args.task_timeout, restart=restart)
+                          task_timeout=args.task_timeout, restart=restart, stub=bool(args.stub),
+                          ready_timeout=args.ready_timeout)
         log("running scenario")
-        scenario.acceptance(ctx)
+        # The lane's server minted its data root's own install identity at boot, and this process is another install:
+        # the copied-folder rule refuses even a read there (SM1_a1, 2026-11-02: StoreForeign right after the HTTP
+        # terminal). This stand launched that install, so the scenario reads its store as it (the durable terminal, the
+        # adoption's task record, SW1's children and root); a context variable, so only this lane's thread.
+        with acting_as(data_root):
+            scenario.acceptance(ctx)
         server = ctx.server
-        row["checks"].update(ctx.checks)
-        row.update({"facts": ctx.facts, "screenshots": ctx.screenshots})
+        _retain_attempt(row, ctx)
         if absorbing:
             if absorb is None:  # an absorbing scenario that never restarts still owes the post-task absorb
                 absorb = wait_absorb()
@@ -774,7 +685,6 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
                           "diff_sha256": diff_sha256(clone, pre_head, post_head)}
         row["model_slots"] = model_slot_snapshot(settings_path, env_overrides=False)
         row["grants"] = isolated_credential_grants(applied)
-        row["runtime_outcome"] = runtime_terminal_disclosure(ctx.facts.pop("runtime_result", None))
         if args.stub:
             row["facts"]["stub_unconsumed"] = stub.consumed()
             kinds = stub.kinds()  # the review-organ branches the stub actually served
@@ -789,25 +699,54 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
         row["reason_code"] = f"infra_error:{code}"
         row["error"] = f"{type(exc).__name__}: {exc}"[:2000]
         log(f"infra error: {row['error'][:200]}")
+        _retain_attempt(row, ctx)
+        if absorb is not None:
+            row["self_mod_absorb"].update(absorb)
     finally:
         if ctx is not None:
-            ctx.close_ui()
+            contained("close_ui", ctx.close_ui)
             if scenario.needs_ui:
                 row["ui"] = {"available": not ctx.ui_reason, "reason": ctx.ui_reason}
-        if server is not None:
-            server.stop()
+        stop_unconfirmed = contained("server_stop", lambda: list(server.stop() or []) if server is not None else [],
+                                     default=["server stop raised before it could prove an exit"])
+        # A start that failed stopped its own process before ``server`` was assigned: its proof lives on that object.
+        stop_unconfirmed += [text for srv in spawned if srv is not server for text in srv.stop_unconfirmed]
         if stub is not None:
-            stub.__exit__(None, None, None)
-        survivors = None
-        if PROCFS_AVAILABLE:
+            contained("stub_exit", lambda: stub.__exit__(None, None, None))
+
+        def orphan_scan() -> list:
             gone = harness.wait_until(lambda: not harness.pids_with_env_value(str(data_root)), 30)
-            survivors = [] if gone else harness.pids_with_env_value(str(data_root))
-        _apply_orphan_scan(row, survivors)
-        row["budget"]["spent_usd"], row["budget"]["unknown_cost_rows"] = lane_spend(data_root)
+            return [] if gone else harness.pids_with_env_value(str(data_root))
+
+        survivors = contained("orphan_scan", orphan_scan, default=False) if PROCFS_AVAILABLE and harness is not None else None
+        _apply_orphan_scan(row, survivors, stop_unconfirmed)
+        may_run = bool(stop_unconfirmed or survivors or survivors is False)   # a process may still run (and spend) from this lane
+        if spawned and may_run:
+            budget.note_stop_unproved(job)   # its settlement keeps the reservation charged
+        row["budget"].update(lane_spend_fact(data_root, spawned=bool(spawned)))
         row["ended_at"], row["duration_sec"] = now_iso(), round(time.time() - started, 1)
-        row["traces"] = traces.publish_lane_traces(lane, data_root, traces.lane_secrets(settings_path, {args.key_env: key or os.environ.get(args.key_env, "")}))
-        _record_row(out, lane, row)
-        if args.prune_clones:
+        row["traces"] = contained("traces", lambda: traces.publish_lane_traces(
+            lane, data_root, traces.lane_secrets(settings_path, {args.key_env: key or os.environ.get(args.key_env, "")})),
+            default={"published": False, "reason": "collect_error"})
+        if row["traces"].get("published") is not True:   # a bundle withheld (residue) or lost: the attempt has no traces
+            _evidence_missing(row, f"traces_{row['traces'].get('reason') or 'unpublished'}")
+        written: list = []
+
+        def record() -> bool:
+            _write_result(lane, row)
+            written.append(True)
+            _index_row(out, row)
+            return True
+
+        if not contained("record_row", record, default=False):
+            _evidence_missing(row, "record_row")   # this row is what the verdict counts
+            if written:
+                # Only the index append failed, after result.json was written with the status from before this step
+                # (``pass`` included): that file alone is written again, once, with this row. The append is never
+                # retried, since whether a failed append left a row, whole or torn, is unknown. A rewrite that fails
+                # too stays named in ``finalize_errors``, and the file may then still say ``pass`` or be torn.
+                contained("record_row_correction", lambda: _write_result(lane, row))
+        if args.prune_clones and not may_run:
             shutil.rmtree(clone, ignore_errors=True)
         states[job] = (f"{row['status']} ({row.get('duration_sec')}s)", time.time())
     return row
@@ -827,6 +766,7 @@ def watcher(stop: threading.Event, states: dict, interval: float, budget: RunBud
         snap = budget.snapshot()
         spend = (f"spent ${snap['spent_usd']:.2f}/${snap['cap_usd']:.2f} reserved ${snap['reserved_usd']:.2f}"
                  + (f" unknown-cost rows {snap['unknown_cost_rows']}" if snap["unknown_cost_rows"] else "")
+                 + (f" unknown liability ${snap['unknown_liability_usd']:.2f}" if snap["unknown_liability_usd"] else "")
                  + (f" not_run {len(snap['attempts_not_run'])}" if snap["attempts_not_run"] else ""))
         line = f"t=+{time.time() - started:.0f}s lanes: {lanes or '-'} | {spend} | free {' '.join(disks)}"
         if probe is not None:
@@ -845,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     out = pathlib.Path(args.out).expanduser() if args.out else run_root("e2e_live")
     out = assert_outside_repo(out, source)
     seed = out / "seed"
-    budget = RunBudget(args.total_budget, args.per_task_usd, self_mod=args.self_mod)
+    budget = RunBudget(args.total_budget, args.per_task_usd, reader=lane_spend, self_mod=args.self_mod)
     requested = [(sid, n) for sid in args.scenario_ids for n in range(1, args.attempts + 1)]
     jobs = dispatch_order(budget, requested)   # the pool's order AND the ledger's: admission is FIFO by this index
     manifest_path = out / "run_manifest.json"
@@ -983,6 +923,8 @@ def main(argv: list[str] | None = None) -> int:
             failed = sorted(k for k, v in r["checks"].items() if not v)
             _log(f"{r['scenario']}_a{r['attempt']}: {r['status']} in {r.get('duration_sec')}s"
                  + (f" failed checks: {failed}" if failed else "") + (f" error: {r['error'][:160]}" if r["error"] else ""))
+        if args.stub:
+            _log(stub_lane.MACHINERY_ONLY)
         budget_final = budget.snapshot()
         _log(f"verdicts: {json.dumps(verdicts)}")
         _log(f"budget: spent ${budget_final['spent_usd']:.2f} of cap ${budget_final['cap_usd']:.2f}"
@@ -992,7 +934,7 @@ def main(argv: list[str] | None = None) -> int:
                       "scenarios": verdicts, "lanes_run": sum(1 for r in rows if r["status"] != "not_run"),
                       "budget": budget_final})
         if budget_final["refusals"]:
-            final["stop_reason"] = "budget_cap"
+            final["stop_reason"] = budget_final["refusals"][0]["reason"]
     return 0 if ok else 1
 
 

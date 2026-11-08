@@ -34,12 +34,16 @@ from .lib.telegram_state import (
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _jsonl_tail, _load_runtime_state, _read_json_file, _child_row_held_for_root,
-    _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress, _quiet_progress,
+    _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
+    _quiet_progress,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_typing import TypingCue, host_reply_preparation
+from .lib.telegram_poll_binding import (
+    PollCursor, bot_id, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
+)
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .scripts.telegram_settings import (
     TelegramSettingsError,
@@ -57,12 +61,14 @@ from .scripts.telegram_settings import (
 _HONOR_ENV_PROXIES = (not in_worker_process()) and env_proxies_configured()
 
 
-def _telegram_client(api, event=None, chat_id: int = 0) -> TelegramClient:
-    """Build each bridge client with the granted token and skill-local proxy."""
-    granted = api.get_settings(["TELEGRAM_BOT_TOKEN"])
-    return TelegramClient(granted.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES,
+def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str | None] | None = None) -> TelegramClient:
+    """Build each bridge client with the granted token, skill-local proxy and saved server."""
+    token = api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
+    api_base_url, files_dir = server or _saved_server(api)
+    return TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                           proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
-                          **(_mirror_options(api, event, chat_id) if event is not None else {}))
+                          **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+                          api_base_url=api_base_url, files_dir=files_dir)
 
 _POLL_GENERATION_STARTED = time.time()
 
@@ -474,25 +480,6 @@ async def _inject(api, payload: Dict[str, Any]) -> None:
         pass
 
 
-def _load_offset(api) -> int:
-    path = _state_file(api, "poll_offset.json")
-    try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return int(data.get("offset") or 0)
-    except Exception:
-        pass
-    return 0
-
-
-def _save_offset(api, offset: int) -> None:
-    path = _state_file(api, "poll_offset.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"offset": offset}), encoding="utf-8")
-    tmp.replace(path)
-
-
 def _extract_sender_label(sender: dict, fallback_chat_id: int) -> str:
     """Build a human-readable sender label from a Telegram user dict."""
     return (
@@ -629,8 +616,9 @@ async def _start_poller(api):
     try:
         _settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
         lang = await _migrate_bridge_language(api, _settings, lang)
-        client = _telegram_client(api)
-        offset = _load_offset(api)
+        server = _saved_server(api)
+        client = _telegram_client(api, server=server)
+        cursor = PollCursor(_state_file(api, "poll_offset.json"), server[0], bot_id(client.token))
         try:
             await _validate_bot(api, client, command_mode, lang)
             validated = True
@@ -645,7 +633,7 @@ async def _start_poller(api):
             # ready nor failed. The in-loop validation overwrites it.
             _save_bridge_status(api, "degraded", "telegram_startup_deferred")
             api.log("warning", "Telegram token validation deferred by a transport failure; polling waits for the network.")
-        return client, offset, pinned_chat, max_updates, command_mode, lang, validated
+        return client, server, cursor, pinned_chat, max_updates, command_mode, lang, validated
     except TelegramSettingsError:
         _save_bridge_status(api, "error", "settings_invalid")
         api.log("error", "Telegram settings are invalid; owner binding is closed.")
@@ -670,22 +658,43 @@ def _fail_permanent_poll_rejection(api, exc, revalidating: bool) -> None:
 
 
 async def _poller(api) -> None:
-    client, offset, pinned_chat, max_updates, command_mode, lang, validated = await _start_poller(api)
+    while True:
+        fingerprint = server_fingerprint(api)
+        try:
+            started = await _start_poller(api)
+            break
+        except TelegramRequestRejected:
+            await park_until_settings_change(api, fingerprint)
+    client, server, cursor, pinned_chat, max_updates, command_mode, lang, validated = started
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
+    conflict_reported = False
     while True:
         revalidating = False
         try:
+            saved = _saved_server(api)
+            if saved != server:
+                # A Save reaches polling at the next cycle, as it reaches every send at once:
+                # getUpdates, the replies and the downloads made here follow it. A new server
+                # validates the token there again and is polled from its own oldest update.
+                validated = validated and server is not None and saved[0] == server[0]
+                client, server = _telegram_client(api, server=saved), saved
+                cursor.follow(saved[0], bot_id(client.token))
+                api.log("info", "Telegram Bot API settings changed; polling follows the saved server.")
             if not validated:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang)
                 revalidating = False
                 validated = True
+            offset, handled = cursor.offset, []
             updates = await client.get_updates(offset)
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
                 degraded_cause = ""
+            if conflict_reported:
+                _save_bridge_status(api, "ready")
+                conflict_reported = False
             retry_delay = TELEGRAM_RETRY_INITIAL_SEC
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
@@ -694,8 +703,13 @@ async def _poller(api) -> None:
                 authorized_chat = None
                 try:  # Isolate one bad update without changing offset/retry semantics.
                     update_id = int(update.get("update_id") or 0)
-                    if update_id >= offset:
+                    if update_id > 0:
+                        # Confirm what the server returned, even below the offset: a server
+                        # that lost its queue answers from its oldest update, again each poll.
                         offset = update_id + 1
+                    handled.append(update_key(update))
+                    if cursor.is_replay(update):
+                        continue
 
                     authorized_chat = await _authorized_owner(api, client, update, pinned_chat, lang)
                     if not authorized_chat:
@@ -834,7 +848,7 @@ async def _poller(api) -> None:
                         if cb_data.startswith("qz:"):
                             await telegram_quiz.answer_from_callback(
                                 api, client, cb_data, cb_id=cb_id,
-                                update_id=update_id, lang=lang, post=_host_post,
+                                request_key=update_key(update), lang=lang, post=_host_post,
                             )
                             continue
 
@@ -862,18 +876,25 @@ async def _poller(api) -> None:
                         except Exception:
                             api.log("warning", "Telegram update failure notice could not be delivered.")
             if updates:
-                _save_offset(api, offset)
+                cursor.save(offset, handled)
             await asyncio.sleep(0.1)
         except (TelegramRequestRejected, TelegramTransportError) as exc:
-            if isinstance(exc, TelegramRequestRejected) and not exc.transient:
+            # Only getUpdates and getMe reach here: a 409 is another poller of this token, which may stop.
+            if isinstance(exc, TelegramRequestRejected) and not exc.transient and exc.status_code != 409:
                 _fail_permanent_poll_rejection(api, exc, revalidating)
-                raise
+                await park_until_settings_change(api, (client.token, server))
+                server, validated = None, False
+                continue
             # Transition logging only: one line entering degraded, one on
             # recovery; consecutive transient failures stay quiet while the
             # monotone backoff (reset by any successful poll) paces retries.
             if not degraded_cause:
                 degraded_cause = type(exc).__name__
                 api.log("warning", f"Telegram poller degraded ({degraded_cause}): {exc}")
+            if getattr(exc, "status_code", None) == 409 and not conflict_reported:
+                # A webhook or another poller holds the token: no update arrives until it stops.
+                _save_bridge_status(api, "degraded", "telegram_conflict")
+                conflict_reported = True
             await asyncio.sleep(retry_delay)
             retry_delay = next_telegram_retry_delay(retry_delay)
         except TelegramSettingsError:
@@ -897,7 +918,7 @@ async def _handle_owner_message(
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     chat_id = int(chat.get("id") or 0)
-    _owner_message_seen(api, chat_id, int(message.get("message_id") or 0))
+    _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
     # Owner binding + filtering is already enforced at the top of
     # the update loop (TOFU for all command modes), so chat_id is
     # guaranteed to equal the pinned owner chat here.
@@ -922,15 +943,6 @@ async def _handle_owner_message(
         header, keyboard = _build_language_keyboard(lang)
         await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         return
-    if cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@"):
-        requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
-        if requested:
-            async def _reply(message: str) -> None:
-                await client.send_message(chat_id, message)
-
-            await _choose_language(api, requested, lang, _reply)
-            return
-
     # Handle /help command locally — always allowed
     is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
     if is_help_cmd:
@@ -948,7 +960,7 @@ async def _handle_owner_message(
             return
         try:
             sender_label = f"Telegram ({_extract_sender_label(sender, chat_id)})"
-            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, chat_id, message, update_id),
+            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
                 "text": "/panic", "chat_id": chat_id,
                 "sender_label": sender_label, "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label},
                 "user_id": int(sender.get("id") or chat_id), "source": "telegram"}), timeout=2)
@@ -957,6 +969,25 @@ async def _handle_owner_message(
             await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
         return
 
+    # Local commands are done. Look up the replied-to card once, before any payload forwarding;
+    # a secret reply stays local even when it has no text or resembles a slash command.
+    reply_to = message.get("reply_to_message") or {}
+    quiz_ref = None
+    if isinstance(reply_to, dict) and reply_to:
+        quiz_ref = telegram_quiz.quiz_for_message(api, client.bot_id, chat_id, int(reply_to.get("message_id") or 0))
+    if quiz_ref and quiz_ref.get("secret"):
+        await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
+                                              request_key=update_key(update), lang=lang, post=_host_post)
+        return
+
+    if cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@"):
+        requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if requested:
+            async def _reply(message: str) -> None:
+                await client.send_message(chat_id, message)
+
+            await _choose_language(api, requested, lang, _reply)
+            return
 
     # Translate commands to safe natural-language text.
     # _translate_command returns None when the command is rejected.
@@ -975,11 +1006,13 @@ async def _handle_owner_message(
             )
         return
 
-    reply_to = message.get("reply_to_message") or {}
+    if quiz_ref is not None and quiz_ref.get("ambiguous") and not _SLASH_COMMAND_RE.match(text):
+        # An old card's number names no question for sure: an answer or a turn meant for it stays
+        # here, before any download; a command keeps its dispatch, as below.
+        await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
+                                              request_key=update_key(update), lang=lang, post=_host_post)
+        return
     if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
-        quiz_ref = telegram_quiz.quiz_for_message(
-            api, chat_id, int(reply_to.get("message_id") or 0),
-        )
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
             # that question, not a new chat turn (#472).
@@ -988,7 +1021,7 @@ async def _handle_owner_message(
             answer_text = str(message.get("text") or message.get("caption") or "")
             await telegram_quiz.answer_from_reply(
                 api, client, quiz_ref, answer_text, chat_id=chat_id,
-                update_id=update_id, lang=lang, post=_host_post,
+                request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
     photos = message.get("photo") or []
@@ -1018,7 +1051,7 @@ async def _handle_owner_message(
         parked = await telegram_inbound.park_inbound_file(api, client, inbound)
     try:
         await _inject(api, {
-            **_owner_ingress_fields(api, chat_id, message, update_id),
+            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
             "text": safe_text,
             "chat_id": chat_id,
             "user_id": int(sender.get("id") or chat_id or 1),
@@ -1037,6 +1070,11 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
+    if _old_reference_unlinked(api, client.bot_id, chat_id, message):
+        try:
+            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
+        except Exception:
+            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):
@@ -1119,12 +1157,12 @@ def _make_outbound(api, cue: TypingCue | None = None):
             host_row = event.get("role") == "system" and not _quiet_progress(event)
             quiet = _is_silent_mode_enabled(local_settings) and not host_row
             single = quiet and event.get("is_progress") is True and len(message_chunks(text, parse_mode)) == 1
-            tracked_msg_id = _get_silent_msg(api, chat_id) if single else 0
+            tracked_msg_id = _get_silent_msg(api, client.bot_id, chat_id) if single else 0
 
             # An answer never lands under, or revives, the typing it ends (DESIGN §9).
             async with _cue_message(cue, chat_id) as delivered:
                 # editMessageText returns False on any failure (too old, deleted, parse error): send instead.
-                if tracked_msg_id and _replaceable_progress(api, chat_id, tracked_msg_id, event):
+                if tracked_msg_id and _replaceable_progress(api, client.bot_id, chat_id, tracked_msg_id, event):
                     edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode=parse_mode)
                     if not edited and parse_mode:
                         edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode="")
@@ -1136,7 +1174,7 @@ def _make_outbound(api, cue: TypingCue | None = None):
                     delivered()
 
             if single and msg_id:
-                _set_silent_msg(api, chat_id, msg_id)  # an edit of a split note would erase its last part
+                _set_silent_msg(api, client.bot_id, chat_id, msg_id)  # an edit of a split note would erase its last part
             elif not host_row:
                 _clear_silent_msg(api, chat_id)
         except Exception as exc:
@@ -1348,7 +1386,9 @@ def _make_quiz(api, cue: TypingCue | None = None):
             question = str(event.get("question") or "").strip()
             raw_options = event.get("options") if isinstance(event.get("options"), list) else []
             # Shared quiz contract cap: ouroboros.tools.core._MAX_QUIZ_OPTIONS.
-            plain_labels, details, recommended_index = telegram_quiz.card_options(raw_options, limit=6)
+            # A secret request is a note on where to enter it: no options, no reply prompt.
+            secret = isinstance(event.get("secret_request"), dict)
+            plain_labels, details, recommended_index = telegram_quiz.card_options([] if secret else raw_options, limit=6)
             # Buttons and the remembered record keep the starred caption; an open
             # question (no options) is a card without buttons (TZ-2 B1).
             labels = telegram_quiz.button_labels(plain_labels, recommended_index)
@@ -1362,7 +1402,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
             stake = str(event.get("stake") or "").strip()
             assumption = str(event.get("assumption") or "").strip()
             lang = _poller_preferences(api)[4]
-            wait_for_answer = event.get("wait_for_answer") is True
+            wait_for_answer = event.get("wait_for_answer") is True and not secret
             # Both optional: events from an older host carry neither.
             project_name = str(event.get("project_name") or "").strip()
             host_facts = str(event.get("host_facts") or "").strip()
@@ -1383,7 +1423,8 @@ def _make_quiz(api, cue: TypingCue | None = None):
             async with telegram_quiz.card_lock(token), _cue_message(cue, chat_id) as delivered:
                 message_id, overflowed = await telegram_quiz.send_quiz_card(
                     client, chat_id, body=body, compact=compact,
-                    hint_text=telegram_quiz.hint(lang) if labels else telegram_quiz.hint_open(lang),
+                    hint_text=(telegram_quiz.hint_secret(lang) if secret else telegram_quiz.hint(lang) if labels
+                               else telegram_quiz.hint_open(lang)),
                     keyboard=telegram_quiz.quiz_keyboard(token, labels),
                     reserve=telegram_quiz.answered_edit_reserve(lang),
                 )
@@ -1395,10 +1436,10 @@ def _make_quiz(api, cue: TypingCue | None = None):
                     settled_text = telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
                 else:
                     settled_text = body
-                telegram_quiz.remember_quiz(api, token, {
+                telegram_quiz.remember_quiz(api, client.bot_id, token, {
                     "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                     "message_id": int(message_id or 0), "options": labels,
-                    "text": settled_text,
+                    "text": settled_text, **({"secret": True} if secret else {}),
                 })
                 await telegram_quiz.apply_retained_fact(api, token, lang, client_factory=lambda: client, published=event)
         except Exception as exc:
@@ -1469,6 +1510,15 @@ def register(api):
                                  "Leave empty to keep the saved proxy. Disable and re-enable the skill after changing it."},
                         {"name": "clear_telegram_proxy", "label": "Clear saved Telegram proxy", "type": "checkbox",
                          "help": "Remove the proxy instead of replacing it."},
+                        {"name": "TELEGRAM_API_BASE", "label": "Bot API base URL", "type": "text",
+                         "placeholder": "https://api.telegram.org",
+                         "help": "Origin of a telegram-bot-api server you run, e.g. http://127.0.0.1:8081. Every "
+                                 "Telegram call goes there; polling after its current long poll or retry wait (up to "
+                                 "about a minute). Empty: the cloud. Moving the bot to another server: quit first (skill's notes)."},
+                        {"name": "TELEGRAM_API_FILES_DIR", "label": "Bot API files directory", "type": "text",
+                         "placeholder": "/absolute/path/to/server-file-store",
+                         "help": "For a server started with --local: its file store, mounted at the same absolute "
+                                 "path here. Downloads read files only inside it. Empty: HTTP downloads only."},
                         {"name": "TELEGRAM_COMMAND_MODE", "label": "Command mode", "type": "select",
                          "options": [
                              {"value": "full_access", "label": "Full access (default)"},

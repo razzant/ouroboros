@@ -91,7 +91,6 @@ def test_git_network_bounded_rejects_missing_cwd(tmp_path):
     assert "cwd" in err
 
 
-@pytest.mark.serial
 def test_checkout_reset_fetch_uses_configured_bound_and_keeps_local_head(tmp_path, monkeypatch):
     """The real reset/wrapper chain keeps its local reset after a timed-out fetch."""
     repo = _seed_repo(tmp_path / "repo")
@@ -108,8 +107,11 @@ def test_checkout_reset_fetch_uses_configured_bound_and_keeps_local_head(tmp_pat
     monkeypatch.setattr(git_ops, "save_state", state.update)
     monkeypatch.setattr(git_ops, "update_state", lambda mutator, **_kw: mutator(state) or state)
     monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, row: events.append(row))
+    real_process = git_ops._run_git_process_bounded
 
     def fake_process(cmd, *, timeout, cwd, env, text):
+        if "fetch" not in cmd:  # the reset's own local Git shares this runner and runs for real
+            return real_process(cmd, timeout=timeout, cwd=cwd, env=env, text=text)
         captured.update(cmd=cmd, timeout=timeout, cwd=cwd, env=env)
         return git_ops.FETCH_TIMEOUT_RC, "", "timed out"
 

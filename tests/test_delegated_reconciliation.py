@@ -524,6 +524,27 @@ def test_the_kill_boundary_states_its_own_verdict_before_it_writes_it(tmp_path):
     dc._CUSTODY.clear()
 
 
+def test_a_signal_deaths_verdict_ends_the_dead_attempts_run_as_an_abrupt_loss(tmp_path):
+    """A worker death (ARCHITECTURE §5). A worker killed by a signal reserves no handoff for its delegated runs (the leaf
+    settles as on abrupt loss), so the kill boundary states the verdict it writes next, ``interrupted``, and the
+    still-running run is cancelled as ``owner_task_gone``; a death that keeps its handoff passes no verdict and the
+    run is left to the handoff (``tests/test_worker_crash_retry.py`` holds the two callers)."""
+    import ouroboros.delegate_custody as dc
+    from ouroboros.task_results import STATUS_INTERRUPTED
+
+    dc._CUSTODY.clear()
+    dc.record_started(tmp_path, dc.RunCustody(
+        run_id="run-signal-dead", task_id="t-signal", route_id="r", model="m",
+        project_id="p", project_owned=False, root_task_id="t-signal", ledger_root=str(tmp_path)))
+    dc._CUSTODY.clear()
+    live = _LiveRunStub(run_id="run-signal-dead")
+    outcomes = dc.reconcile_task_runs(tmp_path, "t-signal", gateway_factory=lambda: live,
+                                      deliberate_terminal=STATUS_INTERRUPTED)
+    assert [row["action"] for row in outcomes] == ["cancelled"]
+    assert live.cancels == [("run-signal-dead", "owner_task_gone")]
+    dc._CUSTODY.clear()
+
+
 def test_the_supervisor_kill_path_carries_the_cancellation_verdict(tmp_path, monkeypatch):
     """End to end over the supervisor seam the finder probed: the cancel kill
     path passes its own terminal into the audit, a reap passes nothing."""
@@ -657,11 +678,10 @@ def _panel_run(tmp_path, source="review_substrate", task_id="t-reviewed",
     return dc
 
 
-@pytest.mark.parametrize("source", ["review_substrate", "review_substrate:task_acceptance"])
-@pytest.mark.parametrize("owner,expected", [
-    ("completed", "left_live"),
-    ("failed", "left_live"),
-    ("cancelled", "cancelled"),
+@pytest.mark.parametrize(("owner", "expected", "source"), [
+    ("completed", "left_live", "review_substrate"),
+    ("failed", "left_live", "review_substrate:task_acceptance"),
+    ("cancelled", "cancelled", "review_substrate"),
 ])
 def test_a_review_panels_run_outlives_every_owner_terminal_but_cancellation(
     tmp_path, source, owner, expected,
@@ -759,7 +779,6 @@ def test_a_pending_review_invocation_is_left_to_its_panel_never_re_posted(tmp_pa
     dc._CUSTODY.clear()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("pending", [False, True], ids=["bound", "pending"])
 @pytest.mark.parametrize("captured,case", [
     (captured, case) for captured in (False, True)

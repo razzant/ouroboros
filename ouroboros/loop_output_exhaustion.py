@@ -57,10 +57,10 @@ def next_step(usage: dict) -> str:
     return "finish" if no_recap(usage) else "inform"
 
 
-def fallback_untried(ctx: Any) -> bool:
+def fallback_untried(usage: dict, target: Any) -> bool:
     """Eligibility only: the physical claim below consumes the binding."""
-    record = ctx.accumulated_usage.get(KEY)
-    return not record or binding(ctx) not in record["tried"]
+    record = usage.get(KEY)
+    return not record or list(target) not in record["tried"]
 
 
 def _invoke(ctx: Any, send: Any, step: str) -> Any:
@@ -203,7 +203,8 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
         if refused is not None and getattr(refused, "predicted_free_tokens", None) is None:
             # The smaller send's own provider refusal is window evidence like any other; empty replies are not.
             from ouroboros.context_anchor import record_refused_input
-            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1])
+            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1],
+                                 measured=fit.measurement.anchor_input_tokens is not None)
     if msg is not None:
         usage.pop(KEY, None)
     _save(ctx)
@@ -223,9 +224,10 @@ def finish(ctx: Any, *, reason: str = REASON) -> tuple:
     notice += " Saved work remains available; choose whether and how to continue."
     candidate = _loop()._live_delivery_candidate(ctx)
     saved = candidate.full_text if candidate is not None else _loop()._last_assistant_text(ctx.messages)
+    # Stamped before composing: the composer may end this rail on the owner's Stop now.
+    usage.update(execution_status="infra_failed" if reason == REASON else "failed", reason_code=reason)
     text, usage, trace = _loop()._forced_fallback_result(
         ctx, ctx.llm_trace, saved or notice, reason, source="output_exhaustion_no_recap", host_words=not saved)
-    usage.update(execution_status="infra_failed" if reason == REASON else "failed", reason_code=reason)
     trace["output_recovery"] = copy.deepcopy(record)
     set_terminal_host_notice(usage, str(usage.get("terminal_host_notice") or ""), notice)
     return text, usage, trace

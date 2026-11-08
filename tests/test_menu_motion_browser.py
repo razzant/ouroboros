@@ -12,7 +12,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['webkit', 'chromium'])
@@ -41,7 +41,14 @@ OPEN_AND_CLOSE = """async () => {
             inert: node.inert, opacity: Number(getComputedStyle(node).opacity) })));
         await frame();
     }
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // The picture leaves when its own exit animation ends (motion.js leaveAsPicture). A loaded runner stretches that
+    // animation (WebKit in CI was 5 % into it after three frames), so wait for its end, bounded, then one more frame.
+    const leaving = [...document.querySelectorAll('body > .chat-plus-menu')];
+    await Promise.race([
+        Promise.all(leaving.flatMap((node) => node.getAnimations().map((a) => a.finished.catch(() => {})))),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+    await frame();
     return { entrance, origin, above: box.bottom <= button.top + 1, height, after,
              left: document.querySelectorAll('body > .chat-plus-menu').length,
              expanded: document.getElementById('chat-plus').getAttribute('aria-expanded') };

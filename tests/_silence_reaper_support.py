@@ -22,7 +22,7 @@ from supervisor import queue, workers
 
 def _ended_attempt(clock, task_id):
     """The silence that once ended an attempt, and its RUNNING row leaving the pool."""
-    idle = max(float(queue.get_task_idle_timeout_sec()), float(queue.get_per_call_timeout_ceiling_sec()) + 120.0)
+    idle = float(queue.get_task_idle_timeout_sec())
     clock[0] += idle + float(queue.FINALIZATION_GRACE_SEC) + 2
     meta = workers.RUNNING.pop(task_id)
     slot = workers.WORKERS.get(meta.get("worker_id"))

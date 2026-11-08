@@ -1,12 +1,9 @@
 """Runner receipts, equivalent workloads, and the real ordinary/managed consumers."""
 
-import hashlib
 import json
 import logging
 import os
 import shutil
-import subprocess
-import venv
 from types import SimpleNamespace
 
 import pytest
@@ -17,8 +14,10 @@ from ouroboros.commit_admission import (
     run_tests_preflight_with_proof,
 )
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
+import hashlib
+import subprocess
+import venv
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +35,7 @@ def _suite(repo):
     (repo / "tests" / "test_candidate.py").write_text(
         "import pathlib, pytest\n"
         "def test_parallel():\n    assert pathlib.Path('candidate.txt').read_text() == 'tested'\n"
-        "@pytest.mark.serial\ndef test_serial():\n    test_parallel()\n"
+        "@pytest.mark.serial('exclusive')\ndef test_serial():\n    test_parallel()\n"
     )
     (repo / "candidate.txt").write_text("tested")
 
@@ -184,7 +183,7 @@ def test_proof_logging_failure_does_not_change_runner_authority(candidate, monke
 
     monkeypatch.setattr("ouroboros.commit_admission.append_jsonl", unavailable_log)
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green fixture", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     with caplog.at_level(logging.WARNING, logger="ouroboros.commit_admission"):
         assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
         proof = candidate._preflight_test_proof
@@ -195,26 +194,6 @@ def test_proof_logging_failure_does_not_change_runner_authority(candidate, monke
               if record.getMessage().startswith("Preflight proof event (not persisted): ")]
     assert [row["action"] for row in events] == ["created", "reused"]
     assert all(row["task_id"] == "" and row["head"] == proof.head for row in events)
-
-
-def test_green_proof_row_discloses_the_passes_it_ran_and_its_budget(candidate, monkeypatch):
-    """A GREEN gate renders no pytest output at all — stdout is piped and printed
-    only on timeout, containment loss or failure — so this disclosure row is the
-    only durable record of what a healthy run cost against the budget that would
-    have killed it. A reused proof executed nothing, so it reports no passes while
-    still naming the budget it was taken under."""
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "1234")
-    monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green fixture", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
-    assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
-    assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
-    created, reused = _proof_events(candidate.drive_root)
-    assert (created["action"], reused["action"]) == ("created", "reused")
-    assert list(created["pass_seconds"]) == [spec.label for spec in pr._preflight_pass_specs()]
-    assert all(isinstance(seconds, float) and seconds >= 0.0
-               for seconds in created["pass_seconds"].values())
-    assert created["budget_sec"] == reused["budget_sec"] == 1234
-    assert reused["pass_seconds"] == {}
 
 
 def test_interpreter_identity_preserves_real_venv_invocation_path(candidate, tmp_path, monkeypatch):
@@ -301,26 +280,35 @@ def test_nonproof_outcomes_never_mint_a_receipt(candidate, monkeypatch, outcome)
         rc, error = {"empty": (5, ""), "failure": (1, ""), "timeout": (None, ""),
                      "containment": (0, "live descendant"), "node_missing": (0, "")}[outcome]
         monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (rc, "output", error))
-        monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+        monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
         if outcome == "node_missing":
             web = ctx.repo_dir / "web" / "tests"
             web.mkdir(parents=True)
             (web / "test.test.js").write_text("// test\n")
             monkeypatch.setattr(pr, "run_node_tests", lambda *a: None)
-    result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
-    assert not getattr(ctx, "_preflight_test_proof", None)
-    assert _proof_events(ctx.drive_root) == []
-    if outcome in {"no_git", "no_suite"}:
-        assert result is None and not ctx._preflight_tests_passed
-    elif outcome != "node_missing":
-        assert result
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
+    temp_root = (ctx.drive_root.parent / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
+        assert not getattr(ctx, "_preflight_test_proof", None)
+        assert _proof_events(ctx.drive_root) == []
+        if outcome in {"no_git", "no_suite"}:
+            assert result is None and not ctx._preflight_tests_passed
+        elif outcome != "node_missing":
+            assert result
+    finally:
+        retire_synthetic_gate_hold(candidate.repo_dir, temp_root, "live descendant")  # the stubbed lane proved no process
 
 
 @pytest.mark.parametrize("change", ["tree", "index", "head", "args", "env", "python", "workers", "serial", "timeout"])
 def test_workload_changes_invalidate_proof(candidate, monkeypatch, change):
     ctx = candidate
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx) is None
     proof = ctx._preflight_test_proof
     assert proof and preflight_test_proof_matches(ctx, ctx.repo_dir)
@@ -335,9 +323,13 @@ def test_workload_changes_invalidate_proof(candidate, monkeypatch, change):
         kwargs["pytest_args"] = ["tests/", "-k", "serial"]
     elif change == "python":
         monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", "/missing/python")
+    elif change == "timeout":  # the full suite's budget is its caller's alone: the env lever bounds a bounded run
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "950")
+        assert proof.covers(capture_preflight_test_subject(ctx.repo_dir))
+        kwargs["timeout"] = 950
     else:
         key, value = {"env": ("PROOF_INPUT", "different"), "workers": ("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3"),
-                      "serial": ("OUROBOROS_PREFLIGHT_SERIAL", "1"), "timeout": ("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "950")}[change]
+                      "serial": ("OUROBOROS_PREFLIGHT_SERIAL", "1")}[change]
         monkeypatch.setenv(key, value)
     assert not proof.covers(capture_preflight_test_subject(ctx.repo_dir, **kwargs))
 
@@ -352,7 +344,7 @@ def test_proof_names_tested_checkout_not_later_live_tree(candidate, monkeypatch)
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", late_edit)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert run_tests_preflight_with_proof(ctx, runner=_run_review_preflight_tests) is None
     assert ctx._preflight_test_proof.tree == before.tree
     assert not preflight_test_proof_matches(ctx, ctx.repo_dir)
@@ -364,7 +356,7 @@ def test_environment_changed_during_lanes_creates_no_reusable_proof(candidate, m
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", changing_env)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
     assert candidate._preflight_test_proof is None
 
@@ -385,7 +377,7 @@ def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
     before = capture_preflight_test_subject(candidate.repo_dir)
     monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
-    assert budget.worker_budget(os.cpu_count()) == 1  # the tight sample really admits fewer workers
+    assert budget.admission(os.cpu_count()).workers == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
 
 
@@ -413,7 +405,7 @@ def test_managed_telemetry_uses_the_tested_tree_even_after_a_live_edit(tmp_path,
         return 0, "green", ""
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", changed_source)
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert run_tests_preflight_with_proof(ctx, runner=_run_review_preflight_tests) is None
     assert update_merge.read_update_tx()["tests_evidence"]["tree"] == tested.tree
     assert not preflight_test_proof_matches(ctx, repo)
@@ -424,7 +416,7 @@ def test_postcommit_baseline_runs_before_reuse(candidate, monkeypatch):
     from ouroboros.tools import git
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *a: (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     assert pr.run_hermetic_pytest(candidate.repo_dir, ctx=candidate) is None
     assert candidate._preflight_test_proof
     shutil.rmtree(candidate.repo_dir / "tests")

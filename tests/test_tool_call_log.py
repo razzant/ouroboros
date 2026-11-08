@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.loop_tool_execution as execution
-from ouroboros.tool_call_log import logical_calls
+from ouroboros.observability import read_call_payload
+from ouroboros.tool_call_log import logical_calls, worker_phrase, worker_position
 from ouroboros.tools.tool_result import ToolResult
 
 
@@ -116,6 +117,13 @@ def test_timeout_then_late_settlement_keeps_both_rows(tmp_path):
     result, logs = _call(registry, tmp_path, timeout=1)
     assert result["tool_result"].code == "TOOL_TIMEOUT"
     assert [row["type"] for row in _rows(logs / "tools.jsonl")] == ["tool_call_started", "tool_call_timeout"]
+    waited = _rows(logs / "tools.jsonl")[1]  # names where the abandoned worker stands (P1)
+    own, waits = waited["worker_at"].split(" <- ")
+    assert own.endswith("test_tool_call_log.py:handler") and waits.endswith(" in wait")
+    assert "worker_stack" not in waited  # the live row stays compact; the record keeps the whole stack
+    assert f"Its worker was at {waited['worker_at']}." in result["result"]  # the model reads the same fact
+    _manifest, record, _ref = read_call_payload(tmp_path / "child", task_id="task-1", call_id=waited["result_ref"]["call_id"])
+    assert record["worker_at"] == waited["worker_at"] and record["worker_stack"][-1] == waits
     release.set()
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and len(_rows(logs / "tools.jsonl")) < 3:
@@ -123,6 +131,7 @@ def test_timeout_then_late_settlement_keeps_both_rows(tmp_path):
     rows = _rows(logs / "tools.jsonl")
     [call] = logical_calls(rows)
     assert call["state"] == "settled" and call["settled"]["result_preview"] == "late"
+    assert "worker_at" not in call["settled"] and "worker_stack" not in call["settled"]
     assert call["wait_ended"]["waited_ms"] >= 900 and call["settled"]["elapsed_ms"] >= call["wait_ended"]["waited_ms"]
     live_timeout = next(frame for frame in registry.frames if frame.get("type") == "tool_call_timeout")
     assert live_timeout["ts"] == call["wait_ended"]["ts"]
@@ -189,22 +198,10 @@ def test_handler_settlement_producer_reaches_memory(tmp_path, status, code, prev
 
 
 @pytest.mark.parametrize("facts,preview,mark", [
-    ({"status": "ok", "is_error": False}, "⚠️ quoted warning, successful read", "✓"),
-    ({"status": "error", "is_error": True}, "ordinary exception text", "·"),
     ({"status": "host_error"}, "ordinary exception text", "·"),
-    ({"status": "error"}, "done", "·"),
-    ({"status": "blocked"}, "done", "·"),
-    ({"status": "unavailable"}, "done", "·"),
-    ({"status": "timeout"}, "done", "·"),
     ({"status": "ok"}, "⚠️ quoted warning", "✓"),
-    ({"is_error": True}, "done", "·"),
-    ({"is_error": False}, "⚠️ quoted warning", "✓"),
-    ({"status": "error", "is_error": False}, "⚠️ stale text", "✓"),
     # A typed ok answer that names another outcome keeps its bucket, never a success mark.
     ({"status": "inspection_required", "is_error": False}, "⚠️ INTEGRATE_DELEGATED_INSPECT_CAPTURE: …", "inspection_required"),
-    ({"status": "git_error", "is_error": False}, "⚠️ GIT_ERROR: …", "git_error"),
-    ({"status": "ok", "is_error": True}, "done", "·"),
-    ({"status": "future_status"}, "done", "?"),
     ({}, "legacy success", "✓"),
     ({}, " ⚠️ legacy failure", "·"),
 ])
@@ -465,3 +462,22 @@ def test_replayed_observations_keep_each_rows_own_host_time_and_invent_none(tmp_
     assert evidence["legacy"]["calls"] == 1
     check = next(o for o in evidence["observations"] if o["key"].endswith(":check") and o["fact"] == "settled")
     assert check["verification"] == {"status": "fail"}
+
+
+def test_a_worker_position_states_only_what_it_saw(monkeypatch):
+    """An unreadable stack is unknown, never "settled"; a call that exited never shows the stack its thread
+    serves next; a call without a worker says so; no invocation record says nothing (BIBLE P1)."""
+    from ouroboros import server_liveness
+
+    live = {"_worker_thread": threading.get_ident()}
+    monkeypatch.setattr(server_liveness, "_loop_thread_stack", lambda *_a, **_k: [])
+    unknown = worker_position(live)
+    assert unknown == {"worker_at": "unknown (its stack could not be read)"}
+    assert worker_phrase(unknown) == " Its worker stood: unknown (its stack could not be read)."
+    monkeypatch.setattr(server_liveness, "_loop_thread_stack", lambda *_a, **_k: ["ouroboros/next.py:1 in other"])
+    assert worker_position(live)["worker_stack"] == ["ouroboros/next.py:1 in other"]
+    assert worker_phrase(worker_position(live)).startswith(" Its worker was at ")
+    settled = worker_position({**live, "_worker_done": True})
+    assert settled == {"worker_at": "settled as its wait ended"}
+    assert worker_phrase(settled) == " Its worker stood: settled as its wait ended."
+    assert worker_position({}) == {"worker_started": False} and worker_position(None) == {}

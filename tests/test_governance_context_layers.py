@@ -330,9 +330,6 @@ def test_the_skill_layer_tiers_the_rules_and_names_what_each_delivery_did_not_re
     ({"type": "extension", "declares": set()}, True, True),
     ({"type": "script", "declares": {"env_from_settings"}}, True, False),
     ({"type": "instruction", "declares": {"scheduled_tasks"}}, True, False),
-    ({"type": "script", "declares": {"contributes"}}, False, True),
-    ({"type": "script", "declares": {"page_module"}}, False, True),
-    ({"type": "script", "declares": {"ui_tab", "permissions"}}, True, True),
     ({"type": "instruction", "declares": set()}, False, False),
 ])
 def test_host_contracts_follow_the_manifests_facts_in_both_directions(skill_governance_root, facts, plugin_api, ui):

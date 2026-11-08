@@ -1,45 +1,9 @@
-"""Own-work candidate selection and terminal links; neither invents page coverage."""
+"""Terminal links and covered rooms of authored pages; they never invent page coverage."""
 from __future__ import annotations
-
-import json
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.dialogue_provenance import recorded_finality
-
-
-def failed_work_units(root, store):
-    """Candidates over the open rows of finished failures (failed or cancelled) the mind never sealed.
-
-    Every post-task run asks this while consciousness is on, a direct turn's in the server after its
-    answer, so it is addressed by the open rows: they name their tasks, whose typed status alone is
-    read (never a task body); only when one of them failed does the chronicle answer which of them
-    the mind sealed (its page author index) and which rows a pending candidate of their room covers."""
-    from ouroboros.memory_fallback import FallbackUnit
-    from ouroboros.memory_inventory import OpenSegment
-    from ouroboros.task_store import task_facts
-
-    open_rows = memory_inventory.open_rows_by_room(root)
-    named = sorted({str(entry[1].get("task_id") or "") for entries in open_rows.values() for entry in entries} - {""})
-    # The named rows alone, through the primary key: a status filter in SQL lets the planner walk
-    # every failed task through the status index instead.
-    facts = task_facts(root, where="task_id IN (SELECT value FROM json_each(?))", params=(json.dumps(named),)) if named else {}
-    failed = {task_id for task_id, fact in facts.items() if fact["status"] in ("failed", "cancelled")}
-    if failed:
-        failed -= store.mind_page_authors(failed)
-    units = []
-    for room, entries in open_rows.items():
-        entries = [entry for entry in entries if str(entry[1].get("task_id") or "") in failed]
-        pending = {ref for record in store.pending_candidates(room) for ref in record["covers"]["rows"]} if entries else set()
-        by_task = {}
-        for entry in entries:
-            if entry[0]["row_sha256"] not in pending:
-                by_task.setdefault(str(entry[1].get("task_id") or ""), []).append(entry)
-        for task_id, rows in by_task.items():
-            segment = OpenSegment(room, rows[0][0], rows[-1][0], tuple(rows), store.room_head(room))
-            units.append(FallbackUnit("page", room, f"candidate:{task_id}:{rows[0][0]['row_sha256'][:12]}",
-                                      segment=segment, candidate_task=task_id))
-    return sorted(units, key=lambda unit: unit.segment.rows[0][2])
 
 
 def _terminal_writer(record):
@@ -64,12 +28,22 @@ def capture_terminal_rows(root, records):
     (``memory_inventory.terminal_rows``): a page's writer ran after the chronicle's activation, so its later
     terminal rows lie after the frontier. Each is ``(address, {"type", "status", <the finality facts it
     stored>}, pos)``."""
+    return writer_terminal_rows(root, terminal_starts(records))
+
+
+def terminal_starts(records):
+    """``{(room, writer task): the stream position after which its terminal rows are later}`` of the pages."""
     starts = {}
     for record in records:
         task_id = _terminal_writer(record)
         if task_id:
             key = (str(record["room_id"]), task_id)
             starts[key] = min(starts.get(key, _terminal_after(record)), _terminal_after(record))
+    return starts
+
+
+def writer_terminal_rows(root, starts):
+    """``capture_terminal_rows`` for the writers' ``terminal_starts``: all it reads besides the pages."""
     if not starts:
         return {}
     tasks, first = {task_id for _room, task_id in starts}, min(starts.values())
@@ -87,6 +61,82 @@ def capture_terminal_rows(root, records):
                 grouped.setdefault((room, task_id), []).append(
                     (address, {"type": meta.get("type"), "status": status, **finality}, pos))
     return grouped
+
+
+def linked_rows(root, store, by_room, projects=()):
+    """The ``row_sha256`` of every writer's later terminal row its page links below it (``terminal_links``), and of
+    each closure's own notice among the open rows ``by_room`` (``closure_notices``, over the registry's ``projects``
+    the capture holds): that page's or closed record's, never read as an open row of my other conversations
+    (``memory_view_conversations``) or a debt."""
+    pages = store.room_records(None, kinds=("page",))
+    grouped = capture_terminal_rows(root, pages)
+    return {address["row_sha256"] for rows in grouped.values() for address, _facts, _pos in rows} | closure_notices(
+        pages, by_room, projects)
+
+
+def _closures(pages, projects=()):
+    """``{room: the closure deliveries its closing pages and its closed project name}`` (``metadata.closure_delivery``,
+    ``closed.delivery``)."""
+    named = {}
+    for page in pages:
+        if (page.get("metadata") or {}).get("closure_delivery"):
+            named.setdefault(str(page["room_id"]), set()).add(page["metadata"]["closure_delivery"])
+    for project in projects:
+        if (project.get("closed") or {}).get("delivery"):
+            named.setdefault(str(project["chat_id"]), set()).add(project["closed"]["delivery"])
+    return named
+
+
+def closure_notices(pages, by_room, projects=()):
+    """``close_project`` names the delivery of the System row it posts in the room (``project_closure``) on the
+    project's closed record and on the page it writes there from its closing note first, when anything is open: that
+    one row, wherever it lands, is the closure's, linked below the page or held by the record, so a project closed with
+    nothing open leaves nothing open. A reopening removes the record and posts a notice of its own delivery: the room
+    is open again. No position or text decides it."""
+    return {address["row_sha256"] for room, ids in _closures(pages, projects).items()
+            for address, meta, _pos in by_room.get(room, ()) if meta.get("delivery_id") in ids}
+
+
+def closure_link(root, record):
+    """A closing page's own closure notice (``closure_notices``) as one line with its exact address and reader, or
+    that it is not in the room yet; nothing for any other record."""
+    delivery, project = ((record.get("metadata") or {}).get(key) for key in ("closure_delivery", "closes_project"))
+    if not delivery or record.get("kind") != "page":
+        return []
+    try:  # read from the page's first row on; a first address that no longer resolves reads the room whole
+        rows = chat_chain.iter_room_rows(root, record["room_id"], from_addr=(record.get("covers") or {}).get("first"))
+    except (chat_chain.RowAddressError, ValueError):
+        rows = chat_chain.iter_room_rows(root, record["room_id"])
+    found = next((address for address, row, _pos in rows if row.get("delivery_id") == delivery), None)
+    if found is None:
+        return [f"- The closure notice of project {project} (delivery {delivery}) is not in the room yet."]
+    at = chat_chain.format_address(found)
+    return [f"- The closure notice of project {project}: memory_read(room_id='{record['room_id']}', rows=true, "
+            f"from='{at}', to='{at}')"]
+
+
+def covered_rooms(root, record):
+    """A conversation page's rooms (``covers.rooms``) as ``(room, label, first, last)``, oldest first: the first and
+    last address of the rows it sealed there, read from that room's rows inside the page's span; none for a page over
+    one room."""
+    from ouroboros.memory_view import room_labeler
+
+    covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
+    rooms = covers.get("rooms") if record.get("kind") == "page" and isinstance(covers.get("rooms"), dict) else {}
+    if not rooms:  # a note, an account, a page over one room: no labeler to build (it reads two registries)
+        return []
+    label, found = room_labeler(root), []
+    label.warm(list(rooms))
+    for room, refs in rooms.items():
+        try:
+            rows = chat_chain.iter_room_rows(root, room, from_addr=covers.get("first"), to_addr=covers.get("last"))
+        except (chat_chain.RowAddressError, ValueError):  # a span bound that no longer resolves reads the room whole
+            rows = chat_chain.iter_room_rows(root, room)
+        wanted = set(refs)
+        sealed = [(pos, chat_chain.format_address(address)) for address, _row, pos in rows
+                  if address["row_sha256"] in wanted]
+        found += [(sealed[0][0], room, label(room), sealed[0][1], sealed[-1][1])] if sealed else []
+    return [entry[1:] for entry in sorted(found)]
 
 
 def terminal_links(root, record, cache=None):

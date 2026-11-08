@@ -23,10 +23,11 @@ from ouroboros.config import (
 )
 from ouroboros.config import ENDPOINT_AUTHORED_SETTINGS as _ENDPOINT_AUTHORED_SETTINGS
 from ouroboros.config import ENDPOINT_WRITTEN_SETTINGS as _ENDPOINT_WRITTEN_SETTINGS, ENDPOINT_WRITERS as _ENDPOINT_WRITERS
-from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
     CommitBoundary,
     SettingsDocumentBusy,
+    SettingsDocumentUnreadable,
     SettingsLockUnavailable,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
@@ -37,10 +38,11 @@ from ouroboros.gateway.owner_settings import (
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
+    record_settings_change,
     settings_document_digest,
     unsaved_error,
 )
-from ouroboros.onboarding_wizard import build_onboarding_html
+from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
@@ -311,13 +313,6 @@ def _start_supervisor_if_needed_for_request(request: Request, settings: dict) ->
     return bool(callback(settings)) if callable(callback) else False
 
 
-async def _json_body_or_empty(request: Request) -> Any:
-    try:
-        return await request.json()
-    except Exception:
-        return {}
-
-
 def _has_running_agent_tasks() -> bool:
     # Known pre-existing residual: PENDING/RUNNING are read without the queue
     # lock, so a task mid-handoff (removed from PENDING, not yet in RUNNING)
@@ -400,7 +395,7 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
 @owner_write_guard
 async def api_owner_runtime_mode(request: Request) -> JSONResponse:
     """Persist the owner-selected runtime mode for the next boot."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -456,7 +451,7 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
 @owner_write_guard
 async def api_owner_auto_grant(request: Request) -> JSONResponse:
     """Persist the owner auto-grant toggle outside generic settings writes."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -693,7 +688,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
     Ordinary modes use this owner path; Cyber can also author a generic save.
     The choice applies to subsequent tasks, so no restart is required.
     """
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -756,7 +751,7 @@ async def api_acknowledge_capability(request: Request) -> JSONResponse:
     Context and output acknowledgements have independent records and timestamps.
     They write the evidence store, never settings.json, so this endpoint deliberately
     has no ``owner_write_guard`` or settings lock and cannot answer ``settings_locked``."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     provider = str((body or {}).get("provider") or "").strip()
     model = str((body or {}).get("model") or "").strip()
     if not provider or not model:
@@ -909,13 +904,16 @@ async def api_onboarding(request: Request) -> Response:
     install-time preset and the ``light`` safety default both depend on, and
     (b) made a page load the author of provider defaults the owner never saw.
     The save paths (POST /api/settings, POST /api/onboarding/complete, the
-    desktop wizard bridge) keep the same normalization and persist it."""
-    from ouroboros.config import SETTINGS_PATH
+    desktop wizard bridge) keep the same normalization and persist it.
+    The settings view and the wizard body come from the one live Setup derivation
+    that ``/onboarding`` and ``/api/onboarding/bootstrap`` serve, so this body shows
+    the consciousness control as the state does too."""
+    from ouroboros.gateway import onboarding_host
 
-    settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
+    settings, bootstrap = onboarding_host._live_setup(request)
     if has_startup_ready_provider(settings):
         return Response(status_code=204)
-    return HTMLResponse(build_onboarding_html(settings, host_mode="web", fresh_install=not SETTINGS_PATH.exists()))
+    return HTMLResponse(render_onboarding_html(bootstrap))
 
 
 def _apply_settings_save_side_effects(
@@ -1293,17 +1291,8 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         authored_keys += tuple(key for key in body if key in SAVED_CHOICE_SETTINGS)
         if runtime_mode_at_least(current_runtime_mode, "cyber_pro") and "OUROBOROS_CONTEXT_MODE" in body:
             authored_keys += tuple(_CONTEXT_MODE_KEYS)
-        _owner_write_settings(
-            settings_to_save,
-            authored_keys=authored_keys,
-            boundary=boundary)
-        control_changes = {key: {"old": raw_old_settings.get(key), "new": settings_to_save.get(key)}
-                           for key in ("OUROBOROS_RUNTIME_MODE", "OUROBOROS_SAFETY_MODE",
-                                       "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
-                                       "OUROBOROS_CONTEXT_MODE", "OUROBOROS_REVIEW_ENFORCEMENT")
-                           if key in all_changed}
-        if control_changes:
-            _owner_audit(request, "settings_controls", {"changes": control_changes})
+        record_settings_change(request, _owner_write_settings(
+            settings_to_save, authored_keys=authored_keys, boundary=boundary))
         from ouroboros.gateway.safety_settings import audit_safety_change
         audit_safety_change(request, old_effective_settings, current)
         boundary.at("environment projection")
@@ -1408,4 +1397,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             return unsaved_error(str(e), 503, code="settings_locked")
         if isinstance(e, SettingsDocumentBusy):
             return unsaved_error(str(e), 503, code="settings_busy")
+        if isinstance(e, SettingsDocumentUnreadable):
+            return unsaved_error(str(e), 409, code="settings_unreadable")
         return unsaved_error(str(e), 400)

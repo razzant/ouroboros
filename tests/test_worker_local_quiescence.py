@@ -27,7 +27,6 @@ from tests.test_imagegen_tool import BODY, _transport, configured as configured,
 from tests.test_imagegen_wait_control import _setup
 from tests.test_pause_model_receiver import _call, _until, scope as scope
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -367,12 +366,15 @@ def test_a_failed_readiness_row_never_unbinds_the_birth_the_probe_answer_carries
     Before, a raise in the readiness block left the birth unbound, and the first idle
     probe answer then ended the worker loop instead of answering.
     """
+    from ouroboros.process_identity import process_kernel_birth
+
     with _probe_worker_process(tmp_path, monkeypatch, "readiness_fault") as worker:
         worker.release.set()
         worker.in_q.put({"type": "worker_quiescence", "token": "probe-1"})
         answer = worker.receive(_quiescent, 15)
         assert answer is not None and answer["token"] == "probe-1" and answer["pid"] == worker.proc.pid
         assert answer["process_birth"], "measured before the failing readiness row"
+        assert answer["kernel_birth"] == (process_kernel_birth(worker.proc.pid) or ""), "so is the kernel birth"
 
 
 # ---------------------------------------------------------------------------

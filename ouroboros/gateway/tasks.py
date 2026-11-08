@@ -62,6 +62,7 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
+from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -108,9 +109,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     "executor_ref",
     "workspace_executor",
     "project_id",
-    # Owner provenance (and its recorded absence) belongs to the host, never to a caller.
+    # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
-    "origin_suppressed", "origin_message_absent",
+    "origin_suppressed", "origin_message_absent", "presence_binding_relation",
 })
 
 
@@ -260,7 +261,11 @@ def _admission_rejection_response(
             admission_cleanup={"child_drive_removed": bool(removed)},
         )
     try:
-        shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
+        from ouroboros.owner_keep import gate
+
+        with gate(drive_root, task_id, timeout_sec=0) as kept:  # the owner's keep holds a rejected task's artifacts too
+            if not kept:
+                shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
     except Exception:
         log.warning("Failed to clean rejected task artifacts for %s", task_id, exc_info=True)
     return JSONResponse(
@@ -282,7 +287,16 @@ def _enqueue_api_task_durably(
     admission_token: str,
     result_fields: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Atomically enqueue, snapshot, and publish the scheduled task result."""
+    """Enqueue under Q, publish outside it, then the admission's receipt under Q again (Q spans memory only).
+
+    The row is durable before the 202 (the barrier). Its receipt lands on the record as the window left it:
+    the row still queued takes the whole receipt as ``scheduled``; an assignment meanwhile wrote ``running`` and a
+    Stop its terminal, and the receipt keeps that status and every word they wrote (their result text, their
+    metadata), adding only the token and the admission facts the record lacks (the launch and the Stop write
+    under Q, so the read and the merge here see one state). Unknown persistence (a failed or uncertain barrier,
+    a receipt the readback does not show) retains the queue row, its reservation and its resources: unknown is
+    not refusal, and the next generation's restore decides the row.
+    """
     from supervisor import queue
 
     with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
@@ -290,24 +304,29 @@ def _enqueue_api_task_durably(
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
             return admitted
-        try:
-            if queue.persist_queue_snapshot(reason="api_task_create") is not True:
-                raise RuntimeError("Queue snapshot persistence was not confirmed")
-            write_task_result(drive_root, task_id, STATUS_SCHEDULED, **result_fields)
+    try:
+        if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202, outside Q
+            raise RuntimeError("Queue snapshot persistence was not confirmed")
+        with queue._queue_lock:
+            current = load_task_result(drive_root, task_id, strict=True) or {}
+            # Another writer's word stands (a Stop's "cancelled" text, a launch's "assigned"): the receipt adds its
+            # token and the admission facts the record has not got.
+            receipt = {key: value for key, value in result_fields.items() if key == "api_admission" or key not in current}
+            write_task_result(drive_root, task_id, str(current.get("status") or STATUS_SCHEDULED), **receipt)
             stored = load_task_result(drive_root, task_id, strict=True) or {}
             if stored.get("api_admission") != result_fields["api_admission"]:
                 raise RuntimeError("The exact API admission receipt was not persisted")
-        except Exception as exc:
-            # An observer may raise AFTER atomic replacement. Read the exact
-            # token; unknown persistence retains the queue row and its resources.
-            try:
-                stored = load_task_result(drive_root, task_id, strict=True) or {}
-            except Exception:
-                stored = {}
-            if stored.get("api_admission") != result_fields["api_admission"]:
-                return {**admitted, "_admission_uncertain": str(exc)}
-        queue.release_task_admission(task_id, admission_token)
-        return admitted
+    except Exception as exc:
+        # An observer may raise AFTER atomic replacement. Read the exact
+        # token; unknown persistence retains the queue row and its resources.
+        try:
+            stored = load_task_result(drive_root, task_id, strict=True) or {}
+        except Exception:
+            stored = {}
+        if stored.get("api_admission") != result_fields["api_admission"]:
+            return {**admitted, "_admission_uncertain": str(exc)}
+    queue.release_task_admission(task_id, admission_token)
+    return admitted
 
 
 def _complete_api_task_admission(
@@ -328,10 +347,12 @@ def _complete_api_task_admission(
     metadata: Dict[str, Any],
 ) -> JSONResponse:
     """Publish one API admission; retain custody when persistence is unknown."""
+    from ouroboros.model_wait import execution_opening
+
     result_fields = {
         **({"created_at": task["created_at"]} if task.get("created_at") else {}),
         **{key: task.get(key) for key in (
-            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role",
+            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role", "depth",
             "chat_id", "title", "suggested_name", "context", "expected_output", "constraints",
             "task_contract", "workspace_root",
         )},
@@ -349,6 +370,7 @@ def _complete_api_task_admission(
         "metadata": metadata,
         **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref", "reasoning_effort",
                                       "execution_timeout_sec") if key in task},
+        **execution_opening(task),  # #939: nothing of it ran yet; a Continue before its first start reads 0
         "api_admission": {"token": admission_token, "status": "accepted"},
         "result": "Task accepted and durably scheduled.",
     }
@@ -1018,16 +1040,21 @@ def _cascade_waits_only_on_runs(task_id: str) -> bool:
 
     Their cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
     critical until a verified terminal) or not sent (the engine is unreachable: pending until it answers).
-    The Stop stays pending and the cancel-intent watchdog settles it once custody records them settled;
-    none of these is a cascade that cancelled nothing. An unreadable answer proves nothing, so the
-    incident stays.
+    A witnessed live inline Presence root waits the same way: its runner observes the open intent at its
+    next stop check and writes the terminal itself (#2012). The Stop stays pending and the cancel-intent
+    watchdog settles it once custody records them settled; none of these is a cascade that cancelled
+    nothing. An unreadable answer, an unreadable author census included, proves nothing, so the incident
+    stays; only a Presence root's own row reads that census.
     """
     try:
         from ouroboros.delegate_custody_reconcile import tree_open_runs
+        from ouroboros.presence_runner import presence_execution_witness
+        from supervisor.cancel_publication import live_presence_row
         from supervisor.queue import DRIVE_ROOT, task_subtree_is_live
 
-        return bool(tree_open_runs(DRIVE_ROOT, task_id)) and not task_subtree_is_live(
-            task_id, ignore_intents=True, count_runs=False)
+        waits = tree_open_runs(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
+                                                         and presence_execution_witness(task_id, drive_root=DRIVE_ROOT) is True)
+        return bool(waits) and not task_subtree_is_live(task_id, ignore_intents=True, count_runs=False)
     except Exception:
         log.debug("Cascade liveness read failed for %s", task_id, exc_info=True)
         return False
@@ -1090,8 +1117,17 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optiona
         from supervisor.cancel_publication import live_presence_row
 
         row = load_task_result(DRIVE_ROOT, task_id, strict=True)
-        # A live Presence turn is its runner's (as on the single Stop's miss lane).
-        if live_presence_row(row) or (not row and not still_owned()):
+        # A Presence row is its runner's: only a turn the shared owner still holds takes the Stop (#2012), or one
+        # whose saved work the queue keeps (a moved turn's restart return, #2566); unconfirmed custody is retried.
+        if live_presence_row(row) and not task_has_live_ownership(task_id):
+            from ouroboros.presence_recovery import CUSTODY_QUEUED, CUSTODY_UNKNOWN, queue_custody
+
+            custody = queue_custody(DRIVE_ROOT, task_id, row)
+            if custody == CUSTODY_UNKNOWN:
+                raise OSError("Presence queue custody is unreadable; Stop intent not recorded")
+            if custody != CUSTODY_QUEUED:
+                return None
+        elif not row and not still_owned():
             return None
     source = "http_cascade" if cascade else "http_single"
     record = functools.partial(
@@ -1160,10 +1196,6 @@ def _drive_stop(task_id: str, intent: Dict[str, Any], *, cascade: bool) -> JSONR
                 "reason_code": "teardown_unconfirmed", **echo,
             }, status_code=202)
     return json_error("task not found or not active", 404, task_id=task_id)
-
-
-# Sentinel telling "the body did not parse" apart from a legitimate JSON null.
-_NO_BODY = object()
 
 
 async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool, stop_action_id: str = "") -> JSONResponse:
@@ -1255,8 +1287,8 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     # non-object JSON must refuse, never silently narrow a cascade to its root.
     raw_body = (await request.body()) or b""
     if raw_body.strip():
-        body = await request_json_or(request, _NO_BODY)
-        if body is _NO_BODY or not isinstance(body, dict):
+        body = await request_json_or(request, None)
+        if not isinstance(body, dict):
             return json_error("request body must be a JSON object", 400, task_id=task_id)
     else:
         body = {}
@@ -1338,25 +1370,29 @@ async def api_task_resume(request: Request) -> JSONResponse:
     revocation, an acceptance fence at restore) is granted by the same call once
     its durable authority validates again; a fence-lifted zero-dispatch sibling
     is released by this same call as an explicit selection. A paused direct
-    owner-chat turn is resumed here too, under its own task id. The optional
+    owner-chat turn is resumed here too, under its own task id. A held Continue
+    whose earlier attempt's writers all still run returns to its writer wait
+    (``held``, ``blockers``) and starts by itself once they settle. The optional
     body (``TaskResumeRequest``) names held calls whose outcome is unknown that
     the owner goes on past (a refusal's ``acceptable_unknown``), never re-run.
+    This door binds itself (``control_actor.owner_door``): only its Resume moves a
+    moved Presence turn off its producer allowance (owner, 2026-11-02, #2566).
     """
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    body = await request_json_or(request, {}) or {}
+    body = await request_json_or(request, {})
     named = body.get("accept_unknown", []) if isinstance(body, dict) else None
     if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason"}
             or not all(isinstance(value, str) for value in named)):
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
     try:
-        from ouroboros.control_actor import accepting_unknown
+        from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
 
-        with accepting_unknown(named, str(body.get("reason") or "")):
+        with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
             result = resume_budget_paused_task(task_id)
     except Exception as exc:
         return json_exception(exc, 503)
@@ -1366,7 +1402,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
     if error == "billing_authority_unavailable":
         message = ("This task's billing lineage does not authorize a return; repair it or cancel the task."
                    if result.get("billing_authority") == "refused" else
-                   "This task's billing conditions could not be read. Fix that cause, then try Resume again.")
+                   "This task's billing conditions still could not be read. You can try Resume again later.")
         return json_error(message + " The task stays paused; budget exhaustion was not established.", 409,
                           code=error, reason_code=result.get("cause", ""), task_id=task_id,
                           **({"action": result["action"]} if result.get("action") else {}))
@@ -1468,65 +1504,20 @@ def _compose_task_text(
     return "".join(parts)
 
 
-def _render_attachment_lines(attachments: Any) -> str:
-    """Render the complete staged/rejected attachment report.
-
-    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
-    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
-    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
-    remain readable; new rows carry ordinal/status/reason and rejected rows are
-    rendered without source paths or secret contents."""
-    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
-    if isinstance(attachments, dict):
-        attachments = attachments.get("attachment_manifest")
-    if not isinstance(attachments, list):
-        return ""
-    lines: List[str] = []
-    if ref:
-        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
-    for item in attachments:
-        if not isinstance(item, dict):
-            continue
-        try:
-            ordinal = int(item.get("ordinal"))
-        except (TypeError, ValueError):
-            ordinal = len(lines)
-        status = str(item.get("status") or "staged")
-        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
-        if status == "rejected":
-            reason = str(item.get("reason") or "staging_failed").strip()
-            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
-            continue
-        relpath = str(item.get("relpath") or "").strip()
-        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
-        label = label or pathlib.Path(relpath).name
-        if not relpath:
-            continue
-        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
-        # v6.54.3: also surface the REAL staged path for process tools — scripts
-        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
-        # models GUESS wrong absolute paths that tripped light-mode path guards.
-        # The staged path lives inside this task's own artifact_store, so both
-        # forms address the same file.
-        abs_path = str(item.get("abs_path") or "").strip()
-        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
-        lines.append(
-            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
-            f"{script_hint} [status=staged, ordinal={ordinal}]"
-        )
-    return "\n".join(lines)
-
-
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     from ouroboros.queue_observation import load_queue_document
     try:
         from ouroboros.project_admission import project_hold_fact
+        from ouroboros.project_naming import derived_run_name
         snapshot = load_queue_document(drive_root)
         snapshot.pop("_queue_alive", None)
         for row in [*snapshot.get("pending", []), *snapshot.get("running", [])]:
             task = row.get("task")
             if isinstance(task, dict):
                 task["project_admission_hold"] = project_hold_fact(task)
+                # Activity names the run as its card does, never by its whole order.
+                if name := derived_run_name(task):
+                    task["suggested_name"] = name
         return snapshot
     except Exception:
         return {}

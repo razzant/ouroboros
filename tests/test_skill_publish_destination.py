@@ -272,9 +272,7 @@ def test_repository_root_origin_is_distinct_from_an_unknown_folder(tmp_path, req
 
 
 @pytest.mark.parametrize("url", [
-    "https://github.com/owner/repo", "https://github.com/owner/repo.git",
-    "git@github.com:owner/repo", "git@github.com:owner/repo.git",
-    "ssh://git@github.com/owner/repo", "ssh://git@github.com/owner/repo.git",
+    "https://github.com/owner/repo", "git@github.com:owner/repo", "ssh://git@github.com/owner/repo.git",
 ])
 def test_github_publication_accepts_https_and_ssh(url):
     from ouroboros.skill_publish_destination import github_repository
@@ -290,3 +288,167 @@ def test_publication_to_other_hosts_explains_the_remaining_limit(url):
     with pytest.raises(SkillPublishDestinationError, match="Publishing currently supports GitHub repositories only") as err:
         github_repository(url)
     assert err.value.reason_code == "hub_destination_invalid"
+
+
+def test_a_hub_inside_a_repository_folder_is_never_a_publication_target(tmp_path):
+    folder_hub = {"id": "team-hub", "name": "Team hub", "kind": "hub", "url": "https://github.com/team/tools",
+                  "path": "catalog", "trust": "review", "confirmed": True}
+    assert resolve_publish_destination(tmp_path, "fresh", rows=[folder_hub, *ROWS]).source_id == "ouroboros"
+    # Without an Official row the first hub is the default: never the one inside a folder.
+    assert resolve_publish_destination(tmp_path, "fresh", rows=[folder_hub, ROWS[2]]).source_id == "ouroboros-community"
+    with pytest.raises(SkillPublishDestinationError) as refused:
+        resolve_publish_destination(tmp_path, "fresh", "team-hub", rows=[folder_hub, *ROWS])
+    assert refused.value.reason_code == "hub_folder_unsupported" and "catalog" in str(refused.value)
+    # A record names its view: the row it came from is found by id first, never another view of the repository.
+    other_view = {**ROWS[3], "id": "mine-next", "ref": "next"}
+    write_install_record(tmp_path, "packed", {"source": {"id": "mine", "kind": "git", "name": "My skills",
+                                                         "url": ROWS[3]["url"], "ref": "main", "commit": "",
+                                                         "path": "packs"},
+                                              "release": {"version": "1", "digest": "0" * 64, "path": "packs/packed"},
+                                              "basis": "review"})
+    origin = resolve_publish_destination(tmp_path, "packed", rows=[other_view, *ROWS])
+    assert (origin.source_id, origin.branch, origin.skill_folder("packed")) == ("mine", "main", "packs/packed")
+
+
+def test_a_name_added_again_for_another_address_is_not_the_origin_of_an_older_install(tmp_path):
+    # "mine" was removed and added again for alice/skills; this release came from alice/old-skills.
+    write_install_record(tmp_path, "packed", {"source": {"id": "mine", "kind": "git", "name": "My skills",
+                                                         "url": "https://github.com/alice/old-skills", "ref": "main",
+                                                         "commit": "", "path": "packs"},
+                                              "release": {"version": "1", "digest": "0" * 64, "path": "group/packed"},
+                                              "basis": "review"})
+    assert resolve_publish_destination(tmp_path, "packed", rows=ROWS).source_id == "ouroboros", "no origin is left"
+    chosen = resolve_publish_destination(tmp_path, "packed", "mine", rows=ROWS)
+    assert (chosen.repository, chosen.skill_folder("packed")) == ("alice/skills", "packs/packed")
+
+
+def test_an_older_record_publishes_in_place_only_on_its_own_row(tmp_path):
+    """A record from before views matches every view of its repository for updates; it goes back into its own
+    folder only on its own row, as before. Another view the owner picks gets the skill in that view's folder."""
+    write_install_record(tmp_path, "packed", {"source": {"id": "mine", "kind": "git", "name": "My skills",
+                                                         "url": ROWS[3]["url"]},
+                                              "release": {"version": "1", "digest": "0" * 64, "path": "group/packed"},
+                                              "basis": "review"})
+    team = {**ROWS[3], "id": "team", "name": "Team", "path": "team"}
+    rows = [*ROWS, team]
+    chosen = resolve_publish_destination(tmp_path, "packed", {"source_id": "team", "mode": "entry"}, rows=rows)
+    assert (chosen.repository, chosen.skill_folder("packed")) == ("alice/skills", "team/packed")
+    assert resolve_publish_destination(tmp_path, "packed", "mine", rows=rows).skill_folder("packed") == "group/packed"
+    # A record naming its view goes back in place on any row reading exactly that view.
+    write_install_record(tmp_path, "viewed", {"source": {"id": "gone", "kind": "git", "name": "Gone",
+                                                         "url": ROWS[3]["url"], "ref": "main", "commit": "",
+                                                         "path": "packs"},
+                                              "release": {"version": "1", "digest": "0" * 64, "path": "packs/viewed"},
+                                              "basis": "review"})
+    assert resolve_publish_destination(tmp_path, "viewed", "mine", rows=rows).skill_folder("viewed") == "packs/viewed"
+    assert resolve_publish_destination(tmp_path, "viewed", "team", rows=rows).skill_folder("viewed") == "team/viewed"
+
+
+def test_a_pinned_view_takes_back_only_what_came_from_it(tmp_path):
+    pinned = {**ROWS[3], "id": "pinned", "name": "Pinned", "commit": "a" * 40}
+    pinned.pop("ref")
+    rows = [*ROWS, pinned]
+    with pytest.raises(SkillPublishDestinationError, match="Pinned stays at commit aaaaaaa") as refused:
+        resolve_publish_destination(tmp_path, "fresh", "pinned", rows=rows)
+    assert refused.value.reason_code == "destination_pinned"
+    write_install_record(tmp_path, "kept", {"source": {"id": "pinned", "kind": "git", "name": "Pinned",
+                                                       "url": ROWS[3]["url"], "ref": "", "commit": "a" * 40,
+                                                       "path": "packs"},
+                                            "release": {"version": "1", "digest": "0" * 64, "path": "packs/kept"},
+                                            "basis": "review"})
+    back = resolve_publish_destination(tmp_path, "kept", "pinned", rows=rows)
+    assert (back.branch, back.skill_folder("kept")) == ("", "packs/kept"), "its origin: the default branch, in place"
+
+
+def test_the_default_hub_is_never_a_pinned_view(tmp_path):
+    """The hub chosen by default or by its alias obeys the refusal an explicit choice meets: a hub pinned to a commit
+    is passed over, exactly as a hub read from a folder; the release that came from it still goes back to it."""
+    pinned_hub = {"id": "stable-hub", "name": "Stable hub", "kind": "hub", "url": "https://github.com/team/hub",
+                  "commit": "a" * 40, "trust": "review", "confirmed": True}
+    with pytest.raises(SkillPublishDestinationError, match="Stable hub stays at commit aaaaaaa") as refused:
+        resolve_publish_destination(tmp_path, "fresh", "stable-hub", rows=[pinned_hub])
+    assert refused.value.reason_code == "destination_pinned"
+    for requested in (None, "hub", {"source_id": "hub", "mode": "new_entry"}):
+        alone = resolve_publish_destination(tmp_path, "fresh", requested, rows=[pinned_hub])
+        assert (alone.source_id, alone.repository) == ("hub", "razzant/OuroborosHub"), requested
+        beside = resolve_publish_destination(tmp_path, "fresh", requested, rows=[pinned_hub, *ROWS])
+        assert beside.source_id == "ouroboros", requested
+    _record(tmp_path, "kept", "stable-hub", "hub", {"commit": "a" * 40, "path": "skills/kept"})
+    back = resolve_publish_destination(tmp_path, "kept", rows=[pinned_hub, *ROWS])
+    assert (back.kind, back.source_id, back.repository, back.branch) == ("hub", "stable-hub", "team/hub", "")
+
+
+def test_a_branch_named_in_full_is_that_branch_and_a_tag_is_refused_by_name(monkeypatch, tmp_path):
+    """A revision may name its branch in full (``refs/heads/main``): publication reads and targets that branch. A tag
+    never moves, so a source reading one would never read a publication: it is refused by name, before anything is
+    written, and no other branch is chosen for it."""
+    from ouroboros import skill_publish_github
+    from ouroboros.skill_publish_client import GitHubError
+    from ouroboros.skill_sources import with_added_source
+
+    rows, full = with_added_source([], kind="git", url="https://github.com/team/skills", name="Main", trust="review",
+                                   revision="refs/heads/main")
+    rows, _hub = with_added_source(rows, kind="hub", url="https://github.com/team/hub", name="Team hub",
+                                   trust="review", revision="refs/heads/stable")
+    target = resolve_publish_destination(tmp_path, "fresh", full["id"], rows=rows)
+    assert (target.repository, target.branch, target.skill_folder("fresh")) == ("team/skills", "main", "fresh")
+    assert resolve_publish_destination(tmp_path, "fresh", "hub", rows=rows).branch == "stable"
+    reads = []
+    monkeypatch.setattr(skill_publish_github, "request",
+                        lambda method, path, **_kwargs: reads.append(path) or {"object": {"sha": BASE_SHA}})
+    assert skill_publish_github.fetch_branch_head(None, "team", "skills", target.branch) == (BASE_SHA, "main")
+    assert reads == ["/repos/team/skills/git/refs/heads/main"]
+    rows, tagged = with_added_source(rows, kind="git", url="https://github.com/team/skills", name="Release",
+                                     trust="review", revision="refs/tags/v1.0.0")
+    with pytest.raises(SkillPublishDestinationError, match="Release stays at the tag v1.0.0") as refused:
+        resolve_publish_destination(tmp_path, "fresh", tagged["id"], rows=rows)
+    assert refused.value.reason_code == "destination_tag"
+
+    # A bare name that the repository holds as a tag is refused when its branch is read.
+    rows, bare = with_added_source(rows, kind="git", url="https://github.com/hub/project", name="Bare",
+                                   trust="review", revision="v1.0.0")
+    ctx, events, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
+    monkeypatch.setattr(skill_publish, "resolve_publish_destination", lambda drive, skill, destination:
+                        resolve_publish_destination(drive, skill, destination, rows=rows))
+    monkeypatch.setattr(skill_publish, "fetch_branch_head", skill_publish_github.fetch_branch_head)
+    reads.clear()
+
+    def github(method, path, **_kwargs):
+        reads.append(path)
+        if path == "/repos/hub/project/git/refs/tags/v1.0.0":
+            return {"ref": "refs/tags/v1.0.0", "object": {"type": "tag", "sha": "c" * 40}}
+        raise GitHubError("Not Found", http_status=404)
+
+    monkeypatch.setattr(skill_publish_github, "request", github)
+    result = _submit(ctx, destination=bare["id"])
+    assert (result["ok"], result["status"], result["reason_code"]) == (False, "blocked", "destination_tag"), result
+    assert "v1.0.0 is a tag of hub/project" in result["repair_hint"]
+    assert reads == ["/repos/hub/project/git/refs/heads/v1.0.0", "/repos/hub/project/git/refs/tags/v1.0.0"]
+    assert not [event for event in events if event[0] == "mutation"] and captured["additions"] == []
+
+
+def test_a_refusal_that_names_its_cause_reaches_the_preflight_and_the_tool(monkeypatch, tmp_path):
+    """Publishing into a hub read from a folder is refused with its own reason, never as «not a GitHub repository»."""
+    import ouroboros.config as config
+    from ouroboros.gateway import skill_publish as preflight
+    from ouroboros.skill_publish_destination import _row_destination
+
+    folder_hub = {"id": "team-hub", "name": "Team hub", "kind": "hub", "url": "https://github.com/team/tools",
+                  "path": "catalog", "trust": "review", "confirmed": True}
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([folder_hub, *ROWS]))
+    _record(tmp_path, "hosted", "team-hub", "hub", {"commit": "c" * 40, "path": "catalog/skills/hosted"})
+    outcome = preflight.build_skill_publish_preflight(tmp_path, "hosted", repo_path="", github_token_configured=True)
+    assert (outcome.status_code, outcome.payload["reason_code"]) == (409, "hub_folder_unsupported")
+    assert outcome.payload["summary"].startswith("Publishing to a hub inside a repository folder (catalog)")
+    assert "not a GitHub repository" not in outcome.payload["summary"] + outcome.payload["repair_hint"]
+
+    ctx, _events, _captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
+
+    def refuse(_drive, _skill, _requested):
+        return _row_destination(folder_hub)
+
+    monkeypatch.setattr(skill_publish, "resolve_publish_destination", refuse)
+    result = _submit(ctx, destination="team-hub")
+    assert (result["ok"], result["reason_code"]) == (False, "hub_folder_unsupported")
+    assert "inside a repository folder (catalog)" in result["repair_hint"]

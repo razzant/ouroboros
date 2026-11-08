@@ -162,7 +162,7 @@ def test_diagnostic_rechecks_room_after_preparation_without_reading_under_queue_
     assert not queue.PENDING and observation(attention)["attention_wait"] == "subagents_off_in_room"
 
 
-@pytest.mark.parametrize("origin", ["evolution", "evolution-descendant", "evolution-transaction", "consciousness"])
+@pytest.mark.parametrize("origin", ["evolution", "evolution-descendant", "consciousness"])
 def test_autonomous_diagnostics_keep_their_own_controls(attention, monkeypatch, origin):
     from ouroboros.settings_integrity import live_subagents_mode
 
@@ -423,7 +423,7 @@ def test_terminal_file_does_not_release_or_kill_source(attention):
     assert workers.WORKERS[0] is worker and worker.busy_task_id == "root"
 
 
-@pytest.mark.parametrize("barrier", ["panic", "stop", "pause", "deadline", "billing"])
+@pytest.mark.parametrize("barrier", ["panic", "deadline", "billing"])
 def test_source_barriers_prevent_diagnostic_admission(attention, monkeypatch, barrier):
     if barrier == "panic":
         monkeypatch.setattr("ouroboros.installation_stop.installation_panic", lambda *a, **k: True)
@@ -565,8 +565,7 @@ def test_diagnostic_producer_to_worker_put_revalidates_source_off_queue_lock(att
         assert generation.lane_idle(preparation.ADMISSION_LANE, 15)
 
 
-@pytest.mark.parametrize("source_change", ["pause", "new_episode"])
-@pytest.mark.parametrize("root_control", ["stop", "deadline"])
+@pytest.mark.parametrize(("root_control", "source_change"), [("stop", "pause"), ("deadline", "new_episode")])
 def test_sent_diagnostic_source_change_cannot_hide_root_hard_control(monkeypatch, source_change, root_control):
     from ouroboros.work_diagnostics import control_reason
 

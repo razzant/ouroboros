@@ -193,13 +193,13 @@ def runtime_environ() -> dict[str, str]:
     return env
 
 
-def _actor_project(scope: tuple[Path, Mapping]) -> str:
+def _actor_project(scope: tuple[Path, Mapping], *, scheduled_room: bool = False) -> str:
     """Current room from lineage or admitted facts, never a working directory."""
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.projects_registry import RoomResolver, get_reserved_project
 
     root, actor = scope
-    if actor.get("presence"):
+    if actor.get("presence") and not scheduled_room:
         return ""
     chat = RoomResolver(root, strict=True)(actor.get("id"), actor.get("parent_task_id"), actor.get("root_task_id"))
     if chat:
@@ -230,15 +230,20 @@ def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskS
 
 def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
     from ouroboros.consciousness_authority import is_consciousness_origin
-    from ouroboros.dialogue_provenance import presence_metadata_binding
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_record_metadata
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     actor = {key: task.get(key) or metadata.get(key) for key in (
         "id", "parent_task_id", "root_task_id", "project_id", "chat_id")}
-    actor["presence"] = bool(task.get("_presence_turn") or presence_metadata_binding(metadata) is not None)
-    actor["autonomous"] = bool(task.get("type") == "evolution" or metadata.get("evolution_root_task_id")
-                               or metadata.get("evolution_transaction") or is_consciousness_origin(metadata)
-                               or metadata.get("work_kind") == "consciousness" or actor["presence"])
+    # The record's own view (its owner door and lineage too): the owner's related work keeps its room.
+    actor["presence"] = bool(task.get("_presence_turn")
+                             or presence_metadata_binding(presence_record_metadata(task)) is not None)
+    # Only the scheduler stamps this origin; descendants and Continue carry it by value. A time-born task follows
+    # its room's Off regardless of author or place. Ordinary wakes, Presence and Evolve retain their own controls.
+    actor["scheduled"] = bool(metadata.get("schedule_writer_kind"))
+    actor["autonomous"] = not actor["scheduled"] and bool(
+        task.get("type") == "evolution" or metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction")
+        or is_consciousness_origin(metadata) or metadata.get("work_kind") == "consciousness" or actor["presence"])
     return (Path(task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root),
             MappingProxyType(actor))
 
@@ -296,6 +301,11 @@ def live_effort_range() -> dict[str, str]:
     return read_cognition(root, _actor_project(snapshot.actor_scope), settings=settings)["effort_range"]
 
 
+def _schedule_capped(mode: str, actor: Mapping) -> str:
+    """Work the clock started holds no Swarm request (owner 03.11): Auto, while the room's Off still stops it."""
+    return "auto" if mode == "swarm" and actor.get("scheduled") else mode
+
+
 def live_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None = None,
                         settings: Mapping | None = None) -> str:
     """Live room choice from explicit or bound actor facts; autonomous work keeps its controls."""
@@ -309,7 +319,8 @@ def live_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None 
         return config.normalize_subagents_mode(settings.get("OUROBOROS_SUBAGENTS_MODE"))
     if scope[1].get("autonomous"):
         return "auto"
-    return read_cognition(scope[0], _actor_project(scope), settings=settings)["subagents_mode"]
+    project = _actor_project(scope, scheduled_room=bool(scope[1].get("scheduled")))
+    return _schedule_capped(read_cognition(scope[0], project, settings=settings)["subagents_mode"], scope[1])
 
 
 def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mapping | None = None,
@@ -323,7 +334,8 @@ def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mappin
         cognition = project.get("cognition") if project is not None else None
         mode = ((cognition if isinstance(cognition, Mapping) else {}).get("subagents_mode") if project is not None
                 else settings.get("OUROBOROS_SUBAGENTS_MODE"))
-        mode = "auto" if _actor_scope(task, drive_root)[1].get("autonomous") else normalize_subagents_mode(mode)
+        actor = _actor_scope(task, drive_root)[1]
+        mode = "auto" if actor.get("autonomous") else _schedule_capped(normalize_subagents_mode(mode), actor)
         mode = mode if subagents_availability(settings) == "available" else "off"
     else:
         # Direct turns have no queue admission row. Resolve their accepted room,
@@ -336,9 +348,15 @@ def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mappin
 
 
 def room_subagents_mode_applies() -> bool:
-    """Consciousness and Evolve keep their own controls, including their descendants."""
+    """Consciousness, Presence and Evolve keep their own controls, including their descendants; scheduled work does not."""
     snapshot = _TASK_SETTINGS.get()
     return not (snapshot and snapshot.actor_scope and snapshot.actor_scope[1].get("autonomous"))
+
+
+def actor_is_scheduled() -> bool:
+    """Whether the bound actor is work the clock started, or carries on from it."""
+    snapshot = _TASK_SETTINGS.get()
+    return bool(snapshot and snapshot.actor_scope and snapshot.actor_scope[1].get("scheduled"))
 
 
 def actor_subagents_availability() -> str | None:

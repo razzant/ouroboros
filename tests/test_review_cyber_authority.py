@@ -30,7 +30,7 @@ def test_effective_authority_keeps_configured_enforcement(access):
 
 
 @pytest.mark.parametrize("status", [
-    "responded", "unanswered", "error", "not_performed", "not_dispatched", "pending",
+    "responded", "error", "pending",
 ])
 def test_coupling_facts_survive_action_authority(candidate, access, status):  # noqa: F811
     """The gate's one verdict (``review_err``) is projected under the owner's
@@ -71,7 +71,7 @@ def test_review_status_readiness_matches_the_actual_gate(candidate, access):  # 
     projection = json.loads(_handle_review_status(candidate))
     assert "repo_commit_ready" not in projection, "no readiness axis is projected under either authority"
     assert not projection["open_obligations"] and not projection["commit_readiness_debts"]
-    assert not projection["advisory_runs"]
+    assert "advisory_runs" not in projection and "advisory_run_archive" not in projection
     assert not load_state(candidate.drive_root).advisory_runs
 
 

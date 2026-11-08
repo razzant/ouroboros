@@ -1,26 +1,34 @@
-// Dashboard -> Storage: the last finished count of everything Ouroboros owns (the data folder with the
-// engine home, working copies, project folders, Deliverables, the installed program), its date, the growth
-// since the count before it and the free space of the data folder's disk. `POST /api/storage/measure`
-// starts one complete count in a server child; `GET /api/storage` is its passive projection, polled only
-// while counting, listing or freeing (including trash deletion, not an entry the maintenance child reported
-// stuck) AND this tab is on screen. The bar is drawn only for a finished
-// count (the owner's choice «Полоса и группы», 2026-10-05): five group shares that sum to the headline; a
-// running, stopped or failed count never replaces the saved one, so the bar and the list stay while a new
-// count runs. Unknown is never zero: a place that could not be listed has no size. The second card ends
-// in the Temporary space tray (storage_free.js): a pure preview of what the app's own retirers would
-// remove, one danger capsule last on the page, the shared confirm dialog, progress and result in place.
+// Dashboard -> Storage: the whole footprint and coloured bar first, then Cleanup and every folder. The last
+// finished count of everything Ouroboros owns (the data folder with the engine home, working copies, project
+// folders, Deliverables, the installed program), its date and the growth since the count before it.
+// `POST /api/storage/measure` starts one complete count in a server child; `GET /api/storage` is its passive
+// projection, polled only while counting, listing or freeing (including trash deletion, not an entry the
+// maintenance child reported stuck) AND this tab is on screen. The bar is drawn only for a finished count (the
+// owner's choice «Полоса и группы», 2026-10-05): five group shares that sum to the headline; a count replaces the saved
+// one only once its places finish, so the bar and the list stay while a new count runs. Each group
+// folds under its head, its places, sizes and removers one press away. Unknown is never zero: a place that could
+// not be listed has no size. The first card holds the flow of Free temporary space (storage_free.js): a pure
+// preview, the ordinary pool read whole by its real ids, one Remove, progress and the result in place. Finished
+// copies not verified saved are a separate, deliberate form: their own list read whole, each id chosen by the owner
+// (nothing chosen to begin with), the shared confirm dialog as the acknowledgement of the whole copy's loss.
+// The folders deleted projects left behind are one read-only fold under the groups (storage_deleted.js).
 
-import { apiClient } from './api_client.js';
+import { apiClient, isStoreMigrating } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { fmt } from './i18n.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
-import { DOTS, durationLabel, formatBytes, isSize, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
-import { confirmCopy, doneSentences, groupsOf, notStarted, startsChecked, trayHtml, trayState } from './storage_free.js';
+import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
+import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
+import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
 
 const POLL_MS = 1000;
+const POOL_PAGE = 500;  // the contract's largest page: the pool is read whole before anything can be sent
+const LIST_PAGE = 100;
+const MANUAL_PAGE = 50;  // a copy's entry lists its fifty largest unsaved paths: smaller pages than the other lists
+const LIST_RESTARTS = 3;  // a list whose version keeps moving stops and says so; the owner may try again
 const text = escapeHtmlText;
 const attr = escapeHtmlAttr;
 
@@ -45,7 +53,8 @@ const PLACE_WORDS = {
     project_folders: { label: 'Project folders', why: 'Your project files. Not deleted here.' },
     deliverables: { label: 'Deliverables', why: 'Files Ouroboros made for you. Not deleted here.' },
     work_folders: { label: 'Task work folders', why: 'Removed by the app’s own cleanup {days} days after a task finishes.' },
-    working_copies: { label: 'Working copies', why: 'Copies of code that helpers work in. Removed {days} days after they were made, once their task has finished.' },
+    working_copies: { label: 'Working copies', why: 'Copies of code that helpers work in. Removed {days} days after they were made, once their task has finished, their work is saved and you have not asked to keep them.' },
+    session_scratch: { label: 'Session scratch', why: 'Short-lived folders coding sessions write test files and package caches into, outside the data folder. Released by the app once their task or reviewer seat is over; the Storage line says what still holds them.' },
     app_state: { label: 'App state', why: 'The task database, settings, caches and working state.', parts: true },
     data_other: { label: 'Everything else in the data folder', why: 'Logs, attachments and anything not listed above.', parts: true },
     program: { label: 'Ouroboros program', why: 'The installed app and its history. Updated by the app.' },
@@ -64,6 +73,11 @@ const JOB_WORDS = {
     custody_trash: 'Deleting moved folders',
     evidence_packing: 'Evidence packing',
     record_compression: 'Compression',
+    drive_settlement: 'Work folder settlement',
+    copy_retirement: 'Working copy retirement',
+    review_checkout_prune: 'Review copy retirement',
+    session_scratch_release: 'Scratch release',
+    engine_runtime_prune: 'Engine program copies',
 };
 const JOB_STATES = {
     done: '{job}: done',
@@ -98,6 +112,12 @@ function jobPhrase(fact, now) {
     const job = fmt(JOB_WORDS[fact.id] || String(fact.id));
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
+    }
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
+        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
+            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
+            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+        return parts.filter(Boolean).join(' · ');
     }
     if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {
         // This place's own plane (task evidence, or reviewer seat homes), never one total under two places.
@@ -142,6 +162,7 @@ export function placeRows(count, days = 7, removers = {}, now = new Date()) {
             unreadable: isSize(place.unreadable) ? place.unreadable : 0,
             growth: isSize(place.growth_bytes) ? place.growth_bytes : null,
             caveat: place.growth_flag === 'unreadable',
+            undecided: typeof place.undecided === 'string' ? place.undecided : '',
             otherDisk: place.same_volume === false,
             split: said.split && parts.length ? engineSplit({ ...place, parts }) : '',
             remover: removerLine(removers?.[place.id], now),
@@ -185,21 +206,41 @@ export function storageState(response) {
     return response.error && !response.error.stopped ? 'failed' : 'never';
 }
 
-function factsLine(count, now) {
-    const parts = [fmt('Last count: {when}', { when: whenLabel(count.finished_at, now) })];
-    const took = durationLabel(count.duration_seconds);
-    if (took) parts.push(fmt('took {duration}', { duration: took }));
+/** How old the count is (the fact a Refresh answers): "Counted today at 18:40", "Counted 30 Oct — 6 days ago". */
+function countedWords(iso, now) {
+    const at = new Date(iso);
+    if (!iso || Number.isNaN(at.getTime())) return '';
+    const days = Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 864e5);
+    if (days < 1) return fmt('Counted {when}', { when: whenLabel(iso, now) });
+    return fmt('Counted {date} — {age}', { date: at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }), age: plural(days, '{n} day ago', '{count} days ago') });
+}
+
+/** The hero's meta lines under the footprint: the count's age, then what it grew by since the one before. */
+function countLines(count, now) {
+    const lines = [countedWords(count.finished_at, now)];
     if (isSize(count.growth_bytes) && count.growth_since) {
         const when = whenLabel(count.growth_since, now);
-        const growth = count.growth_bytes === 0 ? fmt('no change since {when}', { when })
-            : fmt(count.growth_bytes > 0 ? '+{size} since {when}' : '−{size} since {when}', { size: formatBytes(Math.abs(count.growth_bytes)), when });
-        parts.push(count.growth_flag === 'unreadable' ? `${growth} ${fmt('(some items could not be read)')}` : growth);
+        lines.push(count.growth_bytes === 0 ? fmt('No change since {when}', { when })
+            : fmt(count.growth_bytes > 0 ? '+{size} since {when}' : '−{size} since {when}', { size: formatBytes(Math.abs(count.growth_bytes)), when }));
     }
-    return parts.join(' · ');
+    return lines.filter(Boolean).map((line) => `<p class="dashboard-hero-meta" data-i18n-fmt="storage.facts">${text(line)}</p>`).join('');
+}
+
+/** How the count was taken, each fact once (the hero's Details): how long it took, what it could not read (this
+ *  count's items, or the earlier count's when only the growth is qualified). '' when there is nothing to say. */
+function countFactsHtml(count) {
+    const took = durationLabel(count?.duration_seconds);
+    const facts = [took ? fmt('Took {duration}.', { duration: took }) : '',
+        count?.unreadable > 0 ? `${plural(count.unreadable, '{n} item could not be read', '{count} items could not be read')}.`
+            : count?.growth_flag === 'unreadable' ? fmt('Some items could not be read, so the growth is approximate.') : ''];
+    return facts.filter(Boolean).map((fact) => `<p class="storage-meta" data-i18n-fmt="storage.facts">${text(fact)}</p>`).join('');
 }
 
 function progressHtml(counting) {
-    const sentence = fmt('Measuring {place} · {current} · {size} so far · {done} of {total} places. You can leave this tab.', {
+    const sentence = counting.place === 'deleted_projects' ? fmt('Measuring folders of deleted projects outside these places · {current} · {size} so far. You can leave this tab.', {
+        current: counting.current || '',
+        size: formatBytes(counting.bytes || 0),
+    }) : fmt('Measuring {place} · {current} · {size} so far · {done} of {total} places. You can leave this tab.', {
         place: words({ id: counting.place }).label ? fmt(words({ id: counting.place }).label) : '',
         current: counting.current || '',
         size: formatBytes(counting.bytes || 0),
@@ -242,34 +283,41 @@ export function announceSentence(response, { readFailed = false, now = new Date(
         else parts.push(fmt('Not counted yet.'));
         const free = freeOf(response);
         const state = trayState(free, tray?.dismissed);
-        if (state === 'listing') parts.push(fmt('Checking what can go. Nothing is removed.'));
-        else if (state === 'running') parts.push(fmt('Freeing space. You can leave this tab.'));
-        else if (state === 'done') parts.push(doneSentences(free)[0]);
-        else if (state === 'failed') parts.push(fmt('Temporary space could not be listed. Nothing was removed.'));
+        parts.push(...attemptSentences(tray));  // what happened to the owner's attempt, before the phase it stands beside
+        if (state === 'listing') parts.push(fmt('Checking for files to remove. Nothing is removed.'));
+        else if (state === 'ready' && free.pool?.count > 0) parts.push(fmt('{items} ready to remove.', { items: plural(free.pool.count, '{n} item', '{count} items') }));
+        else if (state === 'running') parts.push(fmt('Removing. You can leave this tab.'));
+        else if (state === 'done') {
+            const { problems, lead } = resultSentences(free);
+            parts.push(...problems, lead);
+        } else if (state === 'failed') parts.push(fmt('Temporary space could not be listed. Nothing was removed.'));
     }
     return parts.filter(Boolean).join(' ');
 }
 
+/** The disk's free space: one reading, drawn under the total before a first count and under the folders after it. */
+function diskHtml(response, now) {
+    const volume = response?.volume;
+    if (!response) return '';
+    const disk = isSize(volume?.free_bytes) ? fmt('This disk: {free} free of {total} · read {when}', { free: formatBytes(volume.free_bytes), total: isSize(volume.total_bytes) ? formatBytes(volume.total_bytes) : fmt('unknown'), when: whenLabel(volume.observed_at, now) }) : fmt('Free space on this disk could not be read');
+    return `<p class="storage-meta storage-disk" data-i18n-fmt="storage.disk">${text(disk)}</p>`;
+}
+
+/** The hero's words (style.css "The Dashboard tab body"): the whole footprint, its count's age and growth; the free
+ *  space of the disk stands under it only while there is no count yet. */
 function summaryHtml(response, { readFailed, now }) {
-    const kicker = '<div class="storage-kicker">Ouroboros uses</div>';
-    if (!response) {
-        return `${kicker}<div class="storage-total is-unknown">${readFailed ? 'Could not be read' : 'Loading…'}</div>`;
-    }
-    const { count, counting, error, volume } = response;
-    const failed = Boolean(error && !error.stopped && !count && !counting);
-    const total = count ? formatBytes(count.bytes) : failed ? fmt('Could not be counted') : fmt('Not counted yet');
+    const count = response?.count;
+    const value = count ? formatBytes(count.bytes) : readFailed ? fmt('Could not be read') : !response ? fmt('Loading…') : fmt('Not measured yet');
+    return `<p class="dashboard-hero-kicker">Space used by Ouroboros</p><p class="dashboard-hero-figure storage-total${count ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(value)}</p>
+        ${count ? countLines(count, now) : diskHtml(response, now)}
+        ${readFailed ? '<p class="ui-status storage-status" data-tone="warn">Storage status could not be read. Showing the last answer.</p>' : ''}`;
+}
+
+/** The second card's head: how the saved count stands, or why there is none yet. */
+function countStatusHtml(response, now) {
+    if (!response) return '';
+    const { count, counting, error } = response;
     const lines = [];
-    if (isSize(volume?.free_bytes) && isSize(volume?.total_bytes)) {
-        lines.push(`<div class="storage-meta" data-i18n-fmt="storage.free">${text(fmt('{free} free of {total} on the disk the data folder is on', {
-            free: formatBytes(volume.free_bytes), total: formatBytes(volume.total_bytes),
-        }))}</div>`);
-    }
-    if (count) {
-        lines.push(`<div class="storage-meta" data-i18n-fmt="storage.facts">${text(factsLine(count, now))}</div>`);
-        if (count.unreadable > 0) {
-            lines.push(`<div class="storage-meta" data-i18n-fmt="storage.unreadable">${text(plural(count.unreadable, '{n} item could not be read', '{count} items could not be read'))}</div>`);
-        }
-    }
     if (counting) {
         lines.push(progressHtml(counting));
         if (!count) lines.push(firstCountHtml(counting));
@@ -278,90 +326,78 @@ function summaryHtml(response, { readFailed, now }) {
     } else if (!count) {
         lines.push('<div class="storage-meta">Measuring reads file sizes only and changes nothing. It can take a while on a large data folder.</div>');
     }
-    if (readFailed) lines.push('<p class="ui-status storage-status" data-tone="warn">Storage status could not be read. Showing the last answer.</p>');
-    return `${kicker}<div class="storage-total${count ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(total)}</div>${lines.join('')}`;
+    return lines.join('');
 }
 
 function sizeCells(row) {
-    const size = row.bytes === null ? '' : formatBytes(row.bytes);
+    const size = row.bytes === null ? fmt('unknown') : formatBytes(row.bytes);
     const growth = row.growth === null || row.growth === 0 ? '' : signed(row.growth);
-    return `<span class="storage-place-size${size ? '' : ' is-unknown'}" data-i18n-fmt="storage.size">${text(size)}</span>
+    return `<span class="storage-place-size${row.bytes === null ? ' is-unknown' : ''}" data-i18n-fmt="storage.size">${text(size)}</span>
         <span class="storage-place-delta" data-i18n-fmt="storage.growth">${text(growth)}</span>`;
 }
 
-/** The reason, then what qualifies the row: unreadable, on another disk, a growth some items escaped. */
+/** The reason, then what qualifies the row: unreadable (or a folder not chosen yet, with the server's
+ *  sentence naming the setting), on another disk, a growth some items escaped. */
 function whyLine(row) {
     const notes = [row.why];
-    if (row.bytes === null) notes.push(fmt('Could not be read.'));
+    if (row.bytes === null) notes.push(row.undecided ? fmt('Not counted: {reason}', { reason: row.undecided }) : fmt('Could not be read.'));
     if (row.otherDisk) notes.push(fmt('on another disk'));
     if (row.caveat && row.growth) notes.push(fmt('(some items could not be read)'));
     return `<span class="storage-place-why" data-i18n-fmt="storage.why">${text(notes.filter(Boolean).join(' · '))}</span>`;
 }
 
-function partsHtml(row) {
-    if (!row.parts.length) return '';
-    const items = row.parts.map((part) => `<li><span data-i18n-authored>${text(part.name)}</span><span data-i18n-fmt="storage.size">${text(formatBytes(part.bytes))}</span></li>`);
-    if (row.rest) items.push(`<li class="storage-parts-rest" data-i18n-fmt="storage.rest">${text(fmt('and {n} more, {size}', { n: number(row.rest.count), size: formatBytes(row.rest.bytes) }))}</li>`);
-    return `<details class="activity-history storage-parts" data-key="parts-${attr(row.id)}">
-            <summary>Largest parts</summary>
-            <ul class="storage-parts-list">${items.join('')}</ul>
-        </details>`;
-}
+const partsHtml = (row) => largestPartsHtml(row.parts, row.rest, `parts-${row.id}`, `parts-${row.id}-open`);
 
 const removerHtml = (row) => (row.remover
     ? `<span class="storage-place-remover" data-i18n-fmt="storage.remover">${text(row.remover)}</span>` : '');
 
 function memberHtml(row) {
-    return `<li class="storage-place is-member" data-storage-place="${attr(row.id)}">
-            <span class="storage-place-label">${text(row.label)}</span>${sizeCells(row)}
-            ${whyLine(row)}
-            ${row.split ? `<span class="storage-place-split" data-i18n-fmt="storage.split">${text(row.split)}</span>` : ''}
-            ${removerHtml(row)}${partsHtml(row)}
-        </li>`;
+    return `<li class="storage-folder" data-storage-place="${attr(row.id)}"><details class="storage-folder-fold" data-key="place-${attr(row.id)}">
+        <summary data-key="place-${attr(row.id)}-open"><span class="storage-key" data-group="${attr(row.group)}"></span><span class="storage-place-label">${text(row.label)}</span>${sizeCells(row)}</summary>
+        <div class="storage-folder-open">${whyLine(row)}${row.split ? `<span class="storage-place-split">${text(row.split)}</span>` : ''}${removerHtml(row)}${partsHtml(row)}</div>
+    </details></li>`;
 }
 
-function groupHtml(group) {
-    const head = `<div class="storage-group-head"><span class="storage-key" data-group="${attr(group.id)}"></span>
-        <span class="storage-group-label">${text(group.label)}</span>${sizeCells(group)}</div>`;
-    // A group of one place carries that place's words under its heading; a larger group lists its places.
-    if (group.members.length === 1) {
-        const row = group.members[0];
-        return `<li class="storage-group" data-storage-group="${attr(group.id)}" data-storage-place="${attr(row.id)}">${head}
-            <div class="storage-group-body">${whyLine(row)}
-            ${row.split ? `<span class="storage-place-split" data-i18n-fmt="storage.split">${text(row.split)}</span>` : ''}
-            ${removerHtml(row)}${partsHtml(row)}</div></li>`;
-    }
-    return `<li class="storage-group" data-storage-group="${attr(group.id)}">${head}
-        <ul class="storage-group-places">${group.members.map(memberHtml).join('')}</ul></li>`;
-}
-
-function placesHtml(response, now) {
+function barHtml(response, now) {
     const count = response?.count;
     if (!count) return '';
     const days = response.retention_days ?? 7;
-    // The bar pictures the last finished count only; its label is fixed chrome, the list carries the names
-    // and sizes (the language overlay translates an aria-label by its English text).
     const segments = barSegments(count, days).map((segment) => `<span class="storage-bar-seg" data-group="${attr(segment.group)}" data-share="${segment.share}"></span>`);
-    const bar = segments.length ? `<div class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below">${segments.join('')}</div>` : '';
-    return `<h3 class="storage-card-title">Where it is</h3>${bar}
-        <ul class="storage-groups">${groupRows(placeRows(count, days, response.removers, now)).map(groupHtml).join('')}</ul>`;
+    const groups = groupRows(placeRows(count, days, response.removers, now));
+    return `${segments.length ? `<div class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below">${segments.join('')}</div>` : ''}
+        <ul class="storage-legend" aria-label="Groups of the bar">${groups.map((group) => `<li><span class="storage-key" data-group="${attr(group.id)}"></span><span data-i18n-fmt="storage.group">${text(group.label)}</span><b data-i18n-fmt="storage.size">${text(group.bytes === null ? fmt('unknown') : formatBytes(group.bytes))}</b></li>`).join('')}</ul>`;
 }
 
-export const freeOf = (response) => response?.free || { state: 'idle', groups: [], run: null, error: null, done: 0, total: 0 };
+function placesHtml(response, now, deletedShown = {}) {
+    const count = response?.count;
+    if (!count) return '';
+    const groups = groupRows(placeRows(count, response.retention_days ?? 7, response.removers, now));
+    const rows = groups.flatMap((group) => [...group.members].sort((a, b) => (b.bytes ?? -1) - (a.bytes ?? -1)));
+    const middle = Math.ceil(rows.length / 2);
+    const deleted = deletedProjectsHtml(count, { placeLabel: (id) => fmt(words({ id }).label), shown: deletedShown, now });
+    return `<div class="storage-folders">${[rows.slice(0, middle), rows.slice(middle)].map((half) => `<ul>${half.map(memberHtml).join('')}</ul>`).join('')}</div>${deleted}${diskHtml(response, now)}`;
+}
+
+export const freeOf = (response) => response?.free || { state: 'idle', groups: [], run: null, error: null, done: 0, total: 0, pool: null };
 
 /** The whole view for one response: markup per region, the measure action's label and busy flag, whether
- *  Stop is offered, and the tray for the owner's checklist state (`tray: {checked, dismissed}`). */
-export function renderStorage(response, { pending = false, readFailed = false, now = new Date(), tray = null } = {}) {
+ *  Stop and the door are offered, and the flow for the owner's state (see `trayHtml`). */
+export function renderStorage(response, { pending = false, readFailed = false, now = new Date(), tray = null, deletedShown = {} } = {}) {
     const state = storageState(response);
     const counting = state === 'counting' || (pending && !response?.count);
     const busy = Boolean(pending || response?.counting);
-    const label = counting ? 'Measuring…' : response?.count ? 'Measure again' : state === 'failed' ? 'Try again' : 'Measure now';
+    const label = counting ? 'Measuring…' : response?.count ? 'Refresh sizes' : state === 'failed' ? 'Try again' : 'Measure sizes';
     return {
         state,
         summary: summaryHtml(response, { readFailed, now }),
+        facts: countFactsHtml(response?.count),
+        bar: barHtml(response, now),
+        auto: response ? fmt('Files of finished tasks are also removed by the app {days} days after the task ends. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
+        status: countStatusHtml(response, now),
         announce: announceSentence(response, { readFailed, now, tray }),
-        places: placesHtml(response, now),
-        tray: response ? trayHtml(freeOf(response), tray || { checked: new Set(), dismissed: false }, response.retention_days ?? 7) : '',
+        places: placesHtml(response, now, deletedShown),
+        tray: response ? trayHtml(freeOf(response), tray || { checked: new Set(), dismissed: false }, response.retention_days ?? 7, { volume: response.volume, now }) : '',
+        door: Boolean(response) && doorOffered(trayState(freeOf(response), tray?.dismissed)),
         measure: { label, busy },
         stop: Boolean(response?.counting),
     };
@@ -379,7 +415,7 @@ function patch(node, html, painted) {
     const focused = node.contains(document.activeElement) ? document.activeElement?.dataset?.key : '';
     node.innerHTML = html;
     open.forEach((key) => node.querySelector(`details[data-key="${key}"]`)?.setAttribute('open', ''));
-    if (focused) node.querySelector(`[data-key="${focused}"]`)?.focus();
+    if (focused) node.querySelector(`[data-key="${focused}"]`)?.focus({ preventScroll: true });
     // A bar share is a measured runtime value: one narrowly named custom property.
     node.querySelectorAll('[data-share]').forEach((element) => element.style?.setProperty('--storage-share', element.dataset.share));
 }
@@ -388,30 +424,37 @@ export function initStorage({ state, mount } = {}) {
     if (!mount) return null;
     const page = document.createElement('div');
     page.id = 'page-storage';
-    page.className = 'settings-embedded-content';
+    page.className = 'dashboard-body scroll-fade-y';  // the tab's one root and scroller (style.css "The Dashboard tab body")
     page.innerHTML = `
-        <div class="costs-scroll">
-            <div class="storage-root">
-                <section class="storage-summary ui-card" aria-label="Storage summary">
-                    <p class="storage-announce" data-storage-live role="status" aria-live="polite"></p>
-                    <div class="storage-summary-head">
-                        <div class="storage-summary-text" data-storage-summary></div>
-                        <div class="storage-actions storage-summary-actions">
-                            <button type="button" class="btn btn-default btn-sm storage-refresh" data-storage-action="measure">Measure now</button>
-                            <button type="button" class="btn btn-default btn-sm" data-storage-action="stop" hidden>Stop</button>
-                        </div>
-                    </div>
-                </section>
-                <section class="storage-panel ui-card" aria-label="Where it is" data-storage-panel hidden>
-                    <div data-storage-places></div>
-                    <div class="storage-tray" data-storage-tray></div>
-                </section>
+        <section class="storage-summary ui-card" aria-label="Space used by Ouroboros">
+            <p class="storage-announce" data-storage-live role="status" aria-live="polite"></p>
+            <div class="dashboard-hero">
+                <div class="storage-summary-text" data-storage-summary></div>
+                <div class="dashboard-hero-actions storage-summary-actions">
+                    <button type="button" class="btn btn-default btn-sm" data-storage-action="measure">Measure sizes</button>
+                    <button type="button" class="btn btn-default btn-sm" data-storage-action="stop" hidden>Stop</button>
+                </div>
             </div>
-        </div>
+            <details class="ui-disclosure storage-count-details" data-storage-details hidden><summary>Details</summary><div data-storage-facts></div></details>
+            <div data-storage-status></div><div data-storage-bar></div>
+        </section>
+        <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
+            <h3 class="storage-card-title">Cleanup</h3>
+            <div class="storage-tray" data-storage-tray></div>
+            <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
+            <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
+        </section>
+        <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
+            <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
+            <div data-storage-places></div>
+        </section>
     `;
     mount.appendChild(page);
     const regions = {
         summary: page.querySelector('[data-storage-summary]'),
+        facts: page.querySelector('[data-storage-facts]'),
+        status: page.querySelector('[data-storage-status]'),
+        bar: page.querySelector('[data-storage-bar]'),
         places: page.querySelector('[data-storage-places]'),
         tray: page.querySelector('[data-storage-tray]'),
     };
@@ -419,14 +462,25 @@ export function initStorage({ state, mount } = {}) {
     // screen reader hears phase changes and not the figures the progress line repaints every second.
     const live = page.querySelector('[data-storage-live]');
     const panel = page.querySelector('[data-storage-panel]');
-    // The owner's checklist: a new preview starts with every group checked except those holding saved work,
-    // a group listed later too; the choices hold until the next preview. Cancel hides the list without asking
-    // the server anything.
-    const ui = { checked: new Set(), known: new Set(), checkedFor: null, dismissed: false };
+    // The owner's flow state, for one plan: the lists read so far, the items chosen (every one, once all are read),
+    // the saved groups checked (none to begin with). A dismissed list or result hides without asking the server.
+    // `sending`: a Remove, Free or Discard is out. `postUnknown`: the action ('Remove', 'Free' or 'Discard') whose answer was lost, so this plan
+    // is never sent again; `confirming`
+    // while no read has answered since. `outdated`: 'refused' or 'read' when the server no longer holds this plan.
+    // `notice`: what happened to the owner's attempt under a plan the server has since replaced (attemptSentences).
+    // `manualOpen`: the copies-by-hand screen; `manualChosen`: the copy ids the owner chose there, none to begin with.
+    const freshFlow = (plan = null) => ({ plan, chosen: new Set(), checked: new Set(), dismissed: false, saved: false, sending: false, outdated: '',
+        postUnknown: false, confirming: false, notice: '', poolShown: LIST_PAGE, pool: EMPTY_LIST(), excluded: EMPTY_LIST(), outcomes: EMPTY_LIST(),
+        manual: EMPTY_LIST(), manualOpen: false, manualChosen: new Set(), manualShown: MANUAL_ROWS });
+    let ui = freshFlow();
     // The measure node is never replaced, and a running count marks it aria-disabled rather than disabled,
     // so keyboard focus stays on it through a count and every repaint.
     const measureButton = page.querySelector('[data-storage-action="measure"]');
     const stopButton = page.querySelector('[data-storage-action="stop"]');
+    const door = page.querySelector('[data-storage-door]');
+    const auto = page.querySelector('[data-storage-auto]');
+    const scroller = page;
+    const details = page.querySelector('[data-storage-details]');
     const painted = new Map();
     let response = null;
     let readFailed = false;
@@ -436,32 +490,64 @@ export function initStorage({ state, mount } = {}) {
     let generation = 0;
     let controller = null;
     let timer = 0;
+    const deletedShown = {};  // how far the owner continued each list of deleted projects' folders
 
     const onScreen = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === 'storage';
 
+    /** A new plan is a new flow: whatever was read or chosen under the last one means nothing now. What happened to the
+     *  owner's attempt on it is still said beside the new facts, never merged into them. */
+    function syncPlan() {
+        const { plan = null, run = null } = freeOf(response);
+        if (plan !== ui.plan) {
+            abortLists();
+            const { dismissed } = ui;
+            const notice = ui.postUnknown ? lostNotice(ui.postUnknown) : ui.outdated || ui.notice;
+            ui = freshFlow(plan);
+            ui.dismissed = plan === null ? dismissed : false;
+            ui.notice = notice;
+        }
+        // A run of this plan is the answer a lost request could not give. One that began after this list was
+        // dismissed has a result to show: only Done dismisses that.
+        if (run && !ui.runSeen) Object.assign(ui, { runSeen: true, dismissed: false, postUnknown: false, confirming: false });
+    }
+
     function paint() {
-        const free = freeOf(response);
-        if (free.started_at !== ui.checkedFor) {
-            ui.checkedFor = free.started_at;
-            ui.checked = new Set();
-            ui.known = new Set();
-        }
-        for (const group of groupsOf(free)) {
-            if (ui.known.has(group.id)) continue;
-            ui.known.add(group.id);
-            if (startsChecked(group)) ui.checked.add(group.id);
-        }
-        const view = renderStorage(response, { pending: measuring, readFailed, tray: ui });
+        syncPlan();
+        const view = renderStorage(response, { pending: measuring, readFailed, tray: ui, deletedShown });
+        const top = scroller.scrollTop;
+        const flowHeld = regions.tray.contains(document.activeElement) || document.activeElement === door;
         patch(regions.summary, view.summary, painted);
+        patch(regions.facts, view.facts, painted);
+        details.hidden = !view.facts;
         if (live.textContent !== view.announce) live.textContent = view.announce;
+        if (auto.textContent !== view.auto) auto.textContent = view.auto;
+        patch(regions.status, view.status, painted);
+        patch(regions.bar, view.bar, painted);
         patch(regions.places, view.places, painted);
         patch(regions.tray, view.tray, painted);
-        panel.hidden = !response;
+        panel.hidden = !response?.count;
+        door.hidden = !view.door;
+        door.parentElement.parentElement.classList.toggle('has-door', view.door);
+        door.textContent = freeOf(response).run ? fmt('Check again') : fmt('Check for files to remove');
+        door.parentElement.hidden = !view.door;  // the empty row takes no room on a phone
+        door.setAttribute('aria-disabled', pending ? 'true' : 'false');
         if (measureButton.textContent !== view.measure.label) measureButton.textContent = view.measure.label;
         measureButton.setAttribute('aria-disabled', view.measure.busy ? 'true' : 'false');
         if (view.measure.busy) measureButton.setAttribute('aria-busy', 'true');
         else measureButton.removeAttribute('aria-busy');
         stopButton.hidden = !view.stop;
+        // The control that held focus can leave with its phase: focus follows the flow instead of falling to the body.
+        if (flowHeld && !regions.tray.contains(document.activeElement) && (document.activeElement !== door || door.hidden)) refocusTray();
+        if (scroller.scrollTop !== top) scroller.scrollTop = top;
+    }
+
+    function abortLists() {
+        for (const list of [ui.pool, ui.excluded, ui.manual, ui.outcomes]) {
+            list.abort?.abort();
+            list.abort = null;
+            list.loading = false;
+            list.run = (list.run || 0) + 1;
+        }
     }
 
     function stopPolling() {
@@ -476,10 +562,11 @@ export function initStorage({ state, mount } = {}) {
         controller?.abort();
         controller = null;
         stopPolling();
+        abortLists();
     }
 
     const working = () => Boolean(response?.counting) || ['listing', 'running'].includes(freeOf(response).state)
-        || freeOf(response).run?.deleting > 0;
+        || freeOf(response).run?.deleting > 0 || ui.confirming;
 
     function schedule() {
         stopPolling();
@@ -490,12 +577,17 @@ export function initStorage({ state, mount } = {}) {
     function apply(next) {
         response = { ...next, count: 'count' in next ? next.count : (response?.count ?? null) };
         readFailed = false;
+        // A read answered; it cannot say a lost request will never land, so the plan stays unsendable (syncPlan).
+        ui.confirming = false;
         paint();
         schedule();
+        syncLists();
     }
 
     async function refresh() {
-        if (disposed) return;
+        // While a POST is out its own answer is the next truth: a read now could answer from before it and be dropped
+        // or overtake it. act() reads once it is answered when the tab moved meanwhile.
+        if (disposed || pending) return;
         stopPolling();
         controller?.abort();
         const mine = ++generation;
@@ -509,41 +601,182 @@ export function initStorage({ state, mount } = {}) {
             readFailed = true;
             paint();
             schedule();
+            syncLists();  // the held plan's lists read on; a plan the server lost answers so itself
         } finally {
             if (controller === abort) controller = null;
         }
     }
 
-    /** A tray action replaces the control it came from; keyboard focus moves to the tray's next
-     *  control (Stop while it works, the door afterwards) instead of falling to the body. */
+    /** A flow action replaces the control it came from; keyboard focus moves to the flow's next control
+     *  (Stop while it works, Remove on the review, the door at rest) instead of falling to the body. */
     function refocusTray() {
         if (disposed || regions.tray.contains(document.activeElement)) return;
-        (regions.tray.querySelector('[data-free-stop]') || regions.tray.querySelector('button'))?.focus();
+        const next = ['stop', 'go', 'done', 'preview', 'saved-back', 'manual-back', 'cancel'].map((name) => regions.tray.querySelector(`[data-free-${name}]`)).find(Boolean);
+        if (next) next.focus({ preventScroll: true });
+        else if (!door.hidden) door.focus({ preventScroll: true });
     }
 
-    /** One POST whose answer is the same envelope as the GET; `measure` marks the measure POST. */
-    async function act(request, failure, { measure = false } = {}) {
+    /** The owner's own press replaced the flow: bring its start into view. A poll never moves the page. */
+    function revealFlow() {
+        const edge = regions.tray.getBoundingClientRect?.();
+        const box = scroller.getBoundingClientRect?.();
+        if (edge && box && (edge.top < box.top || edge.bottom > box.bottom)) scroller.scrollTop += edge.top - box.top - 12;
+    }
+
+    // ---------------------------------------------------------------------------
+    // The lists: read only while this tab is on screen, one reader per list, never a timer of their own.
+    // ---------------------------------------------------------------------------
+
+    const LISTS = { pool: { size: POOL_PAGE }, excluded: { size: LIST_PAGE }, manual: { size: MANUAL_PAGE }, outcomes: { size: LIST_PAGE } };
+
+    /** Read `view` until it holds `want` items or all of them. A version that moved restarts from the first page,
+     *  so nothing is silently missed or shown twice; a refusal or failure stops and says so, with no retry loop. */
+    async function readList(view) {
+        const list = ui[view];
+        const plan = ui.plan;
+        if (disposed || list.loading || !plan || !onScreen()) return;
+        const mine = (list.run || 0) + 1;
+        const abort = new AbortController();
+        Object.assign(list, { run: mine, abort, loading: true, error: '' });
+        paint();
+        const restart = () => {
+            Object.assign(list, { items: [], ids: new Set(), total: null, version: '', next: 0, complete: false, restarts: list.restarts + 1 });
+            if (view === 'manual') ui.manualChosen = new Set();  // a list read again is chosen from again
+        };
+        try {
+            while (!list.complete && list.items.length < list.want) {
+                let page = null;
+                try {
+                    page = await apiClient.storageFreeItems({ plan, view, cursor: list.next, limit: LISTS[view].size, version: list.version, signal: abort.signal });
+                } catch (error) {
+                    if (error?.body?.reason_code !== 'view_changed') throw error;
+                    if (list.run !== mine) return;
+                    if (list.restarts >= LIST_RESTARTS) { list.error = 'changing'; return; }
+                    restart();
+                    paint();
+                    continue;
+                }
+                if (disposed || list.run !== mine) return;
+                const expected = view === 'pool' ? freeOf(response).pool?.count ?? null : view === 'manual' ? manualOf(freeOf(response))?.count ?? null : null;
+                const problem = acceptPage(list, page, { plan, view, expected });
+                if (problem === 'moved' && list.restarts < LIST_RESTARTS) restart();
+                else if (problem) { list.error = problem; return; }
+                if (view === 'pool' && list.complete) ui.chosen = new Set(list.items.map((item) => item.id));
+                paint();
+            }
+            list.restarts = 0;
+        } catch (error) {
+            if (disposed || list.run !== mine || abort.signal.aborted) return;
+            if (error?.body?.reason_code === 'preview_outdated') {
+                ui.outdated = 'read';
+                if (onScreen()) void refresh();
+            } else list.error = error?.body?.reason_code || 'read';
+        } finally {
+            if (list.run === mine) {
+                list.loading = false;
+                list.abort = null;
+                if (!disposed) {
+                    paint();
+                    syncLists();  // the run may have moved while this read was out
+                }
+            }
+        }
+    }
+
+    /** A fingerprint of what the run reports: the outcomes are read again only when it moved. */
+    const runMark = (run) => JSON.stringify([run?.removed, run?.deleting, run?.stuck, run?.failed, run?.not_started, run?.kept]);
+
+    /** What the current phase needs read: the whole pool at a ready plan, an open list when it has more to show. */
+    function syncLists() {
+        if (disposed || !onScreen()) return;
+        const free = freeOf(response);
+        const state = trayState(free, ui.dismissed);
+        if (state === 'ready' && free.pool?.count > 0 && !ui.outdated) {
+            ui.pool.want = Infinity;
+            if (!ui.pool.complete && !ui.pool.error) void readList('pool');
+        }
+        // The copies by hand are read whole once their screen is open, never earlier and never on a plan the server refused.
+        if (state === 'ready' && ui.manualOpen && manualOf(free) && !ui.outdated) {
+            ui.manual.want = Infinity;
+            if (!ui.manual.complete && !ui.manual.error) void readList('manual');
+        }
+        // A plan the server no longer holds is not read for: its answer is known, and a failing status read must not loop.
+        if (state === 'ready' && !ui.outdated && ui.excluded.want > ui.excluded.items.length && !ui.excluded.complete && !ui.excluded.error) void readList('excluded');
+        if (state === 'done' && ui.outcomes.want > 0 && free.run?.outcomes_ready) {
+            const mark = runMark(free.run);
+            if (mark !== ui.outcomes.mark && !ui.outcomes.loading) {
+                // The trash settled: the same number of rows is read again from the first page, under its new version.
+                const { want } = ui.outcomes;
+                ui.outcomes = { ...EMPTY_LIST(), want, mark };
+            }
+            if (!ui.outcomes.complete && ui.outcomes.items.length < ui.outcomes.want && !ui.outcomes.error) void readList('outcomes');
+        }
+    }
+
+    /** A disclosure opened: its list starts being read, one page's worth. */
+    function wantList(view) {
+        if (ui[view].want <= 0) ui[view].want = LIST_PAGE;
+        syncLists();
+    }
+
+    function showMore(view) {
+        ui[view].want = ui[view].items.length + LIST_PAGE;
+        syncLists();
+    }
+
+    function retryList(view) {
+        // A failed request resumes where it stopped; an answer that could not be trusted starts the list over.
+        const untrusted = ['incomplete', 'moved', 'changing'].includes(ui[view].error);
+        Object.assign(ui[view], { error: '', restarts: 0 }, untrusted ? { items: [], ids: new Set(), total: null, version: '', next: 0, complete: false } : {});
+        if (view === 'manual' && untrusted) ui.manualChosen = new Set();
+        paint();
+        syncLists();
+    }
+
+    /** One POST whose answer is the same envelope as the GET; `measure` marks the measure POST, `removal` a Remove, Free
+     *  or Discard ('Remove' | 'Free' | 'Discard'), whose flow is held (`sending`) until it is answered. */
+    async function act(request, failure, { measure = false, removal = false } = {}) {
         if (disposed || pending) return;
         pending = true;
         measuring = measure;
-        paint();
+        const flow = ui;
+        if (removal) flow.sending = true;
+        stopPolling();
         controller?.abort();
         const mine = ++generation;
+        paint();
+        let next = null;
+        let failed = null;
         try {
-            const next = await request();
-            if (disposed) return;
-            // A newer read or a hide moved the generation while the POST was out: its answer is stale,
-            // and a hidden tab reads nothing until it is shown again (onSubtab/onPage).
-            if (mine === generation) apply(next);
-            else if (onScreen()) void refresh();
+            next = await request();
         } catch (error) {
-            if (disposed) return;
-            showToast(error?.message || fmt(failure), 'warn');
-            if (mine === generation && onScreen()) void refresh();
-        } finally {
-            pending = false;
-            measuring = false;
-            if (!disposed) paint();
+            failed = error || new Error(fmt(failure));
+        }
+        pending = false;
+        measuring = false;
+        flow.sending = false;
+        if (disposed) return;
+        if (failed) {
+            // No HTTP status (also an OK answer whose body could not be read), or a 5xx: the request may have reached the server, and a 5xx can follow a started run (the
+            // answer failed after the start). A 4xx and the migration gate answered before any handler ran, so they are
+            // definite. An unknown one is never sent again; a read says what happened, and the toast claims neither way
+            // (`failure` says nothing was removed; the browser's own text says nothing).
+            const unknown = !failed.status || failed.status >= 500 && !isStoreMigrating(failed);
+            const lost = Boolean(removal && unknown);
+            if (lost) Object.assign(flow, { postUnknown: removal, confirming: true });
+            showToast(lost ? fmt(`The answer to ${removal === 'Free' || removal === 'Discard' ? removal : 'Remove'} was lost; nothing is sent again.`)
+                : failed.message || fmt(failure), 'warn');
+            paint();
+            if ((mine === generation || removal) && onScreen()) void refresh();
+            else schedule();
+            return;
+        }
+        // A hide moved the generation while the POST was out: a hidden tab reads nothing until it is shown again
+        // (onSubtab/onPage), and a shown one reads now rather than trust an answer it stopped waiting for.
+        if (mine === generation) apply(next);
+        else {
+            paint();
+            if (onScreen()) void refresh();
         }
     }
 
@@ -555,25 +788,78 @@ export function initStorage({ state, mount } = {}) {
     const stopCount = () => act(() => apiClient.cancelStorageMeasure(), 'The count could not be stopped.');
     const stopFree = () => act(() => apiClient.cancelStorageFree(), 'Freeing could not be stopped.').then(refocusTray);
 
+    /** The answer's new plan opens the flow; until then the dismissed one stays dismissed. */
     function preview() {
-        ui.dismissed = false;
+        // The owner's new start: a refusal's sentence has been read. A lost answer stays unknown and is still said.
+        Object.assign(ui, { notice: '', outdated: '' });
         return act(() => apiClient.previewStorageFree(), 'Temporary space could not be listed. Nothing was removed.').then(refocusTray);
     }
 
-    /** The shared confirm dialog, then one POST naming the plan and the checked groups. */
-    async function confirmFree() {
-        const free = freeOf(response);
-        const groups = groupsOf(free).filter((group) => ui.checked.has(group.id)).map((group) => group.id);
-        if (trayState(free, ui.dismissed) !== 'ready' || !groups.length || pending) return;
-        const confirmed = await openConfirmDialog(confirmCopy(free, ui.checked));
-        if (!confirmed || disposed) return;
+    /** One POST for this plan; a refusal says why and a stale list stops offering Remove. Nothing is ever resent. */
+    async function postRemoval(send, failure, action) {
+        ui.notice = '';  // the owner's next send: an earlier attempt's sentence has been read
         await act(async () => {
-            const next = await apiClient.freeStorage(free.plan, groups);
-            if (next?.started === false) showToast(notStarted(next.reason), 'warn');
+            const next = await send();
+            if (next?.started === false) {
+                showToast(notStarted(next.reason), 'warn');
+                if (OUTDATES_PLAN.has(next.reason)) ui.outdated = 'refused';
+            }
             return next;
-        }, 'Nothing was removed.');
+        }, failure, { removal: action });
         refocusTray();
+        revealFlow();
     }
+
+    /** The review was the one confirmation: its Remove sends the real ids of exactly the items chosen. */
+    async function removeChosen() {
+        const free = freeOf(response);
+        const items = ui.pool.items.filter((item) => ui.chosen.has(item.id)).map((item) => item.id);
+        if (trayState(free, ui.dismissed) !== 'ready' || pending || ui.outdated || ui.postUnknown) return;
+        if (free.plan !== ui.plan || !ui.pool.complete || !items.length) return;
+        await postRemoval(() => apiClient.freeStorageItems(free.plan, items), 'Nothing was removed.', 'Remove');
+    }
+
+    /** The saved groups: the shared confirm dialog, then one POST naming the plan and the checked groups. */
+    async function freeSavedGroups() {
+        const free = freeOf(response);
+        const groups = savedGroups(free).filter((group) => ui.checked.has(group.id)).map((group) => group.id);
+        const sendable = () => trayState(freeOf(response), ui.dismissed) === 'ready' && !pending && !ui.outdated && !ui.postUnknown;
+        if (!sendable() || !groups.length) return;
+        const confirmed = await openConfirmDialog(confirmCopy(free, ui.checked));
+        // The dialog was open while the server could answer: the plan must still be this one and still sendable.
+        if (!confirmed || disposed || freeOf(response).plan !== free.plan || !sendable()) return;
+        await postRemoval(() => apiClient.freeStorage(free.plan, groups), 'Nothing was removed.', 'Free');
+    }
+
+    /** The copies chosen by hand: the shared confirm dialog states the whole copy's loss, and only its confirmation sends
+     *  one POST of the chosen ids with the acknowledgement. Nothing is sent from a list not read whole, for an id not
+     *  chosen, or from a refused plan; the acknowledgement alone never stands in for a choice. */
+    async function discardChosen() {
+        const free = freeOf(response);
+        const sendable = () => trayState(freeOf(response), ui.dismissed) === 'ready' && !pending && !ui.outdated && !ui.postUnknown
+            && ui.manualOpen && ui.manual.complete && !ui.manual.error;
+        const facts = manualFacts(ui.manual, ui.manualChosen);
+        const ids = facts.rows.map((item) => item.id);
+        if (!sendable() || free.plan !== ui.plan || !ids.length) return;
+        const confirmed = await openConfirmDialog(manualConfirmCopy(ui.manual, ui.manualChosen));
+        // The dialog was open while the server could answer: the plan must still be this one and still sendable.
+        if (!confirmed || disposed || freeOf(response).plan !== free.plan || !sendable()) return;
+        await postRemoval(() => apiClient.freeStorageManual(free.plan, ids, true), 'Nothing was removed.', 'Discard');
+    }
+
+    // A Remove, Free or Discard that is out or whose answer was lost holds the flow: nothing hides or re-chooses it.
+    const held = () => ui.sending || ui.postUnknown;
+
+    const dismiss = () => {
+        if (held()) return;
+        abortLists();
+        ui.notice = '';
+        ui.dismissed = true;
+        ui.saved = false;
+        ui.manualOpen = false;
+        paint();
+        door.focus({ preventScroll: true });
+    };
 
     const onClick = (event) => {
         if (event.currentTarget === measureButton) void measure();
@@ -581,21 +867,82 @@ export function initStorage({ state, mount } = {}) {
     };
     const onTrayClick = (event) => {
         const target = event.target?.closest?.('button');
-        if (!target || target.disabled) return;
-        if (target.hasAttribute('data-free-preview')) void preview();
-        else if (target.hasAttribute('data-free-cancel')) {
-            ui.dismissed = true;
+        if (!target || target.disabled || target.getAttribute('aria-disabled') === 'true') return;
+        const has = (name) => target.hasAttribute(name);
+        if (has('data-free-preview')) void preview();
+        else if (has('data-free-cancel') || has('data-free-done')) dismiss();
+        else if (has('data-free-go')) void removeChosen();
+        else if (has('data-free-stop')) void stopFree();
+        else if (has('data-free-saved-go')) void freeSavedGroups();
+        else if (has('data-free-manual-go')) void discardChosen();
+        else if (has('data-free-retry-pool')) retryList('pool');
+        else if (has('data-free-retry-excluded')) retryList('excluded');
+        else if (has('data-free-retry-manual')) retryList('manual');
+        else if (has('data-free-retry-outcomes')) retryList('outcomes');
+        else if (has('data-free-more-excluded')) showMore('excluded');
+        else if (has('data-free-more-outcomes')) showMore('outcomes');
+        else {
+            if (held() && !has('data-free-more-picks') && !has('data-free-more-manual')) return;
+            if (has('data-free-saved')) ui.saved = true;
+            else if (has('data-free-saved-back')) ui.saved = false;
+            else if (has('data-free-manual-open')) ui.manualOpen = true;
+            else if (has('data-free-manual-back')) ui.manualOpen = false;
+            else if (has('data-free-manual-none')) ui.manualChosen = new Set();
+            else if (has('data-free-more-manual')) ui.manualShown += MANUAL_ROWS;
+            else if (has('data-free-all')) ui.chosen = new Set(ui.pool.items.map((item) => item.id));
+            else if (has('data-free-none')) ui.chosen = new Set();
+            else if (has('data-free-more-picks')) ui.poolShown += LIST_PAGE;
+            else return;
             paint();
-            refocusTray();
-        } else if (target.hasAttribute('data-free-go')) void confirmFree();
-        else if (target.hasAttribute('data-free-stop')) void stopFree();
+            if (has('data-free-manual-open')) syncLists();  // its list starts being read, whole
+            if (has('data-free-saved') || has('data-free-saved-back') || has('data-free-manual-open') || has('data-free-manual-back')) {
+                refocusTray();
+                revealFlow();
+            }
+        }
     };
     const onTrayChange = (event) => {
-        const box = event.target?.closest?.('[data-free-group]');
+        const box = event.target?.closest?.('[data-free-group], [data-free-pick], [data-free-manual-pick]');
         if (!box) return;
-        if (box.checked) ui.checked.add(box.dataset.freeGroup);
-        else ui.checked.delete(box.dataset.freeGroup);
+        if (held()) {
+            paint();  // the box shows the choice that was sent again
+            return;
+        }
+        if (box.hasAttribute('data-free-group')) {
+            if (box.checked) ui.checked.add(box.dataset.freeGroup);
+            else ui.checked.delete(box.dataset.freeGroup);
+        } else if (box.hasAttribute('data-free-manual-pick')) {
+            // One copy, one choice: only a row the server offered by hand and described can be chosen.
+            const copy = ui.manual.complete ? ui.manual.items[Number(box.dataset.freeManualPick)] : null;
+            if (!copy || !manualKnown(copy)) {
+                paint();
+                return;
+            }
+            if (box.checked) ui.manualChosen.add(copy.id);
+            else ui.manualChosen.delete(copy.id);
+        } else {
+            const item = ui.pool.items[Number(box.dataset.freePick)];
+            if (!item) return;
+            if (box.checked) ui.chosen.add(item.id);
+            else ui.chosen.delete(item.id);
+        }
         paint();
+    };
+    // `toggle` does not bubble: a capture listener sees each disclosure of the flow as it opens.
+    const onTrayToggle = (event) => {
+        if (!event.target?.hasAttribute?.('open')) return;
+        const which = event.target.dataset?.freeDisclosure;
+        if (which === 'left' && excludedCount(freeOf(response).pool) > 0) wantList('excluded');
+        else if (which === 'each') wantList('outcomes');
+    };
+    /** Show more on a list of deleted projects' folders: draws the next rows, and focus lands on the first of them, where the button was. */
+    const onPlacesClick = (event) => {
+        const key = event.target?.closest?.('[data-deleted-more]')?.dataset.deletedMore;
+        if (!key) return;
+        const from = deletedShown[key] || DELETED_ROWS;
+        deletedShown[key] = from + DELETED_ROWS;
+        paint();
+        regions.places.querySelector(`[data-deleted-list="${key}"]`)?.children[from]?.focus({ preventScroll: true });
     };
     const onSubtab = (event) => {
         if (event?.detail?.tab === 'storage' && onScreen()) void refresh();
@@ -607,8 +954,11 @@ export function initStorage({ state, mount } = {}) {
     };
     measureButton.addEventListener('click', onClick);
     stopButton.addEventListener('click', onClick);
+    door.addEventListener('click', onTrayClick);
     regions.tray.addEventListener('click', onTrayClick);
     regions.tray.addEventListener('change', onTrayChange);
+    regions.tray.addEventListener('toggle', onTrayToggle, true);
+    regions.places.addEventListener('click', onPlacesClick);
     window.addEventListener('ouro:dashboard-subtab-shown', onSubtab);
     window.addEventListener('ouro:page-shown', onPage);
     document.addEventListener('visibilitychange', onPage);
@@ -619,8 +969,11 @@ export function initStorage({ state, mount } = {}) {
         cancelRead();
         measureButton.removeEventListener('click', onClick);
         stopButton.removeEventListener('click', onClick);
+        door.removeEventListener('click', onTrayClick);
         regions.tray.removeEventListener('click', onTrayClick);
         regions.tray.removeEventListener('change', onTrayChange);
+        regions.tray.removeEventListener('toggle', onTrayToggle, true);
+        regions.places.removeEventListener('click', onPlacesClick);
         window.removeEventListener('ouro:dashboard-subtab-shown', onSubtab);
         window.removeEventListener('ouro:page-shown', onPage);
         document.removeEventListener('visibilitychange', onPage);

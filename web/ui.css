@@ -15,8 +15,6 @@
     --control-disabled-opacity: 0.55;
     --bg-primary: #0f0f11;
     --bg-secondary: #1a1b1c;
-    --bg-card: rgba(var(--neutral-rgb), 0.06);
-    --bg-hover: rgba(var(--neutral-rgb), 0.08);
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
     --type-meta: 12px;
     --type-body: 14px;
@@ -36,10 +34,7 @@
     --text-muted: var(--text-disabled);  /* legacy alias */
     --accent: #f45152;
     --accent-light: #fe7d85;
-    --accent-dim: rgba(201, 53, 69, 0.15);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
-    --accent-04: rgba(201, 53, 69, 0.04);
-    --accent-05: rgba(201, 53, 69, 0.05);
     --accent-08: rgba(201, 53, 69, 0.08);
     --accent-10: rgba(201, 53, 69, 0.10);
     --accent-12: rgba(201, 53, 69, 0.12);
@@ -65,9 +60,6 @@
     /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
        the hue lives in one place and stays clear of the project fuchsia (C7.2). */
     --user-bubble-from: rgba(71, 128, 210, 0.24);
-    --user-bubble-to: rgba(71, 128, 210, 0.18);
-    --user-border: rgba(110, 150, 210, 0.18);
-    --user-glow: rgba(160, 190, 245, 0.04);
     --user-sender: #a0c6ff;
     --user-text: #efeff2;
     /* System / owner-control voice (system bubble + sender), tokenized so it tracks one source (C7.2): in dark a
@@ -90,12 +82,9 @@
     --green-dim: rgba(255, 255, 255, 0.07);
     --red: #ef4444;
     --red-dim: rgba(255, 255, 255, 0.07);
+    /* A rule only where a table or a section needs one; a field's hairline (the one edge the bible keeps, principle 2). */
     --divider: rgba(var(--neutral-rgb), 0.06);
-    --surface-border: rgba(var(--neutral-rgb), 0.08);
-    --surface-border-soft: rgba(var(--neutral-rgb), 0.06);
-    --surface-card: rgba(var(--neutral-rgb), 0.03);
-    --surface-card-soft: rgba(var(--neutral-rgb), 0.025);
-    --surface-control: rgba(var(--neutral-rgb), 0.04);
+    --field-border: rgba(var(--neutral-rgb), 0.08);
     /* Chart chrome (grid lines, tick/legend text) and the four default series of a
        chart the host draws (widgets, living cards), in the owner's order; a fifth
        series takes the first again. Chart.js paints to a canvas and cannot read CSS,
@@ -119,13 +108,7 @@
     --diagram-line: #989898;
     --diagram-secondary: #28292a;
     --diagram-tertiary: #151617;
-    --ui-card-bg: var(--surface-card);
-    --ui-card-bg-soft: var(--surface-card-soft);
-    --ui-card-border: var(--surface-border);
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
-    /* A live task card's lift off the transcript: soft in light (a near-black shadow that suits the
-       dark shell reads as grime on white), one plain shadow in dark (no light along the edge). */
-    --live-card-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     /* Status triples: fg/bg/border named together, never derived
        (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
        is a neutral veil carrying the hue's ink (a dark tint of green, amber or red goes olive or brown); inside the
@@ -156,31 +139,30 @@
     --status-live-fg: var(--accent-light);
     --status-live-bg: var(--accent-10);
     --panic-ink: var(--accent-light);
+    /* Panic's body (style.css .chat-header-btn.danger): on dark the red tone is already the capsule's neutral veil, and
+       stacking it would wash out Panic's ink, so the capsule's own fill; light lays the red tone over it. */
+    --panic-fill: var(--chip-float);
+    --panic-fill-hover: var(--chip-float-hover);
     --focus-accent-border: #fe7d85;
     --focus-accent-ring: rgba(211, 45, 67, 0.28);
-    --radius-xs: 3px;
-    --radius-sm: 8px;
-    /* In-between radius used by chips, counters, and fade rules. */
-    --radius-md: 10px;
-    --radius: 12px;
-    --radius-lg: 16px;
-    --radius-xl: 20px;
     --page-header-padding-y: 10px;
     --page-header-padding-x: 20px;
     --page-header-padding-bottom: 6px;
-    --pill-padding-y: 7px;
     --pill-padding-x: 14px;
-    --pill-font-size: 13px;
     --pill-radius: 999px;
-    --pill-strip-padding: 6px 0 8px;
-    --button-padding-y: 8px;
-    --button-padding-x: 16px;
-    --button-font-size: 13px;
-    --button-min-height: 34px;
-    /* Floating chrome (the recipe at the end): one height for a floating group's text controls, and the
-       group's inset, which its negative margin cancels so grouping moves no control. */
-    --chrome-control-h: 30px;
-    --chrome-navigation-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+    /* The control box (DESIGN.md principle 4; owner 06.11.2026, Q1 = A): one height for a control at rest, one for a
+       control inside a row, one for floating chrome (the header's capsules; a coarse pointer raises it to the touch
+       minimum, below). A page picks a size by setting --control-h on a scope, never by writing the box: the lock
+       after the control recipes makes a page's box declaration on a shared control do nothing. The inset, the corner
+       and the text are tokens the same way; the text stays one token until the board picks 13 or 14 px. */
+    --control-h: 34px;
+    --control-h-sm: 28px;
+    --control-h-float: 30px;
+    --control-pad-x: var(--space-4);
+    --control-pad-y: 0px;
+    --control-radius: var(--pill-radius);
+    --button-font-size: var(--type-body);
+    /* A floating group's inset, which its negative margin cancels so grouping moves no control. */
     --chrome-inset: calc(var(--space-1) + 1px);
     /* Airy dopamine seed (DESIGN.md design bible): the dark values; the light theme's follow in its block. One set of
        recipes reads them in both themes. The dark theme draws the same roles its own way: a deep graphite room, each
@@ -189,10 +171,14 @@
        under them; inside a voice its own opaque steps (the voice materials, after the light block). */
     --elev-rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28);
     --elev-float: 0 2px 8px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
-    --row-lift-dim: rgba(0, 0, 0, 0.45);  /* the feed under a row lifted by a long press */
+    /* The one veil under every layer: dialogs, the Project panel, the file dialog and the reader, the feed under a row
+       lifted by a long press. */
+    --scrim: rgba(0, 0, 0, 0.45);
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;
+    /* One inset for every card on the room (block, inline; the board picks 16/24 or 16/18). */
+    --card-pad: 16px 24px;
     --surface-object: rgba(255, 255, 255, 0.055);
     /* The object's colour as one opaque paint (its veil over --bg-primary), for marks that must cover what they
        cross: a chart's label halos and dot rings. */
@@ -286,6 +272,8 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
+    /* Smallest result measure before a neighbouring action wraps below it. */
+    --result-copy-min-width: 12rem;
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
        a new visual dimension becomes a variable before a page-local literal). */
     --updates-list-max-height: 320px;
@@ -393,11 +381,10 @@
     --diagram-line: #66606e;
     --diagram-secondary: #edf0f5;
     --diagram-tertiary: #f5f6f8;
-    --live-card-shadow: 0 6px 20px rgba(var(--neutral-rgb), 0.06), 0 1px 3px rgba(var(--neutral-rgb), 0.05);
     /* Airy dopamine seed, light values (the dark ones are in :root): white objects and capsules on two soft shadows. */
     --elev-rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06);
     --elev-float: 0 2px 6px rgba(28, 33, 51, 0.06), 0 18px 44px rgba(28, 33, 51, 0.11);
-    --row-lift-dim: rgba(16, 18, 28, 0.24);
+    --scrim: rgba(16, 18, 28, 0.24);
     --surface-object: #ffffff;
     --surface-object-opaque: var(--surface-object);
     --surface-capsule: #ffffff;
@@ -440,7 +427,6 @@
     /* The light theme's own values of tokens the dark seed in :root sets differently (hues, status triples, the
        System voice, the owner's quote tint, the Project's tints). */
     --user-bubble-from: rgba(80, 120, 190, 0.14);
-    --user-bubble-to: rgba(55, 85, 155, 0.12);
     --system-bubble-bg: rgba(245, 158, 11, 0.12);
     --accent: #c93545;
     --focus-accent-ring: var(--accent-10);
@@ -463,6 +449,8 @@
     /* The answer roles and Panic's word on white: the ok pair flat for the chosen answer (only its accessible name says
        `Your choice`), meta words and the ok dot for `You answered`, the faded held controls and pending message. */
     --panic-ink: var(--status-error-fg);
+    --panic-fill: linear-gradient(var(--tone-red), var(--tone-red)), var(--chip-float);
+    --panic-fill-hover: linear-gradient(var(--tone-red-hover), var(--tone-red-hover)), var(--chip-float);
     --tone-chosen-answer: var(--tone-green);
     --tone-chosen-answer-ink: var(--status-ok-fg);
     --tone-chosen-answer-detail: var(--text-meta);
@@ -491,11 +479,6 @@
     --surface-capsule: #8f263a;
     --surface-capsule-hover: #9e3044;
     --surface-tray: #832336;
-    --surface-card: var(--surface-tray);
-    --surface-card-soft: var(--surface-tray);
-    --surface-control: var(--surface-tray);
-    --ui-card-bg: var(--surface-card);
-    --ui-card-bg-soft: var(--surface-card-soft);
     --status-neutral-bg: var(--surface-capsule);
     --status-neutral-fg: var(--text-secondary);
     --tone-quiet-hover: var(--surface-capsule);
@@ -533,7 +516,7 @@
     --text-muted: var(--text-disabled);
 }
 /* Code stays on the room's neutral material inside either voice. */
-.md-code-block { --tone-quiet-hover: var(--bg-hover); }
+.md-code-block { --tone-quiet-hover: var(--menu-item-hover); }
 
 .ouro-ui { font-family: var(--font-sans); color-scheme: var(--native-color-scheme); }
 .muted { color: var(--text-meta); }
@@ -551,24 +534,24 @@
     align-items: center;
     justify-content: center;
     text-align: center;
-    min-height: 38px;
+    box-sizing: border-box;
+    height: var(--control-h);
     line-height: 1.2;
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--neutral-rgb), 0.04);
+    border: 1px solid transparent;
+    border-radius: var(--control-radius);
+    background: var(--surface-capsule);
     color: var(--text-secondary);
-    border-radius: 12px;
-    padding: 10px 16px;
+    box-shadow: var(--elev-rest);
+    padding: var(--control-pad-y) var(--control-pad-x);
     cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--button-font-size);
     font-weight: 600;
+    transition: var(--motion-tone);
 }
-.theme-choice:hover,
-.theme-choice[aria-checked="true"] {
-    color: var(--text-primary);
-    border-color: var(--focus-accent-border);
-    background: var(--accent-12);
-}
+.theme-choice:hover { color: var(--text-primary); background: var(--surface-capsule-hover); }
+.theme-choice[aria-checked="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.theme-choice:not(:disabled):active { filter: var(--press); }
 .theme-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .theme-choice-label {
     display: block;
@@ -579,22 +562,33 @@
 .theme-status { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .theme-status:empty { display: none; }
 
+/* ---- One control, three tones (DESIGN.md design bible) ---------------------------------------------------------
+   Everything pressable with a body is a capsule standing on the rest shadow, in every state and either theme:
+   neutral (the capsule surface), tonal (its hue's fill and that fill's ink: the crimson for the primary action, the
+   chosen tab or place and a count, the soft crimson for a chosen option or card, green for save, red for danger, amber
+   for the owner's turn). A quiet control (ghost, link, filter) has no body and no shadow. A state changes colour,
+   never height: hover deepens the fill a step, a press deepens it again (--press), a chosen one takes its tone; what
+   cannot be pressed now loses its shadow. Page styles map their controls onto these tones and add no fourth recipe
+   and no outline; an author frame may override any of it with its own CSS after this sheet. */
 .btn {
     box-sizing: border-box;
-    padding: var(--button-padding-y) var(--button-padding-x);
-    border-radius: var(--radius-sm);
+    height: var(--control-h);
+    padding: var(--control-pad-y) var(--control-pad-x);
+    border-radius: var(--control-radius);
     border: 1px solid transparent;
+    /* Without a tone a button is quiet (no body, the primary ink), never the engine's own grey. */
+    background: transparent;
+    color: var(--text-primary);
     font-size: var(--button-font-size);
-    font-weight: 500;
+    font-weight: 600;
     font-family: var(--font-sans);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    min-height: var(--button-min-height);
     text-align: center;
-    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    transition: var(--motion-tone);
 }
 
 .btn:focus-visible {
@@ -602,72 +596,349 @@
     outline-offset: 2px;
 }
 
-.btn:hover {
-    transform: scale(1.02);
-}
-
-.btn:active {
-    transform: scale(0.98);
-    box-shadow: 0 0 0 3px var(--accent-08);
-}
-
+.btn:not(:disabled):active { filter: var(--press); }
 .btn:disabled {
     cursor: not-allowed;
     opacity: var(--control-disabled-opacity);
-    transform: none;
     box-shadow: none;
 }
 
-.btn-primary {
-    background: var(--accent-dim);
-    color: var(--accent-light);
-    border-color: var(--accent-18);
+/* The solid crimson under white ink deepens when pressed (--press-solid), so its words keep 4.5:1. */
+.btn-primary { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
+.btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
+/* An action the owner can take is legible at rest (docs/DESIGN.md section 6): a neutral button carries the primary
+   ink, since a label parked at secondary ink reads as disabled next to the one beside it. */
+.btn-default { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
+.btn-default:not(:disabled):hover { background: var(--surface-capsule-hover); }
+.btn-ghost { background: transparent; color: var(--text-primary); box-shadow: none; }
+.btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
+.btn-danger { background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
+.btn-danger:not(:disabled):hover { background: var(--tone-red-hover); }
+.btn-save { background: var(--tone-green); color: var(--status-ok-fg); box-shadow: var(--elev-rest); }
+.btn-save:not(:disabled):hover { background: var(--tone-green-hover); }
+/* A capsule over content uses the same geometry, focus and disabled state, on glass. */
+.btn-float {
+    background: var(--surface-float); color: var(--text-primary); box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
 }
-.btn-primary:hover {
-    background: var(--accent-25);
-    border-color: var(--accent-35);
+@media (hover: hover) {
+    .btn-float:not(:disabled):hover { filter: var(--press); }
 }
-/* An action the owner can take is legible at rest (docs/DESIGN.md section 6):
-   a button label parked at secondary ink reads as disabled next to the one
-   beside it. */
-.btn-secondary {
-    background: rgba(var(--neutral-rgb), 0.04);
-    color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.10);
-}
-.btn-secondary:hover {
-    background: rgba(var(--neutral-rgb), 0.07);
-    border-color: var(--accent-25);
-}
-.btn-ghost {
-    background: transparent;
-    color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.08);
-}
-.btn-ghost:hover {
-    background: rgba(var(--neutral-rgb), 0.04);
-}
-.btn-danger {
-    background: rgba(220, 38, 38, 0.2);
-    color: var(--status-error-fg);
-    border: 1px solid rgba(220, 38, 38, 0.3);
-}
-.btn-danger:hover { background: rgba(220, 38, 38, 0.35); }
+.btn-float:not(:disabled):active { filter: var(--press) var(--press); }
+/* A control inside a row is the small capsule: the row height, a tighter inset, the meta text size. */
+.btn-sm { --control-h: var(--control-h-sm); --control-pad-x: var(--space-3); --button-font-size: var(--type-meta); }
 
-.btn-save {
-    background: var(--green-dim);
-    color: var(--status-ok-fg);
-    border-color: rgba(34, 197, 94, 0.22);
+/* Tabs (DESIGN.md design bible): a tab is a neutral capsule with the secondary ink; the chosen tab (a place) takes the
+   crimson tone and stays standing; a press deepens the colour, nothing changes height. The strip that scrolls them is
+   the page's (style.css .app-tab-strip). */
+.app-tab {
+    --control-pad-x: var(--pill-padding-x);
+    flex: 0 0 auto;
+    white-space: nowrap;
+    box-sizing: border-box;
+    height: var(--control-h);
+    border: 1px solid transparent;
+    background: var(--surface-capsule);
+    color: var(--text-secondary);
+    box-shadow: var(--elev-rest);
+    border-radius: var(--control-radius);
+    padding: var(--control-pad-y) var(--control-pad-x);
+    font: inherit;
+    font-size: var(--button-font-size);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
 }
-.btn-save:hover { background: rgba(34, 197, 94, 0.25); }
-.btn-default {
-    background: var(--bg-card);
+.app-tab:hover { background: var(--surface-capsule-hover); box-shadow: var(--elev-rest); color: var(--text-primary); }
+.app-tab.active,
+.app-tab.is-active { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
+.app-tab:not(:disabled):active { filter: var(--press); }
+.app-tab:disabled { box-shadow: none; }
+.app-tab:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* A tab's count (Skills: the jobs in flight) is a neutral count pill on the shared type scale: it says how many,
+   while amber would say the owner has a move to make. */
+.app-tab-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px;
+    padding: 0 6px;
+    min-width: 18px;
+    height: 18px;
+    border-radius: var(--pill-radius);
+    background: var(--status-neutral-bg);
+    color: var(--status-neutral-fg);
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. Their words carry the
+   controls' weight (DESIGN type line), as .btn and .app-tab do. */
+.filter-chip {
+    --control-pad-x: var(--space-3);
+    --button-font-size: var(--type-meta);
+    box-sizing: border-box;
+    height: var(--control-h);
+    padding: var(--control-pad-y) var(--control-pad-x);
+    border-radius: var(--control-radius);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    box-shadow: none;
+    font-size: var(--button-font-size);
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+.filter-chip:hover { background: var(--tone-quiet-hover); }
+.filter-chip.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.filter-chip:not(:disabled):active { filter: var(--press); }
+.filter-chip:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+
+/* A segmented choice (one option of a single-select group, page_header.js renderSegmentedField) is the one capsule
+   control: neutral options standing on the rest shadow, the chosen one in the soft crimson and still standing, no
+   outline. Hover and press change colour, never height. A word longer than its column (a translated label) breaks
+   rather than overflowing, so a segment keeps a minimum height, not a fixed one. A setting's value is never amber. */
+.ui-segment {
+    --control-pad-x: var(--space-3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    box-sizing: border-box;
+    min-height: var(--control-h);
+    line-height: 1.2;
+    border: 1px solid transparent;
+    border-radius: var(--control-radius);
+    background: var(--surface-capsule);
+    color: var(--text-secondary);
+    box-shadow: var(--elev-rest);
+    padding: var(--space-1) var(--control-pad-x);
+    cursor: pointer;
+    font-size: var(--button-font-size);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    transition: var(--motion-tone);
+}
+.ui-segment:not(:disabled):not(.active):hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
+.ui-segment.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.ui-segment:not(:disabled):active { filter: var(--press); }
+.ui-segment:disabled { cursor: not-allowed; opacity: var(--control-disabled-opacity); box-shadow: none; }
+.ui-segment:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+
+/* An object on the room (DESIGN.md design bible): one flat fill on the rest shadow with the object radius, no edge
+   (the transparent 1px border only keeps the box's size). Inside an object a group or row is a tray
+   (--surface-tray, --radius-inner, no shadow); fills never stack. */
+.ui-card {
+    border: 1px solid transparent;
+    background: var(--surface-object);
+    border-radius: var(--radius-object);
+    box-shadow: var(--elev-rest);
+    padding: var(--card-pad);
+}
+/* On a phone a card keeps 18 px at its sides, so a three-way choice fits its row instead of wrapping two and one
+   (owner, board of 06.11: 24 px on a desk, 18 px on a phone). */
+html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
+
+/* ---- The control box lock (owner decision 06.11.2026, Q1 = A) ---------------------------------------------------
+   Why it exists: one button had eight heights (18–39 px) because any page sheet could write height, padding, radius,
+   border or font-size on a shared control and win by specificity, and nothing but a screenshot noticed. The 06.11
+   cleanup deleted those rules; this lock keeps them from returning by construction: in the product documents a page
+   declaration on the box of these roles does nothing, so the next author reaches for the token. It holds only the
+   box; material, words and places are held by deletion, review and the owner's eye (his 2C of 05.11).
+   How to pick a size: set a token on a scope, never the property —
+     --control-h: var(--control-h-sm)      a control inside a row (.btn-sm does this)
+     --control-h: var(--control-h-float)   floating chrome (the docked header toolbar scope does this)
+     --control-h: auto                     a control that carries a paragraph (style.css .chat-file-card), with
+     --control-pad-y                       its block inset, --control-pad-x its inline inset (one or two values),
+     --control-radius                      its corner (the pill, or --radius-inner for a card),
+     --button-font-size                    its text (the body size at rest; .btn-sm takes the meta size).
+   How to add a role: give its class the token values it needs (as .btn-sm does), add it to the :is() lists below and
+   to the touch-reach family, and name it in DESIGN.md principle 4.
+   Scope: the product documents only (their root is .ouro-ui: the app, setup, login). An author frame loads this sheet
+   under its own root and keeps the overridable recipes above. */
+:root:where(.ouro-ui) :is(.btn, .app-tab, .filter-chip, .theme-choice) {
+    box-sizing: border-box !important;
+    height: var(--control-h) !important;
+    min-height: 0 !important;
+    padding-block: var(--control-pad-y) !important;
+    padding-inline: var(--control-pad-x) !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--control-radius) !important;
+    font-size: var(--button-font-size) !important;
+}
+:root:where(.ouro-ui) .ui-segment {
+    box-sizing: border-box !important;
+    height: auto !important;
+    min-height: var(--control-h) !important;
+    padding-block: var(--space-1) !important;
+    padding-inline: var(--control-pad-x) !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--control-radius) !important;
+    font-size: var(--button-font-size) !important;
+}
+
+/* ---- The shared parts (DESIGN.md principles 6 and 7; the 06.11 convergence) -------------------------------------
+   Five decisions each have one owner here and screens compose them: the result of an action (.ui-action-row +
+   .ui-result, ui_primitives.js setResult / errorWords), main vs Details (details.ui-disclosure), a row of one fact
+   (.ui-row), the length of a list (.ui-list-more), and the one primary action of a place (the [data-primary] slot).
+   The contract of each part is its comment here and its home test (web/tests/ui_primitives.test.js). */
+
+/* The action row: the trigger, then its result as the next sibling, 8px apart. The result keeps one meta line of
+   height from the start (reserved, never display: none), so a late word never moves the control or its neighbours;
+   in a narrow container the result wraps under the trigger into that same reserved line. */
+.ui-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-width: 0;
+}
+.ui-action-row > .ui-result { flex: 1 1 var(--result-copy-min-width); }
+/* The result: a status sentence (the meta size, a dot and a word in the tone's ink) with the raw text, if any, behind
+   one disclosure. ui_primitives.js setResult writes it; a plain acknowledgement ends by itself, a warning, a needed
+   restart or a failure stays until the next result or an edit in the same subject replaces it (DESIGN "Status and
+   chips"). */
+.ui-result {
+    display: block;
+    min-width: 0;
+    min-height: calc(var(--type-meta) * var(--line-meta));
+    overflow-wrap: anywhere;
+}
+.ui-result > .ui-disclosure { margin-top: var(--space-1); }
+.ui-result-details {
+    margin: var(--space-1) 0 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* The one disclosure look: a quiet summary with one caret, the secondary ink, the meta size; what it opens keeps its
+   own layout. A section's lead stays in the main view; the rest, a paragraph or a record, lives behind this. */
+details.ui-disclosure > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    list-style: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-weight: 500;
+}
+details.ui-disclosure > summary::-webkit-details-marker { display: none; }
+details.ui-disclosure > summary::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin-inline: 2px var(--space-1);
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+details.ui-disclosure[open] > summary::before { transform: rotate(45deg); }
+details.ui-disclosure > summary:hover { color: var(--text-primary); }
+details.ui-disclosure > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
+details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
+
+/* The row: one fact as a tray inside its object — a title the CSS clamps to two lines, one meta line under it, and
+   its actions at the end; in a narrow row the actions move under the words (a container query, never a viewport
+   one). The words for titles, meta and counts come from the caller. */
+.ui-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "words actions" "meta actions";
+    align-items: center;
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    min-width: 0;
+    padding: var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    container-type: inline-size;
+}
+.ui-row-title {
+    grid-area: words;
+    min-width: 0;
+    margin: 0;
     color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.08);
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    font-weight: 500;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
 }
-.btn-default:hover {
-    background: var(--bg-hover);
-    border-color: rgba(var(--neutral-rgb), 0.14);
+.ui-row-meta {
+    grid-area: meta;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
+}
+.ui-row-meta:empty { display: none; }
+.ui-row-actions {
+    grid-area: actions;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    min-width: 0;
+}
+/* Narrow row: the children query the row itself (its container-type); a rule on .ui-row inside the query would match an
+   ancestor container instead, because an element never queries its own size. */
+@container (max-width: 28rem) {
+    .ui-row > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
+    .ui-row > .ui-row-title { grid-row: 1; }
+    .ui-row > .ui-row-meta { grid-row: 2; }
+    .ui-row > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
+}
+.ui-row + .ui-row { margin-top: var(--space-2); }
+
+/* The list's one length control: "Show all (N)" is a quiet small capsule at the list's start edge; the label and its
+   count come from the caller. */
+.ui-list-more { align-self: flex-start; justify-self: start; margin-top: var(--space-2); }
+
+/* The primary slot (DESIGN principle 4: the crimson is the one primary action of a place). The containers that have
+   one — the page header's actions, a section's actions, an action row, a dialog's foot — paint their [data-primary]
+   control crimson; a second [data-primary] in the same slot is neutral, so two crimsons in one place cannot be
+   expressed. Any other crimson there is a page-level choice the review sees. */
+.ui-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] {
+    background: var(--tone-crimson);
+    color: var(--tone-crimson-ink);
+    box-shadow: var(--elev-rest);
+    --press: var(--press-solid);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary]:not(:disabled):hover {
+    background: var(--tone-crimson-hover);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary] {
+    background: var(--surface-capsule);
+    color: var(--text-primary);
+    --press: brightness(1.12);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary]:not(:disabled):hover {
+    background: var(--surface-capsule-hover);
 }
 
 
@@ -680,13 +951,14 @@
     white-space: nowrap;
 }
 
-/* The chip primitive reserves its border so a tone can paint it without
-   changing the chip's size. The aliases above keep their own geometry. */
+/* The chip primitive reserves its border so a tone can paint its fill without changing the chip's size; a chip and
+   a status badge never show an edge (a status chip lies flat). The aliases above keep their own geometry. */
 .ui-chip {
     border: 1px solid transparent;
 }
 
 .ui-status,
+.ui-result,
 :where(.settings-inline-status, .wizard-runtime-status) {
     color: var(--text-secondary);
     font-size: var(--type-meta);
@@ -707,34 +979,34 @@
 .ui-chip[data-tone="ok"] {
     color: var(--status-ok-fg);
     background: var(--status-ok-bg);
-    border-color: var(--status-ok-border);
 }
 .ui-chip[data-tone="warn"] {
     color: var(--status-warn-fg);
     background: var(--status-warn-bg);
-    border-color: var(--status-warn-border);
 }
 .ui-chip[data-tone="danger"],
 .ui-chip[data-tone="error"] {
     color: var(--status-error-fg);
     background: var(--status-error-bg);
-    border-color: var(--status-error-border);
 }
 .ui-chip[data-tone="neutral"],
 .ui-chip[data-tone="muted"] {
     color: var(--status-neutral-fg);
     background: var(--status-neutral-bg);
-    border-color: var(--status-neutral-border);
 }
 
 .ui-status[data-tone="ok"],
+.ui-result[data-tone="ok"],
 .settings-inline-status[data-tone="ok"],
 .settings-test-result[data-tone="ok"] { color: var(--status-ok-fg); }
 .ui-status[data-tone="warn"],
+.ui-result[data-tone="warn"],
 .settings-inline-status[data-tone="warn"],
 .settings-test-result[data-tone="warn"] { color: var(--status-warn-fg); }
 .ui-status[data-tone="danger"],
 .ui-status[data-tone="error"],
+.ui-result[data-tone="danger"],
+.ui-result[data-tone="error"],
 .settings-inline-status[data-tone="danger"],
 .settings-inline-status[data-tone="error"],
 .settings-test-result[data-tone="danger"],
@@ -742,14 +1014,19 @@
 /* `muted` is a tone the code emits but no rule named. */
 .ui-status[data-tone="neutral"],
 .ui-status[data-tone="muted"],
+.ui-result[data-tone="neutral"],
+.ui-result[data-tone="muted"],
 .settings-inline-status[data-tone="neutral"],
 .settings-inline-status[data-tone="muted"] { color: var(--status-neutral-fg); }
+.ui-status[data-tone="info"],
+.ui-result[data-tone="info"] { color: var(--status-info-fg); }
 
 /* A status sentence's own dot, one anatomy in every consumer (docs/DESIGN.md "Status marks"). CSS draws it, not
    status_mark.js, because ui.css and ui_primitives.js reach skill authors on their own; it takes the marks' fact
    size and the saturated hues (ok green, warn amber, error red, any other tone the neutral meta ink) while the
    sentence keeps its word tone. */
 .ui-status[data-tone]:not(:empty)::before,
+.ui-result[data-tone]:not(:empty)::before,
 .settings-inline-status[data-tone]:not(:empty)::before,
 .wizard-runtime-status[data-tone]:not(:empty)::before {
     content: "";
@@ -764,9 +1041,9 @@
     position: relative;
     top: -1px;
 }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="ok"]:not(:empty)::before { background: var(--green); }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before { background: var(--amber); }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status):is([data-tone="danger"], [data-tone="error"]):not(:empty)::before {
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="ok"]:not(:empty)::before { background: var(--green); }
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before { background: var(--amber); }
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status):is([data-tone="danger"], [data-tone="error"]):not(:empty)::before {
     background: var(--red);
 }
 
@@ -789,8 +1066,8 @@
     min-width: 0;
     max-width: 100%;
     padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
     background-color: var(--bg-secondary);
     color: var(--text-primary);
     font-family: var(--font-sans);
@@ -836,7 +1113,6 @@ textarea.ui-control { resize: vertical; }
 }
 @media (prefers-reduced-motion: reduce) {
     .btn, .ui-control { transition: none; }
-    .btn:hover, .btn:active { transform: none; }
 }
 
 /* Measured popup placement and its floating material are shared; menu/listbox interaction stays separate. The paint
@@ -873,7 +1149,7 @@ textarea.ui-control { resize: vertical; }
 }
 .ui-model-option, .ui-model-empty {
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     font-size: var(--type-body);
     line-height: var(--line-body);
     overflow-wrap: anywhere;
@@ -897,7 +1173,7 @@ textarea.ui-control { resize: vertical; }
     margin: 0;
     padding: var(--space-2) var(--space-3);
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: transparent;
     color: var(--text-primary);
     font-family: var(--font-sans);
@@ -950,7 +1226,7 @@ textarea.ui-control { resize: vertical; }
     max-height: var(--ui-hint-room, none);
     padding: var(--space-2) var(--space-3);
     border: 1px solid transparent;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-object);
     background: var(--popup-float);
     box-shadow: var(--elev-float);
     -webkit-backdrop-filter: var(--glass);
@@ -981,7 +1257,7 @@ textarea.ui-control { resize: vertical; }
     font-weight: 600;
     cursor: pointer;
 }
-.ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 .ui-hint:not([hidden]) { animation: ui-hint-in var(--motion-fade) var(--ease-sheet); }
 @keyframes ui-hint-in { from { opacity: 0; transform: translateY(3px); } }
 @media (prefers-reduced-motion: reduce) {
@@ -996,21 +1272,35 @@ textarea.ui-control { resize: vertical; }
    never as a box glued to one control or one group. */
 @media (pointer: coarse) {
     /* A coarse pointer (a phone) raises the shared touch minimum to a finger's 44px, and the whole family with it. */
-    :root { --touch-target-min: 44px; --chrome-control-h: var(--touch-target-min); }
+    :root { --touch-target-min: 44px; --control-h-float: var(--touch-target-min); }
 }
-/* ---- Touch hit extension ----------------------------------------------------------------------------------------
+/* ---- Touch reach --------------------------------------------------------------------------------------------------
    A small control keeps its look and, under a finger, gains an invisible hit area centred on it and at least the
-   touch minimum each way: the pseudo-element reaches out only on the sides that fall short (a 32px-tall capsule
-   gains 6px above and below, nothing sideways). Composition keeps at least that overshoot between neighbouring
-   controls, so hit areas never overlap (the composer rows part by --space-2). The one recipe, inset by the one
-   --ui-hit-inset; controls add the class, and style.css gives a page's links the same extension. */
-.ui-hit-area { position: relative; }
+   touch minimum each way: the pseudo-element reaches out only on the sides that fall short (a 34px-tall capsule
+   gains 5px above and below, nothing sideways), so the one-height capsules need no 44px body on a phone. Composition
+   keeps at least that overshoot between neighbouring controls, so hit areas never overlap (the composer rows part by
+   --space-2). The one recipe, inset by the one --ui-hit-inset: the shared control families carry it by selector, a
+   page's own small control adds .ui-hit-area, style.css gives a page's links the same extension, and in the product
+   documents every disclosure's summary has it (a summary that draws its own ::after caret keeps it: that rule is as
+   specific and later). Where a reach would cover a neighbour or be clipped, the minimum is the control's own height
+   instead (DESIGN "Touch and containment"): a row that wraps on a phone and a strip that scrolls set it through the
+   control tokens on their scope (--control-h, and --control-h-sm for the small capsules in it; the lock writes the
+   box); a disclosure's summary, words without a body, takes it below, and so does a field. */
+.ui-hit-area, .btn, .app-tab, .filter-chip, .theme-choice, .ui-segment,
+:root:where(.ouro-ui) summary { position: relative; }
 @media (pointer: coarse) {
-    .ui-hit-area::after {
+    :is(.ui-hit-area, .btn, .app-tab, .filter-chip, .theme-choice, .ui-segment)::after,
+    :root:where(.ouro-ui) summary::after {
         content: "";
         position: absolute;
         inset: var(--ui-hit-inset);
     }
+    /* A disclosure stacked under controls or under another one: its line of words is the minimum tall, so its reach
+       covers neither (its look stays a line: the summary has no body). A menu's items stack the same way. A field is a
+       target too, and a native select cannot carry the ::after. */
+    details.ui-disclosure > summary,
+    .ui-popup [role^="menuitem"],
+    .ui-control { min-height: var(--touch-target-min); }
 }
 
 .ui-chrome-group {
@@ -1022,7 +1312,7 @@ textarea.ui-control { resize: vertical; }
     margin: calc(-1 * var(--chrome-inset));
     padding: var(--space-1);
     border: 1px solid transparent;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-object);
 }
 .ui-chrome-control {
     box-sizing: border-box;
@@ -1030,60 +1320,13 @@ textarea.ui-control { resize: vertical; }
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    height: var(--chrome-control-h);
+    height: var(--control-h-float);
     padding: 0 var(--pill-padding-x);
     border-radius: var(--pill-radius);
     line-height: 1;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
 }
-
-/* ---- One control, three tones (DESIGN.md design bible) ---------------------------------------------------------
-   Everything pressable with a body is a capsule standing on the rest shadow, in every state and either theme:
-   neutral (the capsule surface), tonal (its hue's fill and that fill's ink: the crimson for the primary action, the
-   chosen tab or place and a count, the soft crimson for a chosen option or card, green for save, red for danger, amber
-   for the owner's turn). A quiet control (ghost, link, filter) has no body and no shadow. A state changes colour,
-   never height: hover deepens the fill a step, a press deepens it again
-   (--press), a chosen one takes its tone; what cannot be pressed now loses its shadow. `.ui-chrome-control` stays
-   geometry only (a floating control's own tone is its page's): page styles map their controls onto these tones and
-   add no fourth recipe and no outline. These recipes are the product documents' own (their root is `.ouro-ui`);
-   `:where` keeps the specificity, and an author frame that sets `data-theme` keeps the overridable base recipe. */
-:root[data-theme]:where(.ouro-ui) .btn { border-color: transparent; border-radius: var(--pill-radius); font-weight: 600; transition: var(--motion-tone); }
-:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary) {
-    border-color: transparent; background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest);
-}
-:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary):not(:disabled):hover { border-color: transparent; background: var(--surface-capsule-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-ghost { border-color: transparent; background: transparent; box-shadow: none; }
-:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-primary { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-save { background: var(--tone-green); color: var(--status-ok-fg); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-save:not(:disabled):hover { background: var(--tone-green-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-danger { border-color: transparent; background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-danger:not(:disabled):hover { border-color: transparent; background: var(--tone-red-hover); }
-:root[data-theme]:where(.ouro-ui) .btn:hover { transform: none; }
-:root[data-theme]:where(.ouro-ui) :is(.btn, .theme-choice):not(:disabled):active { transform: none; filter: var(--press); }
-:root[data-theme]:where(.ouro-ui) .btn-primary { --press: var(--press-solid); }
-:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):active { box-shadow: none; }
-/* A capsule over content uses the same geometry, focus and disabled state, on glass. */
-:root[data-theme]:where(.ouro-ui) .btn-float {
-    background: var(--surface-float); color: var(--text-primary); box-shadow: var(--elev-float);
-    -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
-}
-@media (hover: hover) {
-    :root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):hover { filter: var(--press); }
-}
-:root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):active { filter: var(--press) var(--press); }
-:root[data-theme]:where(.ouro-ui) .btn:disabled { box-shadow: none; }
-/* The Appearance choice is one control in both documents (the SPA and the served setup page load only this sheet
-   in common): neutral capsules, the chosen one in the soft crimson, all standing. */
-:root[data-theme]:where(.ouro-ui) .theme-choice {
-    border-color: transparent; border-radius: var(--pill-radius); background: var(--surface-capsule); box-shadow: var(--elev-rest);
-    transition: var(--motion-tone);
-}
-:root[data-theme]:where(.ouro-ui) .theme-choice:hover { border-color: transparent; background: var(--surface-capsule-hover); }
-:root[data-theme]:where(.ouro-ui) .theme-choice[aria-checked="true"] { border-color: transparent; background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
-:root[data-theme]:where(.ouro-ui) :is(.ui-chip, .status-badge) { border-color: transparent; }
 
 /* ---- Status marks (docs/DESIGN.md "Status marks") --------------------------------------------------------------
    One small family for every surface, created and painted by web/modules/status_mark.js and drawn only here. The

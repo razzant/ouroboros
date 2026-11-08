@@ -1,6 +1,7 @@
 import { tr } from './i18n.js';
 import { MAX_QUIZ_OPTIONS, MAX_DECISION_COMMENT } from './api_types.js';
 import { bindEnterSubmit } from './ui_interactions.js';
+import { secretRequestOf } from './secret_hitl.js';
 
 export const WAIT_FIELDS = ['wait_for_answer', 'wait_ended_at', 'owner_wait_state', 'owner_wait_resume_reason'];
 
@@ -10,7 +11,8 @@ export const WAIT_FIELDS = ['wait_for_answer', 'wait_ended_at', 'owner_wait_stat
 // keeps the lifecycle context after it. The Python pointer fallback
 // (ouroboros/project_dialogue.py::QUESTION_STATUS) emits the same words; the shared
 // fixture web/tests/fixtures/question_presentation_parity.json pins both sides on the
-// rows Python actually emits.
+// rows Python actually emits. Whether the question's task is a paused member of its work is the
+// browser's own work projection (`paused`, work_status.memberPaused), so only this side says it.
 const STATUS = {
     waiting: 'Waiting for your answer',
     open: 'Unanswered',
@@ -51,7 +53,15 @@ function lifecycleKey(row) {
         : waiting ? 'waiting' : resumed ? 'resumed' : 'open';
 }
 
-export function questionPresentation(row = {}) {
+// A paused task reads its mail only after its Resume, which nobody presses for the owner (owner 07.10): an answer it
+// waits for, or one saved in its mailbox, says so while its work is paused, in one clause after its lead word (owner
+// 04.11, 1A: why it is paused is the work's own line). A queued or held one keeps the plain words.
+const PAUSED_STATUS = {
+    waiting: 'Waiting for your answer · read after Resume',
+    answer_saved: 'Answer saved · read after Resume',
+};
+
+export function questionPresentation(row = {}, { paused = false } = {}) {
     if (deliveryOwed(row)) {
         if ((row.quiz_state || row.state) !== 'answered') {
             return { status: tr('question.status.closure_pending', 'Question closed · update pending') };
@@ -61,11 +71,14 @@ export function questionPresentation(row = {}) {
         const reason = row.question_delivery.reason_code;
         return { status: reason === 'late_answer_delivery_unknown'
             ? tr('question.status.answer_unknown', 'Answer recorded · delivery unknown')
-            : reason === 'awaiting_recipient_read'
-                ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
-                : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
+            : reason === 'awaiting_recipient_read' && paused
+                ? tr('question.status.answer_saved_paused', PAUSED_STATUS.answer_saved)
+                : reason === 'awaiting_recipient_read'
+                    ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
+                    : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
     }
     const key = lifecycleKey(row);
+    if (paused && key === 'waiting') return { status: tr('question.status.waiting_paused', PAUSED_STATUS.waiting) };
     // The English words stay the source (and the Python twin's); the install language reads
     // them by the lifecycle code (web/modules/i18n.js).
     return { status: tr(`question.status.${key}`, STATUS[key]) };
@@ -114,13 +127,16 @@ export function normalizeQuiz(msg) {
         state: String(src.state || 'open'),
         taskId: String(msg.task_id || ''),
         ts: msg.ts || null,
-        answerFields: Object.fromEntries(['answered_index', 'comment', 'question_delivery'].filter((key) => Object.hasOwn(src, key))
+        answerFields: Object.fromEntries(['answered_index', 'comment', 'question_delivery', 'secret_outcome', 'secret_save']
+            .filter((key) => Object.hasOwn(src, key))
             .map((key) => [key, src[key]])),
         answeredIndex: Number.isInteger(src.answered_index) ? src.answered_index : null,
         // The owner's verbatim words on a settled card (history replay
         // merges them from the projection). With no answeredIndex they
         // ARE the answer, not a remark beside one.
         comment: String(src.comment || ''),
+        // An integration-secret request (showSecretHitl): its protected form replaces the free answer.
+        secretRequest: secretRequestOf(src),
         detailsUnavailable: src.option_details === undefined && raw.every((option) => typeof option === 'string'),
     };
 }

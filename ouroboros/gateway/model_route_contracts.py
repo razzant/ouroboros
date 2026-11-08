@@ -25,7 +25,7 @@ class WebSearchLeg(TypedDict):
     source: str  # openai | openrouter | anthropic | ddgs
     backend: str
     model: str  # the wire model; empty for ddgs
-    model_source: Literal["selection", "provider_default"]
+    model_source: Literal["selection", "provider_default"]  # provider_default: the source's recommended model
     # Only on an ``unavailable`` leg: the locally known cause, never a provider probe.
     unavailable_reason: NotRequired[Literal["no_credentials", "package_missing", "legacy_openai_base_url"]]
 
@@ -35,7 +35,7 @@ class WebSearchRoute(TypedDict):
 
     scope: Literal["builtin_web_search"]
     source: str  # auto, or one strict source
-    model: str  # the selection as saved or drafted; empty means provider defaults
+    model: str  # the selection as saved or drafted; empty follows each source's recommended model
     legs: List[WebSearchLeg]  # eligible, in order
     unavailable: List[WebSearchLeg]  # each names its unavailable_reason
     note: str

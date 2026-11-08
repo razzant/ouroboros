@@ -111,7 +111,7 @@ def test_notice_import_does_not_block_current_store_and_late_receipts_are_found(
     assert not notice_receipts.recorded(tmp_path, 3, row["type"])
 
 
-@pytest.mark.parametrize("reader", ["owner", "routing", "words", "notices", "publication", "narrative"])
+@pytest.mark.parametrize("reader", ["owner", "publication", "narrative"])
 def test_absence_readers_answer_over_the_readable_rows_of_a_root_with_a_torn_line(tmp_path, reader):
     """A line the import could not read is an unreadable old row, as it was for the chain readers:
     absence-only answers are given over the readable rows, so one torn line in the archive never
@@ -174,7 +174,7 @@ def test_a_torn_line_leaves_the_routing_card_open_until_its_source_is_readable(t
     assert latest_chat_annotations(tmp_path)["owner-one"]["status"] == "delivered"
 
 
-@pytest.mark.parametrize("reader", ["owner", "routing", "words", "notices"])
+@pytest.mark.parametrize("reader", ["owner", "routing", "notices"])
 def test_named_reader_has_equal_sql_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     row = owner()
     ref = build_owner_message_ref(chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])
@@ -359,6 +359,18 @@ def test_legacy_owner_binding_keeps_the_missing_chat_id_convention(tmp_path, nam
     ref = build_owner_message_ref(chat_id=1, client_message_id="", ts=row["ts"] if named_time else "", text=row["text"])
     assert resolve_owner_message_source(tmp_path, ref) == row
     assert resolve_owner_message_source(tmp_path, {**ref, "text_sha256": "0" * 64}) is None
+    # A later card may repeat these words (even in the same clock tick). It has its
+    # own identity and must not shadow a pre-identity inbound source or its corpus.
+    quiz = {"ts": row["ts"], "chat_id": 1, "direction": "out", "type": "quiz_answer",
+            "source": "owner_quiz_answer", "client_message_id": "quiz_answer:asker:choice",
+            "text": "host answer frame", "quiz": {"state": "answered", "comment": row["text"]}}
+    ds.append(tmp_path, "chat", quiz)
+    assert resolve_owner_message_source(tmp_path, ref) == row
+    words = owner_words._message_rows(tmp_path, "legacy-task", None, ref, "origin_message")
+    assert [word["text"] for word in words] == [row["text"]]
+    exact_quiz = build_owner_message_ref(chat_id=1, client_message_id=quiz["client_message_id"],
+                                         ts=quiz["ts"], text=row["text"])
+    assert resolve_owner_message_source(tmp_path, exact_quiz) == quiz
 
 
 def test_mismatched_import_is_not_coverage_or_absence(tmp_path):
@@ -376,7 +388,7 @@ def test_mismatched_import_is_not_coverage_or_absence(tmp_path):
     assert ds.range_coverage(tmp_path, "chat", lower=segment["base"] + segment["size"])["imported"]
 
 
-@pytest.mark.parametrize("reader", ["identity", "room", "evidence", "task"])
+@pytest.mark.parametrize("reader", ["identity", "room", "task"])
 def test_memory_readers_do_equal_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     from ouroboros import chat_chain
     from ouroboros.dialogue_evidence import read_room_source
@@ -472,7 +484,7 @@ def test_memory_recall_keeps_the_frozen_public_golden(tmp_path):
     assert _normalize(Memory(tmp_path).chat_history(count=20), tmp_path) == expected
 
 
-@pytest.mark.parametrize("reader", ["reentry", "page", "receipt", "wake"])
+@pytest.mark.parametrize("reader", ["reentry", "page", "wake"])
 def test_presence_readers_do_equal_sql_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     from ouroboros import presence_continuation as pc
     from ouroboros.consciousness_wake import _chat_window

@@ -163,7 +163,7 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         tool = _plan_task_entry()
         params = tool.schema["parameters"]["properties"]
         self.assertEqual(set(params), {"goal", "plan", "done_when", "affected_paths", "ask", "message",
-                                       "attach", "reviewer_effort", "reason"})
+                                       "attach", "reviewer_effort", "reason", "continue_seats"})
         # Three effects, one tool: nothing is schema-required (the handler reads the effect).
         self.assertEqual(tool.schema["parameters"]["required"], [])
 

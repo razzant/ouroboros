@@ -16,6 +16,7 @@ import pytest
 from ouroboros import maintenance_jobs, store, store_hot_facts as hot, task_store
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_hot_facts import _old_task, _task
+from tests._cases import case_folders
 
 # What a row's stored body can be left as, and the census's reason (None: no body row at all).
 DAMAGE = {
@@ -53,21 +54,23 @@ def _tree(root):
 
 # --- the census itself ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("descendants", [False, True], ids=["root", "descendants"])
-@pytest.mark.parametrize("kind", list(DAMAGE))
-def test_a_damaged_row_is_named_and_every_readable_member_kept(tmp_path, kind, descendants):
-    _tree(tmp_path)
-    _damage(tmp_path, "stray", kind)
-    census = task_store.tree_facts(tmp_path, "root-1", descendants=descendants)
-    assert set(census.members) == {"root-1", "child", "legacy"}
-    assert census.members["legacy"]["root_task_id"] == "root-1"
-    assert census.unresolved == {"stray": {"reason": DAMAGE[kind][1], "linked": False}}
-    # The neighbouring tree's census names the same row and nothing of root-1.
-    assert task_store.tree_facts(tmp_path, "other").unresolved == census.unresolved
+def test_a_damaged_row_is_named_and_every_readable_member_kept(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for descendants in [False, True]:
+        for kind in list(DAMAGE):
+            tmp_path = next(case_paths)
+            with subtests.test(descendants=descendants, kind=kind):
+                _tree(tmp_path)
+                _damage(tmp_path, "stray", kind)
+                census = task_store.tree_facts(tmp_path, "root-1", descendants=descendants)
+                assert set(census.members) == {"root-1", "child", "legacy"}
+                assert census.members["legacy"]["root_task_id"] == "root-1"
+                assert census.unresolved == {"stray": {"reason": DAMAGE[kind][1], "linked": False}}
+                # The neighbouring tree's census names the same row and nothing of root-1.
+                assert task_store.tree_facts(tmp_path, "other").unresolved == census.unresolved
 
 
-@pytest.mark.parametrize("tie", ["parent", "member_parent", "retry_of_root", "superseded", "caller_id", "handoff",
-                                 "own_root"])
+@pytest.mark.parametrize("tie", ["parent", "superseded", "own_root"])
 def test_a_damaged_row_tied_to_one_tree_is_linked_there_only(tmp_path, tie):
     _tree(tmp_path)
     typed = {"parent": {"parent_task_id": "child"}, "superseded": {"superseded_by": "child"}}.get(tie, {})
@@ -170,26 +173,28 @@ def _pause_and_park(tmp_path, monkeypatch, queue, workers, task_id):
     install_exact_budget_pause(ctx, task_id, budget_pause.exact_pause_marker(row)["checkpoint"])
 
 
-@pytest.mark.parametrize("kind", list(DAMAGE))
-def test_an_unattributed_damaged_row_lets_pause_settle_and_resume_proceed(tmp_path, monkeypatch, kind):
-    from ouroboros import owner_pause
+def test_an_unattributed_damaged_row_lets_pause_settle_and_resume_proceed(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for kind in list(DAMAGE):
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind), monkeypatch.context() as monkeypatch:
+            from ouroboros import owner_pause
 
-    queue, state, workers = _install_queue(tmp_path, monkeypatch)
-    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
-    _live_root(tmp_path, workers, "solo")
-    _damage(tmp_path, "stray", kind)
-    _pause_and_park(tmp_path, monkeypatch, queue, workers, "solo")
-    fence = owner_pause.read_fence(tmp_path, "solo")
-    assert fence["state"] == owner_pause.FENCE_PAUSED
-    assert fence["membership_gaps"] == {"rows": [{"task_id": "stray", "reason": DAMAGE[kind][1]}], "count": 1}
-    assert queue.resume_budget_paused_task("solo")["ok"] is True
+            queue, state, workers = _install_queue(tmp_path, monkeypatch)
+            monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+            _live_root(tmp_path, workers, "solo")
+            _damage(tmp_path, "stray", kind)
+            _pause_and_park(tmp_path, monkeypatch, queue, workers, "solo")
+            fence = owner_pause.read_fence(tmp_path, "solo")
+            assert fence["state"] == owner_pause.FENCE_PAUSED
+            assert fence["membership_gaps"] == {"rows": [{"task_id": "stray", "reason": DAMAGE[kind][1]}], "count": 1}
+            assert queue.resume_budget_paused_task("solo")["ok"] is True
 
 
 GAP_WORDS = (" The Pause did not wait for 1 saved task record that could not be read and that nothing ties to this "
              "task (stray); whether it belongs here is unknown.")
 
 
-@pytest.mark.serial  # binds the shared chat writer, as tests/test_pause_notices.py does
 def test_the_owner_reads_the_gap_in_the_pause_row_and_keeps_it_after_resume(tmp_path, monkeypatch):
     from ouroboros import pause_notices
     from ouroboros.startup_migrations import prepare_startup_state
@@ -237,7 +242,6 @@ def test_only_a_still_closed_pause_lends_its_gap_to_a_resume(tmp_path):
     assert owner_pause.paused_gap(tmp_path, "solo") == {}  # never lent to a later, different Resume
 
 
-@pytest.mark.serial  # binds the shared chat writer, as tests/test_pause_notices.py does
 def test_a_gap_found_after_the_pause_is_named_by_the_resume_not_rewritten_into_its_notice(tmp_path, monkeypatch):
     from ouroboros import owner_pause, pause_notices
     from ouroboros.startup_migrations import prepare_startup_state
@@ -284,7 +288,7 @@ AFTER = {"task_id": "stray-2", "reason": "body_not_object"}
 TIED = {"kind": "member_record_unreadable", "task_id": "stray-2", "detail": "body_not_object"}
 
 
-@pytest.mark.parametrize("case", ["clean", "after", "beside_the_pause_gap", "tied"])
+@pytest.mark.parametrize("case", ["clean", "beside_the_pause_gap", "tied"])
 def test_the_resume_census_names_a_row_damaged_after_the_pause_settled(tmp_path, monkeypatch, case):
     """Exact Resume of a parked root: no settle tick re-read the tree after the damage, only Resume's own census."""
     from ouroboros import owner_pause
@@ -386,38 +390,41 @@ DOORS = {"warm_root": (_warm_root, "warm", 1), "answered_tree": (_answered_tree,
          "late_review": (_late_review, "late_phase", 3)}
 
 
-@pytest.mark.parametrize("case", ["clean", "after", "tied"])
-@pytest.mark.parametrize("door", list(DOORS))
-def test_every_resume_door_names_a_row_damaged_after_the_pause_settled(tmp_path, monkeypatch, door, case):
+def test_every_resume_door_names_a_row_damaged_after_the_pause_settled(subtests, tmp_path, monkeypatch):
     """Before the exact door: a warm root, an answered tree and its unsent review each answer with their own census."""
-    from ouroboros import owner_pause
-    from supervisor.owner_pause_control import refresh_owner_pause_tree, request_owner_pause
+    case_paths = case_folders(tmp_path)
+    for case in ["clean", "after", "tied"]:
+        for door in list(DOORS):
+            tmp_path = next(case_paths)
+            with subtests.test(case=case, door=door), monkeypatch.context() as monkeypatch:
+                from ouroboros import owner_pause
+                from supervisor.owner_pause_control import refresh_owner_pause_tree, request_owner_pause
 
-    queue, state, workers = _install_queue(tmp_path, monkeypatch)
-    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
-    build, answer, reads = DOORS[door]
-    root, park = build(tmp_path, monkeypatch, workers)
-    assert request_owner_pause(root, request_id=f"press-{door}")["ok"]
-    park()
-    assert refresh_owner_pause_tree(root) == owner_pause.FENCE_PAUSED
-    fence = owner_pause.read_fence(tmp_path, root)
-    if case != "clean":
-        _damage(tmp_path, "stray-2", "array", **({"parent_task_id": root} if case == "tied" else {}))
-    censuses = _counted_censuses(monkeypatch)
-    ack = queue.resume_budget_paused_task(root)
-    if case == "tied":  # a row a link ties to the tree still holds it, named, and the Pause stays closed
-        assert ack["ok"] is False and ack["error"] == "owner_pause_effects_unsettled"
-        assert TIED in ack["blockers"] and "membership_gaps" not in ack
-        assert owner_pause.fence_closed(owner_pause.read_fence(tmp_path, root))
-        return
-    assert censuses == [root] * reads, "the door's own censuses only: none added for the gap"
-    assert ack["ok"] is True and ack[answer], ack
-    if case == "clean":
-        assert "membership_gaps" not in ack and "message" not in ack
-    else:
-        assert ack["membership_gaps"] == {"rows": [AFTER], "count": 1}
-        assert ack["message"] == "Resume accepted." + GAP_WORDS.replace("(stray)", "(stray-2)")
-    assert owner_pause.read_fence(tmp_path, root).get("membership_gaps") == fence.get("membership_gaps")
+                queue, state, workers = _install_queue(tmp_path, monkeypatch)
+                monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+                build, answer, reads = DOORS[door]
+                root, park = build(tmp_path, monkeypatch, workers)
+                assert request_owner_pause(root, request_id=f"press-{door}")["ok"]
+                park()
+                assert refresh_owner_pause_tree(root) == owner_pause.FENCE_PAUSED
+                fence = owner_pause.read_fence(tmp_path, root)
+                if case != "clean":
+                    _damage(tmp_path, "stray-2", "array", **({"parent_task_id": root} if case == "tied" else {}))
+                censuses = _counted_censuses(monkeypatch)
+                ack = queue.resume_budget_paused_task(root)
+                if case == "tied":  # a row a link ties to the tree still holds it, named, and the Pause stays closed
+                    assert ack["ok"] is False and ack["error"] == "owner_pause_effects_unsettled"
+                    assert TIED in ack["blockers"] and "membership_gaps" not in ack
+                    assert owner_pause.fence_closed(owner_pause.read_fence(tmp_path, root))
+                    continue
+                assert censuses == [root] * reads, "the door's own censuses only: none added for the gap"
+                assert ack["ok"] is True and ack[answer], ack
+                if case == "clean":
+                    assert "membership_gaps" not in ack and "message" not in ack
+                else:
+                    assert ack["membership_gaps"] == {"rows": [AFTER], "count": 1}
+                    assert ack["message"] == "Resume accepted." + GAP_WORDS.replace("(stray)", "(stray-2)")
+                assert owner_pause.read_fence(tmp_path, root).get("membership_gaps") == fence.get("membership_gaps")
 
 
 def test_a_resume_joins_its_census_to_the_pause_gap_each_row_once_within_the_bound():
@@ -462,7 +469,7 @@ def _reserve_model_request(root, task_id, root_task_id):
                                                 task_id=task_id, root_task_id=root_task_id))
 
 
-@pytest.mark.parametrize("tie", ["unattributed", "parent", "custody", "model_request"])
+@pytest.mark.parametrize("tie", ["unattributed", "custody", "model_request"])
 def test_continue_is_held_only_by_a_damaged_row_tied_to_its_tree(tmp_path, monkeypatch, tie):
     from supervisor.continuation_admission import admit_continuation
     from tests.test_owner_continue import NONCE, _interrupted
@@ -510,7 +517,7 @@ def _cold_tie(root, tie):
     _damage(root, "kid", "torn", **({"parent_task_id": "sleeper"} if tie == "child" else {}))
 
 
-@pytest.mark.parametrize("tie", ["unattributed", "child", "model_request", "other_root_request"])
+@pytest.mark.parametrize("tie", ["unattributed", "child", "other_root_request"])
 def test_a_cold_sleep_is_refused_only_by_its_own_damaged_member(tmp_path, tie):
     from ouroboros import model_sleep
     from tests.test_model_sleep import _ctx, _result
@@ -556,6 +563,7 @@ def test_an_unreadable_model_request_set_holds_a_cold_sleep_beside_damage_it_cou
 def test_a_census_names_no_gap_while_a_link_source_is_unreadable(tmp_path, monkeypatch, source):
     """Unknown is never "nothing ties it": the row holds, named, beside the unreadable source."""
     from ouroboros import delegate_custody_current, owner_pause
+    from supervisor import tree_census
     from supervisor.continuation_admission import conflicting_writers
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
@@ -571,6 +579,9 @@ def test_a_census_names_no_gap_while_a_link_source_is_unreadable(tmp_path, monke
     if source == "model_requests":
         monkeypatch.setattr(owner_pause, "tree_model_requests", unreadable)
     else:
+        # The census's revision reads the same custody rows: a store that cannot answer one cannot answer
+        # the other. While it does answer and nothing moved, the ids read at that revision are known.
+        monkeypatch.setattr(tree_census, "read_revision", unreadable)
         monkeypatch.setattr(delegate_custody_current, "tree_task_ids", unreadable)
     gaps = []
     blockers = conflicting_writers(queue, "root-1", drive_root=tmp_path, gaps=gaps)

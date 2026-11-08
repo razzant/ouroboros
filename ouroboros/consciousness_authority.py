@@ -38,11 +38,17 @@ LEVELS = CONSCIOUSNESS_AUTONOMY_LEVELS
 LEVEL_OBSERVE, LEVEL_ACT, LEVEL_FULL = LEVELS
 
 # Act withholds the runtime's own posture: evolution, restart, the one
-# settings writer, its own alarm clock and owner-binding configuration.
+# settings writer and its own alarm clock. Place configuration is withheld on
+# the ARGUMENTS instead (``PLACE_READ_ACTIONS``): its reads are reads.
 ACT_DISABLED: tuple[str, ...] = (
     "toggle_evolution", "request_restart", "set_tool_timeout",
-    "toggle_consciousness", "configure_presence",
+    "toggle_consciousness",
 )
+# The two ``configure_presence`` actions every level keeps: a place and the rooms it
+# captured (the one model-facing reader of them). Every other action edits the
+# owner's place configuration (16.09: "конфигурация"), which below Full
+# ``observe_argument_refusal`` refuses for Act and Observe alike.
+PLACE_READ_ACTIONS: frozenset[str] = frozenset({"list", "inspect"})
 # Names Observe keeps even though they have mutating shapes,
 # because each has a real read-only or own-work path that withholding the NAME
 # would destroy along with the mutation. What the name may then be asked to DO
@@ -57,6 +63,7 @@ OBSERVE_ARGUMENT_NARROWED: frozenset[str] = frozenset({
     # a child must be able to stop the one it started (the nanny's other half).
     "cancel_task",
     "manage_schedules",  # reads and lifecycle controls remain; authoring does not
+    "configure_presence",  # its reads remain, for Act too (``PLACE_READ_ACTIONS``)
 })
 # Observe withholds every verb that starts work or changes the world beyond
 # this mind's own memory (the table beside ``ROUTING_VERBS``) plus publication.
@@ -150,20 +157,20 @@ def work_kind(metadata: Any) -> str:
     return WORK_KIND_CONSCIOUSNESS
 
 
-def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = False) -> Dict[str, Any]:
+def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = False,
+                                  owner_basis: Any = None) -> Dict[str, Any]:
     """Copy host origin by value, never the wake identity itself.
 
-    Children keep the root's kind/cause; independent roots use ``started``.
-    Only a root occasioned by an addressed, confirmed-owner request changes kind.
-    The focus itself remains consciousness.
+    Children keep the root's kind/cause; independent roots use ``started``. A root a consciousness
+    focus starts is its own work unless ``owner_basis`` is the host-verified cite of my human's words
+    (``owner_words.cited_owner_basis``): no host flag and no argument mint owner kind. The focus
+    itself remains consciousness.
     """
     from copy import deepcopy
 
     source = parent_metadata if isinstance(parent_metadata, Mapping) else {}
     kind = work_kind(source)
-    focus = source.get("focus") or {}
-    if (started_root and is_focus_wake(source) and focus.get("addressed") is True
-            and (focus.get("actor") or {}).get("owner_confirmed") is True):
+    if started_root and is_consciousness_origin(source) and isinstance(owner_basis, Mapping) and owner_basis.get("basis") == "cited":
         kind = WORK_KIND_OWNER
     inherited = {"work_kind": kind}
     for key in ("focus", "schedule_writer_kind", "origin_wake_task_id"):
@@ -183,16 +190,31 @@ def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = 
     }
 
 
+def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
+    """The one durable home of a schedule's owner words: its next occurrence's ``task.metadata.owner_corpus`` (a
+    note's template holds only that metadata). The lifecycle stamp and the Off disclosure read nothing else."""
+    corpus = ((record.get("task") or {}).get("metadata") or {}).get("owner_corpus") if isinstance(record, Mapping) else None
+    return [row for row in corpus if isinstance(row, Mapping)] if isinstance(corpus, list) else []
+
+
 def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metadata: Any,
-                          *, started_root: bool) -> None:
+                          *, started_root: bool, same_work: bool = False) -> None:
     """Persist the next occurrence's origin from host writer facts, never the template.
 
-    Independent schedules use root-start semantics, including the confirmed-owner
-    exception. A related continuation keeps its caller's kind and cause.
+    Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
+    unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
+    writer metadata). A lifecycle operation of the same work (``same_work``: pause, resume, restore,
+    an edit that leaves objective and context as they are) keeps the cite stored on the record's next
+    occurrence (``schedule_owner_corpus``); a creation or an authored replacement of the assignment
+    takes only the cite passed with that write, else the writer's kind: the host carries no old
+    declaration onto new work. A related continuation keeps its caller's kind and cause.
     """
     source = writer_metadata if isinstance(writer_metadata, Mapping) else {}
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
-    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root)
+    basis = source.get("owner_basis") if started_root else None
+    if basis is None and same_work and started_root and record.get("writer_kind") == WORK_KIND_OWNER:
+        basis = next((row for row in schedule_owner_corpus(record) if row.get("basis") == "cited"), None)
+    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root, owner_basis=basis)
     record.update(writer_kind=origin["work_kind"], writer_origin=origin)
 
 
@@ -291,11 +313,24 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
     outside its own drive, a mutating child, a writing delegated session. The
     positive path is deliberately left open — a refusal here is about the
     arguments, never about the tool.
+
+    The protected dispatch guard asks this on every call, so it also carries the
+    one narrowing Act shares: below Full, ``configure_presence`` lists and
+    inspects places (``PLACE_READ_ACTIONS``) and changes none.
     """
-    if not is_observe_origin(task_metadata):
-        return ""
     tool = str(name or "").strip()
     values = args if isinstance(args, Mapping) else {}
+    metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
+    if (tool == "configure_presence" and is_consciousness_origin(metadata)
+            and normalize_level(metadata.get("consciousness_autonomy")) != LEVEL_FULL
+            and str(values.get("action") or "") not in PLACE_READ_ACTIONS):  # exact, as the tool matches it
+        return (
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake lists and inspects "
+            "places, it does not change one; your human changes a place on its sheet or by "
+            "a word in Main, a Full wake with configure_presence."
+        )
+    if not is_observe_origin(task_metadata):
+        return ""
     if tool in {"write_file", "edit_text"}:
         # The file tools already confine a resolved path inside the chosen base;
         # this decides which base Observe may choose at all.

@@ -41,7 +41,7 @@ def test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before(tmp_
     made = shape.open_rows(tmp_path, 1_300)
     opened = _counted(monkeypatch, ds, "transaction")
     batched = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert batched.active and len(batched.live_rooms) == shape.ROOMS - 1
+    assert batched.active and sum(len(group["rooms"]) for group in batched.conversations) == shape.ROOMS - 1
     pages = -(-1_300 // cc._ADDRESS_PAGE)
     # The stream's pages, two lookups a page, the selected rows' one read, and the readers' bounds.
     assert len(opened) <= 3 * pages + 8, collections.Counter(opened)
@@ -60,7 +60,7 @@ def test_a_view_enters_the_chronicle_index_for_its_activation_and_its_one_captur
                                   covers={"rows": [f"sealed-{chat}"], "stream_span": [chat, chat]}).ok
     entered = _counted(monkeypatch, ChronicleStore, "_index")
     view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert view.active and len(view.live_rooms) == 23 and view.room["facts"]["pages"] == 1
+    assert view.active and sum(len(group["rooms"]) for group in view.conversations) == 23 and view.room["facts"]["pages"] == 1
     assert entered == ["_reading", "capture"]  # the activation receipt, then one read for every reader of the view
 
 
@@ -238,14 +238,12 @@ def test_warm_lineage_reads_every_task_the_author_rule_asks_about():
 
 def test_documents_by_ids_keys_each_document_by_its_stored_row(tmp_path):
     from ouroboros import task_results, task_store
-    from tests._store_shared import seed_result
-
-    import sqlite3
     from ouroboros.store import store_path
+    from tests._store_shared import independent_writer, seed_result
 
     seed_result(tmp_path, "good", {"status": "completed", "root_task_id": "good", "is_root_task": True})
     seed_result(tmp_path, "zbad", {"status": "completed", "root_task_id": "elsewhere"})
-    with sqlite3.connect(store_path(tmp_path)) as conn:  # a damaged body that names another task
+    with independent_writer(store_path(tmp_path)) as conn:  # a damaged body that names another task
         conn.execute("UPDATE task_bodies SET body=json_set(body, '$.task_id', 'good') WHERE task_id='zbad'")
     documents = task_store.documents_by_ids(tmp_path, ["good", "zbad"])
     assert documents["good"]["root_task_id"] == "good" and documents["zbad"]["root_task_id"] == "elsewhere"

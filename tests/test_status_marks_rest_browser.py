@@ -13,7 +13,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # What a token resolves to on this page (or inside `host`, where a surface's material restates it), as the browser
 # serializes the colour of a property.
@@ -129,9 +129,9 @@ SKILLS = {
     "unfinished": ({**UNREVIEWED, "skill_review": {"current": {"lifecycle_status": "timeout",
                                                                 "terminal_reason": "the reviewer timed out"}}},
                    "Review didn’t finish", "warn", False),
-    "on": ({"enabled": True}, "On", "ok", False),
-    "off": ({}, "Off", "neutral", False),
 }
+# A row the switch says whole (on, off) carries no chip: the switch is its state.
+QUIET_SKILLS = {"on": {"enabled": True}, "off": {}}
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -141,6 +141,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
     page = open_app(subscription_ui)
     set_theme(page, theme)
     rows = [{**SKILL, **facts, "name": name} for name, (facts, _, _, _) in SKILLS.items()]
+    rows += [{**SKILL, **facts, "name": name} for name, facts in QUIET_SKILLS.items()]
     rows.append({**SKILL, "name": "locked", "conflict": {"code": "skill_conflict", "skills": ["other"], "omitted": 0}})
     found = page.evaluate("""async rows => {
         const { renderInstalledSkillCard } = await import('/static/modules/skill_card_renderer.js');
@@ -151,6 +152,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
         document.body.append(host);
         const chips = Object.fromEntries(rows.map(row => {
             const chip = host.querySelector(`.skills-card[data-skill="${row.name}"] .skills-card-status .skills-chip`);
+            if (!chip) return [row.name, null];
             const mark = chip.querySelector('.status-mark');
             const style = getComputedStyle(chip);
             return [row.name, { word: chip.textContent, tone: chip.dataset.tone, color: style.color,
@@ -166,6 +168,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
     pairs = {tone: (page.evaluate("t => __probe(`var(--status-${t}-fg)`)", tone),
                     page.evaluate("t => __probe(`var(--status-${t}-bg)`, 'backgroundColor')", tone))
              for tone in ("neutral", "warn", "ok")}
+    assert all(found["chips"][name] is None for name in QUIET_SKILLS), found["chips"]
     for name, (_facts, word, tone, moving) in SKILLS.items():
         chip = found["chips"][name]
         assert chip["word"] == word and chip["tone"] == tone, (name, chip)
@@ -204,20 +207,23 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
                     page.evaluate("t => __probe(`var(--status-${t}-bg)`, 'backgroundColor')", tone))
              for tone in ("warn", "error", "ok", "neutral")}
     for evolution, consciousness, labels, chip_tones in (
-            ("waiting_for_first_conversation", "wake_paused", ("Needs owner", "Consciousness paused"), ("warn", "neutral")),
-            ("budget_stopped", "waiting_for_owner_chat", ("Budget", "Consciousness needs owner"), ("warn", "warn")),
-            ("waiting_for_restart_verify", "sleeping", ("Restart verify", "Consciousness sleeping"), ("neutral", "ok")),
-            ("paused", "wake_failed", ("Paused", "Consciousness failed"), ("neutral", "error"))):
+            ("waiting_for_first_conversation", "wake_paused", ("Needs owner", "Consciousness: paused"), ("warn", "neutral")),
+            ("budget_stopped", "waiting_for_owner_chat", ("Budget", "Consciousness: needs owner"), ("warn", "warn")),
+            ("waiting_for_restart_verify", "sleeping", ("Restart verify", "Consciousness: sleeping"), ("neutral", "neutral")),
+            ("paused", "wake_failed", ("Paused", "Consciousness: failed"), ("neutral", "error"))):
         status.update(evolution=evolution, consciousness=consciousness)
         page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', {detail: {tab: 'evolution'}}))")
         chip, sentence = page.locator("#evo-campaign-chip"), page.locator("#evo-consciousness")
         chip.filter(has_text=labels[0]).wait_for()
         sentence.filter(has_text=labels[1]).wait_for()
         assert (chip.get_attribute("data-tone"), sentence.get_attribute("data-tone")) == chip_tones, labels
-        # The chip IS the status (the full triple); the sentence states it in its foreground only.
+        # The chip IS the status (the full triple); the sentence states it in its foreground only. The sentence is a
+        # quiet button, so a new tone lands after the shared colour motion (--motion-tone); it is read once landed.
         painted = chip.evaluate("el => [getComputedStyle(el).color, getComputedStyle(el).backgroundColor]")
         assert tuple(painted) == tones[chip_tones[0]], (labels, painted)
-        assert sentence.evaluate("el => getComputedStyle(el).color") == tones[chip_tones[1]][0], labels
+        landed = sentence.evaluate("""async (el) => { await Promise.all(el.getAnimations().map((a) => a.finished));
+            return getComputedStyle(el).color; }""")
+        assert landed == tones[chip_tones[1]][0], labels
     # Loading… goes on by itself: the meta ink, not amber.
     loading = page.evaluate("""() => { const el = document.createElement('span'); el.className = 'status-badge starting';
         el.textContent = 'Loading...'; document.body.append(el); const color = getComputedStyle(el).color; el.remove();

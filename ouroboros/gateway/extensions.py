@@ -644,7 +644,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     sentinel = object()
@@ -711,22 +711,47 @@ async def _run_owner_skill_action(request: Request, skill_name: str, action: str
 
 
 async def api_skill_review(request: Request) -> JSONResponse:
-    """Queue the skill review from the UI without blocking the event loop."""
+    """Queue the skill review from the UI without blocking the event loop. No body (or ``{}``) is a
+    new review of the current bytes. ``SkillReviewRequest`` (``review_reference`` + ``continue_seats``)
+    continues stopped seats of that exact Skills-page review on its own recorded bytes
+    (``skill_review.continue_skill_review``); any other body is refused before a job or a send."""
+    import json
+
+    from ouroboros.review_continuation import ContinuationRefused, parse_selections
+
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
+    try:
+        raw = await request.body()
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) - {"review_reference", "continue_seats"}:
+        return json_error("request body must be {} or {review_reference, continue_seats}", 400)
+    try:
+        selections = parse_selections(body["continue_seats"]) if body else None
+        if body and not isinstance(body.get("review_reference"), dict):
+            raise ContinuationRefused("invalid_reference", "review_reference names the review whose seats continue")
+    except (KeyError, ContinuationRefused) as exc:  # nothing decided: no job, no review, no send
+        return json_error(str(exc) if isinstance(exc, ContinuationRefused) else "review_reference needs continue_seats", 400)
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
     ctx = _ApiReviewCtx(drive_root, repo_dir)
     from ouroboros.skill_review_runner import run_skill_review_lifecycle
-    from ouroboros.skill_review import review_skill as _review_skill_impl
+    from ouroboros.skill_review import continue_skill_review, review_skill as _review_skill_impl
 
+    review_impl = _review_skill_impl
+    if selections:
+        def review_impl(review_ctx, name):
+            return continue_skill_review(review_ctx, name, reference=body["review_reference"],
+                                         continue_seats=body["continue_seats"])
     payload = await run_skill_review_lifecycle(
         ctx,
         skill_name,
         source="skills",
-        review_impl=_review_skill_impl,
+        review_impl=review_impl,
     )
     return JSONResponse(payload)
 
@@ -736,7 +761,7 @@ async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "attest", body)
@@ -785,7 +810,7 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     if "enable_after_grant" in body and not isinstance(body["enable_after_grant"], bool):
@@ -820,7 +845,7 @@ async def api_skill_delete(request: Request) -> JSONResponse:
     skill_name = _sanitize_skill_name(str(request.path_params.get("skill") or "").strip())
     if not skill_name or skill_name == "_unnamed":
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "delete", body)

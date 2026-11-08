@@ -155,7 +155,7 @@ def test_round_fit_reads_its_own_conversation_never_the_witness_store(tmp_path, 
 
     ctx.accumulated_usage.update(_last_round_cache_usage={"prompt_tokens": 130_000, "provider": plan.provider},
                                  _context_raw_input_tokens=100_000)
-    record_input_anchor(ctx.accumulated_usage, plan, round_idx=1)
+    record_input_anchor(ctx.accumulated_usage, plan, round_idx=1, estimate_tokens=100_000)
     anchored = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
     assert anchored.measurement.measurement_basis == "fresh_route_usage"
     assert abs(anchored.measurement.measurement_density - 1.3) < 1e-6

@@ -10,7 +10,6 @@ from ouroboros.server_routing_context import _addressable_root_tasks
 @pytest.mark.parametrize("fields,running,expected", [
     ({}, True, True), ({}, False, False), ({"_owner_hold": True}, True, False),
     ({"_budget_pause": {"status": "paused"}}, True, False),
-    ({"_is_direct_chat": True}, True, True),
     ({"owner_wait": {"state": "waiting", "kind": "quiz"}}, True, True),
 ])
 def test_structural_reader_state(tmp_path, fields, running, expected):

@@ -13,7 +13,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any, Dict, Iterator, List, Optional
 
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, sanitize_tool_result_for_log
 
 _DETAIL_LOOKUP_MAX_BYTES = 4 * 1024 * 1024
 _DETAIL_LOOKUP_MAX_RECORDS = 128
@@ -164,7 +164,8 @@ def _ledger_review_detail(drive_root: pathlib.Path, skill_name: str, job_id: str
 
 def _render_ledger_review_detail(skill_name: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """One skill record rendered as the chat card's detail: the findings grouped by seat, the seats that did
-    not answer, the gate's status of the verdict and the wave's accounting (paid, reused, cost)."""
+    not answer, the gate's status of the verdict and the wave's accounting (paid, reused, cost). This owner
+    projection is redacted; the record and the tool's return keep the reviewers' text."""
     from ouroboros.skill_review import render_skill_review_block
     from ouroboros.tools.review_change import review_result
     from ouroboros.tools.review_skill import legacy_actor_records, outcome_status, reviewer_models
@@ -179,7 +180,7 @@ def _render_ledger_review_detail(skill_name: str, record: Dict[str, Any]) -> Dic
                "findings": [{**f, "model": f.get("model") or f.get("seat_id")} for f in findings],
                "reviewer_models": reviewer_models(result), "raw_actor_records": degraded, "error": reason,
                "record_id": str(record.get("record_id") or ""), "panel": dict(record.get("panel") or {})}
-    markdown = render_skill_review_block(outcome)
+    markdown = sanitize_tool_result_for_log(render_skill_review_block(outcome))
     cost = dict(record.get("cost") or {})
     accounting = []
     if record.get("dispatch_refusal"):
@@ -305,7 +306,7 @@ def review_history_detail(
         "raw_actor_records": degraded_actors,
         "error": error_note,
     }
-    markdown = render_skill_review_block(outcome, attempt_idx=attempt)
+    markdown = sanitize_tool_result_for_log(render_skill_review_block(outcome, attempt_idx=attempt))
     if degraded_actors:
         markdown += (
             "\n\n_A terminal reviewer slot that never started or refused has no "

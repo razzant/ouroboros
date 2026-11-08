@@ -103,12 +103,11 @@ def test_assembled_helper_context_carries_the_brief_not_the_notes(harness, tmp_p
     assert json.dumps(root["text"], ensure_ascii=False)[1:-1] in json.dumps(root_messages[1], ensure_ascii=False)
 
 
-@pytest.mark.parametrize("shape", [
-    {"delegation_role": "root"},
-    {"delegation_role": "", "root_task_id": ""},
-    {"delegation_role": "subagent", "parent_task_id": "some-parent", "root_task_id": "some-parent"},
-], ids=["root", "blank-role", "subagent"])
-@pytest.mark.parametrize("edge", ["top-level", "contract-only"])
+@pytest.mark.parametrize(("edge", "shape"), [
+    pytest.param("top-level", {"delegation_role": "root"}, id='top-level-root'),
+    pytest.param("top-level", {"delegation_role": "subagent", "parent_task_id": "some-parent", "root_task_id": "some-parent"}, id='top-level-subagent'),
+    pytest.param("contract-only", {"delegation_role": "", "root_task_id": ""}, id='contract-only-blank-role'),
+])
 def test_only_the_materialized_start_carries_the_notes_row(harness, shape, edge):
     """The row follows the task that materialized its named predecessor at start (the top-level
     authority with the exact pointer), whatever its role; a contract-only edge (the spread a

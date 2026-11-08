@@ -1,4 +1,11 @@
 {
+  "consciousnessOffer": {
+    "autonomy": "act",
+    "dailyUsd": 20.0,
+    "enabled": null,
+    "maxTasks": 2,
+    "offered": true
+  },
   "contract": {
     "budgetFields": [
       {
@@ -6,7 +13,7 @@
         "inputId": "total-budget",
         "label": "Total Budget (USD)",
         "min": "0.01",
-        "note": "Global spend budget across the runtime. Keep this editable even after onboarding.",
+        "note": "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the limit. Raising the cap does not resume a paused task; it must be resumed explicitly.",
         "settingKey": "TOTAL_BUDGET",
         "settingsInputId": "s-total-budget",
         "stateKey": "totalBudget",
@@ -18,7 +25,7 @@
         "inputId": "per-task-budget",
         "label": "Per-task Cost Cap (USD)",
         "min": "0.01",
-        "note": "Hard cap over one task's WHOLE tree, subagents included: new model calls are refused once the tree's known spend (confirmed and estimated) reaches it. A resumable task then pauses with its work saved; a run that cannot be resumed ends as budget-exhausted instead. Calls already in flight settle normally and can take the total past the cap. Reservations and unresolved charges are shown separately, not counted as spending. Raising the cap does not resume a paused task.",
+        "note": "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the limit. Raising the cap does not resume a paused task; it must be resumed explicitly.",
         "settingKey": "OUROBOROS_PER_TASK_COST_USD",
         "settingsInputId": "s-settings-per-task-cost",
         "stateKey": "perTaskCostUsd",
@@ -369,7 +376,7 @@
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
-        "footer": "When subscription quota is exhausted, work waits for renewal or your choice of another account or model. This integration does not enable paid provider credits.",
+        "footer": "",
         "id": "budget",
         "railCopy": "Quota + API budget",
         "title": "Review limits"
@@ -405,9 +412,11 @@
     "cloudruKey": "",
     "compatibleApiKey": "",
     "compatibleBaseUrl": "",
+    "connections": [],
     "consciousnessModel": "",
     "deepseekKey": "",
     "fallbackModel": "openai/gpt-5.6-luna",
+    "legacyCompatibleBaseUrl": "",
     "lightModel": "openai/gpt-6-luna",
     "localChatFormat": "",
     "localContextLength": 16384,

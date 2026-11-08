@@ -13,7 +13,7 @@ import contextvars
 import json
 import os
 import uuid
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import Any, Mapping, Optional
 
 from ouroboros.configured_subagents import (
@@ -69,6 +69,7 @@ class SubagentSelectionError(ValueError):
 
     code: str
     detail: str
+    facts: Mapping[str, Any] = field(default_factory=dict)  # typed refusal facts, e.g. per-entry results
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
@@ -219,6 +220,8 @@ _REVIEW_SURFACES = {
     "system_review": "/review: one enabled catalog row, default Main",
 }
 
+# The changing part's block of each review seat's price and last review (``review_facts_block``).
+REVIEW_ACTIVITY_HEADER = "## Review seat activity"
 # A session seat is paid in subscription time, not route money (THESIS2 §3).
 SESSION_SEAT_COST_HINT = "uses a session seat and time"
 COST_UNKNOWN_HINT = "cost unknown"
@@ -227,13 +230,13 @@ COST_UNKNOWN_HINT = "cost unknown"
 LOCAL_ROUTE_COST_HINT = "no API cost per review"
 
 
-def _api_review_cost_hint(slot: Any) -> str:
+def _api_review_cost_hint(slot: Any, category: str = "", unit: str = "review") -> str:
     """One api seat's price: what one review by its row actually cost (``review_price``, read from
     this process's table, so context assembly never waits on the ledger). A model call through a
     subscription uses a seat and a local route costs no API money, as Settings → Agents says."""
     from ouroboros.config import resolve_data_dir
     from ouroboros.provider_models import provider_for_model, review_model_uses_local
-    from ouroboros.review_price import review_price, review_price_text
+    from ouroboros.review_price import REVIEW_USAGE_CATEGORY, review_price, review_price_text
 
     model = str(getattr(slot, "model", "") or "")
     if provider_for_model(model) == "claudexor":
@@ -241,7 +244,7 @@ def _api_review_cost_hint(slot: Any) -> str:
     if review_model_uses_local(model):
         return LOCAL_ROUTE_COST_HINT
     row_id = str(getattr(slot, "subagent_id", "") or getattr(slot, "slot_id", "") or "")
-    return review_price_text(review_price(resolve_data_dir(), row_id, model))
+    return review_price_text(review_price(resolve_data_dir(), row_id, model, category=category or REVIEW_USAGE_CATEGORY), unit)
 
 
 # The wizard's summary prints the same sentence (``subagents_settings.js`` ``PACKET_ONLY_POOL_WARNING``).
@@ -310,22 +313,30 @@ def _review_migration_facts(settings: Mapping[str, Any]) -> dict[str, str]:
     return {key: value for key, value in facts.items() if value}
 
 
-def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
+def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
+                       activity_out: Optional[list[str]] = None) -> str:
     """``## Review``: the review POOL this task's settings snapshot serves — the enabled catalog rows the owner
     marked as reviewers, read through the same builder every review surface runs (``review_pool_slots``), never
     live settings or the last execution; ``None`` reads the bound task scope. Each seat is named by its catalog
     handle (the same handle ``## Available subagents`` shows and ``review_change(reviewers=[…])`` accepts); its
-    ``seat_id`` is the stored row id the records carry. Every row retains delivery, measured recent cost
-    and its last-review status; these facts never rank seats or change routing. ``source`` is ``structured`` (a non-empty pool), ``empty`` (a readable catalog
+    ``seat_id`` is the stored row id the records carry. Every row retains its model, effort and delivery.
+    ``source`` is ``structured`` (a non-empty pool), ``empty`` (a readable catalog
     with no marked row — a loud, configured fact whose one seat is the Main model reviewing alone,
     ``main_self_review: true``) or ``error`` (a malformed catalog or a refused migration). A seat without a
-    catalog row (the Main seat) is named by its ``seat_id``. Stable for the task (cache-marked prefix); the
-    task's recent ledger records ride separately in the changing part (:func:`review_records_block`)."""
+    catalog row (the Main seat) is named by its ``seat_id``. Stable for the task (cache-marked prefix B).
+
+    What every settled review on the install changes — each seat's measured price (``cost_hint``), its
+    cost facts and its last-review status — would rewrite that prefix for every later start, so it is
+    one ``## Review seat activity`` block appended to ``activity_out`` for the changing part (C), beside
+    the task's recent ledger records (:func:`review_records_block`). These facts never rank seats or
+    change routing; a pool without seats appends nothing."""
     from ouroboros import reviewer_slot_config as rs
-    from ouroboros.config import get_review_enforcement, get_runtime_mode, runtime_settings, task_settings_scope
+    from ouroboros.config import get_review_enforcement, get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
     from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_price import PLAN_USAGE_CATEGORY
+    from ouroboros.subagent_metrics import seat_facts
     from ouroboros.runtime_mode_policy import runtime_mode_at_least
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
@@ -334,6 +345,7 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
         state = rs.review_pool_state(settings.get(SUBAGENTS_SETTING))
         source, error = state["state"], state["error"]
         pool: list[dict[str, Any]] = []
+        activity: list[dict[str, Any]] = []
         slots: list[Any] = []
         without_credentials: list[str] = []
         recent = rs.reviewer_slot_last_executions()
@@ -353,7 +365,13 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
                     "subagent_id": handles.get(slot.subagent_id, slot.subagent_id) or slot.slot_id,
                     "model": slot.model, "effort": slot.effort,
                     "delivery": "session" if session else ("native" if slot.native_retrieval else "packet"),
-                    "cost_hint": SESSION_SEAT_COST_HINT if session else _api_review_cost_hint(slot),
+                })
+                hint = SESSION_SEAT_COST_HINT if session else _api_review_cost_hint(slot)
+                activity.append({
+                    "seat_id": slot.slot_id, "cost_hint": hint,
+                    # A seat paid in money also prices a plan ask; owner 21.10 F6 A: how often it answers, how long.
+                    **({"plan_cost_hint": _api_review_cost_hint(slot, PLAN_USAGE_CATEGORY, "plan ask")}
+                       if hint not in (SESSION_SEAT_COST_HINT, LOCAL_ROUTE_COST_HINT) else {}),
                     **rs.review_cost_facts(last.get("cost_usd"), route=str(slot.route.value), model=slot.model),
                     "last_review": {key: last[key] for key in ("ts", "status", "failure_code", "cost_kind", "cost_usd") if key in last}
                                    if last else "unknown",
@@ -361,6 +379,9 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
                 # A session seat logs in itself; an api seat answers only with its provider's key.
                 if not session and not model_has_credentials_in_settings(slot.model, dict(settings)):
                     without_credentials.append(pool[-1]["subagent_id"])
+            seats_measured = seat_facts(resolve_data_dir(), [(s.subagent_id or s.slot_id, s.session_target or s.model) for s in slots])
+            for seat, measured in zip(activity, seats_measured["seats"]):
+                seat["measured"] = measured
         # No marked row: the seats built are the one Main seat (``review_pool_slots``).
         main_alone = state["state"] == "empty" and bool(slots)
         migration = _review_migration_facts(settings)
@@ -388,11 +409,40 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None) -> str:
         **({"no_pool_row_has_credentials": True} if without_credentials and len(without_credentials) == seats else {}),
         "surfaces": _REVIEW_SURFACES,
         "omitted": {"rows": 0},
-        "full_source": {"pool": "GET /api/review-pool", "records": "## Review records"},
+        "full_source": {"pool": "GET /api/review-pool", "activity": REVIEW_ACTIVITY_HEADER,
+                        "records": "## Review records"},
     }
     if migration.get("snapshot"):
         facts["migration_snapshot"] = migration["snapshot"]
-    return "## Review\n\n" + json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+    if activity_out is not None and activity:
+        activity_out.append(f"{REVIEW_ACTIVITY_HEADER}\n\n" + json.dumps(
+            {"seats": activity, "measured_coverage": seats_measured["coverage"]}, ensure_ascii=False, separators=(",", ":")))
+    return review_pool_host_section(facts)
+
+
+def review_pool_host_section(facts: Mapping[str, Any]) -> str:
+    """The producer's one-line current pool, with exceptional configuration facts intact."""
+    from ouroboros.section_floor import HostSection
+
+    operative = (f"## Review\n\nenforcement={facts['enforcement']}; mode={facts['mode']}; "
+                 f"reviewers={', '.join(row['subagent_id'] for row in facts['pool']) or 'none'}; source={facts['source']}")
+    exceptions = {key: facts[key] for key in ('error', 'main_self_review', 'coupling_unanswerable',
+                  'pool_without_credentials', 'no_pool_row_has_credentials', 'migration_snapshot') if facts.get(key)}
+    if exceptions:
+        operative += "; " + json.dumps(exceptions, ensure_ascii=False, separators=(",", ":"))
+    return HostSection("review_pool", "## Review\n\n" + json.dumps(facts, ensure_ascii=False, separators=(",", ":")), operative)
+
+
+def subagent_catalog_section(catalog: Mapping[str, Any]) -> str:
+    """The roster in both forms, every ``recommended_use`` whole: the advice exists for routing decisions."""
+    from ouroboros.section_floor import HostSection
+
+    heading = "## Available subagents\n\n"
+    rows = [f"- {row.get('subagent_id', '?')}: {row.get('route_class', '?')}, effort {row.get('effort', '?')}"
+            + (", reviews" if row.get("review_eligible") else "")
+            + ("\n  recommended_use: " + row["recommended_use"] if row.get("recommended_use") else "")
+            for row in catalog.get("rows", ())]
+    return HostSection("subagents", heading + json.dumps(catalog, ensure_ascii=False, indent=1), heading + "\n".join(rows))
 
 
 def review_records_block(*, drive_root: Any, task_id: str) -> str:
@@ -432,6 +482,8 @@ def current_cognitive_route_and_billing(
     task: Optional[Mapping[str, Any]] = None, *, ctx: Any = None,
 ) -> tuple[str, str]:
     """Resolve the caller's current cognitive route and billing basis for nanny supervision."""
+    from ouroboros.supervisor_route import cognitive_parent_context
+    ctx = cognitive_parent_context(ctx, task)
     task_map = task if isinstance(task, Mapping) else {}
     meta = task_map.get("task_metadata") if isinstance(task_map.get("task_metadata"), Mapping) else (
         getattr(ctx, "task_metadata", None) if isinstance(getattr(ctx, "task_metadata", None), Mapping) else {}
@@ -777,6 +829,18 @@ def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dic
     return snapshot
 
 
+def configured_actor_route(snapshot: Mapping[str, Any], cognitive: Mapping[str, Any]) -> tuple[str, bool]:
+    """``(model, use_local)`` of the rounds a frozen row's own actor runs: an API row's target (`` (local)``
+    names the local lane), a session row's nanny on the parent's cognitive route. Pure (no credential, engine
+    or settings read), so the queue's money gate reads what dispatch will (``needs_paid_admission``)."""
+    route = snapshot.get("route") if isinstance(snapshot.get("route"), Mapping) else {}
+    target = str(route.get("target_id") or "").strip()
+    if str(route.get("kind") or "") == "api_model":
+        local = target.endswith(" (local)")
+        return (target[:-8].strip() if local else target), local
+    return str(cognitive.get("model") or "").strip(), bool(cognitive.get("use_local_model"))
+
+
 def resolve_configured_actor_dispatch(
     task: Mapping[str, Any], *, task_type: str,
 ) -> Any:
@@ -822,8 +886,7 @@ def resolve_configured_actor_dispatch(
     )
 
     if route_kind == "api_model":
-        use_local = route_target.endswith(" (local)")
-        model = route_target[:-8].strip() if use_local else route_target
+        model, use_local = configured_actor_route(snapshot, cognitive)
         available = bool(model_has_credentials(route_target))
         unavailable = "" if available else "credentials_unavailable"
         executor = "native" if available else "blocked"
@@ -903,16 +966,13 @@ def resolve_configured_actor_dispatch(
                 if gateway is not None:
                     gateway.close()
 
-    nanny_model = str(cognitive.get("model") or "").strip()
+    nanny_model, nanny_local = configured_actor_route(snapshot, cognitive)
     nanny_effort = str(cognitive.get("effort") or "").strip().lower()
     if not nanny_model and not unavailable:
         unavailable = "parent_cognitive_route_missing"
     if not nanny_effort:
         nanny_effort = resolve_effort(task_type or str(task.get("type") or "task"))
-    lane = dataclass_replace(
-        lane, model=nanny_model,
-        use_local_model=bool(cognitive.get("use_local_model")),
-    )
+    lane = dataclass_replace(lane, model=nanny_model, use_local_model=nanny_local)
     executor = "blocked" if unavailable else "harness"
     availability = {
         "observed_at": observed_at,
@@ -928,6 +988,10 @@ def resolve_configured_actor_dispatch(
             availability["previous_observation"] = dict(previous)
     reasons = []
     if unavailable:
+        from ouroboros.engine_facts import engine_pool_line
+        meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
+        availability["engine_pool"] = engine_pool_line(
+            task.get("budget_drive_root") or meta.get("budget_drive_root"))
         reasons.append(unavailable)
     delta = CapabilityDelta(
         derived_effort=nanny_effort,
@@ -1157,7 +1221,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             selected_id or selected_snapshot is not None or access is not None
             or options.get("mode") is not None or options.get("override_plan_readiness") is not None
             or options.get("workspace") is not None or options.get("attachment_paths") is not None
-            or options.get("attachment_import") is not None
+            or options.get("attachment_import") is not None or options.get("input_files") is not None
         ):
             raise SubagentSelectionError(
                 "retry_selector_conflict",
@@ -1207,14 +1271,22 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 task_inputs(ctx, options["attachment_paths"])
         except DocumentSelectionError as exc:
             raise SubagentSelectionError(exc.code, exc.detail) from exc
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, resolve_selection, selection_entries
+
+        try:  # every selected file is checked as read_file checks it, before the daemon is touched
+            if entries := selection_entries(options.get("input_files")):
+                resolve_selection(ctx, entries)
+        except InputSelectionError as exc:
+            raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results}) from exc
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
-        # Selector validation has not entered the physical-start producer yet.
+        # New explicit-file refusals are definite; preserve other selectors' existing startup handling.
         from ouroboros.delegate_evidence import record_start_blocked
 
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), exc.code)
-        return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail),
+        facts = {**exc.facts, **({"definitely_unrun": True} if "input_files" in exc.facts else {})}
+        return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail, **facts),
                                     meta_updates={"operation_outcome": "completed_no_effect"})
 
     token = _EXACT_START_SELECTION.set({
@@ -1237,7 +1309,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             **{key: options.pop(key) for key in (
                 "directory_strategy", "scope_paths", "continue_from", "continue_carrier", "mode",
                 "override_plan_readiness", "_plan_answers", "workspace", "attachment_paths", "_document_intent",
-                "_document_first_start") if key in options},
+                "_document_first_start", "input_files", "_prepared_inputs") if key in options},
         )
         # Every configured-session start lands here — the host's pre-start
         # (charter, owner 2026-08-28/29) and any model-issued retry/replacement
@@ -1388,6 +1460,10 @@ def delegate_start_entry(ctx: Any, prompt: str = "", _resolved_binding: Any = No
             saved = first_start_selection(bootstrap)
             bound.update(saved if bound.get("attachment_import") is None else
                          {key: value for key, value in saved.items() if key == "attachment_paths"})
+        if not bootstrap.get("physical_started") and not bootstrap.get("initial_invocation_id") \
+                and bound.get("input_files") is None and bootstrap.get("prepared_input_files"):
+            # The parent's schedule-time copies, verified by the work order's first start unless it selects its own.
+            bound["_prepared_inputs"] = list(bootstrap["prepared_input_files"])
         bound.update({
             "snapshot": dict(bootstrap.get("snapshot") or {}),
             "compiled_work_order": True,
@@ -1407,6 +1483,7 @@ def delegate_start_entry(ctx: Any, prompt: str = "", _resolved_binding: Any = No
 __all__ = [
     "SubagentSelectionError",
     "apply_task_start_settings",
+    "configured_actor_route",
     "current_model_visible_subagent_catalog",
     "current_subagent_alternatives",
     "delegate_start_entry",

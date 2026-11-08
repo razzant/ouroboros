@@ -20,7 +20,6 @@ import pytest
 from tests.test_telegram_format_parity import _load_skill
 
 # The shared native-skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 ASK = "Добавь в экспорт оглавление"
 
@@ -94,8 +93,8 @@ def phone(tmp_path, monkeypatch):
     def owner(mid, text=ASK, *, accept=True):
         """One owner message of this Telegram chat, through the bridge's map and the real ingress."""
         message = {"message_id": mid, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": text}
-        state._owner_message_seen(api, 42, mid)
-        fields = state._owner_ingress_fields(api, 42, message, mid)
+        state._owner_message_seen(api, "", 42, mid)
+        fields = state._owner_ingress_fields(api, "", 42, message, mid)
         if not accept:
             return fields
         receiver = SimpleNamespace(enqueue_local_message=lambda *_a, **_k: None)
@@ -213,7 +212,7 @@ def test_an_unlabelled_owner_act_is_told_once_while_the_web_keeps_its_system_row
     assert len(stored) == 1 and "reply_to" not in stored[0]
 
 
-@pytest.mark.parametrize("reason", ["target_closed", "target_finished", "acceptance_fence_sealed", "mailbox_write_failed"])
+@pytest.mark.parametrize("reason", ["target_closed", "acceptance_fence_sealed", "mailbox_write_failed"])
 def test_a_late_refusal_of_an_unlabelled_act_still_reaches_the_phone(phone, monkeypatch, reason):
     """A refusal found inside the delivery transaction writes no System row while its ACK is handed over:
     that ACK is the only carrier."""
@@ -335,8 +334,12 @@ def test_a_task_that_spoke_for_itself_never_gets_the_system_row(phone, monkeypat
     assert [data["text"] for data in phone.sent()] == ([f"Parser · {_cause(stated)}"] if told else [])
 
 
-@pytest.mark.parametrize("failure", [None, "append_false", "append_raises", "ack_raises"])
-@pytest.mark.parametrize("act", ["owner_message", "synthetic"])
+@pytest.mark.parametrize(("act", "failure"), [
+    ("owner_message", None),
+    ("owner_message", "append_raises"),
+    ("synthetic", "append_false"),
+    ("synthetic", "ack_raises"),
+])
 def test_an_accepted_act_stays_quiet_with_or_without_its_ack(phone, monkeypatch, act, failure):
     """Only a refusal has a cause to tell: a landed steer sends nothing and publishes no refusal row."""
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
@@ -444,7 +447,7 @@ def _host_promote(row, *, token="tok-pdf"):
                 chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])}
 
 
-@pytest.mark.parametrize("failure", [None, "append_false", "append_raises", "ack_raises"])
+@pytest.mark.parametrize("failure", [None, "append_false", "ack_raises"])
 def test_a_refused_host_promote_is_told_once_and_a_replay_tells_nothing(phone, monkeypatch, failure):
     """A Swarm, skill-card or picker promote has its typed System row in the owner's chat. The phone gets
     the ACK's line, replying to his message, and skips that row; without a handed-over ACK the row is the

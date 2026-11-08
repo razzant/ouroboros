@@ -50,10 +50,11 @@ def test_only_positive_evidence_releases_a_copy(tmp_path, monkeypatch):
     running, pending, done, unknown = (_seat(root, source, f"op-{name}")
                                        for name in ("running", "pending", "done", "unknown"))
     skill = _seat(root, source, "op-skill", task="api_skill_review")  # an owner that is never a live task
-    _custody(monkeypatch, running=[running, skill], pending=[pending], settled=[done])
+    skill_done = _seat(root, source, "op-skill-done", task="api_skill_review")
+    _custody(monkeypatch, running=[running, skill], pending=[pending], settled=[done, skill_done])
     report = rp.prune_review_checkouts(root, set())
-    assert running.is_dir() and pending.is_dir() and skill.is_dir() and unknown.is_dir() and not done.exists()
-    assert (report["released"], report["errors"]) == (1, [])
+    assert running.is_dir() and pending.is_dir() and skill.is_dir() and unknown.is_dir() and not done.exists() and not skill_done.exists()
+    assert (report["released"], report["errors"]) == (2, []) and report.get("rested") is None
     receipt = rc._receipt(root, TASK, "op-done")
     assert receipt["status"] == "retained"
     assert (Path(receipt["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
@@ -77,7 +78,7 @@ def test_a_seat_a_worker_holds_is_skipped(tmp_path, monkeypatch):
     _custody(monkeypatch, settled=[done])
     with rc._seat_locked(done.parent):
         report = rp.prune_review_checkouts(root, set())
-    assert report["busy"] == 1 and done.is_dir()
+    assert report["busy"] == 1 and done.is_dir() and report.get("rested") is None
     assert rp.prune_review_checkouts(root, set())["released"] == 1 and not done.exists()
 
 
@@ -86,7 +87,7 @@ def test_custody_that_cannot_be_read_removes_nothing(tmp_path, monkeypatch):
     area = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[area], unreadable=True)
     report = rp.prune_review_checkouts(root, set(), views_since=time.time(), now=time.time() + LATER)
-    assert report["skipped"] == "custody_unreadable" and "views_done" not in report
+    assert report["skipped"] == "custody_unreadable" and report["rested"] is True and "views_done" not in report
     assert area.is_dir() and Path(source["view"]).is_dir()
 
 
@@ -247,22 +248,32 @@ def test_stop_ends_the_pass_before_the_next_seat(tmp_path, monkeypatch):
     done = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[done])
     report = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1, stop=lambda: True)
-    assert report["skipped"] == "stopped" and done.is_dir() and Path(source["view"]).is_dir()
+    assert report["skipped"] == "stopped" and report["rested"] is True and done.is_dir() and Path(source["view"]).is_dir()
 
 
 def test_the_periodic_pass_reads_only_seats_that_still_hold_a_copy(tmp_path, monkeypatch):
-    """Released seats keep their evidence; a pass every ten minutes must not reread them all."""
+    """Released seats keep their evidence; a pass every ten minutes must not reread them all, nor their markers,
+    a Skills-page seat included, while a seat that still holds its copy is read."""
     root, source = _frozen(tmp_path)
     _seat(root, source, "op-done")
+    _seat(root, source, "op-skill", task="api_skill_review")
     assert rc.terminal_seat_evidence(root, TASK, "op-done", {"summary": {"state": "succeeded"}})["status"] == "retained"
-    read = []
-    real = rp._view_containers
+    assert rc.terminal_seat_evidence(root, "api_skill_review", "op-skill", {"summary": {"state": "succeeded"}})["status"] == "retained"
+    read, markers = [], []
+    real, real_text = rp._view_containers, Path.read_text
     monkeypatch.setattr(rp, "_view_containers", lambda *args: read.append(True) or real(*args))
+    monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: (
+        markers.append(self.parent.name) if self.name == "checking.json" else None) or real_text(self, *args, **kwargs))
     _custody(monkeypatch)
+    for _ in range(3):
+        rp.prune_review_checkouts(root, set())
+    assert read == [] and markers == [], "released seats cost no read"
+    held = _seat(root, source, "op-open").parent  # a copy still held
     rp.prune_review_checkouts(root, set())
-    assert read == []
+    assert markers and set(markers) == {held.name}, "a seat that holds its copy is read"
+    before = len(read)
     rp.prune_review_checkouts(root, set(), views_since=time.time())
-    assert read == [True]
+    assert len(read) - before == 3, "the views pass reads every seat"
 
 
 def test_stray_files_never_block_the_views_pass(tmp_path, monkeypatch):
@@ -283,7 +294,7 @@ def test_a_busy_seat_defers_the_views_pass(tmp_path, monkeypatch):
     _custody(monkeypatch, settled=[busy])
     with rc._seat_locked(busy.parent):  # a worker preparing or capturing it
         report = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1)
-    assert report["busy"] == 1 and report["skipped"] == "views_busy" and "views_done" not in report
+    assert report["busy"] == 1 and report["skipped"] == "views_busy" and report.get("rested") is None and "views_done" not in report
     assert busy.is_dir() and Path(source["view"]).is_dir()
     assert rp.prune_review_checkouts(root, set(), views_since=time.time() + 1)["views_done"] is True
     assert not busy.exists() and not Path(source["view"]).exists()
@@ -382,7 +393,8 @@ def test_a_second_concurrent_pass_skips(tmp_path, monkeypatch):
     area = _seat(root, source, "op-done")
     _custody(monkeypatch, settled=[area])
     with rp._PASS_LOCK:
-        assert rp.prune_review_checkouts(root, set())["skipped"] == "pass_in_progress"
+        skipped = rp.prune_review_checkouts(root, set())
+        assert skipped["skipped"] == "pass_in_progress" and skipped["rested"] is True
     assert area.is_dir()
 
 
@@ -427,3 +439,25 @@ def test_unreadable_live_ownership_prunes_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(sm, "_startup_live_task_ids", unreadable)
     monkeypatch.setattr(rp, "prune_review_checkouts", lambda *_args, **_kwargs: pytest.fail("pruned blind"))
     sm._prune_review_checkouts()
+
+
+@pytest.mark.parametrize('door', ['live_task', 'ended_task', 'skills_api'])
+@pytest.mark.parametrize('window', ['unbounded', 'open', 'spent'])
+def test_continuation_copy_follows_an_available_continuation_door(tmp_path, monkeypatch, door, window):
+    from tests.test_review_checkout_lifecycle import _seat as make_seat
+    root, source = _frozen(tmp_path)
+    task = 'api_skill_review' if door == 'skills_api' else TASK
+    area = make_seat(root, source, 'stopped', task=task)
+    rc.terminal_seat_evidence(root, task, 'stopped', {'summary': {'id':'run', 'state':'failed'}}, hold=True)
+    marker_path = area.parent / 'checking.json'
+    marker = json.loads(marker_path.read_text())
+    marker_path.write_text(json.dumps({**marker, 'created_at': '2000-01-01T00:00:00+00:00'}))
+    from datetime import datetime, timedelta, timezone
+    start = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    _custody(monkeypatch, settled=[area], started=start)
+    for entry in current.task_snapshot(root, task)['runs'].values():
+        entry.max_seconds = {'unbounded': 0, 'open': 3600, 'spent': 60}[window]
+    result = rp.prune_review_checkouts(root, {task} if door == 'live_task' else set())
+    retained = door != 'ended_task' and window != 'spent'
+    assert result['released'] == (0 if retained else 1)
+    assert area.exists() is retained

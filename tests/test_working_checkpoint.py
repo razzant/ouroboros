@@ -27,7 +27,7 @@ def _file(root, task_id="pause-task", attempt=1):
 def test_each_boundary_replaces_one_attempt_file_with_the_one_serializer(tmp_path):
     ctx, limit_ctx = _loop_ctx(tmp_path)
     assert wc.save_round(limit_ctx, "pre_effect") is True
-    first = json.loads(_file(tmp_path).read_bytes())
+    first = wc.read_working(tmp_path, "pause-task", 1)[1]  # the file is a skeleton over CAS parts: read through the reader
     assert first["task_id"] == "pause-task" and first["task_attempt"] == 1
     assert first["working"]["boundary"] == "pre_effect" and first["working"]["seq"] == 1
     assert first["working"]["pending_tool_call_ids"] == ["call_b"], "the unanswered call is named"
@@ -36,7 +36,7 @@ def test_each_boundary_replaces_one_attempt_file_with_the_one_serializer(tmp_pat
 
     limit_ctx.messages.append({"role": "tool", "tool_call_id": "call_b", "content": "done b"})
     assert wc.save_round(limit_ctx, "post_batch") is True
-    second = json.loads(_file(tmp_path).read_bytes())
+    second = wc.read_working(tmp_path, "pause-task", 1)[1]
     assert second["working"]["seq"] == 2 and second["working"]["pending_tool_call_ids"] == []
     assert wc.save_round(limit_ctx, "ready") is False, "nothing changed since the batch was saved"
     limit_ctx.messages.append({"role": "user", "content": "[owner] also check B"})
@@ -72,7 +72,7 @@ def test_a_failed_pre_effect_write_holds_visibly_and_only_the_task_controls_end_
     monkeypatch.setattr(utils, "write_bytes_atomic", flaky)
     monkeypatch.setattr(budget_pause, "_hold_control_reason", lambda _ctx: "")
     wc.save_before_effects(limit_ctx)  # returns only once the state is durable
-    assert json.loads(_file(tmp_path).read_bytes())["working"]["boundary"] == "pre_effect"
+    assert wc.read_working(tmp_path, "pause-task", 1)[1]["working"]["boundary"] == "pre_effect"
     assert published and published[0]["hold_reason"] == wc.HOLD_UNWRITABLE
     assert published[0]["rail"] == "working_checkpoint"
     assert "budget_pause_hold" not in limit_ctx.accumulated_usage
@@ -104,7 +104,7 @@ def test_content_mail_is_acknowledged_only_after_the_ready_state_that_holds_it(t
     assert [e["msg_id"] for e in drain_owner_entries(tmp_path, "pause-task", set(), 1)] == ["m-b"]
     limit_ctx.messages, limit_ctx.owner_msg_seen = messages, seen
     wc.save_ready(limit_ctx)
-    saved = json.loads(_file(tmp_path).read_bytes())
+    saved = wc.read_working(tmp_path, "pause-task", 1)[1]
     assert "m-b" in saved["seen"] and any("please also check B" in str(r.get("content")) for r in saved["messages"])
     assert drain_owner_entries(tmp_path, "pause-task", set(), 1) == [], "acknowledged once its state is saved"
 
@@ -127,7 +127,7 @@ def test_recovery_freezes_exact_bytes_but_a_live_park_or_an_owed_final_wins(tmp_
     ctx, limit_ctx = _loop_ctx(tmp_path)
     write_task_result(tmp_path, "pause-task", "running")
     wc.save_round(limit_ctx, "pre_effect")
-    exact = _file(tmp_path).read_bytes()
+    exact, rolling = wc.read_working(tmp_path, "pause-task", 1)[0], _file(tmp_path).read_bytes()
     task: dict = {"id": "pause-task"}
     assert wc.attach_recovery(tmp_path, task, source_task_id="pause-task", from_attempt=1, cause="worker_crash")
     handoff = task["_working_recovery"]
@@ -135,7 +135,7 @@ def test_recovery_freezes_exact_bytes_but_a_live_park_or_an_owed_final_wins(tmp_
     assert read_actor_source_bytes(tmp_path, "pause-task", handoff["source_ref"]) == exact
     # Parent 2026-10-08: the locator is in memory until the retry's own publication;
     # a crash before it finds the SAME file and freezes the same bytes again.
-    assert _file(tmp_path).read_bytes() == exact, "the rolling file stays until a consumer captured it"
+    assert _file(tmp_path).read_bytes() == rolling, "the rolling file stays until a consumer captured it"
     again: dict = {"id": "pause-task"}
     assert wc.attach_recovery(tmp_path, again, source_task_id="pause-task", from_attempt=1, cause="worker_crash")
     assert again["_working_recovery"] == handoff and handoff["source_kind"] == wc.SOURCE_WORKING
@@ -282,12 +282,12 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
         return {"role": "assistant", "content": "Continued from the saved state", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    observed = []  # a continued task's view was captured at its start: no new Max-room observation
-    monkeypatch.setattr("ouroboros.memory_max.observe_task_start", lambda *a, **kw: observed.append(kw))
+    noted = []  # a continued task's view was captured at its start: no second Low-start line
+    monkeypatch.setattr(loop, "_note_low_start", lambda *a, **kw: noted.append(a))
     kwargs = _loop_kwargs(tmp_path, registry, [])
     kwargs["task_id"] = task_id
     result, usage, _trace = loop.run_llm_loop(**kwargs)
-    assert result == "Continued from the saved state" and not ran and observed == []
+    assert result == "Continued from the saved state" and not ran and noted == []
     contents = [str(row.get("content") or "") for row in seen_messages]
     assert "Saved object 42" in contents, "completed results are restored"
     unknown = [row for row in seen_messages if row.get("tool_call_id") == "inflight"]
@@ -328,9 +328,9 @@ def test_representative_checkpoint_io_is_measured_not_promised(tmp_path):
     wc.save_round(limit_ctx, "post_batch")
     elapsed = time.perf_counter() - started
     stats = limit_ctx.accumulated_usage["working_checkpoint"]
-    assert stats["last_bytes"] > 11_000_000
-    print(f"WORKING_CHECKPOINT_IO bytes={stats['last_bytes']} encode_ms={stats['encode_ms']} "
-          f"write_ms={stats['write_ms']} total_s={elapsed:.3f}")
+    assert stats["last_whole_bytes"] > 11_000_000, "the state is representative; its file is a skeleton over CAS parts"
+    print(f"WORKING_CHECKPOINT_IO whole_bytes={stats['last_whole_bytes']} file_bytes={stats['last_bytes']} "
+          f"parts={stats['parts_written']} encode_ms={stats['encode_ms']} write_ms={stats['write_ms']} total_s={elapsed:.3f}")
 
 
 def test_a_held_question_wait_continues_through_its_own_reader_after_quit_and_resume(tmp_path, monkeypatch):
@@ -431,3 +431,43 @@ def test_s3_integration_pin_working_recovery_restores_its_saved_cost_ceiling(tmp
     route = ("same-model", "high", False, "max", 0, registry._ctx.context_fit_plan)
     resumed = loop._resume_continuation(registry, ({}, {}, saved), [], {}, {}, set(), route, fresh, 1.0)
     assert resumed[6].ceiling_usd == 7.0 and registry._ctx._cost_ceiling is resumed[6]
+
+
+def cold_continuation(ctx, trace, monkeypatch, *, writer="working", new_id=False, legacy=False):
+    """``ctx`` saved through a real writer — the rolling working checkpoint (its encoder turns non-JSON values into
+    opaque markers) or a parked owner wait (strict JSON) — attached to a retry by the supervisor's own carrier
+    (``restart_retention._recovery_source``) and continued as a new worker process does: a fresh context, the
+    loop's turn reset, then ``resume_from_working`` for the same task or a new execution id. Only the route
+    rebind, which needs a live model plan, is stubbed. ``legacy`` drops the result review's shown facts from
+    the saved bytes, as a source written before they were carried. Returns ``(fresh context, restored trace)``."""
+    from ouroboros import loop, owner_wait
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.restart_retention import _recovery_source
+
+    root, messages = ctx.drive_root, [{"role": "user", "content": "task"}]
+    ctx.task_attempt = 1  # a worker's context always names its attempt
+    write_task_result(root, ctx.task_id, "running")
+    if writer == "owner_wait":
+        wait = owner_wait.checkpoint_owner_wait(ctx, messages, trace, {}, 3, [], set())
+        owner_wait.set_owner_wait(root, ctx.task_id, {**wait, "state": "waiting"})
+    else:
+        wc.save_round(SimpleNamespace(tools=SimpleNamespace(_ctx=ctx), messages=messages, llm_trace=trace,
+                                      accumulated_usage={}, round_idx=3, tool_schemas=[], owner_msg_seen=set(),
+                                      budget_tail="no_tool"), "candidate")
+    if legacy:
+        path = wc.checkpoint_path(root, ctx.task_id, 1)
+        state = wc.read_working(root, ctx.task_id, 1)[1]  # written back whole: the reader takes both forms
+        state["acceptance"] = {key: value for key, value in state["acceptance"].items()
+                               if not key.startswith("_result_review_")}
+        path.write_text(json.dumps(state), encoding="utf-8")
+    task = {"id": ctx.task_id, "_attempt": 1}
+    assert _recovery_source(root, task, 1, "restart")
+    fresh = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.system_repo_dir, drive_root=root,
+                        workspace_root=ctx.workspace_root, workspace_mode=ctx.workspace_mode,
+                        task_id="task-retry" if new_id else ctx.task_id)
+    fresh.task_attempt, fresh.working_recovery = 2, task["_working_recovery"]
+    loop._reset_turn_state(fresh)
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
+    restored: dict = {}
+    wc.resume_from_working(SimpleNamespace(_ctx=fresh), wc.load_recovery(fresh), [], restored, {}, set())
+    return fresh, restored

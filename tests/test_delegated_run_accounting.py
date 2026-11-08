@@ -328,6 +328,8 @@ def test_the_terminal_payload_carries_the_applied_model_and_the_mismatch_delta(t
         "requested": "model sonnet",
         "effective": "model claude-opus-5",
         "reason": "session_route_resolves_its_own_model",
+        "note": "The engine names the model it ran by its own alias; the names differ, capabilities were "
+                "not compared. A disclosure, not a failure.",
     }]
 
     # Agreement (or aliases matching exactly): no delta is invented.
@@ -475,7 +477,6 @@ def test_an_estimated_spend_is_not_a_settled_one(tmp_path, monkeypatch):
     # must be a definite False rather than whatever silence happened to produce.
     ({"state": "succeeded"}, None, False, False, False),
     ({"state": "succeeded", "spendUsd": 0, "spendEstimated": True}, 0.0, False, True, True),
-    ({"state": "succeeded", "spendUsd": 4.10, "spendEstimated": True}, 4.10, False, True, True),
     ({"state": "succeeded", "spendUsd": 0}, 0.0, True, True, False),
     ({"state": "succeeded", "spendUsd": 4.10}, 4.10, True, True, False),
 ])

@@ -9,6 +9,7 @@ from typing import List
 
 from ouroboros import knowledge as knowledge_store
 from ouroboros.project_facts import placed_project_id
+from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.knowledge import INDEX_FILE as INDEX_FILE, OVERVIEW_TOPIC as OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
 from ouroboros.tools.arg_feedback import ignored_argument_note
@@ -26,22 +27,16 @@ PATTERNS_TOPIC = "patterns"
 GLOBAL_ONLY_TOPICS = knowledge_store.GLOBAL_ADDRESS_TOPICS
 
 
-def _backlog_root(ctx: ToolContext) -> Path:
-    return Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-
-
 def _address(ctx: ToolContext, topic: str, scope: str = "") -> knowledge_store.KnowledgeAddress:
+    # One root for every shelf: the canonical data root the scratchpad and the room
+    # binding (placed_project_id) already use, never the ambient DATA_DIR.
     if not isinstance(scope, str):
         raise ValueError("scope must be global or project:<exact project id>")
     sanitized = _sanitize_topic(topic)
     if sanitized in GLOBAL_ONLY_TOPICS:
-        return knowledge_store.resolve_knowledge_address(_backlog_root(ctx), sanitized, "global")
-    project = str(placed_project_id(ctx) or "")
-    root = _backlog_root(ctx)
-    if not getattr(ctx, "budget_drive_root", "") and (project or scope.startswith("project:")):
-        from ouroboros.config import DATA_DIR
-        root = Path(DATA_DIR)
-    return knowledge_store.resolve_knowledge_address(root, sanitized, scope, project)
+        return knowledge_store.resolve_knowledge_address(canonical_data_root(ctx), sanitized, "global")
+    return knowledge_store.resolve_knowledge_address(
+        canonical_data_root(ctx), sanitized, scope, str(placed_project_id(ctx) or ""))
 
 
 def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = None,
@@ -123,14 +118,20 @@ def _bound_delta_meta(meta: dict) -> None:
                                    json.dumps(headings, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
 
-def _residency(note: knowledge_store.KnowledgeNote) -> str:
+def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -> str:
     """Where the written note now sits in my contexts: a fact about its cost, never a limit."""
     if note.state == "archived":
         return "Residency: archived, so it is not in the active knowledge index; knowledge_read still opens it."
     body = note.source.text_at(note.source.body_span) if note.source else note.text
     loaders = "Main, tasks, wakes and Presence; helpers do not load it"
     if note.address.scope == "global" and note.address.topic == OVERVIEW_TOPIC:
-        return f"Residency: the overview body ({len(body)} chars) is loaded whole in every context that loads knowledge ({loaders})."
+        before = (delta or {}).get('old_body_chars', len(body))
+        after = len(body)
+        return (knowledge_store.overview_residency(note)
+                + f" Body {before} → {after} chars; estimate {before / 4:.2f} → {after / 4:.2f} tokens; "
+                f"delta {(after - before) / 4:+.2f} tokens (chars/4). "
+                "Effect applies at the next context build; an accepted session keeps its earlier capture. "
+                "Current route room: unknown here; compact_context inspects its actual observation.")
     where = (f"the global knowledge index ({loaders})" if note.address.scope == "global"
              else f"the {note.address.scope} knowledge index, loaded in that project's contexts")
     tail = f"the body ({len(body)} chars) is read on demand with knowledge_read."
@@ -152,7 +153,7 @@ def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> 
     # read_file's text ABI normalizes newlines. JSON escapes retain the exact
     # Markdown (CRLF included) through that reader; decode old_content as UTF-8.
     source = json.dumps({"old_content": note.text, "revision": note.revision}, ensure_ascii=True)
-    for root in dict.fromkeys((Path(ctx.drive_root), _backlog_root(ctx))):
+    for root in dict.fromkeys((Path(ctx.drive_root).resolve(strict=False), canonical_data_root(ctx))):
         _text, ref, issue = persist_exact_text_source(
             root, ctx.task_id, source_id="knowledge-previous", text=source)
         if issue:
@@ -224,7 +225,7 @@ def _knowledge_write(
         meta["knowledge_state"] = result.current.state
     if result.ok:
         if result.current is not None:  # before the bound, which then makes room for it
-            meta["knowledge_residency"] = _residency(result.current)
+            meta["knowledge_residency"] = _residency(result.current, result.delta)
         _bound_delta_meta(meta)
         return _publish_tool_result(ctx, ToolResult(
             status="ok", code="OK",
@@ -246,10 +247,13 @@ def _knowledge_write(
 
 
 @completed_local_read
-def _knowledge_list(ctx: ToolContext, scope: str = "", view: str = "active") -> str:
+def _knowledge_list(ctx: ToolContext, scope: str = "", view: str = "active",
+                    topics: List[str] | None = None) -> str:
     try:
         address = _address(ctx, "topic", scope)
-        return knowledge_store.knowledge_index_view(address, view)
+        if topics is not None and (not isinstance(topics, list) or any(not isinstance(t, str) for t in topics)):
+            raise ValueError("topics must be an array of topic paths or directory prefixes ending in /")
+        return knowledge_store.knowledge_index_view(address, view, topics=tuple(topics or ()))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}"))
@@ -272,7 +276,7 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_read),
         ToolEntry("knowledge_write", {
             "name": "knowledge_write",
-            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. An active note's summary stays resident in the index; body text never replaces it. Archive hides default navigation rows while direct reads and explicit Presence topics remain available. Restore removes archive metadata, even malformed values in readable YAML, from CURRENT text including subsequent edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
+            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view; body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. Required except for a summary-only edit; omit for archive/restore. No summary is generated from the body."},
@@ -285,8 +289,9 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_write),
         ToolEntry("knowledge_list", {
             "name": "knowledge_list",
-            "description": "List current knowledge with authored summaries and source links. Default active view includes the archive count and address; archived/all reveal archived notes with archive time and reason. Legacy index prose can still mention archived notes until an authored global overview retires it.",
+            "description": "List current knowledge with authored summaries and source links. Optional topics select exact topics or directory prefixes ending in /. Default active view includes the archive count and address; archived/all reveal archived notes with archive time and reason. Legacy index prose can still mention archived notes until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {"scope": scope,
+                "topics": {"type": "array", "items": {"type": "string"}, "description": "Optional exact topic paths or directory prefixes ending in /; omitted lists the whole shelf."},
                 "view": {"type": "string", "enum": ["active", "archived", "all"], "description": "active (default), archived only, or complete inventory."}}, "required": []},
         }, _knowledge_list),
     ] + chronicle_tools()

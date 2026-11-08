@@ -15,6 +15,32 @@ from typing import Any
 _INHERIT = object()
 
 
+def cognitive_parent_context(ctx: Any = None, task: Any = None) -> Any:
+    """A live conversation's supervisor follows the room's ordinary cognitive role.
+
+    The transport model is the speaking parent's route, not a cognition choice.
+    Use the same role resolver as an ordinary turn; explicit supervisor rows are
+    selected separately. Text turns retain their actual send binding unchanged.
+    """
+    from types import SimpleNamespace
+    from ouroboros.route_choice import following, following_route, opening_role
+
+    task = task if isinstance(task, dict) else {}
+    metadata = (task.get("task_metadata") or task.get("metadata")
+                or getattr(ctx, "task_metadata", None) or {})
+    if (metadata.get("execution_transport") or {}).get("kind") != "live_conversation":
+        return ctx
+    parent = SimpleNamespace(task_metadata=metadata)
+    role = opening_role(parent)
+    model, local = following_route(role)
+    return SimpleNamespace(task_metadata={key: value for key, value in metadata.items()
+                                         if key not in {"model", "use_local_model", "execution_transport"}},
+        active_model=model, active_use_local=local,
+        active_effort=getattr(ctx, "active_effort", "") or metadata.get("reasoning_effort", ""),
+        context_fit_plan=SimpleNamespace(model_role=role), route_choice=following(role),
+        model_wait_context=getattr(ctx, "model_wait_context", None))  # the owner's wait-card replacement carries over
+
+
 def validate_cognitive_route(raw: Any) -> dict:
     """Copy historical bindings unchanged; validate the complete v2 carrier."""
     from ouroboros.model_slots import normalize_processing_preference
@@ -106,28 +132,38 @@ def _selected_cognition(ctx: Any, selected: dict, settings: dict) -> dict:
 def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     """The parent's actual send binding, with its route choice: a parent following its role hands the role
     down (``follows_role``, the nanny follows it live); a parent on its own route (``switch_model``, a
-    wait-card choice) hands a frozen ``parent_switch``; an adopted fallback stays ``parent_fallback``."""
+    wait-card choice) hands a frozen ``parent_switch``. An emergency fallback answers the parent only:
+    children follow its role. Historical ``parent_fallback`` bindings remain readable."""
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, task_model_binding, task_processing_preference
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.route_choice import follows
+    from ouroboros.route_choice import following_route, follows, opening_role
 
+    ctx = cognitive_parent_context(ctx)
     metadata = getattr(ctx, "task_metadata", None) or {}
     plan = getattr(ctx, "context_fit_plan", None)
     waiter = getattr(ctx, "model_wait_context", None)
     overrides = getattr(waiter, "overrides", None) or {}
     task = {"task_metadata": metadata}
     role, pin = task_model_binding(task, context_fit_plan=plan, overrides=overrides)
-    live = overrides.get(role) or {}
-    model = str(live.get("model", getattr(ctx, "active_model", "") or metadata.get("model") or ""))
-    local = bool(live.get("use_local", getattr(ctx, "active_use_local", metadata.get("use_local_model", False))))
+    choice = getattr(ctx, "route_choice", None)
+    followed = follows(choice)
+    # Older parents can carry only the fit role; current parents record the
+    # adopted fallback as an explicit choice. Neither is a child's own route.
+    if ((isinstance(choice, dict) and choice.get("source") == "fallback")
+            or (not isinstance(choice, dict) and role.startswith("fallback:"))):
+        followed = opening_role(ctx)
+    if followed:
+        role, pin = followed, None
+        model, local = following_route(role)
+    else:
+        live = overrides.get(role) or {}
+        model = str(live.get("model", getattr(ctx, "active_model", "") or metadata.get("model") or ""))
+        local = bool(live.get("use_local", getattr(ctx, "active_use_local", metadata.get("use_local_model", False))))
     if pin is None:
         pin = model_role_option(MODEL_ACCOUNTS_KEY, role, settings=settings)
     if local or provider_for_model(model) != "claudexor":
         pin = ""
-    choice = getattr(ctx, "route_choice", None)
-    followed = follows(choice) if isinstance(choice, dict) else ""
-    chosen_by = ("parent_fallback" if role.startswith("fallback:")
-                 else "parent_switch" if isinstance(choice, dict) and not followed else "inherited")
+    chosen_by = "parent_switch" if isinstance(choice, dict) and not followed else "inherited"
     return validate_cognitive_route({
         "schema": 2, "model": model,
         "effort": str(getattr(ctx, "active_effort", "") or metadata.get("reasoning_effort") or ""),

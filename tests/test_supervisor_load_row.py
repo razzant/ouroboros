@@ -83,6 +83,9 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     q = row["queue_lock"]
     assert q["count"] == 1 and q["hold_max_sec"] >= 0.02
     assert q["hold_max_site"].startswith("tests/test_supervisor_load_row.py:")
+    [(site, held)] = q["hold_by_site"].items()  # the per-site table rides the same section, one row per site
+    assert site == "tests/test_supervisor_load_row.py in test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row"
+    assert held["count"] == 1 and held["hold_total_sec"] == q["hold_total_sec"] and held["hold_max_sec"] == q["hold_max_sec"]
     assert _rows(tmp_path) == [row]
     assert sl.BOOT.snapshot()["supervisor_load"] == {"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]}
 
@@ -108,10 +111,12 @@ def test_the_row_reads_the_real_q_and_neither_it_nor_the_drain_waits_for_q(monke
     from supervisor import events as events_mod, queue
 
     sections = sl._load_sections()
-    assert set(sections) == {"queue_lock", "store_locks", "dialogue_retry"}
+    assert set(sections) == {"queue_lock", "store_locks", "dialogue_retry", "conversation_lane"}
     from ouroboros import dialogue_retry, store_timing
+    from supervisor import conversation_lane
 
     assert sections["store_locks"] is store_timing.drain and sections["dialogue_retry"] is dialogue_retry.snapshot
+    assert sections["conversation_lane"] is conversation_lane.carrier_vitals  # the lane's carriers and RSS (4A)
     assert {"rows", "bytes", "evicted", "max_rows"} <= set(sections["dialogue_retry"]())
     queue._queue_lock.drain()
     with queue._queue_lock:

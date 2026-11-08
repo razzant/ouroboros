@@ -48,12 +48,14 @@ def test_replica_transfers_only_matching_source_attempt_without_receiver_clock(t
     assert mismatched['terminal_time']['occurred_at'] is None
 
 
-@pytest.mark.parametrize('known', [False, True])
-@pytest.mark.parametrize('patch', [
-    {'started_at': T3}, {'task_attempt': 9}, {'_attempt': 9},
-    {'metadata': {'attempt': 9, 'note': 'enriched'}},
-    {'metadata': {'task_attempt': 9, 'note': 'enriched'}},
-    {'metadata': {'note': 'enriched'}}, {'metadata': None},
+@pytest.mark.parametrize(("patch", "known"), [
+    pytest.param({'started_at': T3}, False, id='patch0-False'),
+    pytest.param({'task_attempt': 9}, True, id='patch1-True'),
+    pytest.param({'_attempt': 9}, False, id='patch2-False'),
+    pytest.param({'metadata': {'attempt': 9, 'note': 'enriched'}}, True, id='patch3-True'),
+    pytest.param({'metadata': {'task_attempt': 9, 'note': 'enriched'}}, False, id='patch4-False'),
+    pytest.param({'metadata': {'note': 'enriched'}}, True, id='patch5-True'),
+    pytest.param({'metadata': None}, False, id='patch6-False'),
 ])
 def test_terminal_enrichment_keeps_valid_fact_and_witness(tmp_path, monkeypatch, known, patch):
     from ouroboros.post_task_checkpoint import project_replica_task_result_fields

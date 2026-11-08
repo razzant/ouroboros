@@ -6,9 +6,9 @@ import { fmt, tr } from './i18n.js';
 export const TASK_CAUSE_PHRASES = {
     previous_revision_accepted: "The reviewers approved an earlier version of this answer; the current version was not re-reviewed.",
     admission_close_unconfirmed: "Reviewers approved this answer; the supervisor did not confirm that task admission was closed.",
-    author_stop: "Ouroboros stopped with unfinished work; no review approval was granted.",
+    author_stop: "Ouroboros stopped with unfinished work.",
     review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
-    author_finish: "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.",
+    author_finish: "Ouroboros delivered this answer without the reviewers' sign-off.",
     review_degraded: "The reviewers did not reach a verdict on this answer.",
     infra_failure: "The review could not run because of an infrastructure failure, so there is no verdict.",
     acceptance_preparation_failed: "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
@@ -43,6 +43,7 @@ export const TASK_CAUSE_PHRASES = {
     plan_review_answered_open: "The plan reviewers answered, but the review was never closed; the work went on with their notes.",
     plan_review_quorum_unreachable: "Too few plan reviewers could answer, so the work was held.",
     plan_review_objections_open: "Objections to the plan were still open when this answer was delivered; the work went on with them disclosed.",
+    plan_review_unreadable: "The plan record could not be read, so the state of the plan review is unknown.",
     host_child_status_suffix: "A child task had not settled when the answer was delivered",
     invalid_delivery_control_after_repair: "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     budget_exhausted: "The task ran out of budget before it could finish cleanly",
@@ -54,6 +55,8 @@ export const TASK_CAUSE_PHRASES = {
     finalization_grace: "The task hit a time limit and had to wrap up before it could finish cleanly",
     deadline_local: "The task reached its deadline before it could finish cleanly",
     context_overflow: "The task outgrew its context before it could finish cleanly",
+    context_capacity: "This route's window cannot hold the task's context",
+    required_reference_unavailable: "The handbook this task requires could not be read",
     output_recovery_exhausted: "Empty length-limited replies exhausted recovery; saved work remains available",
     children_unabsorbed: "Some sub-task results were never folded in, so the task had to wrap up",
     // The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code.
@@ -65,6 +68,10 @@ export const TASK_CAUSE_PHRASES = {
     empty_final_text: "The task ended without a final answer",
     deep_self_review_unavailable: "The deep self-review could not run",
     deep_self_review_error: "The deep self-review stopped on an error",
+    // A helper the host could not start (agent_dispatch.executor_blocked_outcome): it never ran and spent nothing.
+    subagent_executor_unavailable: "This helper could not start because its route was unavailable; it spent nothing",
+    delegate_tools_invisible: "This helper could not start because the tools that run its session are hidden from it; it spent nothing",
+    delegate_visibility_unverified: "This helper could not start because its tools could not be checked; it spent nothing",
     // #869: the provider-death rail's terminal words (twin of project_dialogue.TASK_CAUSE_PHRASES).
     provider_unavailable: "The task could not get a usable model answer, so it could not finish",
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
@@ -76,8 +83,8 @@ export const TASK_CAUSE_PHRASES = {
     child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
     tool_failure: "A tool this task used failed and nothing recovered it",
     receipt_absent: "No host verification receipt was recorded; this does not establish whether other checks ran.",
-    expected_output_ungrounded: "The declared output has no recorded tool work or structured final answer to support it.",
-    residual_tool_errors_without_review: "Tool errors remain in the record and the result has not been evaluated.",
+    expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
+    residual_tool_errors_without_review: "Tool errors remain in the record.",
     artifacts_unavailable: "Some result files are missing or could not be preserved.",
     partial_result: "The result is partial; remaining work is described in task details.",
     task_exception: "The task stopped on an internal error",
@@ -103,6 +110,10 @@ export const TASK_CAUSE_PHRASES = {
     reason_undescribed: "The recorded reason has no description yet.",
 };
 
+// The codes above of a helper the host could not start: its only result is the host's notice to its parent (codes,
+// alternatives), so its card's collapsed line states the cause and the notice stays in Details.
+export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
+
 export function taskReasonPhrase(code) {
     const raw = String(code || '');
     // English is the source; an install language reads the sentence by its stable code (i18n.js).
@@ -126,11 +137,13 @@ const TOOL_NOUNS = {
 };
 const LISTED = 20;  // outcomes keeps at most this many errors per list
 
-/** The residual-warning clause naming the first recorded tool error in plain words (never a tool
- *  name, its result text or a path), or '' when the record names none. */
+/** The residual-warning clause naming the first recorded tool error that is not a failed read (owner 06.11, A) in
+ *  plain words (never a tool name, its result text or a path), or '' when the record names none. */
 export function residualToolErrorsPhrase(execution = {}) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
-    const unresolved = list('unresolved_tool_errors'), cosmetic = list('cosmetic_tool_errors');
+    const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
+    // A failed read stays in the details (owner 06.11, A): the sentence names effects and commands.
+    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !item.read_only));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
     const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
@@ -144,10 +157,10 @@ export function residualToolErrorsPhrase(execution = {}) {
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
-    const tail = unresolved.length >= LISTED || cosmetic.length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
+    const tail = listed[0].length >= LISTED || listed[1].length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
-    return fmt('{subject}{tail}; the result has not been evaluated.', { subject, tail });
+    return fmt('{subject}{tail}.', { subject, tail });
 }
 
 // Details retain unknown codes once, in order; their visible cause never guesses. Twin: project_dialogue._cause_phrase.

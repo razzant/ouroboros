@@ -120,6 +120,60 @@ def test_system_index_subject_is_the_gate_binding(tmp_path):
     assert frozen.staged_tree == frozen.tree_sha and frozen.m0_tree == frozen.parent_sha
 
 
+def _gate_wave(ctx, monkeypatch, *, subject=None, finding=""):
+    """One gate wave as far as its assembly: the brief its seats would receive from the coupling history
+    this subject's identity selected, and (with ``finding``) the coupling round the wave records."""
+    from ouroboros.review_ledger import CouplingOutcome
+    from ouroboros.tools import parallel_review, review
+    from ouroboros.tools.review_brief_coupling import BriefIntent, build_coupling_history_section
+
+    seen = {}
+
+    def assemble(ctx, *_a, **_k):
+        seen["brief"] = build_coupling_history_section(BriefIntent(coupling_history=ctx._coupling_review_history_rounds).coupling_history)
+        if finding:
+            ctx._last_coupling_result = CouplingOutcome(verdict="FAIL", status="responded", advisory_findings=[{"item": finding}])
+        return None, "assembly stops the fixture here", True
+
+    with monkeypatch.context() as wave:
+        wave.setattr(review, "_prepare_unified_review", assemble)
+        parallel_review.run_parallel_review(ctx, "msg", goal="g", scope="s", subject=subject)
+    return seen["brief"]
+
+
+def _stage(repo, raw):
+    (repo / "x.txt").write_bytes(raw)
+    _git(repo, "add", "-A")
+
+
+@pytest.mark.parametrize("patch", ["crlf", "not-utf8"])
+def test_one_staged_patch_keeps_one_coupling_history_on_both_gate_paths(tmp_path, monkeypatch, patch):
+    """The gate's two paths read one patch under one identity: a synchronous wave (a read-only call, a subject that
+    could not be frozen) and a frozen one see the same earlier rounds, even when ``git diff`` is not text a locale
+    capture can keep: CR survives only as bytes, and undecodable bytes used to fall back to one shared empty key, so
+    one Latin-1 patch was briefed with another's rounds. A different patch never sees them."""
+    from ouroboros.tools.parallel_review import _commit_review_retry_key
+    from ouroboros.tools.review_subject import staged_patch
+
+    first, second = {"crlf": (b"one\r\ntwo\r\n", b"one\r\nthree\r\n"),
+                     "not-utf8": ("caf\u00e9 A\n".encode("latin-1"), "caf\u00e9 B\n".encode("latin-1"))}[patch]
+    repo = _system_repo(tmp_path)
+    ctx = _ctx(repo, tmp_path, _coupling_review_history={})
+    _stage(repo, first)
+    _gate_wave(ctx, monkeypatch, finding="round_of_first_patch")
+    assert list(ctx._coupling_review_history) == [staged_patch(repo)[1][:16]]
+    assert "round_of_first_patch" in _gate_wave(ctx, monkeypatch), "the synchronous path's next round"
+    frozen = freeze_subject(ctx, _index_spec(repo))
+    assert "round_of_first_patch" in _gate_wave(ctx, monkeypatch, subject=frozen), "the frozen path over the same patch"
+    key = _commit_review_retry_key(ctx, "m", goal="g", scope="s", review_rebuttal="")
+    _stage(repo, second)
+    assert "round_of_first_patch" not in _gate_wave(ctx, monkeypatch), "another patch has no such round"
+    assert key != _commit_review_retry_key(ctx, "m", goal="g", scope="s", review_rebuttal="")
+    _stage(repo, first)
+    assert "round_of_first_patch" in _gate_wave(ctx, monkeypatch)
+    assert key == _commit_review_retry_key(ctx, "m", goal="g", scope="s", review_rebuttal="")
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_the_gate_binding_hashes_the_patch_bytes_the_subject_froze(tmp_path, newline):
     """One subject, one identity on every OS. A Windows checkout writes CRLF and
@@ -484,8 +538,7 @@ _ASSIGNED = (("s1", "change"), ("s1", "coupling"), ("s2", "change"), ("s3", "cha
 
 
 def _keys(frozen, **over):
-    args = {"rules_sha": "rules", "layer": frozen.spec.layer, "assigned": _ASSIGNED,
-            "enforcement": "blocking", "contract_fp": "cf"}
+    args = {"layer": frozen.spec.layer, "assigned": _ASSIGNED, "enforcement": "blocking", "contract_fp": "cf"}
     args.update(over)
     return review_reuse_key(frozen, **args)
 
@@ -508,11 +561,12 @@ def test_reuse_key_returns_the_settled_record_without_a_wave(tmp_path):
     assert reused is not None and reused["reused"] is True and reused["usd"] == 0.0
     assert reused["record_id"] == record.record_id and reused["record"]["verdict"]["aggregate"] == "PASS"
     # Another surface, another composition, another layer, another enforcement or
-    # another rules source is another key — a new wave, not a reuse.
+    # another contract is another key — a new wave, not a reuse. The rules source is
+    # the record's provenance, never identity.
     other = freeze_subject(ctx, _index_spec(repo, surface="change"))
     for variant in (
         _keys(other), _keys(frozen, assigned=assigned_seats(["s1", "s2"], ["scope"])), _keys(frozen, layer="core"),
-        _keys(frozen, enforcement="advisory"), _keys(frozen, rules_sha="other-rules"), _keys(frozen, contract_fp="cf2"),
+        _keys(frozen, enforcement="advisory"), _keys(frozen, contract_fp="cf2"),
     ):
         assert variant != key and reuse_or_none(drive, variant) is None
     # The composition hashes as rows, however it is spelled.

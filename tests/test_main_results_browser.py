@@ -10,6 +10,7 @@ import json
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
+from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests._shared import producer_evidence_dir
 from tests.system_e2e.harness import (
@@ -20,7 +21,7 @@ from tests.ui_console_errors import PageErrors
 from tests.ui_failure_evidence import FailureEvidence
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 
 
@@ -135,7 +136,7 @@ def test_main_partial_final_has_one_compact_limitation_with_project_closed(
                             expect(limitation).to_be_visible()
                             text = limitation.inner_text()
                             assert text.count(rationale) == 1, text
-                            assert "no review approval" in text.lower(), text
+                            assert TASK_CAUSE_PHRASES["author_stop"].rstrip(".").lower() in text.lower(), text
                             assert len(text) < 320, "the summary should be a short limitation, not full review detail"
                             assert row.inner_text().count(rationale) == 1
                             assert page.locator("#project-panel.open").count() == 0

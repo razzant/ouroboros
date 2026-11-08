@@ -93,10 +93,13 @@ from ouroboros.runtime_limits import (
     TCP_KEEPALIVE_IDLE_SEC, TCP_KEEPALIVE_INTERVAL_SEC, TCP_KEEPALIVE_PROBE_COUNT,  # noqa: F401
     EXTENSION_STREAM_METADATA_BYTES,  # noqa: F401
     WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC,  # noqa: F401
+    MCP_TASK_SESSION_CLOSE_WAIT_SEC, MCP_TASK_SESSION_RETURN_WAIT_SEC, MCP_TASK_SESSION_IDLE_POLL_SEC,  # noqa: F401
+    MCP_BROWSER_GUARD_READ_SEC, MCP_BROWSER_GUARD_LINE_BYTES, MCP_BROWSER_GUARD_WORKERS,  # noqa: F401
+    MCP_BROWSER_GUARD_PENDING, MCP_STDIO_STDERR_TAIL_BYTES, MCP_STDIO_STDERR_NOTE_BYTES,  # noqa: F401
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
     DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
-    DELEGATE_WAIT_WINDOW_MAX_SEC, OPERATION_WINDOW_FALLBACK_SEC,  # noqa: F401
+    DELEGATE_WAIT_WINDOW_MAX_SEC, IDLE_LEASE_MAX_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
     WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
@@ -115,8 +118,6 @@ from ouroboros.runtime_limits import (
     get_max_subagent_depth,  # noqa: F401
     get_max_workers,  # noqa: F401
     get_onboarding_snapshot_timeout_sec,  # noqa: F401
-    get_per_call_timeout_ceiling_sec,  # noqa: F401
-    get_plan_task_deadline_min_sec,  # noqa: F401
     get_post_task_evolution_budget_usd,  # noqa: F401
     get_model_substitution_redos,  # noqa: F401
     get_restart_drain_max_sec,  # noqa: F401
@@ -124,11 +125,11 @@ from ouroboros.runtime_limits import (
     get_settings_document_lock_timeout_sec,  # noqa: F401
     get_safety_max_tokens,  # noqa: F401
     get_search_code_wall_sec, get_supervisor_liveness_deadline_sec,  # noqa: F401
-    get_task_abs_ceiling_sec, get_max_rounds, operation_window_sec,  # noqa: F401
+    get_task_abs_ceiling_sec, get_max_rounds,  # noqa: F401
     explicit_execution_timeout_sec, _CURRENT_TASK_CEILING,  # noqa: F401
     resolve_task_execution_timeout_sec as _resolve_task_execution_timeout_sec,
     get_task_idle_timeout_sec, get_vision_caption_timeout_sec,  # noqa: F401
-    get_update_letter_timeout_sec, get_ui_translation_timeout_sec, get_websearch_timeout_sec,  # noqa: F401
+    get_ui_translation_timeout_sec, get_websearch_timeout_sec,  # noqa: F401
 )
 from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update_channel  # noqa: F401
 
@@ -151,16 +152,13 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
 # whose OUROBOROS_* env landed late) resolves per call (the hermeticity class of issue #455).
 
 
-def resolve_app_root() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_APP_ROOT", pathlib.Path.home() / "Ouroboros"))
+from ouroboros import launch_roots as _launch_roots  # noqa: E402 — the one derivation of the launch tuple
+
+resolve_app_root, resolve_data_dir = _launch_roots.app_root, _launch_roots.data_dir
 
 
 def resolve_repo_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", resolve_app_root() / "repo"))
-
-
-def resolve_data_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", resolve_app_root() / "data"))
+    return _launch_roots.configured_roots().repo_dir
 
 
 def resolve_port_file(data_dir=None, *, hosting_data_dir=None) -> pathlib.Path:
@@ -176,12 +174,7 @@ def resolve_port_file(data_dir=None, *, hosting_data_dir=None) -> pathlib.Path:
 
 
 HOME = pathlib.Path.home()
-APP_ROOT = resolve_app_root()
-REPO_DIR = resolve_repo_dir()
-DATA_DIR = resolve_data_dir()
-SETTINGS_PATH = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH", DATA_DIR / "settings.json"))
-PID_FILE = pathlib.Path(os.environ.get("OUROBOROS_PID_FILE", APP_ROOT / "ouroboros.pid"))
-PORT_FILE = resolve_port_file(DATA_DIR)
+APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE = _launch_roots.configured_roots()
 
 # Settings pin + write guards: SSOT settings_integrity; re-exported for config.X imports.
 from ouroboros import settings_integrity as _settings_integrity  # noqa: E402
@@ -233,6 +226,8 @@ CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION: str = "3.3.0"
 CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"
 CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION: str = "3.10.4"  # active-turn request field (`llm_claudexor.py` docstring)
 CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION: str = "3.3.7"  # `scope.ephemeral` for host-minted roots (`delegate_registration_policy`)
+# The same on a sticky thread: its lane needs an engine that sweeps unregistered namespaces (Claudexor C6, 5.1.0).
+CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION: str = "5.1.0"
 
 
 # Boot-time runtime-mode baseline. Pinning the owner-selected mode after settings load stops an
@@ -344,9 +339,10 @@ def get_allow_mutative_subagents(write_surface: str = "", *, source_is_system_re
 
 
 def _work_root(key: str, leaf: str) -> str:
-    """A work root: the saved setting, else the environment (``runtime_setting``), else ``~/Ouroboros/<leaf>``."""
+    """A work root: the saved setting, else the environment (``runtime_setting``), else ``<leaf>`` under
+    the data root's work-root basis, never saved (``launch_roots``: ``~/Ouroboros`` or APP_ROOT)."""
     raw = str(runtime_setting(key, "") or SETTINGS_DEFAULTS.get(key, "")).strip()
-    return raw or os.path.expanduser(os.path.join("~", "Ouroboros", leaf))
+    return raw or _launch_roots.work_root_default(key, leaf)
 
 
 def get_subagent_worktree_root() -> str:
@@ -364,8 +360,8 @@ def get_subagent_projects_root() -> str:
 
 def get_deliverables_root() -> str:
     """Visible container for UNNAMED user deliverables: a bare filename (no directory) lands here
-    instead of cluttering the home root. Sibling of the genesis projects root under ~/Ouroboros,
-    outside data/, and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
+    instead of cluttering the home root. Sibling of the genesis projects root, outside data/,
+    and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
     path WITH a directory) is always honored as given. Override with OUROBOROS_DELIVERABLES_ROOT."""
     return _work_root("OUROBOROS_DELIVERABLES_ROOT", "Deliverables")
 

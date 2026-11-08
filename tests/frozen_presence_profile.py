@@ -25,7 +25,7 @@ _PROFILE_FIELDS = frozenset(
         "capability_requests",
     }
 )
-_RUNTIME_FIELDS = frozenset({"model_slot", "inline_max_rounds"})
+_RUNTIME_FIELDS = frozenset({"model_slot", "inline_max_rounds", "execution"})
 _REQUEST_FIELDS = frozenset(
     {
         "id",
@@ -378,6 +378,7 @@ def presence_profile_fingerprint(profile: PresenceProfile) -> str:
             "runtime_defaults": {
                 "model_slot": profile.runtime_defaults.model_slot,
                 "inline_max_rounds": profile.runtime_defaults.inline_max_rounds,
+                **({"execution": profile.runtime_defaults.execution} if profile.runtime_defaults.execution != "event" else {}),
             },
             "capability_requests": [
                 {

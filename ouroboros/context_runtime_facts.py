@@ -4,7 +4,7 @@ Extracted whole from ``context.py`` at its module ceiling (v7 leaf) so the
 facts the runtime section renders keep one home: the project room a task sits in,
 the budget rails it runs under, how the run learns the time (its capture instant
 labels the Recent/Drive snapshots), the body's own dated facts (``vitals_fact``, beside
-``storage_fact``), and the
+``storage_fact``; ``admission_observation`` beside an unconfirmed start's receipt), and the
 configured delegation route with its honestly-labeled historical observations.
 Each returns a plain projection and reads no context state, so nothing here can
 change what the section MEANS — only what it reports. ``context`` re-exports the
@@ -176,10 +176,9 @@ def _owner_wait_fact(ctx: Any) -> str:
     message was accepted and how much later this request comes, so far, with the slowest phase; once
     the first dispatch was observed, when it went out and on which basis. Elapsed only, never a
     dispatch that has not happened; "" for a turn nobody awaits or a process that serves none."""
-    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.active_activity import turn_execution
 
-    entry = get_direct_activity_registry().get(str(getattr(ctx, "task_id", "") or ""))
-    execution = getattr(entry, "execution", None)
+    execution = turn_execution(str(getattr(ctx, "task_id", "") or ""))  # inline (registry) or carried
     if execution is None or not execution.owner_turn:
         return ""
     receipt = execution.receipt()
@@ -234,16 +233,64 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
             "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
-    for key in ("running", "pending"):
+    from ouroboros.project_admission import project_hold_fact
+    from ouroboros.queue_observation import pool_observation_status
+    from ouroboros.task_carrier import execution_kind
+    from ouroboros.work_stop import continuation_refusal, current_stop
+
+    for key in ("running", "pending"):  # a correspondent's Presence turn is its place's, never counted as the owner's
         rows = snapshot.get(key)
-        fact[key + "_count"] = sum(isinstance(row, dict) for row in rows) if isinstance(rows, list) else None
-    fact["reaping_count"] = snapshot.get("reaping_count")
-    fact["worker_total"] = snapshot.get("worker_total")
+        fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
+                                   for row in rows) if isinstance(rows, list) else None
+    intent = snapshot.get("restart_intent")
+    if isinstance(intent, dict) and intent.get("status") in {"awaiting", "accepted", "ready"}:
+        # The host's restart request at this snapshot (``awaiting`` until its ACK; ``server_restart.agent_restart_snapshot``);
+        # the reason is the requester's own words. Until its task finishes nothing restarts; ``ready`` is the bounded drain.
+        fact["pending_restart"] = {
+            "requested_by_task": intent.get("task_id"), "phase": "draining" if intent["status"] == "ready" else "requested",
+            **({"requester_reason": intent["reason"]} if intent.get("reason") else {})}
+    pending_rows = [row for row in snapshot.get("pending") or () if isinstance(row, dict)
+                    and execution_kind(row.get("task") or {}) != "presence"]
+    budget_fences = {str(fence.get("root_task_id") or ""): fence
+                     for fence in snapshot.get("budget_root_fences") or ()
+                     if isinstance(fence, dict)}
+    # Compose the existing hold owners: current_stop, project admission, and continuation refusal.
+    # A budget-pause marker without a known reason remains uncounted; no marker classifier lives here.
+    pending_stop_status = "observed"
+    pending_stops = 0
+    if isinstance(snapshot.get("pending"), list):
+        for row in pending_rows:
+            try:
+                task_row = row.get("task") or {}
+                if (current_stop(task_row, {"budget": budget_fences})
+                        or project_hold_fact(task_row) or continuation_refusal(task_row)):
+                    pending_stops += 1
+            except Exception:
+                pending_stop_status = "unknown"
+                break
+    else:
+        pending_stop_status = "unknown"
+    fact["pending_paused_or_held_count"] = pending_stops if pending_stop_status == "observed" else None
+    fact["pending_paused_or_held_status"] = pending_stop_status
+    observed = pool_observation_status(snapshot)
+    fact["pool_observation_status"] = observed
+    for key in ("max_workers", "worker_total", "active_worker_count", "busy_worker_count", "booting_count",
+                "reaping_count", "retiring_count", "lane_carrier_total"):
+        # worker_total: project slots that exist (the pool grows on demand below the ceiling); the
+        # conversation lane's carriers are apart. A snapshot's max_workers is its writer's ceiling.
+        fact["recorded_max_workers" if key == "max_workers" else key] = (
+            snapshot.get(key) if observed == "observed" else None)
+    demand = snapshot.get("project_demand")  # the last assignment pass's growth forecast, as it published it
+    fact["project_demand"] = dict(demand) if isinstance(demand, dict) else {"status": "not_recorded"}
     assignable = snapshot.get("assignable_idle_workers")
-    if assignable is not None:
+    if observed != "observed":
+        fact["free_worker_slots"] = None
+        fact["free_worker_slots_basis"] = "unknown_pool_observation"
+    elif assignable is not None:
         fact["free_worker_slots"] = max(0, int(assignable))
         fact["free_worker_slots_basis"] = "recorded_assignable_idle_workers"
-    elif fact["running_count"] is not None:
+    elif "assignable_idle_workers" not in snapshot and fact["running_count"] is not None:
+        # Only a snapshot from before the pool was published: a recorded null is unknown, never spare.
         fact["free_worker_slots"] = max(0, fact["max_workers"] - fact["running_count"]
                                           - int(fact["reaping_count"] or 0))
         fact["free_worker_slots_basis"] = "legacy_estimate_from_configured_limit"
@@ -254,6 +301,11 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "Last recorded queue counts at ts; freshness and age were measured when this context "
         "was built and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
+        "pending_count counts rows, not runnable demand: project_demand.admissible_pending is what the "
+        "scheduler's last pass could dispatch (capped by the ceiling), paused or held rows say so explicitly, and "
+        "other rows record no wait cause here. free_worker_slots is assignable idle existing capacity, not headroom; "
+        "the configured ceiling applies on the next task/restart. booting and reaping overlap for fresh slots. "
+        "active_worker_count is dispatch-enabled capacity, not work. "
         "Scheduling owns admission; these observations reserve no slots."
     )
     return fact
@@ -270,15 +322,19 @@ def _project_room_fact(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         _room_pid = str(task.get("project_id") or "").strip()
         if _room_pid and not str(task.get("workspace_root") or "").strip():
             from ouroboros.config import DATA_DIR as _DATA_DIR
+            from ouroboros.project_admission import admitted_folder
             from ouroboros.projects_registry import get_project as _get_project
             from ouroboros.workspace_admission import room_chat_lens_dir as _room_lens, room_lens_applies
 
-            _room = _get_project(_DATA_DIR, _room_pid) or {}
-            _room_wd = str(_room.get("working_dir") or "").strip()
+            # A lens turn states the folder it was admitted with; folderless work (or none
+            # carried) states the room's current folder, which only promoted tasks use.
+            _basis = task.get("_project_admission") if room_lens_applies(task) else None
+            _room_wd = (admitted_folder(_basis, _room_pid)
+                        or str((_get_project(_DATA_DIR, _room_pid) or {}).get("working_dir") or "").strip())
             if _room_wd:
                 # Same resolver the agent uses for the tool lens, so the stated rule
                 # and the actual tool surface cannot diverge (the robot incident).
-                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid)
+                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid, basis=_basis)
                 _lens_active = room_lens_applies(task) and bool(_lens_dir)
                 fact = {
                     "project_id": _room_pid,
@@ -355,22 +411,43 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
     return budget_info
 
 
-def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
-    """The last finished storage count as one compact fact for the mind: when it was counted,
-    what Ouroboros owns and how many items it could not read, the growth since the count before
-    (flagged when either count had unreadable items), free and total space of the data folder's
-    disk, and one ``removers`` line only while a maintenance job's last outcome is not clean
-    (``storage_removers.not_ok`` over the local job rows: never an engine call while a turn is prepared;
-    the engine's record is ``query_data(kind="storage")``'s and the Storage page's), present before any
-    count too. None when nothing was counted and every job is clean (never zero, never an exception). No
-    threshold, tier or warning stands in for judgment here: the mind reads the numbers. The saved file is
-    read through the storage owner's identity cache; free space and the job rows are read fresh."""
-    import shutil
+def disk_view(path: Any, *, observed_at: Optional[str] = None) -> Dict[str, Any]:
+    """Free and total space of the disk holding ``path``, read now through the Storage page's own reader
+    (``storage._volume``): exact bytes, the same decimal GB that page prints (``storage_format.js``), and when
+    it was read. Empty when the volume cannot be read: unknown stays absent, never a zero."""
+    from ouroboros import storage
 
+    volume = storage._volume(path)
+    free, total = volume.get("free_bytes"), volume.get("total_bytes")
+    if free is None or total is None:
+        return {}
+    return {"free_bytes": free, "free_gb": round(free / 1e9, 1), "volume_total_bytes": total,
+            "volume_total_gb": round(total / 1e9, 1), "disk_read_at": observed_at or volume.get("observed_at")}
+
+
+def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """What the mind knows about its disk, as one compact fact, every turn: free and total space of the
+    data folder's disk, read fresh with or without a count, in bytes and the Storage page's decimal GB with
+    when it was read (``disk_view``); what every retirer holds and why
+    (``holds``: by remover, each class with its count, one example and since when, from the job rows the
+    server's five retirer passes and the custody sweep's engine record keep; never an engine call while a
+    turn is prepared) and what the last pass of each released; the last finished storage count when there
+    is one (when it was counted, what Ouroboros owns and how many items it could not read, the growth since
+    the count before, flagged when either count had unreadable items); and one ``removers`` line only
+    while a remover's last outcome is not clean (``storage_removers.not_ok``). None only when free space
+    cannot be read, nothing holds, nothing was counted and every remover is clean (never a fake zero). No
+    threshold, tier or warning stands in for judgment here: the mind reads the numbers and acts through
+    ``free_storage`` or the owner's Storage page."""
     from ouroboros import storage, storage_removers
 
+    fact: Dict[str, Any] = disk_view(data_root, observed_at=observed_at)
+    removers = ""
     try:
-        removers = "; ".join(storage_removers.not_ok(storage_removers.place_removers(data_root, engine=False)))
+        found = storage_removers.place_removers(data_root, engine=False)
+        removers = "; ".join(storage_removers.not_ok(found))
+        holds = storage_removers.holds_by_remover(found)
+        if holds:
+            fact["holds"] = holds
     except Exception:  # the readers already answer unknown; anything else is said, never a broken section
         log.debug("storage removers unreadable for the runtime fact", exc_info=True)
         removers = "the removers' facts could not be read"
@@ -380,28 +457,20 @@ def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
     except Exception:  # an unreadable or malformed file is no fact, never a broken Runtime section
         log.debug("storage count unreadable for the runtime fact", exc_info=True)
         count = None
-    if count is None:
-        return {"removers": removers} if removers else None
-    try:
-        usage = shutil.disk_usage(str(data_root))
-        free, total = usage.free, usage.total
-    except OSError:
-        free = total = None
-    fact = {
-        "counted_at": count["finished_at"],
-        "bytes": count["bytes"],
-        "unreadable": count["unreadable"],  # items the count could not read: the headline excludes them
-        "basis": count.get("basis"),
-        "previous_at": count.get("growth_since"),
-        "growth_bytes": count.get("growth_bytes"),
-        "free_bytes": free,
-        "volume_total_bytes": total,
-    }
-    if count.get("growth_flag"):
-        fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
+    if count is not None:
+        fact.update({
+            "counted_at": count["finished_at"],
+            "bytes": count["bytes"],
+            "unreadable": count["unreadable"],  # items the count could not read: the headline excludes them
+            "basis": count.get("basis"),
+            "previous_at": count.get("growth_since"),
+            "growth_bytes": count.get("growth_bytes"),
+        })
+        if count.get("growth_flag"):
+            fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
     if removers:
         fact["removers"] = removers
-    return fact
+    return fact or None
 
 
 # The body's own facts: bounds here are transport and memory limits, never judgments. Each item is one
@@ -468,6 +537,8 @@ def _supervisor_tail(root: pathlib.Path) -> Dict[str, Any]:
             found["load"] = row
         elif kind == "direct_turn":
             found["turns"] = [*found["turns"], row][-_OWNER_TURNS_SHOWN:]
+        elif kind == "conversation_inline_executor":  # a turn that ran on a thread of the server (2A)
+            found["inline"] = [*found.get("inline", []), row][-_OWNER_TURNS_SHOWN:]
         elif kind in _STALL_ENDS:
             found["open"][(kind, _stall_key(row))] = row
         elif kind in _STALL_ENDS.values():
@@ -533,6 +604,21 @@ def _busy_minute(row: Dict[str, Any], today: Any) -> str:
     queue = row.get("queue_lock")
     if isinstance(queue, dict) and queue.get("count"):
         text += f"; queue {queue.get('count')}/{float(queue.get('hold_total_sec') or 0.0):.1f} s"
+    return text
+
+
+def _carriers(row: Dict[str, Any], today: Any) -> str:
+    """The conversation lane's carriers in the newest ``supervisor_load`` row (owner decision 4A: no number
+    bounds them, the vitals show them): how many, how many idle, each one's last own RSS ("?" before its
+    first turn's beat), the peak named as such. "" for a row without the section."""
+    lane = row.get("conversation_lane")
+    if not isinstance(lane, dict) or type(lane.get("carriers")) is not int:
+        return ""
+    text = f"{_clock(row.get('ts'), today)}: carriers {lane['carriers']}, idle {lane.get('idle')}"
+    sizes = lane.get("rss_mib") if isinstance(lane.get("rss_mib"), list) else []
+    if any(size is not None for size in sizes):
+        text += "; rss " + " · ".join("?" if size is None else str(size) for size in sizes) + " MiB"
+        text += " (peak)" if "peak" in (lane.get("rss_measure") or ()) else ""
     return text
 
 
@@ -647,14 +733,17 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     basis when unobserved, own transactions; the top frame of a stall episode whose end row is still in
     the tail), stall onsets whose end was not observed in the journal's bounded tail (never «current»),
     the last busy minute (counts and summed seconds per store and side, the longest hold's site, never a
-    percentage), the engine's per-route failure shares (the newest ``claudexor_route_health`` row, kept
+    percentage), the engine-and-pool row (counts and durations; a missing source says it was not observed;
+    no daemon read) and the conversation lane's carriers in that row (count, idle, each one's own last RSS),
+    the engine's per-route failure shares (the newest ``claudexor_route_health`` row, kept
     in its own file, which the custody sweep replaces only when they change: failed/runs and the top
     cause per route, most failed first, or a window without runs; no row, no key),
     the runtime (CPython, SQLite, journal per store, the WAL gate while a store runs a
     rollback journal), the retained update's before/after, the boot row, and a note that names the
     journal's reader. ``observed_at`` is the fact's own instant (the clocks' day); it is written only
     when it differs from ``captured_at``, the Runtime JSON's ``context_captured_at`` beside it (a stale
-    snapshot), so the same instant is not printed twice. Every absent source omits its key. Never
+    snapshot), so the same instant is not printed twice. Every absent source omits its key, except
+    ``engine_pool``, which stays and names each source it could not read. Never
     raises."""
     import os
 
@@ -677,6 +766,20 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
             fact[_STALLS_KEY] = stalls
         if isinstance(tail.get("load"), dict):
             fact["busy_minute"] = _busy_minute(tail["load"], observed_at)
+            if carriers := _carriers(tail["load"], observed_at):
+                fact["conversation_carriers"] = carriers
+        try:
+            from ouroboros.engine_facts import engine_pool_line
+            fact["engine_pool"] = engine_pool_line(root)
+        except Exception:
+            log.debug("engine pool fact unavailable", exc_info=True)
+            fact["engine_pool"] = "engine: not observed"
+        if tail.get("inline"):
+            # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
+            # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
+            fact["inline_executors"] = [
+                f"{_clock(row.get('ts'), observed_at)} {row.get('executor')} turn {row.get('task_id')}"
+                + (f" ({row.get('reason')})" if row.get("reason") else "") for row in tail["inline"]]
         routes = _route_health_line(root, observed_at)
         if routes:
             fact["route_health"] = routes
@@ -697,10 +800,39 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     return fact
 
 
+def admission_observation(data_root: Any, *, observed_at: str) -> str:
+    """The body as recorded beside an admission not confirmed in time, each source with its own clock: the
+    published queue's running and waiting counts (``_queue_context_fact``; a correspondent's Presence turn
+    is not the owner's work) at the snapshot's stamp and age, and the newest ``supervisor_load`` row's worst
+    event wait in its window (``_supervisor_tail``: a past window's maximum, not the lag now). The bounded
+    readers a context build uses, once per receipt; no HTTP, no history scan, no verdict; an absent source
+    is unknown, never zero. Never raises."""
+    def at(stamp: Any) -> str:
+        clock = _clock(stamp, observed_at)
+        return f"at {clock} UTC" if clock else "at an unreadable time"
+
+    root = pathlib.Path(data_root)
+    try:
+        queue = _queue_context_fact({"budget_drive_root": str(root)})
+        running, waiting, age = queue.get("running_count"), queue.get("pending_count"), queue.get("age_sec")
+        when = f"{at(queue.get('ts'))} ({_sec(age)} old)" if age is not None else "at an unreadable time"
+        parts = ["Queue: unknown (no readable snapshot)." if running is None else
+                 f"Queue as recorded {when}: {running} running, {'unknown' if waiting is None else waiting} waiting."]
+        load = _supervisor_tail(root).get("load")
+        parts.append(f"Newest server load row {at(load.get('ts'))}: events waited up to "
+                     f"{_sec(load.get('max_event_lag_sec'))} for the supervisor in its {_sec(load.get('window_sec'))} "
+                     "window." if isinstance(load, dict)
+                     else "Server load: unknown (no supervisor_load row in the journal's recent tail).")
+    except Exception:  # a fact beside a receipt never breaks the receipt
+        log.debug("admission observation unavailable", exc_info=True)
+        return "Queue and server load: unknown (unreadable)."
+    return " ".join(parts)
+
+
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
     """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
     site, ``context.build_runtime_section``."""
-    facts = {"storage": storage_fact(data_root),
+    facts = {"storage": storage_fact(data_root, observed_at=observed_at),
              "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
     return {key: value for key, value in facts.items() if value is not None}
 
@@ -710,8 +842,8 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "route_health", "runtime", "wal_gate",
-                "last_update", "boot"):
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "conversation_carriers",
+                "inline_executors", "route_health", "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:
             parts.append(f"{key.replace('_', ' ')} " + " | ".join(str(item) for item in value))

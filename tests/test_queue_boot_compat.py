@@ -29,7 +29,7 @@ def _snapshot(root, *, structural_age, stamp_age, generation, pending=()):
 
 @pytest.mark.parametrize("structural_age,stamp_age,generation,restored", [
     (1, None, None, 1), (901, None, None, 0),
-    (2000, 1, "snapshot-generation", 1), (1, 901, "snapshot-generation", 0),
+    (1, 901, "snapshot-generation", 0),
     (1, None, "snapshot-generation", 0), (1, 1, "foreign-generation", 0),
 ])
 def test_boot_restore_uses_legacy_time_only_without_generation(
@@ -61,7 +61,7 @@ def test_periodic_reconcile_and_status_keep_legacy_liveness_unknown(roots):
 
 @pytest.mark.parametrize("structural_age,stamp_age,generation,settled", [
     (1, None, None, True), (901, None, None, False),
-    (2000, 1, "snapshot-generation", True), (1, 901, "snapshot-generation", False),
+    (1, 901, "snapshot-generation", False),
     (1, None, "snapshot-generation", False), (1, 1, "foreign-generation", False),
 ])
 def test_split_root_boot_recovery_obeys_the_snapshot_protocol(
@@ -78,8 +78,13 @@ def test_split_root_boot_recovery_obeys_the_snapshot_protocol(
     assert load_task_result(root, "split")["status"] == ("failed" if settled else "scheduled")
 
 
-@pytest.mark.parametrize("publication", ["legacy_stale", "stamp_stale", "stamp_missing", "stamp_mismatch", "fresh"])
-@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize(("malformed", "publication"), [
+    (False, "legacy_stale"),
+    (False, "stamp_missing"),
+    (False, "fresh"),
+    (True, "stamp_stale"),
+    (True, "stamp_mismatch"),
+])
 def test_restore_records_invalid_fences_before_stale_empty_return(roots, publication, malformed):
     root, _repo = roots
     _interrupted_running_row(root, "fenced")

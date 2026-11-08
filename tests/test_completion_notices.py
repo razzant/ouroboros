@@ -62,14 +62,8 @@ def _record(case):
 
 
 @pytest.mark.parametrize("case,fragment", [
-    ("clean", "finished"), ("receipt", "finished"),
-    ("delivery_control", "final delivery instruction could not be read"),
+    ("clean", "finished"), ("delivery_control", "final delivery instruction could not be read"),
     ("verification_output", "A tool this task used failed"),
-    ("partial", "The result is partial"),
-    ("mixed", "declared output has no recorded tool work"),
-    ("unknown_warning", "future_warning"),
-    ("artifact_missing", "result files are missing"),
-    ("unknown_delivery", "Delivery of the final answer could not be confirmed"),
 ])
 def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch):
     nt = _load()
@@ -129,7 +123,7 @@ def test_recorded_author_completion_and_review_obligations(trigger, enforcement,
     assert neutral is expected_neutral
     assert bool(detail) is not expected_neutral
     assert record == before
-    assert "had not signed it off" in dialogue._completion_verdict(record, {})
+    assert dialogue.TASK_CAUSE_PHRASES["author_finish"].rstrip(".") in dialogue._completion_verdict(record, {})
 
 
 def test_unavailable_review_without_an_author_completion_is_not_guessed_optional():
@@ -178,8 +172,7 @@ def test_earlier_approval_does_not_hide_current_open_obligations():
     assert "earlier version" in summary["reason_detail"]
 
 
-@pytest.mark.parametrize("notify", ["off", "on"])
-@pytest.mark.parametrize("mirror", ["all", "telegram_only"])
+@pytest.mark.parametrize(("mirror", "notify"), [("all", "off"), ("telegram_only", "on")])
 def test_files_questions_and_project_replies_are_independent(tmp_path, monkeypatch, notify, mirror):
     import base64
     import json

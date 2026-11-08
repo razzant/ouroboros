@@ -1,6 +1,6 @@
 // The "+" menu's contributed and host items (composer_plus.js): one section per skill in the owner's arrangement,
-// "Add dictation…" only once the voice controls offered their chooser and while no engine is chosen, "Make a button
-// with Ouroboros…" starting a request in the draft, and every item doing its verb on this room's draft.
+// "Add dictation…" only once the voice controls offered their chooser and while no engine is chosen, "Make a button…"
+// starting a request in the draft, both under what they do (U019), and every item doing its verb on this room's draft.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createContributionsStore } from '../modules/contributions.js';
@@ -47,7 +47,7 @@ test('skills\' items come in one section each, in the owner\'s order, before the
         assert.deepEqual(labels(f.latest()), [
             ['skill:lists', 'LISTS', ['add']],
             ['skill:templates', 'TEMPLATES', ['simpler', 'shorter']],
-            ['host', 'Ouroboros', ['Make a button with Ouroboros…']],
+            ['host', 'Add to composer', ['Make a button…']],
         ]);
         assert.equal(f.latest()[1].items[0].icon, 'sparkle', 'a skill names its glyph from the host set');
         f.latest()[1].items[1].onSelect();
@@ -58,7 +58,7 @@ test('skills\' items come in one section each, in the owner\'s order, before the
     } finally { f.dispose(); }
 });
 
-test('Make a button with Ouroboros… starts the request in the draft and sends nothing', async () => {
+test('Make a button… starts the request in the draft and sends nothing', async () => {
     const f = await fixture({ contributions: [] });
     try {
         const make = f.latest().at(-1).items.at(-1);

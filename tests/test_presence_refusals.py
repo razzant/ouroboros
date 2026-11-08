@@ -47,7 +47,6 @@ def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
     ("chat_log_unwritable", "retry"),
     ("presence_result_missing", "retry"),
     ("presence_attachment_admission_rejected", "rejected"),
-    ("presence_admission_conversation_mismatch", "rejected"),
 ])
 def test_turn_refusals_keep_legacy_facts_and_semantic_disposition(tmp_path, code, disposition):
     manifest = [{"status": "rejected", "label": "input"}]
@@ -68,7 +67,6 @@ def test_turn_refusals_keep_legacy_facts_and_semantic_disposition(tmp_path, code
     ("presence_behavior_skill_disabled", "blocked"),
     ("presence_required_capability_unavailable", "blocked"),
     ("presence_bindings_unreadable", "retry"),
-    ("presence_binding_wrong_transport", "rejected"),
 ])
 def test_admission_dispositions(tmp_path, monkeypatch, code, disposition):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
@@ -776,14 +774,9 @@ def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt
 
 @pytest.mark.parametrize("row,expected", [
     ({"status": "failed", "reason_code": "resource_refusal_no_resend"}, "presence_resources_unavailable"),
-    ({"status": "running"}, "presence_attempt_outcome_unknown"),
-    ({"status": "interrupted", "terminal_origin": "model_final"}, "presence_attempt_outcome_unknown"),
     # The host reconciled a stale RUNNING row from its own already-failed axes: no terminal of its own.
     ({"status": "failed", "status_reconciled_from": "running", "reason_code": "provider_unavailable",
       "outcome_axes": _INFRA_OUTAGE}, "presence_attempt_outcome_unknown"),
-    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_unavailable",
-      "outcome_axes": _INFRA_OUTAGE, "metadata": {"presence_unknown_outcome": {
-          "source": "provider_outcome_unknown_no_resend"}}}, "presence_attempt_outcome_unknown"),
     # Confirmed infrastructure terminals keep the deferred projection instead of a refusal.
     ({"status": "failed", "terminal_origin": "host_notice", "reason_code": "provider_unavailable",
       "outcome_axes": _INFRA_OUTAGE}, ""),

@@ -1,11 +1,12 @@
 """Nothing in memory maintenance leaves silently (TZ-3 PR-1, invariant I4).
 
 Every host decision that used to vanish is a typed fact, each proven in both
-directions: a scratchpad pass and its outcome, and the ``writer``/``route``/
+directions: a scratchpad fold and its outcome, and the ``writer``/``route``/
 ``writer_input_ref``/``old_chars``/``new_chars`` stamp on every ``source_capture``
 history row. The reader-less ``knowledge_journal.jsonl`` writer is gone, and so are
-the old dialogue writer and the automatic reflection and scratchpad knowledge
-writers whose skips and stamps this file used to pin: a scratchpad answer that
+the old dialogue writer, the automatic reflection and scratchpad knowledge writers
+and the post-task scratchpad pass (#918) whose skips and events this file used to
+pin: a fold is the mind's act, named by its own journal rows, and a fold text that
 still nominates notes writes none.
 """
 
@@ -17,7 +18,7 @@ import pytest
 
 from ouroboros import consolidator as c
 from ouroboros import knowledge as store
-from ouroboros.memory import Memory
+from ouroboros.memory import Memory, ScratchpadFoldFailed, scratchpad_block_sha256
 from ouroboros.tools import knowledge as knowledge_tools
 from ouroboros.tools.registry import ToolContext
 
@@ -35,16 +36,7 @@ def _history(root):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-# --- every scratchpad pass names its outcome ------------------------------------------
-
-
-class _Scratch:
-    def __init__(self, content):
-        self.content = content
-
-    def chat(self, **_kwargs):
-        return {"content": self.content}, {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.02,
-                                           "provider": "openrouter", "resolved_model": "light/served"}
+# --- every scratchpad fold names its outcome ------------------------------------------
 
 
 def _scratchpad(tmp_path, count=4):
@@ -54,39 +46,51 @@ def _scratchpad(tmp_path, count=4):
     return memory
 
 
-def test_a_scratchpad_replacement_reports_its_counts_and_source(tmp_path):
+def _journal(memory, kind=None):
+    rows = [json.loads(line) for line in memory.journal_path().read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [row for row in rows if kind is None or row.get("type") == kind]
+
+
+def test_a_scratchpad_fold_reports_its_counts_and_source(tmp_path):
     memory = _scratchpad(tmp_path)
-    c.consolidate_scratchpad(memory, _Scratch(json.dumps({"compressed_block": "compressed"})))
-    events = _events(tmp_path, "scratchpad_consolidation")
-    assert len(events) == 1
-    event = events[0]
-    assert event["outcome"] == "replaced" and event["pressure"] is False
-    assert (event["blocks_before"], event["compressed_blocks"], event["blocks_after"]) == (4, 2, 3)
-    assert event["chars_before"] > event["chars_after"] > 0
-    assert event["source_entry_id"] == memory.load_scratchpad_blocks()[0]["metadata"]["source_ref"]["entry_id"]
-    assert "knowledge_writes" not in event
-    assert event["last_error_kind"] is None and event["accounted_upper_bound_usd"] == 0.02
+    oldest = [scratchpad_block_sha256(block) for block in memory.load_scratchpad_blocks()[:2]]
+    memory.fold_scratchpad_blocks("compressed", oldest)
+    [row] = _journal(memory, "blocks_folded")
+    assert (row["blocks_before"], len(row["replaced_sha256"]), row["blocks_after"]) == (4, 2, 3)
+    assert row["replaced_sha256"] == oldest
+    assert row["content_len"] == sum(len(block["content"]) for block in memory.load_scratchpad_blocks())
+    assert row["entry_id"] == memory.load_scratchpad_blocks()[0]["metadata"]["source_ref"]["entry_id"]
+    assert [kind["type"] for kind in _journal(memory)][-2:] == ["fold_sources_preserved", "blocks_folded"]
+    assert "knowledge_writes" not in row
 
 
-@pytest.mark.parametrize("content, outcome", [
-    ("not the requested JSON", "failed"),
-    (json.dumps({"compressed_block": "   "}), "empty_block"),
+@pytest.mark.parametrize("cause, kind, row_type", [
+    ("stale", "not_active", "block_fold_refused"),
+    ("journal", "journal_unavailable", "block_fold_failed"),
 ])
-def test_a_refused_scratchpad_pass_names_why_and_keeps_the_blocks(tmp_path, content, outcome):
+def test_a_refused_or_failed_fold_names_why_and_keeps_the_blocks(tmp_path, monkeypatch, cause, kind, row_type):
+    from ouroboros import memory as memory_module
+
     memory = _scratchpad(tmp_path)
     before = memory.load_scratchpad_blocks()
-    c.consolidate_scratchpad(memory, _Scratch(content))
+    named = ["0" * 64] if cause == "stale" else [scratchpad_block_sha256(before[0])]
+    if cause == "journal":
+        real = memory_module.append_jsonl
+        monkeypatch.setattr(memory_module, "append_jsonl", lambda path, row, *a, **k: (
+            False if row.get("type") == "fold_sources_preserved" else real(path, row, *a, **k)))
+    with pytest.raises(ScratchpadFoldFailed) as refused:
+        memory.fold_scratchpad_blocks("compressed", named)
+    assert refused.value.kind == kind
     assert memory.load_scratchpad_blocks() == before
-    events = _events(tmp_path, "scratchpad_consolidation")
-    assert len(events) == 1 and events[0]["outcome"] == outcome
-    assert events[0]["blocks_after"] == 4 and events[0]["source_entry_id"] == ""
-    assert events[0]["last_error_kind"] == ("scratchpad_consolidation_failed" if outcome == "failed" else None)
+    [row] = _journal(memory, row_type)
+    assert row["kind"] == kind and row["fold_block"]["content"] == "compressed"
+    assert _journal(memory, "blocks_folded") == []
 
 
-def test_no_scratchpad_pass_means_no_event(tmp_path):
+def test_no_fold_means_no_fold_rows_and_no_pass_event(tmp_path):
     memory = Memory(tmp_path)
     memory.append_scratchpad_block("small", source="task")
-    assert c.consolidate_scratchpad(memory, _Scratch("unused")) is None
+    assert [row["type"] for row in _journal(memory)] == ["block_appended"]
     assert _events(tmp_path, "scratchpad_consolidation") == []
 
 
@@ -188,22 +192,22 @@ def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_record
 _FORGED = {"provider": "forged", "model": "forged/model", "account": "forged-acct"}
 
 
-def test_a_scratchpad_answer_that_still_nominates_notes_writes_none(tmp_path):
-    """The older prompt asked for knowledge_entries beside the block; an answer of that
-    shape, forged host keys included, compresses the blocks and writes no note."""
+def test_a_fold_text_that_still_nominates_notes_writes_none(tmp_path):
+    """The older prompt asked for knowledge_entries beside the block; a fold text of that
+    shape, forged host keys included, is stored as text and writes no note."""
     memory = _scratchpad(tmp_path)
-    c.consolidate_scratchpad(memory, _Scratch(json.dumps({
+    text = json.dumps({
         "knowledge_entries": [{"topic": "lessons/one", "content": "A durable lesson.", "_nomination_route": _FORGED,
                                "_expected_revision": "forged", "_task_id": "forged"}],
-        "compressed_block": "compressed"})))
-    [event] = _events(tmp_path, "scratchpad_consolidation")
-    assert event["outcome"] == "replaced" and "knowledge_writes" not in event
+        "compressed_block": "compressed"})
+    memory.fold_scratchpad_blocks(text, [scratchpad_block_sha256(memory.load_scratchpad_blocks()[0])])
+    [row] = _journal(memory, "blocks_folded")
+    assert "knowledge_writes" not in row and "knowledge_entries" not in row
     assert not (tmp_path / "memory" / "knowledge").exists()
     assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()
-    journal = [json.loads(line) for line in memory.journal_path().read_text(encoding="utf-8").splitlines() if line.strip()]
-    [row] = [row for row in journal if row.get("type") == "blocks_consolidated"]
-    assert "knowledge_entries" not in row
-    assert memory.load_scratchpad_blocks()[0]["metadata"] == {"source_ref": row["source_ref"]}
+    folded = memory.load_scratchpad_blocks()[0]
+    assert folded["content"] == text
+    assert set(folded["metadata"]) == {"fold", "source_ref"}
 
 
 def test_the_reader_less_knowledge_journal_is_no_longer_written(tmp_path):

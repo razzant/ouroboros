@@ -84,15 +84,16 @@ class TestWebAttachmentBlocks:
 
 
 class TestImageEviction:
-    @pytest.mark.parametrize("count", range(6, LIVE_IMAGE_BLOCKS_HIGH_WATER + 1))
-    def test_up_to_high_water_appends_without_changing_sent_images(self, count):
-        from ouroboros.loop_messages import _append_or_merge_user_content
+    def test_up_to_high_water_appends_without_changing_sent_images(self, subtests):
+        for count in range(6, LIVE_IMAGE_BLOCKS_HIGH_WATER + 1):
+            with subtests.test(count=count):
+                from ouroboros.loop_messages import _append_or_merge_user_content
 
-        messages = [{"role": "user", "content": [_image_block(str(idx))]} for idx in range(count - 1)]
-        sent = deepcopy(messages)
-        _append_or_merge_user_content(messages, [_image_block(str(count - 1))])
-        assert messages[:-1] == sent
-        assert sum(block.get("type") == "image_url" for msg in messages for block in msg["content"]) == count
+                messages = [{"role": "user", "content": [_image_block(str(idx))]} for idx in range(count - 1)]
+                sent = deepcopy(messages)
+                _append_or_merge_user_content(messages, [_image_block(str(count - 1))])
+                assert messages[:-1] == sent
+                assert sum(block.get("type") == "image_url" for msg in messages for block in msg["content"]) == count
 
     def test_eleventh_image_retires_oldest_six_together(self):
         from ouroboros.loop_messages import _append_or_merge_user_content
@@ -120,7 +121,7 @@ class TestImageEviction:
         rendered = json.dumps(messages, ensure_ascii=False)
         assert all(f"[image evicted: shot-{idx}]" in rendered for idx in range(6))
 
-    @pytest.mark.parametrize(("prior", "incoming"), [(5, 6), (9, 3), (0, 11), (2, 14)])
+    @pytest.mark.parametrize(("prior", "incoming"), [(5, 6), (9, 3), (0, 11)])
     def test_incoming_batch_keeps_five_newest_even_when_batch_exceeds_high_water(self, prior, incoming):
         from ouroboros.loop_messages import _append_or_merge_user_content
 

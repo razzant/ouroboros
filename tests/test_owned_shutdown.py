@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 def _sleeper():
@@ -765,7 +764,7 @@ def test_kill_workers_joins_outside_the_queue_lock(tmp_path, monkeypatch):
     proc = SimpleNamespace(pid=4242, is_alive=lambda: False, join=join, terminate=lambda: None)
     workers.WORKERS[0] = SimpleNamespace(wid=0, proc=proc, busy_task_id=None, reaping=False)
     monkeypatch.setattr(workers, "kill_worker_tree", lambda pid, **_k: None)
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     workers.kill_workers(force=True, archive_service_logs=False, reconcile_delegate_custody=False)
     assert observed == [(True, True)], "joins run outside _queue_lock while the slot is held as reaping"
     assert workers.WORKERS == {}
@@ -798,7 +797,8 @@ def test_every_door_joins_the_one_stop_and_the_boot_retry_precedes_launches():
     emergency = inspect.getsource(server._emergency_process_cleanup)
     assert emergency.index("kill_workers(") < emergency.index("stop_owned_work(DATA_DIR)")
     owner = inspect.getsource(server_restart._stop_owned_work)
-    assert owner.index('_stop_owned_daemon("Owner restart")') < owner.index("stop_owned_work(DATA_DIR)")
+    assert "_stop_owned_daemon(" not in owner, "Restart keeps the shared engine (owner 3A)"
+    assert owner.index("reconcile_orphaned_runs(") < owner.index("stop_owned_work(DATA_DIR)")
     assert "_stop_owned_local_processes" not in inspect.getsource(server)
     assert not hasattr(__import__("ouroboros.workspace_executor").workspace_executor, "_iter_process_records")
 
@@ -811,3 +811,161 @@ def test_set_file_is_one_document_under_the_canonical_state(tmp_path):
     document = json.loads(owned_shutdown.owned_processes_path(data).read_text(encoding="utf-8"))
     assert document["schema_version"] == 1 and isinstance(document["records"], dict)
     assert pathlib.Path(owned_shutdown.owned_processes_path(data)).parent == data / "state"
+
+
+# --------------------------------------------------------------------------- contended copies of one launch
+# A pending registration can be older than what the set already stores for the same launch: written while the
+# custody lock was held, folded or replayed after a newer row of that launch was recorded. Controlled identities
+# (``_launch_stop_shared``): launch A's leader is gone and its owed child lives, outside its group and marker. What
+# custody merges holds on every host, over its real files and file locks; only what a measured stop or a custody
+# reader then judges of a process is POSIX's (Windows' ``end_scope`` and ``observe_owned_processes`` measure nothing).
+posix_measured_stop = pytest.mark.skipif(os.name == "nt",
+                                         reason="the measured stop is POSIX; Windows keeps its native kill")
+
+
+def _held_custody_lock(root):
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+    from ouroboros.process_custody import ledger_path
+    from ouroboros.utils import jsonl_append_lock_path
+
+    path = jsonl_append_lock_path(ledger_path(root))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = acquire_exclusive_file_lock(path, timeout_sec=1.0)
+    assert fd is not None
+    return lambda: release_exclusive_file_lock(path, fd)
+
+
+def _launch_owing_a_child(tmp_path, monkeypatch):
+    from ouroboros import owned_shutdown, process_census
+    from ouroboros.utils import append_jsonl
+    from tests._launch_stop_shared import _CHILD, _OLD_BIRTH, _controlled, _launch_row
+
+    rows = {_CHILD: process_census._Row(_CHILD, 1, _CHILD, _OLD_BIRTH, 123.0, "alive", set())}
+    world = _controlled(tmp_path, monkeypatch, rows)
+    monkeypatch.setattr(owned_shutdown, "_update", lambda root, change, *, timeout_sec=2.0, _real=owned_shutdown._update:
+                        _real(root, change, timeout_sec=min(timeout_sec, 0.2)))  # a held lock gives up quickly
+    a = {"ts": "t0", **_launch_row("t-a")}
+    from ouroboros.process_custody import ledger_path
+
+    assert append_jsonl(ledger_path(tmp_path), a)  # A's spawn row; its ownership record is published per test
+    return world, rows, a, [{"pid": _CHILD, "birth": _OLD_BIRTH}]
+
+
+def _a_owes(root):
+    """The pids A's ownership record still owes, and its stop request."""
+    from ouroboros import owned_shutdown
+    from tests._launch_stop_shared import _HEX_A
+
+    [record] = [entry for entry in owned_shutdown.owned_records(root, strict=True)
+                if entry["record_id"] == "launch-" + _HEX_A]
+    return [item["pid"] for item in record["ledger_entry"].get("known_members") or []], record["stop_requested_at"]
+
+
+@pytest.mark.parametrize("reader", ["custody selection", pytest.param("body candidate", marks=posix_measured_stop)])
+def test_a_reader_never_replays_an_older_pending_copy_of_a_launch_over_its_newer_record(tmp_path, monkeypatch, reader):
+    """A lock-free reader lists A's contended registration; before it reads the document, another writer folds and
+    deletes that file and A's stop records the child A still owes (``note_owed``). The one selection every custody
+    reader starts from must still name that child beside A's older row, and the body candidate's read must hold A."""
+    from ouroboros import body_candidate, owned_shutdown, process_custody
+    from ouroboros.launch_custody import read_custody
+    from tests._launch_stop_shared import _CHILD, _PID
+
+    world, rows, a, owed = _launch_owing_a_child(tmp_path, monkeypatch)
+    release = _held_custody_lock(tmp_path)
+    assert owned_shutdown.record_ledgered_process(tmp_path, a)  # contended: a pending file
+    release()
+    real_pending, raced = owned_shutdown._pending_files, []
+
+    def listed_then_raced(root, **kwargs):
+        found = real_pending(root, **kwargs)
+        if found and not raced:
+            raced.append(sorted(path.name for path in found))
+            assert owned_shutdown._update(root, lambda document: False)  # folds A's copy and deletes its file
+            assert process_custody.note_owed(root, a, owed) is not None  # A's newer row, published at once
+        return found
+
+    monkeypatch.setattr(owned_shutdown, "_pending_files", listed_then_raced)
+    if reader == "custody selection":
+        custody = read_custody(tmp_path, every_drive=True)
+        [row] = custody.rows
+        assert not row.get("known_members") and not custody.blind and not custody.unknown, "only the set names it yet"
+        assert [item["pid"] for item in custody.copies.get(id(row), ())] == [_CHILD], "the older copy replaced nothing"
+    else:
+        assert body_candidate.live_lineage_processes(tmp_path, "t-a") == [_PID], "its custody is not released"
+
+    assert raced and _CHILD in rows and (world.signals, world.kills, world.native) == ([], [], [])
+    assert _a_owes(tmp_path)[0] == [_CHILD]
+
+
+@pytest.mark.parametrize("then", ["fold", pytest.param("exit stop", marks=posix_measured_stop)])
+@pytest.mark.parametrize("order", ["older-name-first", "newer-name-first"])
+def test_two_pending_copies_of_a_launch_keep_what_it_owes_in_either_name_order(tmp_path, monkeypatch, order, then):
+    """A's registration and its later owed row both meet a held custody lock (another writer takes it between
+    ``note_owed``'s ledger append and its publication), so both wait as pending files whose random names decide the
+    fold order. Either order keeps A's owed child in the set, and the exit stop then ends it."""
+    from ouroboros import owned_shutdown, process_custody
+    from tests._launch_stop_shared import _CHILD
+
+    world, rows, a, owed = _launch_owing_a_child(tmp_path, monkeypatch)
+    release = _held_custody_lock(tmp_path)
+    assert owned_shutdown.record_ledgered_process(tmp_path, a)
+    release()
+    real_record = owned_shutdown.record_ledgered_process
+
+    def contended(drive_root, entry, **kwargs):
+        release = _held_custody_lock(drive_root)
+        try:
+            return real_record(drive_root, entry, **kwargs)
+        finally:
+            release()
+
+    monkeypatch.setattr(owned_shutdown, "record_ledgered_process", contended)
+    assert process_custody.note_owed(tmp_path, a, owed) is not None
+    monkeypatch.setattr(owned_shutdown, "record_ledgered_process", real_record)
+    pending = sorted((tmp_path / "state" / owned_shutdown.PENDING_DIRNAME).glob("*.json"))
+    assert len(pending) == 2
+    for path in pending:  # the random part of each name, set to one of its two possible orders
+        newer = bool(json.loads(path.read_text())["ledger_entry"].get("known_members"))
+        first = newer == (order == "newer-name-first")
+        path.rename(path.with_name(f"{path.name.split('.')[0]}.{('0' if first else 'f') * 32}.json"))
+
+    assert owned_shutdown._update(tmp_path, lambda document: False)  # the next locked update folds both
+    assert not list((tmp_path / "state" / owned_shutdown.PENDING_DIRNAME).glob("*.json"))
+    assert _a_owes(tmp_path)[0] == [_CHILD], "the set keeps what A owes"
+    assert (world.signals, world.kills, world.native) == ([], [], [])
+    if then == "exit stop":
+        owned_shutdown._stop_records(tmp_path, owned_shutdown.owned_records(tmp_path), time.monotonic() + 5)
+        assert _CHILD not in rows and world.native == [], "the exit stop ends it"
+
+
+@pytest.mark.parametrize("then", ["fold", pytest.param("next start", marks=posix_measured_stop)])
+def test_a_contended_stop_request_never_overwrites_a_launchs_newer_owed_row(tmp_path, monkeypatch, then):
+    """The first shutdown door meets a held lock, so it stamps each target from a lock-free read through the pending
+    protocol (``_stamp``). Between that read and its pending write, A's stop records the child A still owes. The
+    folded stamp keeps the child and its stop request, and the next start's retry ends it."""
+    from ouroboros import owned_shutdown, process_custody
+    from tests._launch_stop_shared import _CHILD
+
+    world, rows, a, owed = _launch_owing_a_child(tmp_path, monkeypatch)
+    assert owned_shutdown.record_ledgered_process(tmp_path, a)
+    release = _held_custody_lock(tmp_path)
+    real_write, written = owned_shutdown._write_pending, []
+
+    def owed_first(root, entry):
+        if not written:
+            release()
+            assert process_custody.note_owed(root, a, owed) is not None  # published while the lock is free
+        written.append(entry["record_id"])
+        return real_write(root, entry)
+
+    monkeypatch.setattr(owned_shutdown, "_write_pending", owed_first)
+    stamped = owned_shutdown._stamp(tmp_path, "stop_requested_at", owned_shutdown._is_stop_target, timeout_sec=0.1)
+    assert written and [entry["record_id"] for entry in stamped] == written
+    assert owned_shutdown._update(tmp_path, lambda document: False)
+
+    owes, requested = _a_owes(tmp_path)
+    assert requested and owes == [_CHILD], "the folded stamp keeps the child and its stop request"
+    assert (world.signals, world.kills, world.native) == ([], [], [])
+    if then == "next start":
+        owned_shutdown.finish_unconfirmed_stops(tmp_path)
+        assert _CHILD not in rows and world.native == [], "the next start's retry ends what A owes"

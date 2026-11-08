@@ -98,8 +98,7 @@ RAIL_WRAPUP_LAST_FIT = "wrapup_last_fit"
 RAIL_SOFT_LAND = "soft_land"
 GRACEFUL_RAILS = frozenset({RAIL_GRACEFUL_CEILING, RAIL_WRAPUP_LAST_FIT, RAIL_SOFT_LAND})
 # The owner's Pause of a whole tree (``owner_pause.py``) is not a monetary stop:
-# it rides the SAME exact checkpoint, park and grant, under reason ``owner``,
-# and never requests a stop of work already sent.
+# it rides the SAME exact checkpoint, park and grant, under reason ``owner``, and never requests a stop of work already sent.
 from ouroboros.owner_pause import RAIL_OWNER_PAUSE, REASON_OWNER  # noqa: E402
 # The model's own COLD sleep (``model_sleep``) rides the same park too; only its
 # selected sources, through the supervisor's sleep-wake policy, wake it.
@@ -431,12 +430,12 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                      expected_pause_id: Optional[str] = None, *,
                      expected_state: Any = None,
                      expected_grant_id: Optional[str] = None,
-                     expected_owner_wait: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                     expected_owner_wait: Optional[Dict[str, Any]] = None, row_update: Any = None) -> Dict[str, Any]:
     """CAS the pause; optional warm-sleep retention transfers its exact wait.
 
-    ``expected_owner_wait`` additionally matches the complete owner-wait row
-    and marks it ``retained`` in the same replace as the new exact pause. The
-    original source stays available; ordinary owner/review waits do not opt in.
+    ``expected_owner_wait`` additionally matches the complete owner-wait row and marks it ``retained`` in the same
+    replace as the new exact pause. The original source stays available; ordinary owner/review waits do not opt in.
+    ``row_update`` rewrites the task's row in this same write: what stands or falls with the transition.
 
     Compare-and-set: ``expected_pause_id``, ``expected_state`` (one state or a
     collection of them) and ``expected_grant_id`` are each checked under the
@@ -479,8 +478,8 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                   if row.get("state") == STATE_PAUSED and row.get("reason") in {"budget", REASON_AUTHORITY}
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         from ouroboros.model_detach import detached_fields
-        return stamp_task_result_schema({**current, **retained_wait, **notice,
-                                         **detached_fields(current, row), "budget_pause": dict(row)})
+        updated = {**current, **retained_wait, **notice, **detached_fields(current, row), "budget_pause": dict(row)}
+        return stamp_task_result_schema(row_update(updated) if row_update else updated)
 
     from ouroboros.task_store import patch_document
     patch_document(root, task_id, update)
@@ -752,9 +751,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     if ctx is None or rail not in RAILS:
         return None
-    # Missing owner/id/root is reported, not parked. Direct chat is eligible:
-    # its queue carrier binds direct_owner_wait at the pooled worker_owner_wait seam.
-    ineligible = ("no_continuation_owner" if not callable(getattr(ctx, "owner_wait_callback", None))
+    # Missing owner/id/root is reported, not parked. Direct chat binds direct_owner_wait at the pooled seam;
+    from ouroboros.presence_carrier import saves_exact_pause  # a moved Presence turn needs no callback (#2566)
+    ineligible = ("no_continuation_owner" if not (callable(getattr(ctx, "owner_wait_callback", None))
+                                                  or saves_exact_pause(ctx, rail))
                   else "no_task_id" if not str(getattr(ctx, "task_id", "") or "")
                   else "no_durable_root" if not (getattr(ctx, "budget_drive_root", None)
                                                  or getattr(ctx, "drive_root", None))
@@ -878,7 +878,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                             if authority:  # withdrawn: no pause stands; the caller ends the work truthfully
                                 return usage.update(exact_pause_unavailable="external_custody_unconfirmed")
                             limit_ctx.messages.append({"role": "user", "content": (
-                                "[SYSTEM NOTICE]\nCold sleep was not taken: transfer was not confirmed or an owner Pause won. "
+                                "[SYSTEM NOTICE]\nCold sleep was not taken: transfer was not confirmed or a Pause won. "
                                 "The exact sleep request was withdrawn; your external work remains yours.")})
                             return
                     else:
@@ -969,13 +969,13 @@ def enter_owner_pause(limit_ctx: Any) -> None:
             raise ModelWaitInterrupted("owner_pause_authority_unreadable")
         setattr(ctx, "_owner_pause_fence_id", str(fence.get("fence_id") or ""))
         try:
+            from ouroboros.presence_carrier import saves_exact_pause  # a moved Presence turn's qualified park (#2566)
             from ouroboros.review_pause import live_detached_operations
-
             detached = live_detached_operations(str(ctx.task_id))
         except Exception:
             log.debug("Live review operations unreadable at the owner pause boundary", exc_info=True)
             detached = []
-        if not (detached and callable(getattr(ctx, "owner_wait_callback", None))):
+        if not (detached and (callable(getattr(ctx, "owner_wait_callback", None)) or saves_exact_pause(ctx, RAIL_OWNER_PAUSE))):
             break
         from ouroboros.owner_wait import consume_warm_resume, park_owner_pause_warm
 
@@ -986,7 +986,7 @@ def enter_owner_pause(limit_ctx: Any) -> None:
                     lambda: consume_warm_resume(ctx))
     # No root argument: ``request_pause`` names the tree the fence above was read from.
     request_pause(limit_ctx, rail=RAIL_OWNER_PAUSE, scope="root",
-                  reason_text="The owner paused this task tree.")
+                  reason_text="This task tree was paused.")
     usage = limit_ctx.accumulated_usage
     published = False
     while wait_member_fence(ctx):
@@ -1005,8 +1005,9 @@ def enter_owner_pause(limit_ctx: Any) -> None:
 
 
 def _hold_until(ctx: Any, usage: Dict[str, Any], reason: str, attempt: Callable[[], Any], *,
-                rail: str = RAIL_OWNER_PAUSE, state: str = STATE_PAUSING) -> Any:
-    """Retry one durable step as a visible typed HOLD; the task's own controls end it."""
+                rail: str = RAIL_OWNER_PAUSE, state: str = STATE_PAUSING, owner_pause_context: Any = None) -> Any:
+    """Retry one durable step as a visible typed HOLD; the task's own controls end it. A pre-send
+    handoff passes its loop context: between retries the owner's Pause takes that boundary too."""
     published = ""
     while True:
         try:
@@ -1014,17 +1015,17 @@ def _hold_until(ctx: Any, usage: Dict[str, Any], reason: str, attempt: Callable[
             usage.pop("budget_pause_hold", None)
             return result
         except Exception as exc:
-            hold = _hold_row(reason, exc=exc)
-            usage["budget_pause_hold"] = dict(hold)
+            usage["budget_pause_hold"] = hold = _hold_row(reason, exc=exc)
             if str(hold.get("error") or "") != published:
                 published = str(hold.get("error") or "")
                 _publish_hold(ctx, {"rail": rail, "state": state, **hold})
-            control = _hold_control_reason(ctx)
-            if control:
+            if control := _hold_control_reason(ctx):
                 from ouroboros.model_wait import ModelWaitInterrupted
 
                 raise ModelWaitInterrupted(control) from exc
-            time.sleep(_HOLD_POLL_SEC)
+        if owner_pause_context is not None:  # outside the step's catch: an exact park unwinds, Resume retries
+            enter_owner_pause(owner_pause_context)
+        time.sleep(_HOLD_POLL_SEC)
 
 
 from ouroboros.model_sleep import enter_cold_sleep  # noqa: E402, F401 -- existing public seam
@@ -1040,9 +1041,8 @@ _DIRECT_TASK_EVENT_OMITTED = frozenset({"image_base64"})
 def parkable_direct_task(task: Dict[str, Any]) -> Dict[str, Any]:
     """The direct turn's own task record, as the queue may park it (#1196).
 
-    A direct turn is never in RUNNING, so the event is the only carrier of the
-    record the SAME task id continues under: origin, chat, contract, metadata,
-    workspace, attachments and the lane fact all ride it unchanged.
+    The event carries the record the SAME task id continues under: origin, chat,
+    contract, metadata, workspace, attachments and the lane fact all ride it unchanged.
     """
     row = {key: value for key, value in task.items() if key not in _DIRECT_TASK_EVENT_OMITTED}
     row["_is_direct_chat"] = True
@@ -1053,11 +1053,10 @@ def parkable_direct_task(task: Dict[str, Any]) -> Dict[str, Any]:
 
 def prestart_pause_event(task: Dict[str, Any], error: BaseException, owner: Any) -> Optional[Dict[str, Any]]:
     """Positive no-body evidence for a fresh input; never reclassify a continuation or prior attempt."""
-    from ouroboros.owner_wait import governing_continuation
+    from ouroboros.owner_wait import fresh_input
 
     if (not getattr(error, "before_task_start", False) or getattr(error, "control_reason", "") != RAIL_OWNER_PAUSE
-            or governing_continuation(task) or int(task.get("_attempt") or 1) != 1
-            or task.get("original_task_id") or task.get("timeout_retry_from")):
+            or not fresh_input(task)):
         return None
     task_id = str(task["id"])
     root_id = str(task.get("root_task_id") or (task.get("metadata") or {}).get("root_task_id") or task_id)
@@ -1351,12 +1350,12 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         external_basis, external_lines = "its participants, read now", "\n" + owner_runs
     pending = pending_tool_call_ids(messages)
     abandoned = [str(item) for item in ((row.get("resume_point") or {}).get("abandoned_model_attempts") or [])]
-    if str(row.get("reason") or "") == REASON_SLEEP and not pending:
-        from ouroboros import model_sleep
+    from ouroboros import model_sleep  # its wake notice, and who granted any Resume
 
+    if str(row.get("reason") or "") == REASON_SLEEP and not pending:
         slept = max(0.0, float(grant["consumed_at"]) - float(row.get("paused_at") or grant["consumed_at"]))
         messages.append(model_sleep.wake_notice({**(row.get("sleep") or {}), "mode": "cold"},
-                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept))
+                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept, by=grant.get("by")))
         if row.get("external_custody"):
             messages.append({"role": "user", "content": (
                 "[SYSTEM NOTICE]\nThe body retained your exact external runs while you slept. "
@@ -1366,10 +1365,10 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         model_sleep.append_question_notice(ctx, str((row.get("sleep_ready") or {}).get("reason") or ""), messages,
                                            shown=external if row.get("external_custody") else ())
         if owner_runs:  # the owner's Pause stopped or observed these runs while it slept
-            messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nWhile you slept the owner's Pause stopped or observed "
+            messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nWhile you slept the Pause stopped or observed "
                              "these delegated runs (current custody; engine facts are evidence, never a grant):\n" + owner_runs})
         return
-    kind = {REASON_OWNER: "owner Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
+    kind = {REASON_OWNER: "Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
         str(row.get("reason") or ""), "budget pause")
     held = ""
     if refresh.get("reason") == "producer_allowance_not_expanded" and refresh.get("ceiling_usd") is not None:
@@ -1384,7 +1383,8 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     if row.get("retained_owner_wait_id") and state.get("owner_pause"):
         messages.append(owner_pause_resume_notice(ctx, state, "owner_input", cold=True))
     messages.append({"role": "user", "content": (
-        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after an explicit owner Resume "
+        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after "
+        f"{model_sleep.resumer_words(grant.get('by')) or 'an explicit Resume'} "
         f"(paused {ctx._budget_paused_sec:.0f}s; rail: {row.get('rail')}; planning threshold "
         f"{'refreshed to $%.2f' % refresh['ceiling_usd'] if refresh.get('refreshed') else 'not refreshed: ' + str(refresh.get('reason'))}"
         f"{' (' + str(refresh['ceiling_basis']) + ')' if refresh.get('ceiling_basis') else ''}{held}). "

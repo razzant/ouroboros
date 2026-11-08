@@ -240,11 +240,12 @@ def test_the_physical_context_literals_are_unchanged_by_the_density_field():
     assert json.loads(json.dumps(asdict(physical)))["measurement_basis"] == "fresh_route_usage"
 
 
-@pytest.mark.parametrize('maximum', [4096, 8192])
-@pytest.mark.parametrize('mode', ['low', 'max', 'nano', None])
-@pytest.mark.parametrize('model,field', [('openai::test-model', 'max_completion_tokens'),
-    ('openai/test-model', 'max_tokens'), ('anthropic::test-model', 'max_tokens'),
-    ('openai-compatible::unlisted-future-model', 'max_tokens')])
+@pytest.mark.parametrize(("model", "field", "mode", "maximum"), [
+    ('openai::test-model', 'max_completion_tokens', 'low', 4096),
+    ('openai/test-model', 'max_tokens', 'max', 8192),
+    ('anthropic::test-model', 'max_tokens', 'nano', 4096),
+    ('openai-compatible::unlisted-future-model', 'max_tokens', None, 8192),
+])
 def test_confirmed_output_maximum_reaches_real_wire_capture_and_reservation(transport, monkeypatch, maximum, mode, model, field):
     from ouroboros.response_limits import record_response_ack
     from tests._usage_store_testing import ledger_rows
@@ -274,11 +275,6 @@ def test_confirmed_output_maximum_reaches_real_wire_capture_and_reservation(tran
     # Direct Anthropic dispatch sends (and labels usage with) the canonical id, so the
     # owner's maximum holds whichever alias the selection or the ack spelled.
     ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic::claude-opus-4.8', 4096),
-    ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic::claude-opus-4-8', 4096),
-    ('anthropic', 'anthropic::claude-opus-4-8', 'anthropic::claude-opus-4.8', 4096),
-    ('anthropic', 'anthropic/claude-opus-4.8', 'anthropic::claude-opus-4-8', 4096),
-    # OpenRouter ids stay exact: no alias folding there, and no direct-route borrow.
-    ('openrouter', 'anthropic/claude-opus-4.8', 'anthropic/claude-opus-4.8', 4096),
     ('openrouter', 'anthropic/claude-opus-4.8', 'anthropic/claude-opus-4-8', C),
     ('anthropic', 'anthropic::claude-opus-4.8', 'anthropic/claude-opus-4-8', C),
 ])

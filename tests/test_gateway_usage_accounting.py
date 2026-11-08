@@ -121,6 +121,9 @@ def test_cost_breakdown_uses_ledger_not_later_compatibility_events(tmp_path, mon
         # the reserved attempt, the unresolved one, and the external unmetered
         # dispatch whose price is unknown. Only the settled $0.25 row is final.
         "non_final_rows": 3,
+        # Of those, the rows still open: the reserved and the unresolved attempt. The external call
+        # without a price is not open; no price will arrive for it (the Costs page names only these).
+        "accounting_open_rows": 2,
         "attempt_counts": {"reserved": 1, "settled": 2, "unresolved": 1},
         "authority": "physical_attempt_ledger",
         "limit_usd": 7.5,
@@ -202,7 +205,6 @@ def test_api_state_money_and_call_count_are_ledger_projections(tmp_path, monkeyp
     assert payload["accounting"]["remaining_known_usd"] == 7.25
 
 
-@pytest.mark.serial
 def test_api_state_unbounded_budget_does_not_expose_private_breakdown_keys(tmp_path, monkeypatch):
     """The no-limit branch keeps internal ledger provenance off the wire."""
     from ouroboros.gateway.state import api_state
@@ -430,6 +432,41 @@ def test_task_detail_cost_breakdown_view_for_root(tmp_path, monkeypatch):
     assert view["unknown_unmetered"] == 1
     assert view["cost_final"] is False  # the undisclosed session keeps finality honest
     assert view["authority"] == "physical_attempt_ledger"
+    # Two partitions of the same subtree in the card's own money words: what it was for, and which route.
+    purposes = {item["key"]: item for item in view["by_purpose"]}
+    assert set(purposes) == {"task", "subagent"} and purposes["task"]["cost_presentation"]["tracked_amount"] == 0.8
+    assert purposes["subagent"]["sessions"] == 2 and purposes["subagent"]["model_calls"] == 0, \
+        "a slice of sessions stays, $0-disclosed ones included"
+    routes = {item["key"]: item for item in view["by_route"]}
+    assert routes["openai"]["cost_presentation"]["tracked_amount"] == 0.8 and routes["openai"]["model_calls"] == 2
+    sessions = [item for key, item in routes.items() if key != "openai"]
+    assert sum(item["sessions"] for item in sessions) == view["subscription_sessions"] == 2
+    assert all(item["model_calls"] == 0 for item in sessions), "a session is no provider send"
+
+
+def test_task_detail_cost_breakdown_slices_say_unknown_never_a_confident_zero(tmp_path, monkeypatch):
+    """A root whose own rows have no price shows own_usd None and an unknown slice, never $0;
+    a root with no own rows keeps its measured 0.0 (the other direction)."""
+    from ouroboros.gateway.tasks import _task_cost_breakdown_view
+
+    root = _data_root(tmp_path, monkeypatch)
+    unpriced = ua.reserve_attempt(ua.AttemptRequest(
+        model="claudexor::codex=gpt-6-astra", provider="claudexor", reservation_usd=None, global_limit_usd=7.5,
+        drive_root=root, task_id="root-1", root_task_id="root-1", category="task", source="test.gateway"))
+    ua.mark_dispatched(unpriced)
+    ua.settle_attempt(unpriced, {"prompt_tokens": 1000, "completion_tokens": 50}, cost_usd=None, cost_final=False)
+    _settled_attempt(root, task_id="child-1", cost=0.25, category="plan_review_review")
+    view = _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert view is not None and view["own_usd"] is None, "own rows exist, none priced: unknown, not $0"
+    purposes = {item["key"]: item for item in view["by_purpose"]}
+    assert purposes["task"]["cost_presentation"]["tracked_amount"] is None and purposes["task"]["tokens"] == 1050
+    assert purposes["plan_review_review"]["cost_presentation"]["tracked_amount"] == 0.25
+    assert [item["key"] for item in view["by_purpose"]] == ["plan_review_review", "task"], "money first"
+    assert {item["key"] for item in view["by_route"]} == {"claudexor", "openai"}
+    paid_only = _data_root(tmp_path / "paid", monkeypatch)
+    _settled_attempt(paid_only, task_id="child-1", cost=0.4)
+    measured = _task_cost_breakdown_view(paid_only, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert measured["own_usd"] == 0.0 and [item["key"] for item in measured["by_route"]] == ["openai"]
 
 
 def test_task_detail_cost_breakdown_view_only_for_roots_and_fails_soft(tmp_path, monkeypatch):
@@ -485,17 +522,21 @@ def test_task_detail_cost_breakdown_view_absent_when_nothing_was_accounted(tmp_p
     assert view["own_usd"] == 0.0 and view["children_usd"] == 0.25
 
 
-def test_task_detail_unknown_zero_subtree_is_omitted_not_reported_free(tmp_path, monkeypatch):
+def test_task_detail_unknown_zero_subtree_keeps_its_slices_and_reports_nothing_free(tmp_path, monkeypatch):
+    """Subscription-only work keeps the view (where it went), with every amount it cannot state as None."""
     from ouroboros.gateway.tasks import _task_cost_breakdown_view
 
     root = _data_root(tmp_path, monkeypatch)
+    assert _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"}) is None  # no rows
     ua.record_unmetered_external_dispatch(
         "detail-opaque", drive_root=root, provider="external-skill",
         task_id="root-1", root_task_id="root-1",
     )
-    assert _task_cost_breakdown_view(
-        root, {"task_id": "root-1", "root_task_id": "root-1"},
-    ) is None
+    view = _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert view is not None
+    assert view["own_usd"] is None and view["children_usd"] is None and view["accounted_upper_bound_usd"] is None
+    assert [(part["key"], part["cost_presentation"]["tracked_amount"], part["model_calls"]) for part in view["by_route"]] == [
+        ("external-skill", None, 1)]
 
 
 def test_task_detail_cost_breakdown_view_discloses_unattributed_money(tmp_path, monkeypatch):
@@ -514,7 +555,6 @@ def test_task_detail_cost_breakdown_view_discloses_unattributed_money(tmp_path, 
     assert round(view["own_usd"] + view["children_usd"] + view["unattributed_usd"], 6) == 0.50
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("limit", [7.5, 0.0])
 def test_api_state_reads_the_slim_writer_snapshot_never_the_full_breakdown(tmp_path, monkeypatch, limit):
     """Both budget branches serve the same values without the five grouped axes."""

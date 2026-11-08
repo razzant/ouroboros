@@ -1802,6 +1802,11 @@ def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
     seen = {}
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
 
         def wait(self, timeout):
@@ -1810,13 +1815,18 @@ def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
 
     import ouroboros.tools.shell as shell
     from ouroboros.claudexor_daemon import owned_config_dir
+    from ouroboros.tools import shell_process
 
     def popen(argv, **kwargs):
         seen["argv"], seen["kwargs"] = argv, kwargs
-        # /panic snapshots the tracked set under this lock: the spawn must be
-        # atomic with registration, so the lock is held HERE (round-2 finding).
+        # Counted before Popen, never under the registry lock (round-2 finding, tracked_start): the
+        # lock-free Panic request and a begun stop see the start through its count and publication.
         seen["lock_held_during_spawn"] = shell._subprocess_lock.locked()
-        return Process()
+        seen["counted_during_spawn"] = shell_process._spawning_subprocesses
+        proc = Process()
+        from tests.test_tracked_tree_containment import fake_tree_read
+        fake_tree_read(monkeypatch, proc, remains=False)
+        return proc
 
     monkeypatch.setattr(installer.subprocess, "Popen", popen)
     installer.install_missing_harness_cli("cursor")
@@ -1836,7 +1846,7 @@ def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
     assert env["CLAUDEXOR_CONFIG_DIR"] == str(owned_config_dir())
     assert "CLAUDEXOR_DAEMON_SOCK" not in env
     assert "CLAUDEXOR_CONTROL_PORT" not in env
-    assert seen["lock_held_during_spawn"] is True
+    assert seen["lock_held_during_spawn"] is False and seen["counted_during_spawn"] == 1
     output, state = bytearray(), {}
     installer._drain_installer_stdout(
         io.BytesIO(b"x" * (installer._HARNESS_INSTALL_STDOUT_LIMIT + 1)), output, state)
@@ -1860,6 +1870,11 @@ def test_installer_timeout_kills_the_process_tree(monkeypatch):
     waits = []
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         pid = 42
         stdout = io.BytesIO()
 
@@ -1870,6 +1885,8 @@ def test_installer_timeout_kills_the_process_tree(monkeypatch):
             return -9
 
     proc = Process()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
     killed = []
     import ouroboros.tools.shell as shell
@@ -1904,6 +1921,11 @@ def test_installer_child_is_panic_tracked_for_its_whole_run(monkeypatch):
     observed = {}
 
     class Process:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
         pid = 43
         stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
 
@@ -1912,6 +1934,8 @@ def test_installer_child_is_panic_tracked_for_its_whole_run(monkeypatch):
             return 0
 
     proc = Process()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
     installer.install_missing_harness_cli("cursor")
     assert observed["tracked_during_wait"] is True, "panic sweep must see the live installer"
@@ -2065,8 +2089,7 @@ def test_gateway_setup_job_operations_use_the_exact_daemon_routes():
     ]
 
 
-@pytest.mark.parametrize("op", ["snapshot", "cancel", "reconcile"])
-@pytest.mark.parametrize("status", [404, 410])
+@pytest.mark.parametrize(("status", "op"), [(404, "snapshot"), (404, "reconcile"), (410, "cancel")])
 def test_login_job_absence_statuses_pass_through(monkeypatch, tmp_path, op, status):
     """Job absence is a client-custody verdict for exactly these operations."""
     from ouroboros import claudexor_daemon as owned
@@ -3555,7 +3578,7 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
 
     from ouroboros.gateway import claudexor_accounts as accounts
 
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
     handlers = sorted(
         name for name, obj in vars(accounts).items()
         if name.startswith("api_claudexor_") and inspect.iscoroutinefunction(obj)

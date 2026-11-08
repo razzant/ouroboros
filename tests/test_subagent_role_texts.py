@@ -16,10 +16,7 @@ import pathlib
 
 from ouroboros.memory import Memory
 
-ROLE_TEXT = (
-    "Work from this assignment first — it is written to be enough; read memory or sources only to fill a "
-    "gap it leaves, and name what you read in your report."
-)
+ROLE_TEXT = "Read memory or sources whenever they could change what you do, and name what you read in your answer."
 DRAFT_RIGHT = ("You may also publish chronicle pages and parts as drafts in your own name; the integrating mind "
                "accepts or rejects them.")
 MEMORY_SENTENCE = "Knowledge notes and memory marks may be written in your own name"
@@ -112,15 +109,19 @@ def test_both_assignment_branches_grant_signed_memory_and_drop_the_old_bans():
 
 
 def test_schedule_subagent_tells_the_parent_children_write_signed_memory_and_drafts_but_not_identity():
+    from ouroboros.tools.chronicle import chronicle_tools
     from ouroboros.tools.control import get_tools
 
     description = next(entry.schema for entry in get_tools() if entry.name == "schedule_subagent")["description"]
     # Addressed to the parent, so "their own name" where the child's assignment says "your own name".
-    assert "children may write knowledge notes and memory marks in their own name" in description
-    assert ("publish chronicle pages and parts only as drafts, which the integrating mind accepts or rejects "
-            "(chronicle_write kind=decision)") in description
-    assert "identity and scratchpad stay with the parent" in description
-    assert "apart from knowledge notes, memory marks and chronicle drafts in its own name" in description
-    assert "Mutative children cannot commit or grant themselves tools" in description
+    # One statement covers read-only and mutative children alike (#502 merged its two former copies).
+    assert "Children may write knowledge notes, memory marks and chronicle drafts in their own name" in description
+    assert "(the integrating mind accepts or rejects drafts: chronicle_write kind=decision)" in description
+    assert "no child commits, grants itself tools or writes identity/scratchpad" in description
+    assert ("READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other "
+            "local writes or shell/review/runtime/skills") in description
+    # Which records a child drafts is said once, by the tool that writes them, in the same catalog.
+    chronicle = next(entry.schema for entry in chronicle_tools() if entry.name == "chronicle_write")["description"]
+    assert "A delegated child or nanny publishes pages and parts only as drafts" in chronicle
     for claim in FALSE_CLAIMS:
         assert claim not in description

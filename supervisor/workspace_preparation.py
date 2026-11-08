@@ -795,7 +795,7 @@ def _row_references(row: Dict[str, Any], resource: Dict[str, Any]) -> bool:
 
 def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
     """Remove exactly the copy ``resource`` names; a different or unknown holder is kept."""
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project, subagent_worktrees
 
     surface, path = str(resource.get("surface") or ""), str(resource.get("path") or "")
     try:
@@ -811,7 +811,7 @@ def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
                                   check=False) if pathlib.Path(path).is_dir() else None
             if head is None or head.returncode != 0 or head.stdout.strip() != str(resource.get("base_sha") or ""):
                 return "retained_not_owned"
-            return "removed" if subagent_worktrees.remove_genesis_project(path) else "retained_remove_failed"
+            return "removed" if genesis_project.remove_genesis_project(path, task_id=task_id) else "retained_remove_failed"
     except Exception:
         log.warning("Prepared copy %s of %s was kept: disposal failed", path, task_id, exc_info=True)
         return "retained_remove_failed"
@@ -846,10 +846,15 @@ def _interruption_reason(marker: Dict[str, Any]) -> str:
     return INTERRUPTED_BY_GENERATION_EXIT
 
 
+def _owes_recovery(row: Dict[str, Any]) -> bool:
+    marker = row.get(MARKER)  # a claim's marked receipt, or a REQUESTED row: an unmarked receipt is the restore's
+    return str(row.get("status") or "") == STATUS_REQUESTED or isinstance(marker, dict) and bool(marker.get("token"))
+
+
 def recover_interrupted_preparations(drive_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, list]:
     """Settle requests whose recorded owner positively ended (startup and periodic reconcile).
 
-    Selects REQUESTED and SCHEDULED rows (the status-indexed read). A
+    Reads REQUESTED rows and marked receipts (``task_store.owing_documents``: one read per row stamp). A
     ``queued``/``copying``/``ready`` marker becomes the typed never-admitted
     refusal through the schedule refusal owner, then only its recorded copy is
     disposed; the queue's own admission of the token retires the marker; an
@@ -861,14 +866,14 @@ def recover_interrupted_preparations(drive_root: Any, *, stop: Optional[Callable
     a SCHEDULED row without a marker belongs to the queue restore.
     """
     from ouroboros import obligations
-    from ouroboros.task_store import list_documents
+    from ouroboros.task_store import owing_documents
 
     root = pathlib.Path(drive_root)
     report: Dict[str, list] = {"settled": [], "retained": [], "admitted": [], "uncertain": [], "live": [],
                                "errors": []}
     try:
         _retire_resolved_gaps(root, obligations)
-        rows = list_documents(root, statuses=[STATUS_REQUESTED, STATUS_SCHEDULED])
+        rows = owing_documents(root, (STATUS_REQUESTED, STATUS_SCHEDULED), _owes_recovery)
     except Exception as exc:
         log.warning("Preparation recovery could not read requested rows", exc_info=True)
         report["errors"].append(f"requested_rows_unreadable:{type(exc).__name__}")
@@ -876,8 +881,6 @@ def recover_interrupted_preparations(drive_root: Any, *, stop: Optional[Callable
     for row in rows:
         marker = row.get(MARKER)
         marked = isinstance(marker, dict) and bool(str(marker.get("token") or ""))
-        if not marked and str(row.get("status") or "") != STATUS_REQUESTED:
-            continue
         if stop is not None and stop():
             break
         tid = str(row.get("task_id") or "")

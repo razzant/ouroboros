@@ -5,8 +5,9 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.gateway._helpers import request_json_or
 from ouroboros.gateway.owner_settings import (
-    _owner_audit, _owner_read_settings_raw, _owner_update_settings, owner_write_guard,
+    _owner_audit, _owner_update_settings, owner_write_guard, record_settings_change,
     settings_document_digest, settings_document_mutation, unsaved_error,
 )
 
@@ -33,9 +34,9 @@ def audit_safety_change(request: Request, before: dict, after: dict) -> None:
 
 
 async def _write(request: Request, writer: Any) -> JSONResponse:
-    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+    from ouroboros.gateway.settings import _run_settings_writer
 
-    return await _run_settings_writer(writer, request, await _json_body_or_empty(request))
+    return await _run_settings_writer(writer, request, await request_json_or(request, {}))
 
 
 @owner_write_guard
@@ -109,7 +110,9 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-def _persist(request: Request, changes: dict, action: str, audit: dict) -> dict:
+def _persist(request: Request, changes: dict, action: str, audit: dict) -> None:
+    """One Safety owner write; its committed old → new is the shared settings record, and the
+    endpoint's own action keeps only what was asked."""
     from ouroboros.config import apply_settings_to_env
 
     def merge(current):
@@ -129,11 +132,9 @@ def _persist(request: Request, changes: dict, action: str, audit: dict) -> dict:
 
     with settings_document_mutation():
         digest = settings_document_digest()
-        previous = _owner_read_settings_raw()
-        _owner_update_settings(merge, digest,
-                               authored_keys=tuple(changes), allow_safety_lowering=True)
+        record_settings_change(request, _owner_update_settings(
+            merge, digest, authored_keys=tuple(changes), allow_safety_lowering=True))
         # Projection only; the owner writer has already released its file lock.
         from ouroboros.config import load_settings
         apply_settings_to_env(load_settings())
-    _owner_audit(request, action, {**audit, "previous": {key: previous.get(key) for key in changes}})
-    return previous
+    _owner_audit(request, action, audit)

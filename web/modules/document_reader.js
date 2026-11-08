@@ -287,8 +287,251 @@ function failure(error, file) {
 }
 
 let readerCount = 0;
-// An image takes the same two view buttons: the whole image fitted, never enlarged, or its own pixels, scrolled.
-const IMAGE_VIEWS = [['fit', 'Fit'], ['actual', 'Actual size']];
+
+const IMAGE_MIN_SCALE = 1;
+const IMAGE_MAX_SCALE = 4;
+const IMAGE_ZOOM_STEP = 1.5;
+const IMAGE_POINTER_SLOP = 8;
+
+/**
+ * Own the image-only viewport interaction without making the document reader a
+ * second image component. The image stays the exact decoded node supplied by
+ * the reader; this object owns only transient scale/translation and pointer
+ * capture. All coordinates are relative to the stage's visual centre, which
+ * keeps focal zoom stable when a phone pinches or a trackpad emits a wheel.
+ */
+function createImageViewport(stage, image) {
+    let scale = IMAGE_MIN_SCALE;
+    let translateX = 0;
+    let translateY = 0;
+    let baseWidth = 0;
+    let baseHeight = 0;
+    let pointers = new Map();
+    let gesture = null;
+    let suppressClick = false;
+    const disposers = [];
+
+    const listen = (target, type, handler, options) => {
+        if (!target?.addEventListener) return;
+        target.addEventListener(type, handler, options);
+        disposers.push(() => target.removeEventListener(type, handler, options));
+    };
+
+    const rect = () => {
+        const value = stage.getBoundingClientRect?.();
+        return value && value.width ? value : {
+            left: 0,
+            top: 0,
+            width: stage.clientWidth || 1,
+            height: stage.clientHeight || 1,
+        };
+    };
+
+    const dimensions = () => {
+        const value = image.getBoundingClientRect?.();
+        return {
+            width: value?.width || image.offsetWidth || image.naturalWidth || 1,
+            height: value?.height || image.offsetHeight || image.naturalHeight || 1,
+        };
+    };
+
+    const setPosition = () => {
+        stage.style?.setProperty('--image-scale', String(scale));
+        stage.style?.setProperty('--image-x', `${translateX}px`);
+        stage.style?.setProperty('--image-y', `${translateY}px`);
+        stage.classList?.toggle('is-image-panned', scale > IMAGE_MIN_SCALE
+            && (Math.abs(translateX) > 0.5 || Math.abs(translateY) > 0.5));
+    };
+
+    const clampPosition = () => {
+        const viewport = rect();
+        const width = baseWidth * scale;
+        const height = baseHeight * scale;
+        const limitX = Math.max(0, (width - viewport.width) / 2);
+        const limitY = Math.max(0, (height - viewport.height) / 2);
+        translateX = Math.max(-limitX, Math.min(limitX, translateX));
+        translateY = Math.max(-limitY, Math.min(limitY, translateY));
+    };
+
+    const rel = (event) => {
+        const viewport = rect();
+        return {
+            x: (event.clientX ?? viewport.left) - viewport.left - viewport.width / 2,
+            y: (event.clientY ?? viewport.top) - viewport.top - viewport.height / 2,
+        };
+    };
+
+    const apply = () => {
+        clampPosition();
+        setPosition();
+    };
+
+    const relPoint = (point) => {
+        const viewport = rect();
+        return {
+            x: point.x - viewport.left - viewport.width / 2,
+            y: point.y - viewport.top - viewport.height / 2,
+        };
+    };
+
+    const zoomAt = (factor, point = null) => {
+        const next = Math.max(IMAGE_MIN_SCALE, Math.min(IMAGE_MAX_SCALE, scale * factor));
+        if (Math.abs(next - scale) < 0.001) return false;
+        const focus = point ? relPoint(point) : { x: 0, y: 0 };
+        const ratio = next / scale;
+        translateX = focus.x - ratio * (focus.x - translateX);
+        translateY = focus.y - ratio * (focus.y - translateY);
+        scale = next;
+        apply();
+        return true;
+    };
+
+    const reset = () => {
+        scale = IMAGE_MIN_SCALE;
+        translateX = 0;
+        translateY = 0;
+        apply();
+    };
+
+    const panBy = (x, y) => {
+        if (scale <= IMAGE_MIN_SCALE) return false;
+        translateX += x;
+        translateY += y;
+        apply();
+        return true;
+    };
+
+    const centerOf = (first, second) => ({
+        x: (first.x + second.x) / 2,
+        y: (first.y + second.y) / 2,
+    });
+
+    const distance = (first, second) => Math.hypot(first.x - second.x, first.y - second.y);
+
+    const startGesture = () => {
+        const values = [...pointers.values()];
+        if (values.length >= 2) {
+            const first = values[0];
+            const second = values[1];
+            gesture = {
+                mode: 'pinch',
+                distance: Math.max(1, distance(first, second)),
+                center: centerOf(first, second),
+                startScale: scale,
+                startX: translateX,
+                startY: translateY,
+                moved: false,
+            };
+        } else if (values.length === 1) {
+            gesture = { mode: 'pan', last: { ...values[0] }, moved: false };
+        }
+    };
+
+    const pointerDown = (event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        try { stage.setPointerCapture?.(event.pointerId); } catch {}
+        startGesture();
+    };
+
+    const pointerMove = (event) => {
+        const previous = pointers.get(event.pointerId);
+        if (!previous) return;
+        const next = { x: event.clientX, y: event.clientY };
+        pointers.set(event.pointerId, next);
+        if (!gesture) return;
+        if (gesture.mode === 'pan' && pointers.size === 1) {
+            const moved = Math.hypot(next.x - gesture.last.x, next.y - gesture.last.y);
+            if (moved > IMAGE_POINTER_SLOP) gesture.moved = true;
+            if (gesture.moved) panBy(next.x - gesture.last.x, next.y - gesture.last.y);
+            gesture.last = next;
+            return;
+        }
+        if (pointers.size < 2) return;
+        const values = [...pointers.values()];
+        const first = values[0];
+        const second = values[1];
+        const currentDistance = Math.max(1, distance(first, second));
+        const currentCenter = centerOf(first, second);
+        if (currentDistance !== gesture.distance
+            || Math.hypot(currentCenter.x - gesture.center.x, currentCenter.y - gesture.center.y) > IMAGE_POINTER_SLOP) {
+            gesture.moved = true;
+        }
+        const nextScale = Math.max(IMAGE_MIN_SCALE, Math.min(IMAGE_MAX_SCALE,
+            gesture.startScale * currentDistance / gesture.distance));
+        const ratio = nextScale / gesture.startScale;
+        const start = relPoint(gesture.center);
+        const current = relPoint(currentCenter);
+        scale = nextScale;
+        translateX = current.x - ratio * (start.x - gesture.startX);
+        translateY = current.y - ratio * (start.y - gesture.startY);
+        apply();
+    };
+
+    const pointerEnd = (event) => {
+        if (gesture?.moved) suppressClick = true;
+        pointers.delete(event.pointerId);
+        try { stage.releasePointerCapture?.(event.pointerId); } catch {}
+        if (pointers.size === 1) startGesture();
+        else if (!pointers.size) gesture = null;
+    };
+
+    const wheel = (event) => {
+        if (event.ctrlKey) {
+            event.preventDefault();
+            zoomAt(Math.max(0.5, 1 - event.deltaY * 0.01), { x: event.clientX, y: event.clientY });
+        } else if (scale > IMAGE_MIN_SCALE) {
+            event.preventDefault();
+            panBy(-event.deltaX, -event.deltaY);
+        }
+    };
+
+    listen(stage, 'pointerdown', pointerDown);
+    listen(stage, 'pointermove', pointerMove);
+    listen(stage, 'pointerup', pointerEnd);
+    listen(stage, 'pointercancel', pointerEnd);
+    listen(stage, 'wheel', wheel, { passive: false });
+
+    return {
+        zoomIn(point) { return zoomAt(IMAGE_ZOOM_STEP, point); },
+        zoomOut(point) { return zoomAt(1 / IMAGE_ZOOM_STEP, point); },
+        reset,
+        zoomAt,
+        panBy,
+        relayout() {
+            const old = dimensions();
+            if (scale === IMAGE_MIN_SCALE || !baseWidth) {
+                baseWidth = old.width;
+                baseHeight = old.height;
+            } else {
+                baseWidth = old.width / scale;
+                baseHeight = old.height / scale;
+            }
+            apply();
+        },
+        takeClick() {
+            const result = !suppressClick;
+            suppressClick = false;
+            return result;
+        },
+        handleKey(key) {
+            if (key === '+' || key === '=') return zoomAt(IMAGE_ZOOM_STEP);
+            if (key === '-' || key === '_') return zoomAt(1 / IMAGE_ZOOM_STEP);
+            if (key === '0' || key === 'Home') { reset(); return true; }
+            if (key === 'ArrowLeft') return panBy(40, 0);
+            if (key === 'ArrowRight') return panBy(-40, 0);
+            if (key === 'ArrowUp') return panBy(0, 40);
+            if (key === 'ArrowDown') return panBy(0, -40);
+            return false;
+        },
+        destroy() {
+            for (const dispose of disposers) dispose();
+            pointers.clear();
+            gesture = null;
+        },
+        get scale() { return scale; },
+    };
+}
 
 const DIALOG_HTML = `
     <div class="document-reader-panel">
@@ -303,9 +546,16 @@ const DIALOG_HTML = `
                         <button type="button" class="btn btn-default" data-reader-view="formatted" aria-pressed="true">Formatted</button>
                         <button type="button" class="btn btn-default" data-reader-view="source" aria-pressed="false">Source</button>
                     </div>
-                    <button type="button" class="btn btn-default" data-reader-action="copy" hidden>Copy</button>
-                    <button type="button" class="btn btn-default" data-reader-action="open">Open</button>
-                    <button type="button" class="btn btn-default" data-reader-action="download">Download</button>
+                    <div class="document-reader-zoom" role="group" aria-label="Image zoom" hidden>
+                        <button type="button" class="btn btn-default" data-reader-zoom="out" aria-label="Zoom out">−</button>
+                        <button type="button" class="btn btn-default" data-reader-zoom="reset">Reset</button>
+                        <button type="button" class="btn btn-default" data-reader-zoom="in" aria-label="Zoom in">+</button>
+                    </div>
+                    <div class="document-reader-file">
+                        <button type="button" class="btn btn-default" data-reader-action="copy" hidden>Copy</button>
+                        <button type="button" class="btn btn-default" data-reader-action="open">Open</button>
+                        <button type="button" class="btn btn-default" data-reader-action="download">Download</button>
+                    </div>
                 </div>
             </div>
             <button type="button" class="btn btn-default document-reader-close" data-reader-action="close" aria-label="Close document">Close</button>
@@ -340,10 +590,39 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         notice.hidden = !lines.length;
     }
 
+    function setSceneChrome(current, visible) {
+        if (current.kind !== 'image') return;
+        const head = current.dialog.querySelector('.document-reader-head');
+        current.sceneChromeVisible = visible;
+        head.hidden = !visible;
+        current.dialog.classList.toggle('is-scene-chrome-hidden', !visible);
+        if (visible) {
+            current.dialog.removeAttribute('aria-label');
+            current.dialog.setAttribute('aria-labelledby', current.title.id);
+        } else {
+            // The labelled heading is hidden with the chrome. Keep the dialog
+            // named for assistive technology while the body remains focused.
+            current.dialog.removeAttribute('aria-labelledby');
+            current.dialog.setAttribute('aria-label', current.file.title || current.file.filename || 'Image');
+            current.body.focus({ preventScroll: true });
+        }
+    }
+
+    function sceneTouchEnabled(current) {
+        const matchMedia = current.dialog.ownerDocument.defaultView?.matchMedia;
+        return current.kind === 'image'
+            && Boolean(matchMedia?.('(pointer: coarse)')?.matches)
+            && Boolean(matchMedia?.('(max-width: 620px)')?.matches);
+    }
+
     function showStatus(current, key, params = {}, { retry = false, tone = 'info' } = {}) {
         const body = current.body;
         destroyChatMarkdown(body);
+        current.viewport?.destroy();
+        current.viewport = null;
+        current.dialog.querySelector('.document-reader-zoom').hidden = true;
         body.classList.remove('is-image', 'is-actual');
+        setSceneChrome(current, true);
         const status = doc.createElement('div');
         status.className = `document-reader-status is-${tone}`;
         status.setAttribute('role', tone === 'error' ? 'alert' : 'status');
@@ -371,10 +650,14 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         }
         let content;
         if (current.kind === 'image') {
-            content = current.image;
+            current.viewport?.destroy();
+            content = doc.createElement('div');
+            content.className = 'document-reader-image-stage';
+            content.setAttribute('role', 'img');
+            content.setAttribute('aria-label', current.file.title || current.file.filename || 'Image');
+            content.append(current.image);
             body.classList.add('is-image');
-            body.classList.toggle('is-actual', current.view === 'actual');
-            body.scrollLeft = 0;
+            body.classList.remove('is-actual');
         } else if (formatted) {
             content = doc.createElement('div');
             content.className = 'document-reader-markdown';
@@ -391,6 +674,11 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         body.setAttribute('aria-busy', 'false');
         body.scrollTop = 0;
         if (formatted) enhanceChatMarkdown(content);
+        if (current.kind === 'image') {
+            current.viewport = createImageViewport(content, current.image);
+            current.viewport.relayout();
+            current.dialog.querySelector('.document-reader-zoom').hidden = false;
+        }
     }
 
     async function load(current) {
@@ -399,7 +687,9 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         current.controller = controller;
         current.loaded = false;
         const views = current.dialog.querySelector('.document-reader-views');
+        const zoom = current.dialog.querySelector('.document-reader-zoom');
         views.hidden = true;
+        zoom.hidden = true;
         setNotice(current, []);
         const image = current.kind === 'image';
         showStatus(current, image ? 'Loading the image…' : 'Loading the document…', {}, { tone: 'loading' });
@@ -418,7 +708,6 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         if (image) {
             current.image = result;
             current.loaded = true;
-            views.hidden = false;
             showContent(current);
             return;
         }
@@ -447,6 +736,8 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         if (!current) return;
         session = null;
         current.controller?.abort();
+        current.viewport?.destroy();
+        current.viewport = null;
         destroyChatMarkdown(current.body);
         for (const dispose of current.disposers) {
             try { dispose(); } catch {}
@@ -476,25 +767,31 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         dialog.querySelector('[data-reader-action="download"]').hidden = !actions.download;
         const current = {
             dialog, file, owner, kind: file.kind, view: 'formatted', text: '', image: null, loaded: false, controller: null,
-            disposers: [], body: dialog.querySelector('.document-reader-body'), disposeFocus: null,
+            disposers: [], body: dialog.querySelector('.document-reader-body'), disposeFocus: null, viewport: null,
+            title, sceneChromeVisible: true, scenePointer: null,
         };
         if (file.kind === 'image') {
-            dialog.querySelectorAll('[data-reader-view]').forEach((button, index) => {
-                [button.dataset.readerView, button.textContent] = IMAGE_VIEWS[index];
-            });
-            current.view = 'fit';
+            dialog.classList.add('is-image-scene');
             current.body.setAttribute('aria-label', 'Image');
         }
         const listen = (target, type, handler) => {
+            if (!target?.addEventListener) return;
             target.addEventListener(type, handler);
             current.disposers.push(() => target.removeEventListener(type, handler));
         };
+        listen(doc.defaultView, 'resize', () => {
+            if (current.kind !== 'image') return;
+            current.viewport?.relayout();
+            if (!sceneTouchEnabled(current) && !current.sceneChromeVisible) setSceneChrome(current, true);
+        });
         listen(dialog, 'click', (event) => {
             if (session !== current) return;
             // The panel fills the dialog box, so the dialog itself is only hit through its backdrop.
             if (event.target === dialog) { close(); return; }
             const action = event.target.closest?.('[data-reader-action]')?.dataset.readerAction;
             const view = event.target.closest?.('[data-reader-view]')?.dataset.readerView;
+            const zoom = event.target.closest?.('[data-reader-zoom]')?.dataset.readerZoom;
+            const sceneTarget = event.target.closest?.('.document-reader-body.is-image');
             if (action === 'close') close();
             else if (action === 'retry') {
                 // The status that held Retry is replaced: the reading region keeps the focus.
@@ -505,11 +802,25 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
             else if (view && view !== current.view && current.loaded) {
                 current.view = view;
                 showContent(current);
+            } else if (zoom && current.loaded && current.viewport) {
+                if (zoom === 'in') current.viewport.zoomIn();
+                else if (zoom === 'out') current.viewport.zoomOut();
+                else current.viewport.reset();
+                current.body.focus({ preventScroll: true });
+            } else if (sceneTarget && current.loaded && current.viewport?.takeClick()) {
+                if (event.detail >= 2) current.viewport.zoomAt(IMAGE_ZOOM_STEP, event);
+                else if (sceneTouchEnabled(current)) setSceneChrome(current, !current.sceneChromeVisible);
             }
         });
         listen(dialog, 'cancel', (event) => { event.preventDefault(); close(); });
         current.body.classList.toggle('is-quiet-focus', pointer);
-        listen(dialog, 'keydown', () => current.body.classList.remove('is-quiet-focus'));
+        listen(dialog, 'keydown', (event) => {
+            current.body.classList.remove('is-quiet-focus');
+            if (current.kind === 'image' && !current.sceneChromeVisible && event.key !== 'Escape') setSceneChrome(current, true);
+            if (current.kind === 'image' && current.loaded && current.viewport && event.key !== 'Escape') {
+                if (current.viewport.handleKey(event.key)) event.preventDefault();
+            }
+        });
         listen(dialog, 'close', () => { if (session === current) close({ restoreFocus: false }); });
         doc.body.appendChild(dialog);
         session = current;

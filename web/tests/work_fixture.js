@@ -8,6 +8,8 @@ const SERVER = JSON.parse(readFileSync(new URL('./fixtures/work_projection_cases
 export const SERVER_CASES = SERVER.cases;
 // Every reason sentence the server can send, by code: a counted one at 1 and at 3 ('' for an uncounted one).
 export const SERVER_REASONS = SERVER.reasons;
+// One saved sleep per kind the server says, as its `sleeping` reason (`wake` and English sentence).
+export const SERVER_SLEEPS = SERVER.sleeps;
 
 /** The mark the server names for an activity (gateway/work_status.mark_of; the server cases pin it): something that
  *  executes (`live`) or work observed running moves even in an incomplete read, a run nobody can confirm while nothing

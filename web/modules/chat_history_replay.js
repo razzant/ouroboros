@@ -41,16 +41,16 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         || String(summary.dedupeKey || '').startsWith('cardrow|');
     const activity = summary.activity ? { activity: summary.activity } : {};
     const key = evolving ? summary.dedupeKey : `history:${identity}`;
-    // Speech keeps its live occurrence alias beside the physical history identity:
-    // history may precede live delivery, or adopt a line before it is redelivered.
-    const occurrence = String(summary.dedupeKey || '').startsWith('subagent-line:')
+    // A child's words and a thought keep their live occurrence alias beside the physical history
+    // identity: history may precede live delivery, or adopt a line before it is redelivered.
+    const occurrence = /^(subagent-line|reasoning):/.test(String(summary.dedupeKey || ''))
         ? { occurrenceKey: summary.dedupeKey } : {};
     const source = { sourceHistoryId: identity, sourceHistoryRevision: summary.cardRowRevision,
         historyPosition: row.history_position };
     let item = record.items.find((entry) => entry.dedupeKey === key);
     if (!item && !evolving) {
         item = record.items.find((entry) => !entry.historyId
-            && entry.dedupeKey === summary.dedupeKey && entry.sourceTs === row.ts);
+            && (entry.occurrenceKey ?? entry.dedupeKey) === summary.dedupeKey && entry.sourceTs === row.ts);
     }
     if (item && evolving) {
         // Source revision advances independently of live content: an older
@@ -62,11 +62,17 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         if (adoptedSource) Object.assign(item, source);
         const incomingTime = Date.parse(row.ts), existingTime = Date.parse(item.sourceTs || '');
         if (Number.isSafeInteger(item.cardRowRevision)) {
-            if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= item.cardRowRevision) return adoptedSource;
+            // Only a newer revision of this merge's review can enrich an equal receipt revision.
+            const newerReview = summary.cardReview?.record_id && Number.isSafeInteger(summary.cardReview.revision)
+                && (!item.cardReview || summary.cardReview.record_id === item.cardReview.record_id
+                    && summary.cardReview.revision > item.cardReview.revision);
+            if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
+                || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
         } else if (!Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) return adoptedSource;
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,
+            cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
             fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
             phase: summary.phase || item.phase, sourceTs: row.ts || item.sourceTs,
@@ -87,6 +93,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     } else {
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            cardReview: summary.cardReview || null,
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',

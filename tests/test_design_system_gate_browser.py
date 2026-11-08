@@ -14,9 +14,10 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 VIEWPORTS = [
     (360, 844, False), (390, 844, False), (390, 780, True),
@@ -59,28 +60,32 @@ MEASURE = """root => {
     const shown = """ + SHOWN + """;
     const name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') +
         [...e.classList].slice(0,3).map(c=>'.'+c).join('');
-    const local = e => e.matches('.app-tab-strip, pre, .md-table-wrap, .widget-table-wrap, ' +
-        '.costs-tables-grid > div, .files-preview-content, .files-editor');
+    // [data-scroll-x] marks the product's own sideways strips (drawer_drag.js SIDEWAYS_SELECTOR: Skills' filters and
+    // categories on a phone), which scroll inside themselves with a fade like a tab strip.
+    const local = e => e.matches('.app-tab-strip, [data-scroll-x], pre, .md-table-wrap, .widget-table-wrap, ' +
+        '.files-preview-content, .files-editor');
     const overflow = [], small = [], headers = [];
     const scope = document.querySelector(root);
     const doc = document.scrollingElement;
     // The 44px rule is a touch rule: it applies when the pointer is coarse, and it measures the HIT area, not the
     // box. A control passes when its centre ±21px (clipped to the viewport) lands on it or on something inside it
-    // (an invisible hit extension counts); otherwise its box is reported. A control below the fold is brought into
-    // view first, where a finger would meet it.
+    // (an invisible hit extension counts); otherwise its box is reported. A control the loop finds where a finger
+    // cannot meet it (below the fold, clipped by its own scroller, or with its reach under a bar such as the Save bar)
+    // is brought to the middle of its scroller first, where a finger would meet it, and judged there.
     const coarse = matchMedia('(pointer: coarse)').matches;
     const hits = (e, r) => {
-        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) {
-            e.scrollIntoView({block: 'center', inline: 'nearest'});
-            r = e.getBoundingClientRect();
-        }
-        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
         const clampX = x => Math.min(Math.max(x, 0), innerWidth - 1);
         const clampY = y => Math.min(Math.max(y, 0), innerHeight - 1);
-        return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
-            const t = document.elementFromPoint(clampX(x), clampY(y));
-            return Boolean(t) && (t === e || e.contains(t));
-        });
+        const reached = box => {
+            const cx = box.left + box.width / 2, cy = box.top + box.height / 2;
+            return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
+                const t = document.elementFromPoint(clampX(x), clampY(y));
+                return Boolean(t) && (t === e || e.contains(t));
+            });
+        };
+        if (reached(r)) return true;
+        e.scrollIntoView({block: 'center', inline: 'nearest'});
+        return reached(e.getBoundingClientRect());
     };
     if (doc.scrollWidth > doc.clientWidth + 1)
         overflow.push({node:'document.scrollingElement',extra:doc.scrollWidth-doc.clientWidth});
@@ -149,6 +154,7 @@ def seed_page(ui, width, height, telegram=False, touch=None):
         return lambda route: route.fulfill(json=body)
     for path, body in payloads.items():
         page.route('**' + path, response(body))
+    page.route('**/api/projects?id=*', lambda route: answer_projects(route, PROJECTS))  # a reference's own read
     return page
 
 
@@ -374,11 +380,11 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 page.wait_for_selector('.widgets-card')
             if name == 'dashboard':
                 page.locator('[data-dashboard-tab="costs"]').click()
-                page.wait_for_function("document.querySelector('#cost-top-model').textContent.length > 200")
-                table = page.locator('#cost-by-model').locator('..')
-                assert table.evaluate('e => e.scrollWidth > e.clientWidth'), 'fixture must scroll locally'
-                table.evaluate('e => e.scrollLeft = e.scrollWidth')
-                assert table.evaluate('e => e.scrollLeft > 0')
+                page.wait_for_function("document.querySelector('#cost-by-model .cost-cell-name')?.textContent.length > 200")
+                cell = page.locator('#cost-by-model .cost-cell-name').first
+                # The cell is the amount's neighbour: a name longer than its column ends in an ellipsis in place.
+                assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
+                assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
                 page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
                 for tab in page.locator('[data-settings-tab]').all():
@@ -391,13 +397,13 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 results[name] = page.evaluate(MEASURE, scope)
         assert not {k:v for k,v in results.items() if any(v.values())}, json.dumps(results, indent=2)
 
-        # Regression sensitivity: restoring the old ineffective stat-value rule
-        # must make the same probe fail, although the table still scrolls locally.
+        # Regression sensitivity: a name cell allowed to grow (the old recipe) must make the same probe fail: the long
+        # name would widen its table past its card and the tab body would scroll sideways.
         open_nav(page, 'dashboard')
         page.locator('[data-dashboard-tab="costs"]').click()
-        page.add_style_tag(content='.costs-stats-grid .value { overflow-wrap: normal; }')
+        page.add_style_tag(content='.cost-cell-name { max-width: none; overflow: visible; }')
         settle(page)
         broken = page.evaluate(MEASURE, '.dashboard-shell')
-        assert any(row['node'] == 'div.costs-scroll' for row in broken['overflow']), broken
+        assert any(row['node'].startswith('div#page-costs') for row in broken['overflow']), broken
     finally:
         page.close()

@@ -17,7 +17,8 @@ def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monke
     address = format_address(row_address(original))
     bridge.handle_web_message("this one", client_message_id="reply", task_metadata={"reply_to": address})
     row = dialogue_test.chat_rows(tmp_path)[-1]
-    assert row["reply_to"]["snippet"] == ("One " + "word " * 80)[:160]
+    assert row["reply_to"]["snippet"] == ("One " + "word " * 80)[:159].rstrip() + "…"  # a cut preview says so
+    assert row["reply_to"]["chars"] == len(original["text"]), "and the reference keeps how long the whole message is"
     assert row["reply_to"]["role"] == "assistant"
     assert echoes[-1]["reply_to"] == row["reply_to"]
     assert echoes[-1]["row_address"] == format_address(row_address(row))
@@ -101,7 +102,7 @@ def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, m
     address, reference = _reply_to(bridge, stored, "mirror-reply")
     assert reference["address"] == address and reference["kind"] == "completion"
     assert reference["role"] == "assistant" and reference["author_label"] == "Ouroboros"
-    assert reference["snippet"] == " ".join(answer.split())[:160]
+    assert reference["snippet"] == " ".join(answer.split())[:159].rstrip() + "…" and reference["chars"] == len(answer)
     assert echoes[-1]["reply_to"] == reference
     replay = next(r for r in _history(tmp_path) if r.get("client_message_id") == "mirror-reply")
     assert replay["reply_to"] == reference
@@ -116,7 +117,6 @@ def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, m
 @pytest.mark.parametrize("direction,record_type,meta,role", [
     ("system", "task_error", {}, "system"),
     ("system", "project_completion_summary", {"completion_answer": "", "project_id": "project-a"}, "system"),
-    ("system", "project_completion_summary", {"project_id": "project-a"}, "system"),
     ("out", "", {}, "assistant"),
 ])
 def test_reply_to_other_rows_keeps_their_own_text_and_voice(tmp_path, monkeypatch, direction, record_type, meta, role):
@@ -158,3 +158,15 @@ def test_an_outgoing_rows_own_name_travels_beside_the_owner_correlation(tmp_path
     frame = next(echo for echo in echoes if echo.get("content") == "Restarting")
     assert frame["client_message_id"] == "owner-cmid" and frame["row_address"]
     assert "row_client_message_id" not in frame, "the owner's correlation never becomes the reply's own name"
+
+
+def test_a_call_opening_row_names_itself_on_its_live_echo():
+    """The call-open row is ingress the host wrote: its live echo must carry its own name, or the chat cannot fold
+    it into the call card and the owner sees the opening as a System bubble beside every call (27.10)."""
+    from ouroboros.chat_references import projection_fields
+    opening = {"direction": "in", "role": "system", "system_type": "call_open", "chat_id": 1, "ts": "t",
+               "client_message_id": "call:c1:open", "host_fact": {"kind": "call_open", "call_id": "c1"}, "text": "Cue"}
+    assert projection_fields(opening)["row_client_message_id"] == "call:c1:open"
+    owner = {**opening, "role": "user", "system_type": ""}
+    owner.pop("host_fact")
+    assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"

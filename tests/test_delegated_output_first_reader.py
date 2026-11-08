@@ -52,8 +52,12 @@ def _whole_from_first(reader, ref):
     return "".join(pieces)
 
 
-@pytest.mark.parametrize("key", ["staged_output", "other_staged_outputs", "terminal_observation", "other_terminal_observations"])
-@pytest.mark.parametrize("geometry", ["parent", "forked_parent", "root_continue"])
+@pytest.mark.parametrize(("geometry", "key"), [
+    ("parent", "staged_output"),
+    ("parent", "other_terminal_observations"),
+    ("forked_parent", "other_staged_outputs"),
+    ("root_continue", "terminal_observation"),
+])
 def test_legacy_receipt_first_recipe_opens_after_gc_with_different_staging_and_publisher(geo, key, geometry):
     text, _ref = _old_receipt(geo, key)
     old = load_task_result(geo.canonical, NANNY)
@@ -75,6 +79,66 @@ def test_legacy_receipt_first_recipe_opens_after_gc_with_different_staging_and_p
     assert _whole_from_first(reader, run[key][0] if key.startswith("other_") else run[key]) == text
     assert load_task_result(geo.canonical, NANNY) == old
     assert _receipts(geo) == [], "portable discovery never earns D7"
+
+
+@pytest.mark.parametrize("key", ["staged_output", "other_staged_outputs"])
+@pytest.mark.parametrize("geometry", ["parent", "forked_parent", "root_continue"])
+def test_the_advertised_direct_read_opens_for_the_actor_it_is_shown_to_without_new_authority(geo, key, geometry):
+    """#2539: a root named in the recipe is the READER's store, which refused every actor outside the staging
+    lineage. Rootless, dispatch picks the permitted root holding the address; the named root stays refused."""
+    text, stored = _old_receipt(geo, key)
+    old = load_task_result(geo.canonical, NANNY)
+    reader = (_top(geo, CONT, forked=True, predecessor=ROOT) if geometry == "root_continue"
+              else _top(geo, ROOT, forked=geometry == "forked_parent"))
+    summary = json.loads(_execute(reader, "get_task_result", task_id=NANNY, view="summary").text)
+    run = summary["delegated_custody"]["terminal_runs"][0]
+    direct = (run[key][0] if key.startswith("other_") else run[key])["direct_read"]
+    opened = _execute(reader, direct["tool"], **direct["arguments"])
+    assert opened.status == "ok" and not opened.text.startswith("⚠️"), opened.text[:300]
+    assert text[:60] in opened.text
+    assert direct["arguments"]["path"] == stored["read"]["arguments"]["path"], "the exact file, not a copy"
+    if geometry != "root_continue":  # the staging store is that reader's own; for the others it never was
+        named = _execute(reader, "read_file", **stored["read"]["arguments"])
+        assert named.text.startswith("⚠️") and "outside selected root=artifact_store" in named.text
+    assert load_task_result(geo.canonical, NANNY) == old, "a read projection, not a stored migration"
+    assert _receipts(geo) == [], "reading it from outside the lineage never earns D7"
+
+
+def test_only_an_absolute_staging_address_goes_rootless():
+    """A relative recipe means its own store: without its root it would name the active workspace."""
+    from ouroboros.delegate_output import project_output_readers
+
+    relative = {"tool": "read_file", "arguments": {"root": "artifact_store", "path": "source_handles/tool_results/x.json"}}
+    row = {"run_id": "r", "owner_task_id": NANNY, "staged_output": {"sha256": "a" * 64, "read": relative}}
+    assert project_output_readers(row)["staged_output"]["direct_read"] == relative
+
+
+def test_a_rootless_direct_read_grants_a_sibling_nothing_its_named_roots_do_not(geo):
+    _text, stored = _old_receipt(geo, "staged_output")
+    sibling = discovery._child(geo, "s1bl1ng", ROOT)
+    path = stored["read"]["arguments"]["path"]
+    rootless = _execute(sibling, "read_file", path=path)
+    runtime = _execute(sibling, "read_file", root="runtime_data", path=path)
+    assert rootless.text.startswith("⚠️") == runtime.text.startswith("⚠️"), (rootless.text[:200], runtime.text[:200])
+    assert "outside selected root=artifact_store" in _execute(sibling, "read_file", **stored["read"]["arguments"]).text
+
+
+def test_a_presence_ceiling_refuses_the_rootless_direct_read_it_never_granted(geo):
+    from ouroboros.presence_authority import (
+        PresenceCapabilityCeiling, PresenceResourceGrant, PresenceToolGrant, presence_ceiling_payload)
+
+    text, stored = _old_receipt(geo, "staged_output")
+    ceiling = PresenceCapabilityCeiling(
+        skill_name="community-helper", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+        state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=10,
+        tool_grants=(PresenceToolGrant("read_file"),),
+        resource_grants=(PresenceResourceGrant(root="user_files", operations=("read",), path_prefix="shared"),),
+        digest="e" * 64)
+    for forked in (False, True):
+        reader = _top(geo, ROOT, forked=forked)
+        reader.task_contract = {"capability_ceiling": presence_ceiling_payload(ceiling)}
+        refused = _execute(reader, "read_file", path=stored["read"]["arguments"]["path"], start_line=1, max_lines=2000)
+        assert refused.status != "ok" and text[:60] not in refused.text, refused.text[:300]
 
 
 def test_predecessor_first_recipe_keeps_physical_publisher_not_effective_successor(geo):

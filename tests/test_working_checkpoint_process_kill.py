@@ -38,7 +38,7 @@ from tests.working_checkpoint_kill_host import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
     os.name != "posix", reason="This fixture qualifies a POSIX SIGKILL of the child's process group only")]
 
 
@@ -142,7 +142,7 @@ def test_sigkill_inside_an_accepted_batch_never_replays_it_and_keeps_acked_mail_
 
     # What the dead interpreter left: the pre-effect state naming the whole batch
     # (no result of it was saved), holding the owner mail ACKed only after that save.
-    saved = json.loads(wc.checkpoint_path(drive, TASK_ID, 1).read_bytes())
+    saved = wc.read_working(drive, TASK_ID, 1)[1]  # a skeleton over CAS parts: the reader expands it
     assert saved["working"]["boundary"] == "pre_effect"
     assert saved["working"]["pending_tool_call_ids"] == call_ids
     assert "mail-1" in saved["seen"]
@@ -177,7 +177,7 @@ def test_sigkill_between_checkpoint_temp_and_replace_keeps_previous_state_and_re
     # The replace never happened: the file is the complete previous state, and
     # the half-written temp is an orphan beside it.
     path = wc.checkpoint_path(drive, TASK_ID, 1)
-    saved = json.loads(path.read_bytes())
+    saved = wc.read_working(drive, TASK_ID, 1)[1]
     assert saved["working"]["seq"] == facts["seq"] - 1 and saved["working"]["boundary"] == "post_batch"
     assert saved["working"]["pending_tool_call_ids"] == []
     assert "mail-1" in saved["seen"] and "mail-2" not in saved["seen"]

@@ -148,7 +148,7 @@ def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateRevie
     names the same facts), ``chat_id`` (the owning chat, by value), ``lines`` (the writer's settled words:
     its verdict clause, then one line per seat of the whole roster, pending and unknown seats included),
     ``subject`` (scalar identity of what the reviewers read), ``source_ref`` (the retained full source),
-    optional ``source_read`` and ``settled_at``.
+    optional ``source_read``, ``settled_at`` and the writer's already-proven ``room_id`` (frozen with its source).
     """
     try:
         facts = _facts(record)
@@ -183,11 +183,30 @@ def owe_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMar
                           mark_id)
 
 
-def owe_after_end(drive_root: Any, duty_id: str, duty: Mapping[str, Any]) -> bool:
+def replay_settled_late_review(drive_root: Any, mark_id: str) -> Optional[LateReviewMark]:
+    """After task end, reuse a publication's frozen source/room instead of composing it from changed facts."""
+    from ouroboros import store
+    from ouroboros.chronicle_store import is_late_review_mark
+
+    try:
+        mark = ChronicleStore(drive_root).get(mark_id)  # includes released marks: a replay cannot resurrect one
+        if mark is not None:
+            _owed(drive_root, mark_id, None)
+            return LateReviewMark("unchanged" if is_late_review_mark(mark) else "conflict", mark_id, mark.get("room_id", ""))
+        with store.open_store(drive_root, write=False) as txn:
+            owed = txn.get_row(OWED_SET, mark_id) or {}
+    except (OSError, ValueError, TimeoutError, sqlite3.Error) as exc:
+        return LateReviewMark("failed", mark_id, "", f"frozen settlement unreadable: {type(exc).__name__}: {exc}")
+    return publish_late_review(drive_root, owed["record"]) if isinstance(owed.get("record"), dict) else None
+
+
+def owe_after_end(drive_root: Any, duty_id: str, duty: Mapping[str, Any], *, replace: bool = True) -> bool:
     """Persist one producer duty (``left_review``: immutable facts naming ``task_id``) that only its author's
     ended task can discharge; the replay hands it back to its producer. False when the store refused (the
-    caller's own path still holds the duty)."""
-    return _owed(drive_root, duty_id, {**json.loads(json.dumps(dict(duty), default=str)), "after_end": True})
+    caller's own path still holds the duty). ``replace=False`` keeps an existing duty: unread-only feedback
+    cannot weaken a left wave's independent room obligation."""
+    return _owed(drive_root, duty_id, {**json.loads(json.dumps(dict(duty), default=str)), "after_end": True},
+                 replace=replace)
 
 
 def update_wait_cursors(drive_root: Any, duty_id: str, waiting: Mapping[str, Any]) -> None:
@@ -283,7 +302,7 @@ def _settle_owed(drive_root: Any, duty_id: str, row: Mapping[str, Any]) -> str:
     return "settled"
 
 
-def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]]) -> bool:
+def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]], *, replace: bool = True) -> bool:
     """Write (``row``) or discharge (``None``) one owed publication; False when the store refused."""
     from ouroboros import store  # D15->D17 is lazy-only
 
@@ -295,7 +314,7 @@ def _owed(drive_root: Any, mark_id: str, row: Optional[Dict[str, Any]]) -> bool:
         with store.open_store(drive_root, write=True) as txn:
             if row is None:
                 txn.delete_row(OWED_SET, mark_id)
-            else:
+            elif replace or txn.get_row(OWED_SET, mark_id) is None:
                 txn.put_row(OWED_SET, mark_id, row)
         return True
     except Exception:
@@ -321,7 +340,7 @@ def ended_task_row(drive_root: Any, task_id: str, *, strict: bool = False) -> Op
 
 def _publish(root: pathlib.Path, mark_id: str, facts: Mapping[str, Any]) -> LateReviewMark:
     try:
-        room = owning_room(root, facts["task_id"], facts.get("chat_id"))
+        room = facts["room_id"] if "room_id" in facts else owning_room(root, facts["task_id"], facts.get("chat_id"))
     except (OSError, ValueError, sqlite3.Error) as exc:  # an unreadable binding or Project registry
         return LateReviewMark("failed", mark_id, "", f"owning room unreadable: {type(exc).__name__}: {exc}")
     if room is None:

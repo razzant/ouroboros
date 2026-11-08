@@ -281,11 +281,23 @@ def runtime_actor_snapshot(
         mismatches.append(
             f"OUROBOROS_MODEL: runtime={actual_model!r} expected={model!r}"
         )
-    # Empty optional slots mean "no alternate actor" and are therefore safe. Every non-empty
-    # active slot must resolve only to its compiled actor: Light may be an explicit documented
-    # helper override, while fallback, reviewer, vision and every other live role stay on Main.
-    # ACTIVE_MODEL_SLOT_KEYS deliberately excludes legacy Heavy, so historical settings remain
+    # Empty optional slots mean "no alternate actor" and are therefore safe, except the web search
+    # Model: a blank one plans the legs this mapping's own resolver names (a leg it cannot serve now
+    # is still planned; ddgs or a Source no transport serves plans no model).
+    # Every non-empty active slot must resolve only to its compiled actor: Light may be an explicit
+    # documented helper override, while fallback, reviewer, vision and every other live role stay on
+    # Main. ACTIVE_MODEL_SLOT_KEYS deliberately excludes legacy Heavy, so historical settings remain
     # readable without resurrecting it as an execution authority.
+    if "OUROBOROS_WEBSEARCH_MODEL" not in active_model_slots:
+        from ouroboros.search_routes import resolve_web_search_route
+
+        route = resolve_web_search_route(settings=settings)
+        planned = [f"{leg['source']}::{leg['model']}" for leg in route["legs"] + route["unavailable"] if leg["model"]]
+        if planned:
+            mismatches.append(
+                f"OUROBOROS_WEBSEARCH_MODEL: blank under Source {route['source']!r} plans "
+                f"{', '.join(planned)}; expected only {model!r} or the ddgs Source"
+            )
     for key, raw in active_model_slots.items():
         if key == "OUROBOROS_MODEL":
             continue

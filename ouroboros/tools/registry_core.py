@@ -174,17 +174,20 @@ def _presence_tool_allowed(ctx: Any, name: str) -> bool:
     return ceiling is None or presence_ceiling_allows_tool(ceiling, name)
 
 
+PRESENCE_RESOURCE_BLOCKED = "⚠️ PRESENCE_RESOURCE_BLOCKED: the resolved target is outside this presence task's positive resource ceiling."
+
+
 def _presence_binding_allowed(ctx: Any, binding: Any) -> bool:
-    from ouroboros.presence_authority import (
-        presence_ceiling_allows_binding,
-        presence_ceiling_from_context,
-    )
+    """The ceiling, or a read of exactly a retained ``input_files`` copy handed to this task (#2593)."""
+    from ouroboros.delegate_readonly_inputs import prepared_copy_read
+    from ouroboros.presence_authority import presence_ceiling_allows_binding, presence_ceiling_from_context
 
     ceiling = presence_ceiling_from_context(ctx)
     if ceiling is None or binding is None:
         return True
     items = binding if isinstance(binding, tuple) else (binding,)
-    return bool(items) and all(presence_ceiling_allows_binding(ceiling, item) for item in items)
+    return bool(items) and all(presence_ceiling_allows_binding(ceiling, item) or prepared_copy_read(ctx, item)
+                               for item in items)
 
 
 def _presence_bound_args(ctx: Any, name: str, args: Any) -> tuple[dict[str, Any], str]:
@@ -326,11 +329,13 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "compact_context", "control",
         "core", "delegate", "edit_ops", "evolution_stats", "followup", "git", "git_pr", "git_rollback", "github",
-        "health", "imagegen", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
+        "health", "imagegen", "join_ledger", "knowledge", "mcp_sign_in", "media", "memory_tools", "plan_review",
+        "preflight_review",
         "project_journal", "presence",
         "recent_tasks",
-        "query_code", "query_data", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "skill_source_tools", "subagent_integration", "task_tree", "tool_discovery", "vcs_read", "verify", "vision",
+        "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
+        "skill_publish", "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree",
+        "tool_discovery", "vcs_read", "verify", "vision",
     ]
 
     def _load_modules(self) -> _ToolCatalog:
@@ -375,6 +380,14 @@ class ToolRegistry:
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
+
+    def copy_for(self, ctx: ToolContext) -> "ToolRegistry":
+        """This catalog bound to ``ctx``; handlers the copy rebinds (``override_handler``) stay its own."""
+        view = copy.copy(self)
+        view._ctx = ctx
+        view._entries, view._scoped_entries = dict(self._entries), dict(self._scoped_entries)
+        view._entry_origins, view._handler_overrides = dict(self._entry_origins), dict(self._handler_overrides)
+        return view
 
     def register(self, entry: ToolEntry, *, origin: str = "") -> None:
         """Register one task-scoped entry without mutating the base catalog."""
@@ -1029,8 +1042,8 @@ class ToolRegistry:
             return ToolResult(status="error", code="TOOL_ERROR", text=text)
         return None if resolution.status == "callable" else self._name_miss_result(name, resolution.refusal(name))
 
-    def get_timeout(self, name: str) -> int:
-        """Return timeout_sec for the named tool (default 360)."""
+    def get_timeout(self, name: str) -> Optional[int]:
+        """Return timeout_sec for the named tool (default 360; ``None`` = a long-lived entry)."""
         entry = self._entries.get(str(name or "").strip())
         if entry is not None:
             return entry.timeout_sec
@@ -1176,11 +1189,11 @@ class ToolRegistry:
             with tool_handoff(self._ctx, str(name or "")) as handoff:
                 result = self._execute_admitted_text(name, args, handoff)
                 typed = result if isinstance(result, ToolResult) else LegacyTextResultAdapter.from_text(name, result)
-                # Host unwind/transport owners settle local execution. Business
-                # status and tool-authored metadata cannot create or negate a join.
-                handoff["settled"] = (handoff.get("settled") is True
-                    or handoff.get("local_extension_returned") is True
-                    or handoff.get("mcp_call_returned") is True)
+                # Host unwind/transport owners settle local execution. Business status and
+                # tool-authored metadata cannot create or negate a join, nor can this fold: a held
+                # runner may record its own end concurrently, so the fold only ever adds one.
+                if handoff.get("local_extension_returned") is True or handoff.get("mcp_call_returned") is True:
+                    handoff["settled"] = True
                 return typed
         except OwnerPauseRefused as exc:
             from ouroboros.tools.tool_result import launch_refusal_result
@@ -1256,9 +1269,10 @@ class ToolRegistry:
                 return ToolResult(status="error", code="TOOL_ARG_ERROR", text=_route_note)
             from ouroboros import body_candidate
 
-            if (candidate_refusal := body_candidate.authoring_seam(self._ctx, name, args)) is not None:
-                return ToolResult(status="blocked", code=candidate_refusal.code,
-                                  text=f"⚠️ {candidate_refusal.code}: {candidate_refusal.text}")
+            seam = body_candidate.authoring_seam(self._ctx, name, args)  # a refusal, or a fresh bind's neighbour note
+            if isinstance(seam, body_candidate.CandidateRefused):
+                return ToolResult(status="blocked", code=seam.code, text=f"⚠️ {seam.code}: {seam.text}")
+            _route_note = "\n\n".join(part for part in (_route_note, seam) if part)
         selected_skill = bool(task_constraint and task_constraint.has_selected_skill)
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         effective_constraint = task_constraint
@@ -1295,10 +1309,7 @@ class ToolRegistry:
             _binding_set_targets_system_repo(self._ctx, resolved_binding) or acting_system_worktree
         )
         if not _presence_binding_allowed(self._ctx, resolved_binding):
-            return (
-                "⚠️ PRESENCE_RESOURCE_BLOCKED: the resolved target is outside "
-                "this presence task's positive resource ceiling."
-            )
+            return PRESENCE_RESOURCE_BLOCKED
         # Fail-closed: an acting child WITHOUT a resolved isolated workspace would
         # have active_workspace/system_repo fall back to the LIVE repo. Confine it
         # to data roots and block shell/coding/service (whose default target is the repo).

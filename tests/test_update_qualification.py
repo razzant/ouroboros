@@ -13,17 +13,10 @@ from tests.test_update_letter_merge_range import merged_range  # noqa: F401
 
 def test_preflight_reads_exact_saved_range_without_writing_or_calling_a_model(tmp_path, monkeypatch):
     running, head, target = "a" * 40, "c" * 40, "b" * 40
-    calls = []
     monkeypatch.setattr(letter, "_default_git", lambda: lambda _: (1, "", ""))
-    monkeypatch.setattr(letter, "collect_range_material", lambda base, target: {
+    monkeypatch.setattr(letter, "collect_range_material", lambda base, target, **k: {
         "base_sha": base, "target_sha": target, "commits": [{"sha": target, "subject": "change"}]})
     monkeypatch.setattr(qualification, "post_merge_checks", lambda *a: {"status": "observed", "runs": []})
-
-    def write(status, material, **kwargs):
-        calls.append(material["base_sha"])
-        return _record(key=letter._key_from_status(status))
-
-    monkeypatch.setattr(letter, "write_letter", write)
     check = _status(current_sha=head, running_sha=running)
     plan = {"base_sha": head, "target_sha": target, "update_channel": "stable", "target_ref": "managed/main"}
     for _ in range(2):
@@ -33,11 +26,13 @@ def test_preflight_reads_exact_saved_range_without_writing_or_calling_a_model(tm
         assert not result["letter"] or not result["letter"]["text"]
         assert result["qualification"] is None
         assert letter.record_path(tmp_path).read_bytes() == saved
-    assert calls == [running]
+    assert letter.save_description("letter", running, target, 0, author={"task_id": "t", "model": "m"},
+                                   drive_root=tmp_path)["outcome"] == "saved"
+    saved = letter.record_path(tmp_path).read_bytes()
     result = qualification.preflight_description({**plan, "base_sha": running}, drive_root=tmp_path)
     assert result["letter"]["text"] == "letter" and result["letter"]["description_current"]
     assert result["qualification"]["base_sha"] == running
-    assert letter.record_path(tmp_path).read_bytes() == saved and calls == [running]
+    assert letter.record_path(tmp_path).read_bytes() == saved
 
 
 @pytest.mark.parametrize("squash", [False, True])
@@ -121,7 +116,7 @@ def test_paging_observes_older_runs_before_inferring_coverage(monkeypatch, older
     assert pages == [1, 2, 3] and not changed
 
 
-@pytest.mark.parametrize("ending", ["exhausted", "oldest", "predates", "budget", "unavailable"])
+@pytest.mark.parametrize("ending", ["exhausted", "budget", "unavailable"])
 def test_coverage_requires_reading_through_the_range(ending, monkeypatch):
     commits = [{"sha": sha, "subject": sha, "date": "2026-10-23T03:00:00+03:00"}
                for sha in ("newest", "middle", "oldest")]
@@ -197,34 +192,27 @@ def test_refresh_preserves_proven_absence_until_a_direct_run_is_observed(monkeyp
     assert not any(r.get("covered_shas") for r in refreshed["github"]["runs"])
 
 
-def test_github_availability_changes_preserve_authored_text(tmp_path, monkeypatch):
+def test_github_availability_and_new_runs_never_touch_the_saved_text(tmp_path, monkeypatch):
     base, target = "a" * 40, "b" * 40
     material = {"base_sha": base, "target_sha": target, "commits": [{"sha": target, "subject": "change"}]}
-    monkeypatch.setattr(letter, "collect_range_material", lambda *a: dict(material))
+    monkeypatch.setattr(letter, "collect_range_material", lambda *a, **k: dict(material))
     monkeypatch.setattr(letter, "_default_git", lambda: lambda _: (1, "", ""))
     observed = {"status": "observed", "runs": [{"sha": target, "status": "completed", "conclusion": "success"}]}
     monkeypatch.setattr(qualification, "post_merge_checks", lambda *a: dict(observed))
-    calls = []
-
-    def write(status, material, **kwargs):
-        calls.append(material["qualification"])
-        return _record(text=f"letter {len(calls)}")
-
-    monkeypatch.setattr(letter, "write_letter", write)
-    first = letter.refresh_after_check(_status(), drive_root=tmp_path)
+    letter.refresh_after_check(_status(), drive_root=tmp_path)
+    letter.save_description("the saved text", base, target, 0, author={"task_id": "t", "model": "m"}, drive_root=tmp_path)
+    first = letter.read_record(tmp_path)
     runs = observed["runs"]
     observed.update(status="unavailable", reason="HTTPError", runs=[])
     offline = letter.refresh_after_check(_status(), drive_root=tmp_path)
-    assert len(calls) == 1 and offline["text"] == first["text"]
+    assert (offline["text"], offline["revision"], offline["written_at"]) == ("the saved text", 1, first["written_at"])
     assert offline["qualification"]["github"]["status"] == "unavailable"
     assert offline["qualification"]["github"]["runs"] == runs
-    observed.update(status="observed", reason="", runs=runs)
-    assert letter.refresh_after_check(_status(), drive_root=tmp_path)["text"] == first["text"]
-    assert len(calls) == 1
-    observed["runs"] = [{"sha": target, "status": "completed", "conclusion": "failure"}]
+    observed.update(status="observed", reason="", runs=[{"sha": target, "status": "completed", "conclusion": "failure"}])
     changed = letter.refresh_after_check(_status(), drive_root=tmp_path)
-    assert len(calls) == 2 and changed["text"] == "letter 2"
     assert changed["qualification"]["github"]["runs"][0]["conclusion"] == "failure"
+    assert (changed["text"], changed["revision"]) == ("the saved text", 1)
+    assert letter.project_letter(changed, head_sha=base, latest_sha=target)["description_current"] is True
 
 
 @pytest.mark.parametrize("state", ["passed", "failed", "not_run"])
@@ -242,7 +230,8 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
     assert receipt["checks"][1]["name"] == "cost_contract"
     assert receipt["checks"][1]["status"] == "unknown"
     assert "No execution evidence" in body and "Post-merge check: not run yet" in body
-    assert receipt["review"] == {"observed": "unknown", "declared": "AUTHOR ACCEPTED"}
+    assert receipt["review"] == {"observed": "unknown", "state": "no_record", "relation": "unknown",
+                                 "declared": "AUTHOR ACCEPTED"}
     assert "Summary of the change" in body
 
 
@@ -266,6 +255,56 @@ def test_malformed_trailer_is_unknown_and_valid_one_is_read():
         body = qualification.TRAILER + json.dumps({**receipt, **changes})
         assert qualification.commit_qualification(body) is None
     assert qualification.commit_qualification(qualification.commit_summary(receipt)) == receipt
+
+
+def test_the_trailer_keeps_record_state_and_request_relation_and_legacy_says_not_recorded():
+    record = {"record": {"state": "pending", "verdict": {"aggregate": "PASS"}}}
+    new = qualification.merge_qualification(record, relation="covers_head")
+    assert new["review"] == {"observed": "PASS", "state": "pending", "relation": "covers_head", "declared": "unknown"}
+    assert qualification.merge_qualification({}, relation="not_declared")["review"] == {
+        "observed": "unknown", "state": "no_record", "relation": "not_declared", "declared": "unknown"}
+    assert ("- Review: observed PASS (record pending, subject relation at the merge request covers_head); "
+            "author declared unknown") in qualification.commit_summary(new)
+    assert qualification.commit_qualification(qualification.commit_summary(new)) == new
+    legacy = qualification.merge_qualification(record)  # a receipt from before the relation: nothing invented
+    assert legacy["review"] == {"observed": "PASS", "declared": "unknown"}
+    assert ("- Review: observed PASS (record state and subject relation at the merge request not recorded); "
+            "author declared unknown") in qualification.commit_summary(legacy)
+    assert "settled" not in qualification.commit_summary(legacy)
+
+
+def _receipt_commit(n, review):
+    return {"sha": f"{n:040x}", "subject": f"change {n}", "date": "2026-11-04T10:00:00+00:00", "body_read": True,
+            "receipt": {"schema": 1, "checks": [], "review": review, "post_merge": {"status": "not_run"}}}
+
+
+def test_review_combinations_stay_bound_to_their_commit_in_every_summary():
+    pass_different = {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS"}
+    fail_same = {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS"}
+    legacy = {"observed": "PASS", "declared": "PASS"}
+    future = {**fail_same, "observed": "PASS", "landing": "same"}
+    guessed = {**pass_different, "relation": "approved"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [
+        _receipt_commit(n, review) for n, review in enumerate((pass_different, fail_same, legacy, future, guessed))]}
+    compact = qualification.compact_qualification(value)["commits"]
+    assert compact["reviews"] == [
+        {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS", "count": 1}]
+    assert compact["unabridged"] == [{"sha": f"{3:040x}", "receipt": {"review": future}},
+                                     {"sha": f"{4:040x}", "receipt": {"review": guessed}}]
+    assert qualification.qualification_summary(value)["reviews"] == [{**review, "count": 1} for review in (
+        pass_different, fail_same,
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS"}, future, guessed)]
+
+
+def test_qualification_summary_preserves_unknown_review_count_field():
+    review = {"observed": "PASS", "state": "settled", "relation": "covers_head", "declared": "PASS",
+              "count": "source-count"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [_receipt_commit(0, review)]}
+    row = qualification.qualification_summary(value)["reviews"][0]
+    assert row["count"] == "source-count"
+    assert row["_count"] == 1
 
 
 def test_github_checks_include_red_intermediate_sha_but_exclude_other_ranges():
@@ -299,19 +338,17 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
         "status": "observed", "runs": [{"sha": target, "conclusion": "failure", "url": "https://github.com/run/1"}]})
     drive = tmp_path / "letter"
     letter.atomic_write_json(letter.record_path(drive), _record(key={**_record()["key"], "base_sha": base, "target_sha": old}))
-    prompts = []
-    def write(status, material, **kwargs):
-        prompts.append(letter._request_text(status, material, "1"))
-        return _record(key=letter._key_from_status(status), text="Incoming qualification has accepted FAILs.")
-    monkeypatch.setattr(letter, "write_letter", write)
     letter.refresh_after_check(_status(current_sha=old, running_sha=base, latest_sha=target), drive_root=drive)
+    material = json.loads(letter.material_path(drive).read_text(encoding="utf-8"))["text"]
+    assert all(word in material for word in (target, "Author accepted two FAILs", "not_run"))
+    assert letter.save_description("Incoming qualification has accepted FAILs.", base, target, 0,
+                                   author={"task_id": "t", "model": "m"}, drive_root=drive)["outcome"] == "saved"
     result = qualification.preflight_description({"base_sha": base, "target_sha": target,
                                                   "update_channel": "stable", "target_ref": "managed/main"}, drive_root=drive)
     assert result["letter"]["key"]["target_sha"] == target and result["letter"]["description_current"]
     assert result["qualification"]["target_sha"] == target
     assert {c["sha"] for c in result["qualification"]["commits"]} == set(_git(repo, "rev-list", f"{base}..{target}").splitlines())
-    assert all(word in prompts[0] for word in (target, "Author accepted two FAILs", '"conclusion": "failure"', "not_run"))
-    assert f'"sha": "{base}"' in prompts[0] and f'"base_sha": "{base}"' in prompts[0]
+    assert result["qualification"]["github"]["runs"][0]["conclusion"] == "failure"
     # Green evidence stays green; host code does not invent a failure from prose.
     green = qualification.merge_qualification({"record": {"verdict": {"aggregate": "PASS"}}},
         [{"name": name, "status": "passed"} for name in qualification.CHECKS])
@@ -322,26 +359,22 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
 def test_new_post_merge_red_refreshes_same_range_and_offline_never_becomes_green(tmp_path, monkeypatch):
     base, target = "a" * 40, "b" * 40
     material = {"base_sha": base, "target_sha": target, "commits": [{"sha": target, "subject": "change", "body": ""}]}
-    monkeypatch.setattr(letter, "collect_range_material", lambda *a: dict(material))
+    collected = []
+    monkeypatch.setattr(letter, "collect_range_material", lambda *a, **k: collected.append(a) or dict(material))
     monkeypatch.setattr(letter, "_default_git", lambda: lambda _: (1, "", ""))
     observed = {"status": "observed", "runs": [{"sha": target, "conclusion": "success"}]}
     monkeypatch.setattr(qualification, "post_merge_checks", lambda *a: dict(observed))
-    calls = []
-    def write(status, material, **kwargs):
-        calls.append(material["qualification"])
-        return _record(text=f"letter {len(calls)}")
-    monkeypatch.setattr(letter, "write_letter", write)
     for _ in range(2):
         letter.refresh_after_check(_status(), drive_root=tmp_path)
-    assert len(calls) == 1
+    assert len(collected) == 1
     observed["runs"] = [{"sha": target, "conclusion": "failure"}]
-    letter.refresh_after_check(_status(), drive_root=tmp_path)
-    assert len(calls) == 2 and calls[-1]["github"]["runs"][0]["conclusion"] == "failure"
+    assert letter.refresh_after_check(_status(), drive_root=tmp_path)["qualification"]["github"]["runs"][0]["conclusion"] == "failure"
     observed.update(status="unavailable", runs=[])
     letter.refresh_after_check(_status(), drive_root=tmp_path)
     record = json.loads(letter.record_path(tmp_path).read_text(encoding="utf-8"))
-    assert len(calls) == 2 and record["qualification"]["github"]["status"] == "unavailable"
-    assert record["text"] == "letter 2"
+    assert record["qualification"]["github"]["status"] == "unavailable"
+    assert record["qualification"]["github"]["runs"][0]["conclusion"] == "failure", "an outage never turns red green"
+    assert len(collected) == 1 and record["state"] == "none"
 
 
 def test_preflight_letter_does_not_show_prior_range(tmp_path):
@@ -353,30 +386,102 @@ def test_preflight_letter_does_not_show_prior_range(tmp_path):
     assert result["letter"]["text"] == "letter" and result["letter"]["description_current"]
 
 
-@pytest.mark.parametrize("failure", ["author", "material_read"])
-def test_failed_same_range_rewrite_keeps_new_red_facts_but_marks_old_prose_stale(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["", "material_read"])
+def test_new_red_facts_land_beside_the_saved_prose_which_stays_current(tmp_path, monkeypatch, failure):
+    """Owner 28.10: a same-range CI change is a new fact about the range, never a reason to mark the
+    description stale; the preflight shows the text and the red run side by side."""
     base, target = "a" * 40, "b" * 40
     green = {"base_sha": base, "target_sha": target, "commits": [{"sha": target, "subject": "change"}],
              "github": {"status": "observed", "runs": [{"sha": target, "conclusion": "success"}]}}
     red = {"status": "observed", "runs": [{"sha": target, "conclusion": "failure"}]}
-    letter.atomic_write_json(letter.record_path(tmp_path), _record(qualification=green, text="Old green description"))
+    letter.atomic_write_json(letter.record_path(tmp_path), _record(qualification=green, text="Old green description",
+                                                                   revision=1))
     monkeypatch.setattr(qualification, "post_merge_checks", lambda *a: red)
     monkeypatch.setattr(letter, "_default_git", lambda: lambda _: (1, "", ""))
-    def collect(*args):
+
+    def collect(*args, **kwargs):
         if failure == "material_read":
             raise letter.MaterialUnavailable("Git object unavailable")
         return {**green, "commits": [{"sha": target, "subject": "change", "body": ""}]}
+
     monkeypatch.setattr(letter, "collect_range_material", collect)
-    monkeypatch.setattr(letter, "write_letter", lambda *a, **k: _record(state="failed", text="", error_kind="budget_exhausted"))
     letter.refresh_after_check(_status(), drive_root=tmp_path)
-    failed = qualification.preflight_description({"base_sha": base, "target_sha": target,
+    result = qualification.preflight_description({"base_sha": base, "target_sha": target,
         "update_channel": "stable", "target_ref": "managed/main"}, drive_root=tmp_path)
-    assert failed["letter"]["description_current"] is False and failed["letter"]["text"] == ""
-    assert failed["qualification"]["github"] == red
-    # A later successful author consumes the new evidence and becomes current.
-    failure = ""
-    monkeypatch.setattr(letter, "write_letter", lambda *a, **k: _record(text="This merge has a red check"))
-    letter.refresh_after_check(_status(), drive_root=tmp_path)
-    fixed = qualification.preflight_description({"base_sha": base, "target_sha": target,
-        "update_channel": "stable", "target_ref": "managed/main"}, drive_root=tmp_path)
-    assert fixed["letter"]["description_current"] and fixed["letter"]["text"] == "This merge has a red check"
+    assert result["letter"]["description_current"] is True and result["letter"]["text"] == "Old green description"
+    assert result["qualification"]["github"]["runs"] == red["runs"]
+    assert letter.read_record(tmp_path)["revision"] == 1
+
+
+def _fail(_url):
+    raise OSError("offline")
+
+
+def test_open_post_merge_reds_are_read_and_an_outage_never_reads_as_none_open():
+    urls = []
+
+    def get(url):
+        urls.append(url)
+        return [{"number": 2390, "title": "Post-merge red: tests/test_a.py::test_x", "created_at": "2026-10-28T08:00:00Z"},
+                {"number": 7, "title": "a pull request", "pull_request": {}}]
+
+    seen = qualification.post_merge_reds("https://github.com/owner/repo.git", get_json=get)
+    assert urls == ["https://api.github.com/repos/owner/repo/issues?labels=post-merge-red&state=open&per_page=100"]
+    assert seen["read"] == "observed" and seen["repository"] == "owner/repo" and seen["observed_at"]
+    assert seen["issues"] == [{"number": 2390, "title": "Post-merge red: tests/test_a.py::test_x",
+                               "opened": "2026-10-28T08:00:00Z"}]
+    # An outage keeps the last observation and its time; without one it lists nothing and dates nothing.
+    first = qualification.post_merge_reds("https://github.com/owner/repo", get_json=_fail)
+    assert (first["read"], first["issues"], first["observed_at"]) == ("unavailable", [], "")
+    down = qualification.kept_reds(first, seen)
+    assert (down["read"], down["issues"], down["observed_at"]) == ("unavailable", seen["issues"], seen["observed_at"])
+    assert qualification.kept_reds(first, None) == first and qualification.kept_reds(None, seen) == seen
+    assert qualification.kept_reds(seen, down) == seen
+    # Another source never wears the old list: a fork's failed read keeps nothing of the official observation.
+    fork = qualification.kept_reds(qualification.post_merge_reds("https://github.com/example/fork", get_json=_fail), seen)
+    assert (fork["repository"], fork["issues"], fork["observed_at"]) == ("example/fork", [], "")
+    full = qualification.post_merge_reds("https://github.com/owner/repo",
+                                         get_json=lambda _: [{"number": n} for n in range(100)])
+    assert full["read"] == "partial" and len(full["issues"]) == 100
+    other = qualification.post_merge_reds("https://gitlab.com/owner/repo",
+                                          get_json=lambda _: pytest.fail("no GitHub reader for another host"))
+    assert other["read"] == "unavailable" and other["issues"] == []
+
+
+def test_every_completed_check_shows_the_open_reds_to_an_up_to_date_install(tmp_path, monkeypatch):
+    """No update, so no range: the reds still reach the Runtime fact, and a later outage keeps them."""
+    monkeypatch.setattr(letter, "collect_range_material", lambda *a, **k: pytest.fail("no range without an update"))
+    monkeypatch.setattr(letter, "_default_git", lambda: lambda _: (1, "", ""))
+    monkeypatch.setattr(qualification, "_get_json", lambda _url: [
+        {"number": 2390, "title": "Post-merge red: tests/test_a.py::test_x", "created_at": "t0"}])
+    status = _status(available=False, latest_sha="", official_repo_url="https://github.com/razzant/ouroboros")
+    record = letter.refresh_after_check(status, drive_root=tmp_path)
+    assert [row["number"] for row in record["post_merge_reds"]["issues"]] == [2390]
+    cache = {"managed_update_cache": {"latest_sha": "", "available": False, "behind": 0, "ahead": 0, "checked_at": "t0",
+                                      "checked_head_sha": status["current_sha"]}}
+    fact = letter.official_update_projection("a" * 40, drive_root=tmp_path, state=cache)
+    assert fact["status"] == "up_to_date" and fact["letter"] is None
+    assert fact["post_merge_reds"]["read"] == "observed" and fact["post_merge_reds"]["issues"][0]["number"] == 2390
+    monkeypatch.setattr(qualification, "_get_json", _fail)
+    kept = letter.refresh_after_check(status, drive_root=tmp_path)["post_merge_reds"]
+    assert kept["read"] == "unavailable" and kept["issues"] == record["post_merge_reds"]["issues"]
+    monkeypatch.setattr(qualification, "_get_json", lambda _url: [])
+    assert letter.refresh_after_check(status, drive_root=tmp_path)["post_merge_reds"]["issues"] == []
+    monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "development")
+    switched = letter.official_update_projection("a" * 40, drive_root=tmp_path, state={"managed_update_cache": {
+        **cache["managed_update_cache"], "update_channel": "stable"}})
+    assert switched["status"] == "unchecked" and switched["post_merge_reds"]["read"] == "observed"
+
+
+def test_a_failed_read_keeps_the_observation_the_record_holds_under_the_lock():
+    """The check reads GitHub before the record lock; the facts land on the record read under it, so a
+    failed read keeps whatever observation the record holds by then."""
+    held = {"read": "observed", "repository": "razzant/ouroboros", "observed_at": "t1",
+            "issues": [{"number": 2412, "title": "Post-merge red: #2397 theme", "opened": "t1"}]}
+    failed = qualification.post_merge_reds("https://github.com/razzant/ouroboros", get_json=_fail)
+    key = {"base_sha": "a" * 40, "target_sha": "", "update_channel": "stable", "target_ref": "managed/main"}
+    record = letter._with_check_facts({"schema": 1, "state": "none", "post_merge_reds": held}, key,
+                                      {"post_merge_reds": failed}, running_sha="a" * 40, checkout_sha="a" * 40,
+                                      target_version="7.9.0")
+    assert record["post_merge_reds"]["read"] == "unavailable"
+    assert (record["post_merge_reds"]["issues"], record["post_merge_reds"]["observed_at"]) == (held["issues"], "t1")

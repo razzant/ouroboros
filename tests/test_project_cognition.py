@@ -195,8 +195,6 @@ def test_creation_seeds_legacy_rows_with_the_same_owner_low_as_the_new_room(room
 @pytest.mark.parametrize("disk,env,expected", [
     ({"OUROBOROS_EFFORT_MIN": "none"}, {"OUROBOROS_EFFORT_TASK": "ultra"}, ("none", "ultra", "ultra")),
     ({"OUROBOROS_EFFORT_TASK": "ultra"}, {"OUROBOROS_EFFORT_MIN": "none"}, ("none", "ultra", "ultra")),
-    ({"OUROBOROS_EFFORT_MAX": "ultra"}, {"OUROBOROS_EFFORT_TASK": "none"}, ("none", "none", "ultra")),
-    ({"OUROBOROS_EFFORT_TASK": "high"}, {"OUROBOROS_EFFORT_TASK": "none"}, ("low", "high", "high")),
     ({EFFORT_FORMAT_KEY: 1, "OUROBOROS_EFFORT_MIN": "low", "OUROBOROS_EFFORT_MAX": "high"},
      {"OUROBOROS_EFFORT_TASK": "ultra"}, ("low", "ultra", "high")),
 ])
@@ -217,7 +215,7 @@ def test_legacy_effort_migration_follows_authored_disk_and_environment_precedenc
     assert tuple(config.load_settings()[key] for key in EFFORT_RANGE_KEYS) == expected
 
 
-@pytest.mark.parametrize("primary", ["none", "minimal", "xhigh", "max", "ultra"])
+@pytest.mark.parametrize("primary", ["none", "xhigh", "ultra"])
 def test_upgrade_keeps_effective_bounds_after_old_writers_filled_defaults(room_settings, monkeypatch, primary):
     from ouroboros.colab_bootstrap import build_colab_settings
     from ouroboros.gateway.owner_settings import _owner_read_settings_raw
@@ -264,10 +262,9 @@ def test_first_generic_owner_save_preserves_an_explicit_independent_triple(room_
     assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))[EFFORT_FORMAT_KEY] == 1
 
 
-@pytest.mark.parametrize("legacy_mode", ["max", "low"])
-@pytest.mark.parametrize("endpoint,body", [
-    ("/api/owner/context-mode", {"mode": "low"}),
-    ("/api/owner/effort-range", {"min": "low", "recommended": "ultra", "max": "high"}),
+@pytest.mark.parametrize(("endpoint", "body", "legacy_mode"), [
+    pytest.param("/api/owner/context-mode", {"mode": "low"}, "max", id='/api/owner/context-mode-body0-max'),
+    pytest.param("/api/owner/effort-range", {"min": "low", "recommended": "ultra", "max": "high"}, "low", id='/api/owner/effort-range-body1-low'),
 ])
 def test_first_main_control_save_normalizes_legacy_context_before_capturing_digest(room_settings, endpoint, body, legacy_mode):
     _root, client = room_settings

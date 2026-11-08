@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,6 @@ subscription_ui = setup_browser.subscription_ui
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_complete_draft_validation_and_local_stop(direct_server_with_data, engine):
@@ -73,8 +71,7 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             key = new_row.locator('[data-custom-secret-key]')
             value = new_row.locator('[data-custom-secret-value]')
             expect(key).to_be_focused()
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(
-                re.compile("is-visible"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-updated', {detail: {source: 'test'}}))")
             expect(page.locator('[data-custom-secret-row]')).to_have_count(2)
             key.fill("bad!")
@@ -204,7 +201,6 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_initial_settings_document_survives_early_edit_while_enrichment_waits(subscription_ui):
     """Hold actual optional reads until after an edit; no timing race or runtime."""
@@ -228,12 +224,13 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     assert pending["reviewers"], "the review pool read must still be pending"
     assert pending["status"], "the status read must still be pending"
     assert page.locator('#btn-save-settings').is_enabled(), "the known document can be saved before enrichment"
+    assert 'Your edits are kept' not in page.locator('#settings-status').inner_text(), "no edit has been made yet"
     source = main.locator('[data-model-role-source]')
     source.select_option("api:openrouter")
     model = main.locator('[data-model-role-model]')
     model.fill("owner-kept-model")
     model.evaluate("element => { window.__earlyModel = element; element.setSelectionRange(4, 4); }")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
 
     page.unroute("**/api/review-pool")
     page.unroute("**/api/claudexor/status*")
@@ -252,13 +249,12 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     expect(model).to_have_value("owner-kept-model")
     assert source.input_value() == "api:openrouter"
     assert model.evaluate("element => element === window.__earlyModel && element.selectionStart === 4")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
     expect(page.locator('#btn-save-settings')).to_be_enabled()
     expect(page.locator('#settings-status')).to_contain_text('Your edits are kept')
     assert not any(path == '/api/settings' for path, _ in ui['posts'])
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_mcp_local_json_errors_hold_whole_settings_save(subscription_ui):
     from playwright.sync_api import expect
@@ -349,7 +345,6 @@ def test_older_failed_settings_reload_cannot_disable_newer_success(subscription_
     expect(page.locator('#settings-status')).to_contain_text('current read failed')
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server_with_data, engine):

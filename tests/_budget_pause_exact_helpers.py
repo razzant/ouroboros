@@ -28,6 +28,9 @@ def _install_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(queue, "PENDING", workers.PENDING)
     monkeypatch.setattr(queue, "RUNNING", workers.RUNNING)
+    # queue.init keeps live acceptance seals: an earlier test's seal would enter this
+    # test's snapshot and fence its root at restore.
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
     queue.BUDGET_ROOT_FENCES.clear()
     queue.init_queue_refs(workers.PENDING, workers.RUNNING, workers.QUEUE_SEQ_COUNTER_REF)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})
@@ -64,6 +67,7 @@ def _loop_ctx(root, task_id="pause-task", *, direct=False, attempt=1):
                                                               "reason_code": "budget_exhausted"},
         messages=messages, llm_trace={"tool_calls": [1]}, owner_msg_seen={"m1"}, round_idx=4,
         tool_schemas=[{"type": "function", "function": {"name": "x"}}],
+        active_model=ctx.active_model, active_use_local=ctx.active_use_local,  # as _RoundLimitContext carries them
     )
     return ctx, limit_ctx
 

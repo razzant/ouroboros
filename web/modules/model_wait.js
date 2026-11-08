@@ -1,6 +1,6 @@
 // Task-local subscription recovery. The host owns waits, revisions and the
 // application of an action; this view only preserves and presents those facts.
-import { fetchJson, jsonPost } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, fetchJson, jsonPost } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { startLogin } from './harness_accounts.js';
 import { createModelRolesEditor, MODEL_ACCOUNTS_KEY, modelRolesHost, parseModelSource } from './model_roles.js';
@@ -79,6 +79,11 @@ export function modelWaitAction(taskId, row, action, fields, requestId) {
     return body;
 }
 
+/** The card's own decision POST declares the app (api_client.APP_SETTINGS_ORIGIN): a model it saves in Settings is
+ *  recorded like the Settings page's own Save, without a row in Main. */
+export const sendModelWaitDecision = (body) => jsonPost('/api/decisions', body,
+    { rejectOkFalse: true, headers: APP_SETTINGS_ORIGIN });
+
 const requestIdentity = () => globalThis.crypto?.randomUUID?.()
     || `model-wait-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -102,7 +107,7 @@ export function isModelWaitReference(value) {
 export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn(),
     onChange = () => {}, openSettings = () => {}, login = startLogin, notify = () => {},
     includeWait = () => true,
-    read = fetchJson, send = (body) => jsonPost('/api/decisions', body, { rejectOkFalse: true }),
+    read = fetchJson, send = sendModelWaitDecision,
     store = claudexorStatus, doc = () => document } = {}) {
     const tasks = new Map();
     const getDoc = typeof doc === 'function' ? doc : () => doc;

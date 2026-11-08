@@ -2,9 +2,10 @@
 
 Split verbatim out of ``tests/test_delegated_subagent_transport.py`` by theme. This
 module owns the narrow ``OUROBOROS_SUBAGENT_HARNESS`` key and its route parsing, the
-auto/harness/native rule table, the nanny verb allowlists, and the resolution rows the
-real dispatch entry point produces — including the canonical event and the
-parent-facing beacon a spent subscription window leaves behind.
+harness/native rule table, the nanny verb allowlists, and the resolution rows the
+real dispatch entry point produces (a row-less child runs native; a configured session
+row is health-checked) — including the canonical event and the parent-facing beacon a
+spent subscription window leaves behind.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from ouroboros.tool_capabilities import (
 
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
     _HealthStub,
-    _dispatch,
     _owned_gateway_uses_each_test_transport,
+    _session_dispatch,
+    _transport_snapshot,
 )
 
 
@@ -41,7 +43,6 @@ def test_subagent_harness_key_stays_out_of_the_model_key_sweep():
     ("", None),
     ("codex", subagents.DelegationRoute("codex", "", "")),
     ("codex=gpt-5.4-mini", subagents.DelegationRoute("codex", "gpt-5.4-mini", "")),
-    ("codex=gpt-5.4-mini:low", subagents.DelegationRoute("codex", "gpt-5.4-mini", "low")),
     # The documented grammar is harness[=model][:effort] — the effort bracket is
     # not tied to the model one. Splitting on `=` first made the whole string the
     # route id, which then failed at dispatch as an unknown route.
@@ -87,7 +88,6 @@ def test_an_explicit_off_is_a_decision_an_empty_value_is_not(monkeypatch):
     assert subagents.parse_subagent_harness("  off  ") is None
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "off")
     assert subagents.get_subagent_harness() is None
-    assert subagents.resolve_subagent_executor("auto", route=None).executor == "native"
 
 
 def test_get_subagent_harness_reads_the_env_key(monkeypatch):
@@ -99,34 +99,6 @@ def test_get_subagent_harness_reads_the_env_key(monkeypatch):
 
 
 ROUTE = subagents.DelegationRoute("some-route", "m", "low")
-
-
-def test_rule_auto_without_harness_runs_native():
-    res = subagents.resolve_subagent_executor("auto", route=None)
-    assert (res.executor, res.reason) == ("native", "harness_not_configured")
-
-
-def test_rule_auto_with_healthy_harness_delegates():
-    res = subagents.resolve_subagent_executor("auto", route=ROUTE)
-    assert (res.executor, res.reason) == ("harness", "harness_ready")
-
-
-def test_rule_auto_with_every_profile_spent_falls_back_to_the_api_loudly():
-    """Owner decision D28. It used to dispatch the child as a NANNY anyway, whose very
-    first `delegate_start` was then refused with this SAME fact (executed and pinned
-    below) — a spent dispatch, and the child left to improvise a fallback in prose.
-    `auto` now falls back to the metered API at the one point that still costs nothing,
-    typed, with the reset instant riding along so waiting stays a visible option."""
-    res = subagents.resolve_subagent_executor("auto", route=ROUTE, reset_at="2030-01-01T00:00:00Z")
-    assert res.executor == "native", "auto must not be dispatched onto a spent substrate"
-    assert res.reason == SUBSCRIPTION_WINDOW_EXHAUSTED
-    assert res.reset_at == "2030-01-01T00:00:00Z"
-    assert not res.blocked, "never a permanent block while metered keys exist"
-
-
-def test_rule_auto_with_unavailable_harness_falls_native_with_a_visible_marker():
-    res = subagents.resolve_subagent_executor("auto", route=ROUTE, unavailable_reason="daemon_unreachable")
-    assert (res.executor, res.reason) == ("native", "daemon_unreachable")
 
 
 @pytest.mark.parametrize("kwargs,reason", [
@@ -145,8 +117,10 @@ def test_rule_native_is_native_whatever_the_state():
 
 
 def test_unknown_executor_is_rejected():
-    with pytest.raises(ValueError):
-        subagents.resolve_subagent_executor("magic")
+    # `auto` is no longer a request: it never host-routes (owner D23).
+    for bad in ("magic", "auto"):
+        with pytest.raises(ValueError):
+            subagents.resolve_subagent_executor(bad)
 
 
 def test_both_child_allowlists_can_see_the_nanny_verbs():
@@ -178,12 +152,11 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
     while its siblings were live — an outage invented out of a healthy substrate, and
     the `harness` executor is a PIN, so the caller was refused rather than re-routed.
 
-    Readiness is per SNAPSHOT now — the engine emits one per credential subject, so in
-    practice one per account: the harness is usable while ANY of its snapshots is, and
-    when they are all spent the instant reported is the EARLIEST, because the first to
-    heal makes the harness usable again. The reader groups by `subject.harness` and
-    deliberately never interprets `subject.subject_id`: WHICH profile a run lands on
-    stays Claudexor's business, so no rotation moves into Ouroboros."""
+    Readiness is per credential SUBJECT now (OB1851: one subject's simultaneous rows are
+    constraints on it, never alternatives): the harness is usable while ANY subject is, and
+    when they are all spent the instant reported is the EARLIEST recheck, not a
+    promise that every constraint on an account has healed. The id groups rows; WHICH profile
+    a run lands on stays Claudexor's business, so no rotation moves into Ouroboros."""
     from ouroboros.subagents import _exhausted_window
 
     def _snap(profile, *, spent, reset="2099-08-03T12:00:00Z", harness="some-route",
@@ -222,11 +195,17 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
                       "availability": {"state": "exhausted", "resets_at": "2099-08-03T09:00:00Z"}}])
     assert _exhausted_window(single, "some-route") == (True, "2099-08-03T09:00:00Z")
 
-    # Another harness's exhaustion is not ours, and a STALE snapshot never blocks.
+    # Another harness's exhaustion is not ours. A stale row still carrying the
+    # engine's dated, unexpired block is a live cap (OB1851: the engine keeps it in
+    # its own admission ledger); an expired or undated one never blocks.
     other = _Quota([_snap("acct-a", spent=True, harness="other-route")])
     assert _exhausted_window(other, "some-route") == (False, "")
     stale = _Quota([_snap("acct-a", spent=True, freshness="stale")])
-    assert _exhausted_window(stale, "some-route") == (False, "")
+    assert _exhausted_window(stale, "some-route") == (True, "2099-08-03T12:00:00Z")
+    for reset in ("2000-01-01T00:00:00Z", None):
+        expired = _snap("acct-a", spent=True, freshness="stale")
+        expired["availability"]["resets_at"] = reset
+        assert _exhausted_window(_Quota([expired]), "some-route") == (False, "")
 
     # And the live sibling wins even when the spent one is listed second.
     reordered = _Quota([_snap("acct-b", spent=False), _snap("acct-a", spent=True)])
@@ -310,14 +289,13 @@ def test_a_full_ratio_without_reset_does_not_refuse_the_engine_attempt():
     assert (unavailable, reset_at) == ("", "")
 
 
-@pytest.mark.parametrize("executor", ["harness", "auto"])
-def test_partial_quota_keeps_the_selected_subscription_dispatch(monkeypatch, executor):
+def test_partial_quota_keeps_the_selected_subscription_dispatch(monkeypatch):
     class Partial(_HealthStub):
         def quota_snapshots(self):
             return [{"subject": {"harness": "some-route"}, "freshness": "fresh",
                      "constraints": [{"used_ratio": 1.0}]}]
 
-    resolution = _dispatch(executor, stub=Partial(), monkeypatch=monkeypatch)
+    resolution = _session_dispatch(stub=Partial(), monkeypatch=monkeypatch)
     assert resolution.executor == "harness"
     assert not resolution.blocked
     assert resolution.route.model == "weak"
@@ -364,103 +342,91 @@ def test_an_unreadable_profile_keeps_the_route_usable():
         _NoAbsences([spent]), "some-route") == (False, "")
 
 
-def test_dispatch_row_auto_without_a_route_runs_native(monkeypatch):
-    res = _dispatch("auto", route="", monkeypatch=monkeypatch)
-    assert (res.executor, res.reason) == ("native", "harness_not_configured")
-
-
-def test_dispatch_row_auto_with_a_healthy_route_becomes_a_nanny(monkeypatch):
-    res = _dispatch("auto", monkeypatch=monkeypatch)
-    assert (res.executor, res.reason) == ("harness", "harness_ready")
-
-
-def test_dispatch_row_auto_with_every_profile_spent_falls_back_to_the_api(monkeypatch):
-    """D28 through the REAL dispatch entry point, with the disclosure it owes.
-
-    Three destinations (p2's `capability_delta` chain composed with this at
-    synthesis): the durable `subagent_executor_resolved` row the dispatch emits, the
-    child's own prompt note, and the parent-facing envelope's
-    `effective_executor` / `capability_delta`."""
-    from ouroboros.agent import dispatch_executor_note, resolve_dispatch_axes
-
-    res = _dispatch("auto", stub=_HealthStub(reset_at="2030-01-01T00:00:00Z"), monkeypatch=monkeypatch)
-    assert res.executor == "native" and not res.blocked
-    assert res.reason == SUBSCRIPTION_WINDOW_EXHAUSTED
-    assert res.reset_at == "2030-01-01T00:00:00Z"
-
-    # Destination 2: the child is told it fell back, that the money is real, and when
-    # the substrate would have healed — it must not discover any of that by spending.
-    note = dispatch_executor_note(res)
-    assert "CAPABILITY DELTA" in note and "METERED" in note
-    assert "2030-01-01T00:00:00Z" in note
-
-    # Destination 3: the parent reads what actually ran, and that it diverged —
-    # through the REAL resolution seam, not a hand-built envelope: the dispatch
-    # stamps the record and rebuilds the envelope from it (one writer).
-    task = {"id": "t-child", "type": "task", "delegation_role": "subagent",
-            "requested_executor": "auto"}
-    resolve_dispatch_axes(task)
-    envelope = task["subagent_envelope"]
-    assert envelope["executor"] == "auto"
-    assert envelope["effective_executor"] == "native"
-    assert envelope["capability_delta"]["reason"] == SUBSCRIPTION_WINDOW_EXHAUSTED
-    assert envelope["capability_delta"]["reduced"] is True
-
-    # And the PIN keeps the opposite answer: it exists to refuse metered spend.
-    pinned = _dispatch("harness", stub=_HealthStub(reset_at="2030-01-01T00:00:00Z"),
-                       monkeypatch=monkeypatch)
-    assert pinned.blocked and pinned.reason == SUBSCRIPTION_WINDOW_EXHAUSTED
-
-
-def test_dispatch_row_auto_with_an_unavailable_route_runs_native_with_a_visible_marker(monkeypatch):
-    from ouroboros.agent import dispatch_executor_note
-
-    res = _dispatch("auto", raises=cx.ClaudexorUnavailable("daemon_unreachable", "no daemon"),
-                    monkeypatch=monkeypatch)
-    assert (res.executor, res.reason) == ("native", "daemon_unreachable")
-    # "Visible" is the whole point of this row: the child must not discover the
-    # fallback by spending.
-    note = dispatch_executor_note(res)
-    assert "METERED" in note and "daemon_unreachable" in note
-
-
 def test_dispatch_row_explicit_harness_blocks_and_never_reaches_the_native_path(monkeypatch):
     for stub, raises in (
         (_HealthStub(status="unavailable"), None),
         (None, cx.ClaudexorUnavailable("daemon_unreachable", "no daemon")),
     ):
-        res = _dispatch("harness", stub=stub, raises=raises, monkeypatch=monkeypatch)
+        res = _session_dispatch(stub=stub, raises=raises, monkeypatch=monkeypatch)
         # The regression this exists for: a pin that silently becomes a metered native
         # run bills the owner for precisely what the pin was asked to prevent.
         assert res.executor != "native", res
         assert res.blocked, res
-    res = _dispatch("harness", route="", monkeypatch=monkeypatch)
-    assert res.blocked and res.reason == "harness_not_configured"
 
 
-def test_dispatch_row_native_is_native_and_asks_the_daemon_nothing(monkeypatch):
+def test_a_rowless_child_runs_native_and_asks_the_daemon_nothing(monkeypatch):
+    """Row-less children (today only the silence diagnostic) run natively with no daemon
+    probe, whatever the legacy harness key says (owner D23: an ambiguous `auto` never
+    host-routes). Before, such a child probed the daemon, resolved a light-lane NANNY,
+    was demoted by the visibility preflight, and read a false "METERED API ... your
+    parent asked for 'auto'" note. The configured rows keep their own answers."""
+    from ouroboros.agent import dispatch_executor_note, preflight_delegate_visibility, resolve_dispatch_axes
     from ouroboros.gateways import claudexor as gw
-    from ouroboros.subagents import dispatch_executor_resolution
+    from ouroboros.subagents import resolve_subagent_dispatch
 
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak:low")
 
     def _boom(*a, **k):
-        raise AssertionError("a native request must not touch the daemon")
+        raise AssertionError("a row-less child must not touch the daemon")
 
     monkeypatch.setattr(gw, "ClaudexorGateway", _boom)
-    res = dispatch_executor_resolution({"delegation_role": "subagent", "requested_executor": "native"})
-    assert (res.executor, res.reason) == ("native", "requested_native")
+
+    class _NoVerbs:
+        def available_tools(self):
+            return ["read_file"]
+
+    for stored in ("", "auto", "native", "a-value-from-an-older-build"):
+        task = {"id": "t-diag", "type": "task", "delegation_role": "subagent",
+                "task_constraint": {"mode": "local_readonly_subagent"},
+                **({"requested_executor": stored} if stored else {})}
+        dispatch = resolve_dispatch_axes(task)
+        res = dispatch.executor_resolution
+        assert (res.executor, res.reason, res.route) == ("native", "requested_native", None), stored
+        assert dispatch_executor_note(res, lane=dispatch.lane) == ""
+        assert dispatch.delta.reduced is False and dispatch.delta.effective_executor == "native"
+        assert task["executor_route"] == "" and task["effective_executor"] == "native"
+        assert preflight_delegate_visibility(_NoVerbs(), task, dispatch) == (dispatch, False)
+        assert "delegate_tools_invisible" not in json.dumps(task["capability_delta"])
+    # A stored harness PIN without a row has no route to honor: it blocks, still unprobed.
+    pinned = resolve_subagent_dispatch({"delegation_role": "subagent", "requested_executor": "harness"})
+    assert pinned.blocked and pinned.executor_resolution.reason == "harness_not_configured"
+
+    # Quiet: a configured session row still dispatches a nanny with its configured note.
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _HealthStub())
+    session = resolve_subagent_dispatch({
+        "delegation_role": "subagent", "parent_cognitive_route": {"model": "nanny-model"},
+        "configured_subagent": _transport_snapshot(ROUTE, "readonly")}, task_type="task")
+    assert session.executor == "harness"
+    assert "configured agent-session route" in dispatch_executor_note(
+        session.executor_resolution, lane=session.lane)
+    # ...a configured API row stays native and silent...
+    from ouroboros import provider_models
+
+    monkeypatch.setattr(provider_models, "model_has_credentials", lambda *_a, **_k: True)
+    api = resolve_subagent_dispatch({
+        "delegation_role": "subagent", "parent_cognitive_route": {"model": "nanny-model"},
+        "configured_subagent": {"schema": 1, "selected_subagent_id": "api-row",
+                                "config_fingerprint": "api-row-v1", "effort": "low",
+                                "route": {"kind": "api_model", "target_id": "provider/api-model"}}},
+        task_type="task")
+    assert api.executor == "native"
+    assert dispatch_executor_note(api.executor_resolution, lane=api.lane) == ""
+    # ...and an explicit `delegate_start` harness request still resolves through the table.
+    assert subagents.resolve_subagent_executor("harness", route=ROUTE).executor == "harness"
+
+
 
 
 def test_a_blocked_pin_ends_the_task_unrun_instead_of_spending(monkeypatch):
     from ouroboros.agent import executor_blocked_outcome
 
-    res = _dispatch("harness", raises=cx.ClaudexorUnavailable("daemon_unreachable", "x"),
-                    monkeypatch=monkeypatch)
+    res = _session_dispatch(raises=cx.ClaudexorUnavailable("daemon_unreachable", "x"),
+                            monkeypatch=monkeypatch)
     text, usage = executor_blocked_outcome(res)
-    assert usage == {"execution_status": "infra_failed",
-                     "reason_code": "subagent_executor_unavailable"}
-    assert "NOT run on metered API tokens" in text
+    assert usage == {"execution_status": "infra_failed", "reason_code": "subagent_executor_unavailable",
+                     "unavailable_reason": res.reason, "alternatives": [], "host_fallback": False,
+                     "terminal_origin": "host_notice"}
+    assert "NOT run and spent nothing" in text
     # No visible marker for a blocked run: there is no child to inform.
     from ouroboros.agent import dispatch_executor_note
     assert dispatch_executor_note(res) == ""
@@ -486,10 +452,10 @@ def test_a_plain_task_is_not_subject_to_the_executor_axis(monkeypatch):
 
 def test_an_acting_child_is_health_checked_against_the_profile_it_will_ask_for(monkeypatch):
     # A route that can only read is not a usable substrate for a child that must write.
-    res = _dispatch("harness", stub=_HealthStub(profiles=("readonly",)),
-                    monkeypatch=monkeypatch, acting=True)
+    res = _session_dispatch(stub=_HealthStub(profiles=("readonly",)),
+                            monkeypatch=monkeypatch, acting=True)
     assert res.blocked and res.reason == "access_profile_unsupported:workspace_write"
-    res = _dispatch("harness", stub=_HealthStub(profiles=("readonly",)), monkeypatch=monkeypatch)
+    res = _session_dispatch(stub=_HealthStub(profiles=("readonly",)), monkeypatch=monkeypatch)
     assert res.executor == "harness"
 
 
@@ -501,26 +467,20 @@ def test_a_route_that_declares_only_the_confined_profile_is_admitted_not_refused
     stands its own sandbox down in favour of that boundary declares only the confined
     profile. `opencode` is exactly that route (`["full", "external_sandbox_full",
     "inherit_native"]`, given the profile so a delegated mutating run on macOS could
-    exist at all). Comparing the literal blocked a pinned `harness` executor outright
-    and dropped `auto` to a metered native child for no reason on either side.
+    exist at all). Comparing the literal blocked the pinned session row outright.
     """
     opencode = ("full", "external_sandbox_full", "inherit_native")
-    res = _dispatch("harness", stub=_HealthStub(profiles=opencode),
-                    monkeypatch=monkeypatch, acting=True)
+    res = _session_dispatch(stub=_HealthStub(profiles=opencode),
+                            monkeypatch=monkeypatch, acting=True)
     assert res.executor == "harness" and not res.blocked
     # The fallback is the DELEGATED run's alone: a read-only child asks for `readonly`,
     # the engine leaves it `readonly`, and opencode really cannot serve it.
-    res = _dispatch("harness", stub=_HealthStub(profiles=opencode), monkeypatch=monkeypatch)
+    res = _session_dispatch(stub=_HealthStub(profiles=opencode), monkeypatch=monkeypatch)
     assert res.blocked and res.reason == "access_profile_unsupported:readonly"
     # And a route with neither profile still refuses the acting child.
-    res = _dispatch("harness", stub=_HealthStub(profiles=("readonly", "inherit_native")),
-                    monkeypatch=monkeypatch, acting=True)
+    res = _session_dispatch(stub=_HealthStub(profiles=("readonly", "inherit_native")),
+                            monkeypatch=monkeypatch, acting=True)
     assert res.blocked and res.reason == "access_profile_unsupported:workspace_write"
-
-
-def test_a_stale_unknown_executor_value_degrades_to_auto_not_to_a_crash(monkeypatch):
-    res = _dispatch("a-value-from-an-older-build", monkeypatch=monkeypatch)
-    assert res.executor == "harness" and res.requested == "auto"
 
 
 def test_executor_resolution_row_also_lands_in_canonical_events(tmp_path):
@@ -539,7 +499,7 @@ def test_executor_resolution_row_also_lands_in_canonical_events(tmp_path):
     (canonical / "logs").mkdir(parents=True)
 
     dispatch = SimpleNamespace(executor_resolution=SimpleNamespace(
-        requested="auto", executor="native",
+        requested="harness", executor="blocked",
         reason=SUBSCRIPTION_WINDOW_EXHAUSTED, reset_at="2030-01-01T00:00:00Z", route=None,
     ))
     task = {"id": "child1", "budget_drive_root": str(canonical)}
@@ -578,7 +538,7 @@ def test_subscription_window_exhausted_beacon_wakes_the_waiting_parent(tmp_path,
     child_logs.mkdir(parents=True)
 
     dispatch = SimpleNamespace(executor_resolution=SimpleNamespace(
-        requested="auto", executor="native",
+        requested="harness", executor="blocked",
         reason=SUBSCRIPTION_WINDOW_EXHAUSTED, reset_at="2030-01-01T00:00:00Z", route=None,
     ))
     task = {"id": "childbeacon1", "parent_task_id": "parentroot1", "root_task_id": "parentroot1"}
@@ -606,7 +566,7 @@ def test_subscription_window_exhausted_beacon_wakes_the_waiting_parent(tmp_path,
 
     # A healthy (non-exhausted) resolution appends NO beacon.
     healthy = SimpleNamespace(executor_resolution=SimpleNamespace(
-        requested="auto", executor="harness", reason="harness_ready", reset_at="", route=None,
+        requested="harness", executor="harness", reason="harness_ready", reset_at="", route=None,
     ))
     _record_executor_resolution(child_logs, {"id": "childbeacon2", "parent_task_id": "parentroot1",
                                              "root_task_id": "parentroot1"}, healthy)

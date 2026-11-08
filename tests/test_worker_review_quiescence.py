@@ -11,7 +11,6 @@ from tests.test_owner_wait_pool import maintain_capacity, park, pool as pool
 from tests.test_review_operation_lifetime import TASK, env as env, _parent, _request, _slot, _rows, until
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("tail", ["wait_close", "final_pointer"])
@@ -99,8 +98,8 @@ def test_a_later_close_retries_the_failed_final_pointer(env, monkeypatch):
 def test_recovered_final_writer_lets_the_full_cap_resume_progress(env, pool, monkeypatch):
     """Reviewer counterexample: a transient pointer failure once pinned ``_LIVE`` forever."""
     park(pool)
-    maintain_capacity()
-    replacement = workers.WORKERS[1]
+    maintain_capacity(demand=1)  # the parked slot's replacement is bought by demand (4A: no idle spare)
+    [replacement] = [slot for slot in workers.WORKERS.values() if slot is not pool.original]
     replacement.reaping = False  # the readiness owner opened it
     affirm_ready(replacement)
     attempts, healthy = [], [False]

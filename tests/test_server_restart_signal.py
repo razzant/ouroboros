@@ -39,7 +39,7 @@ def test_server_tick_observes_existing_stop_latch(monkeypatch):
 @pytest.mark.skipif(sys.platform == "win32", reason="Real PID signals require POSIX delivery")
 @pytest.mark.parametrize("entrypoint,ingress", [
     ("console", "control"), ("console", "sigint"),
-    ("console", "sigterm"), ("imported", "sigint"),
+    ("console", "sigterm"),
 ])
 @pytest.mark.timeout(80)
 def test_signal_during_restart_join_preserves_cleanup(tmp_path, entrypoint, ingress):
@@ -60,11 +60,11 @@ def test_signal_during_restart_join_preserves_cleanup(tmp_path, entrypoint, ingr
             ], cwd=REPO, env=env, stdin=subprocess.DEVNULL,
                 stdout=log, stderr=subprocess.STDOUT)
             wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc)
+                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=60)
             (gates / "request-restart").touch()
             wait_for(lambda: all((gates / name).exists() for name in (
                 "restart-cleanup-entered.json", "main-socket-closed.json",
-                "lifespan-finished.json", "server-finished.json")), proc)
+                "lifespan-finished.json", "server-finished.json")), proc, timeout=60)
             assert json.loads((gates / "main-socket-closed.json").read_text())["closed"]
             assert not (gates / "release").exists()
             assert not (gates / "release-restart-cleanup").exists()

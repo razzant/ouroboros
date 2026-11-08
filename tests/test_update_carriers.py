@@ -24,9 +24,14 @@ import supervisor.update_merge_plan as update_merge_plan
 from ouroboros.tools.release_sync import (
     VERSION_CARRIER_SPANS,
     carrier_spans_for,
+    check_worktree_version_sync,
     locate_carrier_span,
+    published_download_version,
+    sync_release_metadata,
+    version_carrier_desyncs,
 )
 from tests import test_update_merge_assisted as tua
+from tests.test_release_sync import _download_page, _download_references, _make_repo
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -580,3 +585,157 @@ def test_carrier_postcondition_names_a_web_package_lock_the_sync_cannot_fix(tmp_
     lock_text = (repo / "web" / "package-lock.json").read_text()
     assert '"name": "ouroboros-web",\n  "version": "2.0.0"' in lock_text
     assert '"": {\n      "version": "1.0.0"' in lock_text
+
+
+# --- a managed update onto a development marker (BIBLE P9) ------------------------
+
+
+def _marker_update_scene(tmp_path, monkeypatch):
+    """Base at the published 7.9.0 with every carrier; ``remote-sim`` opens the marker; HEAD stays the fork."""
+    repo, head = tua._init_repo(tmp_path)
+    # The repository's LF text policy, as in every real checkout: what this scene's writers produce (CRLF in
+    # Windows text mode, the release sync included) reaches the index stages the resolver reads as LF.
+    (repo / ".gitattributes").write_bytes((REPO_ROOT / ".gitattributes").read_bytes())
+    _make_repo(repo, "7.9.0")
+    sync_release_metadata(str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "published 7.9.0")
+    _git(repo, "checkout", "-q", "-b", "remote-sim")
+    (repo / "VERSION").write_text("7.10.0-alpha.0\n", newline="\n")
+    sync_release_metadata(str(repo))
+    (repo / "official.txt").write_text("official\n", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "official marker")
+    target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "-q", head)
+    _point_at(monkeypatch, tmp_path, repo, head)
+    return repo, target
+
+
+def _links_in_tree(repo):
+    return tuple(published_download_version((repo / rel).read_text(encoding="utf-8"))
+                 for rel in ("README.md", "site/install/index.html", "docs/install/index.html"))
+
+
+def test_a_marker_target_brings_its_published_links_over_a_forks_own_release(tmp_path, monkeypatch):
+    repo, target = _marker_update_scene(tmp_path, monkeypatch)
+    (repo / "VERSION").write_text("7.9.1\n", newline="\n")
+    sync_release_metadata(str(repo))  # the fork's own numbered release moved every link to unpublished v7.9.1
+    assert _links_in_tree(repo) == ("7.9.1", "7.9.1", "7.9.1")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fork release")
+    _git(repo, "merge", "--no-commit", "--no-ff", target)  # README, VERSION and friends conflict; the pages do not
+
+    conflicted = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert "README.md" in conflicted and "site/install/index.html" not in conflicted
+    assert update_carriers.resolve_carrier_conflicts(str(repo), conflicted, prefer="theirs")["kept"] == {}
+    ok, note, error = update_candidate.project_version_carriers(target)
+
+    assert ok, (note, error)
+    assert (repo / "VERSION").read_text().strip() == "7.10.0-alpha.0"
+    assert _links_in_tree(repo) == ("7.9.0", "7.9.0", "7.9.0")
+    assert check_worktree_version_sync(repo) == ""
+    assert _git(repo, "diff", "--name-only", target, "--", "README.md", "site/install/index.html",
+                "docs/install/index.html").stdout == ""
+    assert _git(repo, "diff", "--cached", "--name-only", "--diff-filter=U").stdout == ""
+
+
+def test_the_next_projection_heals_the_dead_marker_links_an_older_body_merged(tmp_path, monkeypatch):
+    """An installed body without the marker rule projects a marker's VERSION onto every link and commits the merge.
+
+    It cannot be corrected in flight: the running body owns that projection. This tree carries it as
+    it was committed, and the next update's projection writes back the target's published links; no
+    tag or remote read decides what was published.
+    """
+    repo, target = _marker_update_scene(tmp_path, monkeypatch)
+    _git(repo, "merge", "-q", "--no-ff", "-m", "the older body's merge", target)
+    dead = "7.10.0-alpha.0"
+    readme = (repo / "README.md").read_text(encoding="utf-8")
+    (repo / "README.md").write_text(readme.replace(_download_references("7.9.0"), _download_references(dead)),
+                                    newline="\n", encoding="utf-8")
+    for rel in ("site/install/index.html", "docs/install/index.html"):
+        (repo / rel).write_text(_download_page(dead), newline="\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "--amend", "--no-edit")
+    assert _links_in_tree(repo) == (dead, dead, dead)
+    # Until then the new body reports the state rather than inheriting it silently.
+    assert "direct-download links" in check_worktree_version_sync(repo)
+
+    _git(repo, "checkout", "-q", "remote-sim")
+    (repo / "landing.txt").write_text("a neutral landing\n", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a neutral landing")
+    next_target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "--no-commit", "--no-ff", next_target)
+    assert _links_in_tree(repo) == (dead, dead, dead)  # Git alone keeps the fork's side of an untouched span
+
+    ok, note, error = update_candidate.project_version_carriers(next_target)
+
+    assert ok, (note, error)
+    assert _links_in_tree(repo) == ("7.9.0", "7.9.0", "7.9.0")
+    assert check_worktree_version_sync(repo) == ""
+    assert version_carrier_desyncs(
+        "7.10.0-alpha.0", download_readme_text=(repo / "README.md").read_text(encoding="utf-8")) == []
+    assert _git(repo, "diff", "--cached", "--name-only", next_target, "--", "README.md", "site/install/index.html",
+                "docs/install/index.html").stdout == ""
+
+
+def _diverged_from_a_target_with(repo, rel, text):
+    """The official tip rewrites *rel*; the fork diverges and starts merging that tip."""
+    _git(repo, "checkout", "-q", "remote-sim")
+    (repo / rel).write_text(text, newline="\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"official {rel}")
+    target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "-q", "-")
+    (repo / "local.txt").write_text("fork\n", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fork work")
+    _git(repo, "merge", "--no-commit", "--no-ff", target)
+    return target
+
+
+def test_a_target_whose_readme_names_no_one_release_fails_the_projection_rather_than_guess(tmp_path, monkeypatch):
+    repo, official = _marker_update_scene(tmp_path, monkeypatch)
+    readme = _git(repo, "show", f"{official}:README.md").stdout
+    mixed = readme.replace("releases/download/v7.9.0/Ouroboros-7.9.0.dmg", "releases/download/v7.8.0/Ouroboros-7.8.0.dmg")
+    assert mixed != readme
+    target = _diverged_from_a_target_with(repo, "README.md", mixed)
+
+    ok, _note, error = update_candidate.project_version_carriers(target)
+
+    assert not ok and error.startswith("carriers still desynced after token sync: ")
+    assert "expected one published plain release below 7.10.0-alpha.0" in error
+
+
+def test_a_target_page_behind_its_readme_is_projected_to_the_release_the_readme_names(tmp_path, monkeypatch):
+    repo, _target = _marker_update_scene(tmp_path, monkeypatch)
+    target = _diverged_from_a_target_with(repo, "site/install/index.html", _download_page("7.8.0"))
+    assert _links_in_tree(repo) == ("7.9.0", "7.8.0", "7.9.0")
+
+    ok, note, error = update_candidate.project_version_carriers(target)
+
+    assert ok, (note, error)
+    assert _links_in_tree(repo) == ("7.9.0", "7.9.0", "7.9.0")
+
+
+def test_the_marker_target_conflict_inventory_keeps_the_official_side_inside_the_spans(tmp_path, monkeypatch):
+    """Release ancestry in the other direction: a fork already on the plain release meets the next marker."""
+    repo, target = _marker_update_scene(tmp_path, monkeypatch)
+    (repo / "VERSION").write_text("7.10.0\n", newline="\n")
+    readme = (repo / "README.md").read_text(encoding="utf-8")
+    (repo / "README.md").write_text(readme.replace("| 7.9.0 |", "| 7.10.0 | 2026-11-03 | Fork row. |\n| 7.9.0 |", 1),
+                                    newline="\n", encoding="utf-8")
+    sync_release_metadata(str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fork cut the release number locally")
+    _git(repo, "merge", "--no-commit", "--no-ff", target)
+
+    conflicted = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert update_carriers.resolve_carrier_conflicts(str(repo), conflicted, prefer="theirs")["kept"] == {}
+    ok, note, error = update_candidate.project_version_carriers(target)
+
+    assert ok, (note, error)
+    assert _links_in_tree(repo) == ("7.9.0", "7.9.0", "7.9.0")
+    assert "| 7.10.0-alpha.0 |" not in (repo / "README.md").read_text(encoding="utf-8")

@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros import delegate_custody as custody, delegate_custody_usage as dcu
 from ouroboros import review_execution as rx
+from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.review_session_usage import session_usage_facts
 from tests._review_session_route_shared import (
     FakeGateway, _agent_request, _agent_slot, _terminal_detail,
@@ -15,10 +16,9 @@ from tests._review_session_route_shared import (
 from tests.test_session_input_events import (
     SPLIT, collect, entry, events, persist_review, _synthetic_root_lineage,  # noqa: F401
 )
-from tests.test_review_session_continuation import _engine
+from tests.test_review_session_continuation import _engine, record_legacy_successor
 from tests._usage_store_testing import ledger_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -49,17 +49,32 @@ def _with_split(monkeypatch):
     monkeypatch.setattr(FakeGateway, "get_run", get_run)
 
 
+def _rejoining_seat(root, monkeypatch, *, started=False):
+    """This seat's first collection stopped at run-1, whose automatic successor an older host recorded; a
+    restarted host's executor rejoins the seat with the seat's retained pending token and joins that successor."""
+    checkpoints = []
+    first = _executor(root)
+    first.set_pending_invocation_checkpoint(checkpoints.append)
+    with pytest.raises(ClaudexorUnavailable):
+        first.execute()
+    token = record_legacy_successor(root, checkpoints[0], started=started)
+    monkeypatch.setattr(dcu, "_EMITTED_SESSION_USAGE", {})  # process-local, like custody's cache
+    executor = _executor(root)
+    executor.restore_custody({"pending_invocation_id": checkpoints[0]})
+    return executor, token
+
+
 def test_lost_continuation_keeps_read_facts_and_same_executor_observes_successor(tmp_path, monkeypatch, fake_route):
-    accepted, posts = _engine(monkeypatch, lose_response=True)
+    posts = _engine(monkeypatch, lose_response=True)
     _with_split(monkeypatch)
-    executor = _executor(tmp_path)
     observed = []
-    executor.usage_observer = observed.append
     from ouroboros.usage_accounting import UsageScope, usage_scope
     with usage_scope(UsageScope(task_id="t-review", root_task_id="root", category="review",
                                 source="review_substrate", review_slot_id="scope_slot_1")):
+        executor, token = _rejoining_seat(tmp_path, monkeypatch)
+        executor.usage_observer = observed.append
         with pytest.raises(OSError, match="response lost") as failure:
-            executor.execute()
+            executor.execute()  # the engine accepted the recorded continuation POST; its reply was lost
         failed_usage = failure.value.delegated_usage
         assert failed_usage["input_token_usage"] == SPLIT
         assert failed_usage["observed_attempt"]["model"] == "fake-small"
@@ -69,7 +84,8 @@ def test_lost_continuation_keeps_read_facts_and_same_executor_observes_successor
         assert executor.execute().raw_text == "[]"
     assert [row["claudexor"]["run_id"] for row in observed] == ["run-1", "run-2"]
     assert all(row["input_token_usage"] == SPLIT for row in observed)
-    assert len(accepted) == 1 and len(posts) == 2 and posts[0][1] == posts[1][1]
+    continued = [(request, key) for request, key in posts if "continueFrom" in request]
+    assert len(posts) == 3 and continued == [({"continueFrom": "run-1"}, token)] * 2  # same key AND bytes: one run
     for row in observed:
         persist_review(tmp_path, row)
     assert [row["input_token_usage"] for row in events(tmp_path) if row["type"] == "llm_usage"] == [SPLIT, SPLIT]
@@ -106,8 +122,9 @@ def test_verified_cancel_usage_reaches_failure_projection(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("carried", ["same", "job_alias", "foreign", "live", "unnamed", "none"])
 def test_successor_failure_never_borrows_prior_run_or_unbound_exception_detail(tmp_path, monkeypatch, fake_route, carried):
-    _engine(monkeypatch)
+    posts = _engine(monkeypatch)
     _with_split(monkeypatch)
+    executor, _token = _rejoining_seat(tmp_path, monkeypatch, started=True)
     poll = rx._poll_session_terminal
     error = OSError("successor observation failed")
     detail = {"summary": {"state": "running" if carried == "live" else "cancelled",
@@ -123,12 +140,12 @@ def test_successor_failure_never_borrows_prior_run_or_unbound_exception_detail(t
             raise error
         return poll(gateway, module, root, held, run_id, seconds)
     monkeypatch.setattr(rx, "_poll_session_terminal", fail_successor)
-    executor = _executor(tmp_path)
     observed = []
     executor.usage_observer = observed.append
     with pytest.raises(OSError) as failure:
         executor.execute()
     assert failure.value is error
+    assert not any("continueFrom" in request for request, _key in posts)  # the bound successor is joined, never re-sent
     assert [row["delegated_run_id"] for row in observed] == ["run-1", "run-2"]
     assert observed[0]["input_token_usage"] == SPLIT
     last = observed[-1]
@@ -138,8 +155,7 @@ def test_successor_failure_never_borrows_prior_run_or_unbound_exception_detail(t
         assert "input_token_usage" not in last and last["observed_attempt"] == {}
 
 
-@pytest.mark.parametrize("state,split", [("succeeded", SPLIT), ("failed", SPLIT),
-                                         ("succeeded", dict.fromkeys(SPLIT)), ("failed", None)])
+@pytest.mark.parametrize("state,split", [("succeeded", SPLIT), ("succeeded", dict.fromkeys(SPLIT)), ("failed", None)])
 def test_attach_only_usage_uses_recorded_attribution_without_new_effects(tmp_path, monkeypatch, state, split):
     from ouroboros import review_operation
     from ouroboros.usage_accounting import UsageScope, usage_scope

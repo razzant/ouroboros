@@ -31,6 +31,7 @@ _AWAITING_REASON = "No answer recorded: the host returned at the dispatch barrie
 # carried on outcome_axes.execution.plan_review; the earlier engine's classes (unanswered,
 # none_answered, answered_open) survive only as the cause sentences of finished tasks.
 PLAN_REVIEW_OBJECTIONS_OPEN = "objections_open"  # objections stood open at delivery
+PLAN_REVIEW_UNREADABLE = "unreadable"  # the record could not be read at delivery: the review's state is unknown
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.review_records import ReviewActorRecord, ReviewRequest
@@ -426,6 +427,35 @@ def _doctrine_panel(record: Dict[str, Any]) -> Dict[str, Any]:
     return {"author_decision": public} if public else {}
 
 
+_LANDINGS_SHOWN = 16  # a panel names the newest landed commits; its record (``source_ref``) keeps every one
+
+
+def _wave_failures_panel(verdict: Dict[str, Any]) -> Dict[str, Any]:
+    """A wave its host stopped (``verdict.wave_failures``): the producer's reason code, its masked words and a
+    selector of the complete note for the review door, never a path. A record without one says nothing."""
+    notes = []
+    for note in [item for item in verdict.get("wave_failures") or [] if isinstance(item, dict)]:
+        ref = note.get("source_ref") if isinstance(note.get("source_ref"), dict) else {}
+        inner = ref.get("ref") if isinstance(ref.get("ref"), dict) else {}
+        notes.append({"block_reason": str(note.get("block_reason") or ""),
+                      "reported_cause": _public_review_reason(note.get("reported_cause")),
+                      "source": {"seat_id": str(ref.get("seat_id") or ""), "role": str(ref.get("role") or ""),
+                                 "part": str(ref.get("part") or ""), "status": str(ref.get("status") or ""),
+                                 "sha256": str(inner.get("sha256") or ""), "size": inner.get("size"), "chars": ref.get("chars")}})
+    return {"wave_failures": notes} if notes else {}
+
+
+def _landed_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The commits that landed under this record, each against its reviewed tree (``commit_landings``):
+    the newest ones, with the count of older ones only the record holds (``commit_landings_omitted``)."""
+    from ouroboros.review_doctrine import public_commit_landings
+
+    landed = public_commit_landings(record)
+    shown = landed[-_LANDINGS_SHOWN:]
+    omitted = {"commit_landings_omitted": len(landed) - len(shown)} if len(landed) > len(shown) else {}
+    return {"commit_landings": shown, **omitted} if landed else {}
+
+
 def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
     """One review-ledger record (``review_ledger.build_wave_record``) as a card panel:
     the record's ``panel`` facts (who sat and why) and every seat's answer per brief
@@ -468,7 +498,9 @@ def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
         "panel_facts": facts, "actors": actors, "superseded": False,
         "source_ref": {"kind": "review_ledger_record", "path": f"state/{LEDGER_SUBDIR}/{record_id}.json"},
         **({"cost": _wave_cost(costs)} if pooled else {}),
+        **_wave_failures_panel(verdict),
         **_doctrine_panel(record),
+        **_landed_panel(record),
     }
 
 

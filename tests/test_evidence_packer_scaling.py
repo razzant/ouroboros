@@ -21,7 +21,7 @@ def _reserve(root, task):
                    "reservation_upper_bound_usd": 0.01, "pricing_known": True})
 
 
-@pytest.mark.parametrize("change", ["money", "delivery", "live_row", "live_evidence"])
+@pytest.mark.parametrize("change", ["money", "delivery", "live_evidence"])
 def test_unrelated_changes_do_not_wake_the_look_or_the_swept_task(root, monkeypatch, change):
     _task(root, "packed", blobs=1)
     assert packer.run_pass(root)["unlinked"] == 2
@@ -219,7 +219,8 @@ def test_unrelated_activity_during_a_pass_does_not_stop_the_backfill(root, monke
     assert not any(pathlib.Path(ref["path"]).exists() for ref in refs)
 
 
-def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(root, monkeypatch):
+@pytest.mark.parametrize("reader", ["resumed", "council"])
+def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(root, monkeypatch, reader):
     """Resuming a terminal task under its id after the census is not a reason to stop the pass: the
     shared blob is in the packed task's verified pack, where the resumed sharer's readers find it. The
     sharer's own generation, chosen at the census, is still written (verified bytes, never a loss), but
@@ -232,7 +233,11 @@ def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(r
     def resume(*args, **kwargs):
         result = write(*args, **kwargs)
         if not resumed:
-            resumed.append(_result(root, "other", "running"))
+            if reader == "resumed":
+                resumed.append(_result(root, "other", "running"))
+            else:
+                resumed.append(_result(root, "other", plan_record={"schema_version": 3,
+                    "asks": [{"participants": [{"status": "pending"}]}]}))
         return result
 
     with monkeypatch.context() as edits:
@@ -476,12 +481,17 @@ def test_a_terminal_write_under_another_body_that_ran_no_pass_owes_one_whole_cen
     assert packs.published_generations(root, "after") and not pathlib.Path(refs[0]["path"]).exists()
 
 
-def test_the_keep_set_covers_live_sharers_whose_rows_did_not_move(root, monkeypatch):
+@pytest.mark.parametrize("reader", ["running", "review", "council"])
+def test_the_keep_set_covers_live_sharers_whose_rows_did_not_move(root, monkeypatch, reader):
     """Both directions. A blob a running task shares with a settled one stays loose on the settled task's
     pass; when another sharer settles later, the census is that task alone, and the running task's refs
     are still kept, read from the status and review indexes, never a listing. The same read is indexed."""
     raw = b'{"shared": "with a task that is still running"}'
     live_refs, _ = _task(root, "live", status="running", blobs=1, payloads=[raw])
+    if reader == "review":
+        _result(root, "live", review_operations={"op": {"surface": "multi_model_review", "state": "dispatched"}})
+    elif reader == "council":
+        _result(root, "live", plan_record={"schema_version": 3, "asks": [{"participants": [{"status": "pending"}]}]})
     _task(root, "first", blobs=1, payloads=[raw])
     assert maintenance.run_job(root, "evidence_packing")["state"] == "done"
     maintenance.run_job(root, "evidence_packing")

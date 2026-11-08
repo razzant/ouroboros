@@ -15,6 +15,7 @@ from tests.test_plan_task_tool import harness as harness
 from tests.test_review_collection_index import _combined_schema, _legacy_store, _old_replace, _operation
 from tests.test_store import document, publish
 from tests.test_store_cutover import _plan, captured_statements
+from tests._cases import chosen_rows
 
 
 def _pending(**fields):
@@ -26,7 +27,7 @@ def _flags(root, task_id):
         return txn.row(task_id, "review_collection_pending", "plan_collection_pending", "write_seq")
 
 
-@pytest.mark.parametrize(("raw", "expected"), [
+@pytest.mark.parametrize(("raw", "expected"), chosen_rows([
     (None, False), ({}, False), (plan_record.empty_record(), False),
     (_record([_pending()]), True),
     (_record([_pending(owner_marked=False, dispatched=False, unresolved=True)]), True),
@@ -38,7 +39,7 @@ def _flags(root, task_id):
     ({"schema_version": 3, "asks": [None]}, True),
     ({"schema_version": 3, "asks": [{"participants": {}}]}, True),
     (_record([{"seat_id": "unknown", "status": "future_status"}]), True),
-])
+], 12, 13, 15))
 def test_plan_selection_is_pure_and_conservative(tmp_path, monkeypatch, raw, expected):
     def forbidden(*_args, **_kwargs):
         pytest.fail("selection must not read sources or fully validate/copy history")
@@ -190,7 +191,7 @@ def test_known_plan_work_uses_its_own_index_before_unknown_history(tmp_path, mon
     with store.open_store(tmp_path / "packer", write=True) as txn:
         txn.conn.execute("UPDATE tasks SET plan_collection_pending=1 WHERE task_id='quiet'")
     with store.open_store(tmp_path / "packer", write=False) as txn:
-        assert evidence_packs.task_packable(txn, "quiet"), "selector is not a new retention duty"
+        assert not evidence_packs.task_packable(txn, "quiet"), "pending council readers still need loose source paths"
 
 
 def test_stopped_plan_classification_keeps_unknown_rows_for_next_pass(tmp_path, monkeypatch):

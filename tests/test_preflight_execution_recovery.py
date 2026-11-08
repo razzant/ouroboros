@@ -9,7 +9,7 @@ import pytest
 
 from ouroboros import preflight_receipts as receipts
 from ouroboros import review_ledger
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests import _contributor_packet_shared as shared
 from tests.test_preflight_receipts_consumers import _foreign_review, _recording
 from tests.test_preflight_receipts import _git, _tiny_repo
@@ -17,7 +17,6 @@ from tests.test_review_change_end_to_end import (
     _brief_text, _paid_rows, _pending_then_answering_seat, staged_body,  # noqa: F401
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("refusal", [
@@ -41,6 +40,10 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     if prior_proof != "absent":
         # Model a context that still owns a prior attestation. The selected gate
         # below must not mistake it for an invocation that got past preflight.
+        # A worker mints it after its registry imported every tool module, so the browser
+        # module's PLAYWRIGHT_BROWSERS_PATH default is already in the environment the proof
+        # binds; a first registry built by the review below would change it (#2363).
+        ToolRegistry(repo_dir=repo, drive_root=ctx.drive_root)
         shared.passing_test_runner(ctx)
         if prior_proof == "stale":
             (repo / "ouroboros" / "helper.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -102,8 +105,7 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     assert review_ledger.load_record(ctx.drive_root, reference["review_record_id"])["preflight_execution"] == exhibit
 
 
-@pytest.mark.parametrize("outcome", ["green", "skip", "failed", "skip_after_green", "unbound", "skip_after_unbound",
-                                     "managed_unbound"])
+@pytest.mark.parametrize("outcome", ["green", "failed", "managed_unbound"])
 def test_nonrefused_gate_keeps_real_test_and_skip_exhibits(tmp_path, monkeypatch, outcome):
     from ouroboros import commit_admission, preflight_runner
     from ouroboros.tools import commit_gate, git

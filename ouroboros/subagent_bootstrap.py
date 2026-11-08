@@ -255,23 +255,28 @@ def bootstrap_before_context(ctx: Any, task: Mapping[str, Any], dispatch: Any) -
             "work_order_fingerprint": str(actor_bootstrap.get("work_order_fingerprint") or ""),
             "host_fallback": False,
         })
+        pool = str(availability.get("engine_pool") or "")
+        if not pool:
+            from ouroboros.engine_facts import engine_pool_line
+            pool = engine_pool_line(getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None))
         if fenced:
-            # A fence (recorded receipt / unreadable receipt store) may hide a
-            # prior physical run: the model must reconcile it, so the blocked
-            # fact rides the episode instead of fabricating an unrun terminal —
-            # and it rides VISIBLY: the receipt carries the typed route_blocked
-            # facts, not just a durable custody row the model never sees.
+            # A fence may hide a prior run, so this blocked fact rides the episode
+            # visibly as route_blocked, never as an unrun terminal.
             try:
                 payload = json.loads(actor_ready)
                 payload["route_blocked"] = {
                     "reason": reason,
                     **({"reset_at": reset_at} if reset_at else {}),
+                    "engine_pool": pool,
                 }
                 actor_ready = json.dumps(payload, ensure_ascii=False, indent=2)
             except (TypeError, ValueError):
                 pass
             return _with_coordination_context(ctx, actor_ready)
         _record_startup_refusal(ctx, task, reason=reason, reset_at=reset_at)
+        recorded = task.get("subagent_availability") if isinstance(task, dict) else None
+        if isinstance(recorded, dict):
+            recorded.setdefault("engine_pool", pool)
         return ""
     if fenced:
         return _with_coordination_context(ctx, actor_ready)
@@ -311,7 +316,8 @@ def _pre_start_leaf(
         "effort_fact": dict(actor_bootstrap.get("effort_fact") or {}), "_initial_bootstrap": True,
         **({"mode": actor_bootstrap["delegated_mode"]} if "delegated_mode" in actor_bootstrap else {}),
         **{key: actor_bootstrap[key] for key in ("directory_strategy", "scope_paths", "workspace") if key in actor_bootstrap},
-        **first_start_selection(actor_bootstrap),
+        **first_start_selection(actor_bootstrap),  # the parent's documents and schedule-time input copies
+        **({"_prepared_inputs": list(actor_bootstrap["prepared_input_files"])} if actor_bootstrap.get("prepared_input_files") else {}),
     })
     try:
         payload = delegate_payload(started)
@@ -600,7 +606,7 @@ def configured_actor_finalization_message(
 ) -> str | None:
     """The charter finalization fact for a configured session actor.
 
-    ``None`` = not a configured actor (the legacy nanny message applies);
+    ``None`` = not a configured actor (no charter fact to state);
     ``""`` = clean (succeeded leaf, adoption, or a typed zero-run receipt);
     otherwise the one structural reminder, prefixed ``CONFIGURED_ACTOR_INCOMPLETE``
     for an incomplete fact and ``CONFIGURED_ACTOR_UNKNOWN`` for anything else:
@@ -818,7 +824,7 @@ def _prepare_actor_first_bootstrap(
         **({"delegated_mode": task["delegated_mode"]} if "delegated_mode" in task else {}),
         **{key: list(task[key]) if key in ("scope_paths", "attachment_paths") else task[key]
            for key in ("directory_strategy", "scope_paths", "workspace", "attachment_paths", "attachment_import",
-                       "document_import_intent") if key in task},
+                       "document_import_intent", "prepared_input_files") if key in task},
     }
     zero_run_evidence_gaps: set[str] = set()
     durable_zero_run = _durable_zero_run_receipt(
@@ -872,6 +878,31 @@ def _prepare_actor_first_bootstrap(
     }, ensure_ascii=False, indent=2)
 
 
+def _custody_guidance(receipt: dict, ctx: Any) -> str:
+    startup = receipt.get("startup") if isinstance(receipt.get("startup"), dict) else {}
+    blocked = receipt.get("route_blocked") if isinstance(receipt.get("route_blocked"), dict) else {}
+    refused = startup.get("status") == "refused" or startup.get("definitely_unrun") is True
+    held = any(
+        str(blob.get("pending_invocation_id") or "").strip() or str(blob.get("run_id") or "").strip()
+        for blob in (receipt, startup, blocked))
+    if refused and not held:
+        from ouroboros.engine_facts import engine_pool_line
+        root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+        return (
+            "This refusal carries no custody handle, so no run exists. A fresh delegate_start is safe. "
+            "Waiting first, or a typed delegation_zero_run decision, stays yours; this receipt never "
+            "authorizes native/API fallback.\n" + engine_pool_line(root))
+    return (
+        "Physical custody is unresolved: this receipt reports a durable "
+        "zero-run fence, unreadable receipt evidence, unfinished recovery, or "
+        "a start fault. Do not call delegate_start over it — a prior run or a "
+        "terminal delegation_zero_run decision may already exist. Reconcile "
+        "the typed facts first; then supervise the run you find, retry the "
+        "exact route once absence is proven, or record a typed "
+        "delegation_zero_run decision (incomplete|unknown). This receipt "
+        "never authorizes native/API fallback.")
+
+
 def append_startup_receipt(
     ctx: Any, messages: list[dict[str, Any]], startup_wake: str, seen: Optional[set] = None,
 ) -> None:
@@ -919,19 +950,7 @@ def append_startup_receipt(
             "fallback."
         )
     else:
-        # Everything else is unresolved physical custody: a durable zero-run
-        # fence, unreadable receipt evidence, unfinished recovery, or a start
-        # fault. All of them may hide a live or already-decided run.
-        guidance = (
-            "Physical custody is unresolved: this receipt reports a durable "
-            "zero-run fence, unreadable receipt evidence, unfinished recovery, or "
-            "a start fault. Do not call delegate_start over it — a prior run or a "
-            "terminal delegation_zero_run decision may already exist. Reconcile "
-            "the typed facts first; then supervise the run you find, retry the "
-            "exact route once absence is proven, or record a typed "
-            "delegation_zero_run decision (incomplete|unknown). This receipt "
-            "never authorizes native/API fallback."
-        )
+        guidance = _custody_guidance(receipt, ctx)
     delivered = _startup_view(
         startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen)
     messages.append({

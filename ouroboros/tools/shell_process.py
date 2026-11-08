@@ -1,10 +1,16 @@
 """Process-execution substrate shared by every command-running tool.
 
-Owns the tracked subprocess registry and its panic-time tree kill, the
+Owns the tracked subprocess registry, the one admission/publication protocol
+its producers start/retire children through (``tracked_start``, ``retire_tracked``) and the restart
+exit's own finalization scope (``exit_finalization``), its panic-time
+request and the ordinary stop's tree kill, the one command wait that also
+reads an in-process turn's Stop now (``communicate_or_stop``), the
 PYTHONPATH scrubbing that keeps an external workspace from shadow-importing
 Ouroboros, the single normalized per-command timeout resolution (which the
-loop's outer wait reuses, ``command_timeout_for_call``), the return-code and
-bounded stdout/stderr rendering, and the probe that decides whether a
+loop's outer wait reuses, ``command_timeout_for_call``) with the refusal a spent
+task bound gives before any child starts, the return-code and complete
+stdout/stderr rendering with the result of a child that never returned
+(``unfinished_command_result``), and the probe that decides whether a
 resolved cwd is reachable through the workspace executor. The
 run_command/run_script handlers and the tool descriptors stay with
 ``tools/shell.py``.
@@ -12,26 +18,199 @@ run_command/run_script handlers and the tool descriptors stay with
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import pathlib
 import subprocess
+import sys
 import threading
-from typing import Any, List, Mapping, Optional
+import time
+import weakref
+from contextlib import contextmanager
+from typing import Any, Callable, List, Mapping, Optional
 
 from ouroboros.platform_layer import kill_process_tree, request_process_tree_kill, scrub_repo_from_pythonpath, subprocess_new_group_kwargs
+from ouroboros.process_identity import process_kernel_birth
+from ouroboros.platform_layer import (
+    IS_WINDOWS,
+    WINDOWS_CREATE_SUSPENDED,
+    assign_pid_to_job,
+    close_job,
+    create_kill_on_close_job,
+    job_has_running_member,
+    observe_child_exit,
+    retained_child_group,
+    resume_process,
+    terminate_job,
+)
 from ouroboros.config import SETTINGS_DEFAULTS, load_settings, runtime_environ
+from ouroboros.owned_shutdown import stop_begun
 from ouroboros.tools.registry import ToolContext
-from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.deadline_utils import deadline_clamped_timeout_sec, deadline_expired
 from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 
+log = logging.getLogger(__name__)
 
-# Tracked process groups let panic kill descendant trees too.
+# Tracked process groups let panic kill descendant trees too. Publication and the Panic request
+# never take a lock: a cleanup holding ``_subprocess_lock`` cannot keep a started child unnamed.
 _active_subprocesses: set = set()
 _subprocess_lock = threading.Lock()
 _panic_requested = False
-_spawning_subprocesses = 0
+_spawning_subprocesses = 0  # admitted starts not yet published, or published into a stop not yet handed over
+_start_settled = threading.Condition()  # guards only that count and its admission check; never held across I/O
+_FINALIZING = threading.local()  # the restart exit's thread inside ``exit_finalization``
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
+
+
+class CommandAdmissionClosed(RuntimeError):
+    """Emergency Stop or this server generation's begun stop refused a tracked start before its Popen."""
+
+    process_not_started = True
+
+
+class CommandStopped(subprocess.SubprocessError):
+    """Stop now ended an in-process turn's command wait (``communicate_or_stop``): neither a result nor a
+    timeout. ``exit_observed`` is the observed end only (the child's exit and, where the caller's stop
+    confirms the backend, that confirmation); otherwise it is unknown, never a confirmed kill.
+    ``output``/``stderr`` keep everything the command wrote, whole."""
+
+    def __init__(self, cmd: Any, output: str, stderr: str, *, exit_observed: bool) -> None:
+        super().__init__(f"Stop now ended {cmd!r}; its exit was {'observed' if exit_observed else 'not observed'}")
+        self.cmd, self.output, self.stderr, self.exit_observed = cmd, output, stderr, exit_observed
+
+
+def unfinished_command_result(ctx: Any, ended: subprocess.SubprocessError, timeout_sec: int, tool: Optional[str], *,
+                              root: str, cwd: Any) -> str:
+    """The result of a run_command/run_script child that never returned, after its handler published the process
+    facts. A timeout keeps its legacy text, typed ``TOOL_TIMEOUT`` by the adapter. Stop now (``CommandStopped``) is
+    the calling ``tool``'s typed ``SHELL_ERROR``, never a success: the host killed the command; everything it wrote
+    is kept, masked, beside whether its exit was observed."""
+    if isinstance(ended, CommandStopped):
+        from ouroboros.tools.tool_result import _publish_process_result
+
+        seen = ("its exit was observed" if ended.exit_observed
+                else "its exit was NOT observed, so whether it still runs is unknown")
+        return _publish_process_result(ctx, "SHELL_ERROR", (
+            f"⚠️ SHELL_ERROR ({tool or 'run_command'}): Stop now ended this turn while the command ran; the host sent "
+            f"its process tree the timeout's own kill and {seen} (root={root}, cwd={cwd}).\n\n"
+            f"{_format_process_output(ended.output, ended.stderr)}"))
+    return (
+        f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
+        f"and the host killed what it could still reach of its process tree; a background child may survive untracked (root={root}, cwd={cwd}). NOTE: this is the per-command "
+        f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
+        f"sampling, large builds/downloads), start it with start_service and poll "
+        f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
+        f"(only the task's own deadline or budget narrows it) — and preserve a best-effort deliverable before the task deadline."
+    )
+
+
+def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
+    """The Stop-now reader for a runner-owned turn, including pooled Presence. Ordinary pooled work
+    keeps the worker kill; no turn has no reader (``owner_stop.in_process_stop_now``)."""
+    waiter = getattr(ctx, "model_wait_context", None)
+    if waiter is None:
+        return None
+    from supervisor.owner_stop import in_process_stop_now, runner_reads_stop
+
+    if getattr(waiter, "worker_slot_held", True) and not runner_reads_stop(waiter):
+        return None
+    return lambda: in_process_stop_now(ctx)
+
+
+def communicate_or_stop(proc: subprocess.Popen, timeout: Optional[float], stop: Optional[Callable[[], Any]] = None,
+                        end: Optional[Callable[[], Any]] = None) -> tuple:
+    """The one command wait. Without ``stop`` it is ``proc.communicate(timeout)``, as before. With a reader
+    the same requested timeout is waited in slices of the in-flight control cadence
+    (``config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC``); its deadline raises ``TimeoutExpired`` for the caller's
+    own kill. Only a reader answering True stops: ``end()`` stops the work through the caller's own kill
+    (False: it could not confirm the backend's end), the output is read with a 5 s bound and
+    ``CommandStopped`` is raised. An unknown read (``None``) stops nothing and claims no absent Stop."""
+    if stop is None:
+        return proc.communicate(timeout=timeout)
+    from ouroboros import config
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        part = config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC
+        try:
+            return proc.communicate(timeout=part if deadline is None else min(part, max(0.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(proc.args, timeout) from None
+        if stop() is True:
+            break
+    confirmed = end() if end is not None else None
+    try:
+        output, stderr = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired as exc:  # a descendant outside the group may still hold a pipe
+        output, stderr = exc.output, exc.stderr
+    output, stderr = (value.decode(errors="replace") if isinstance(value, bytes) else value or "" for value in (output, stderr))
+    raise CommandStopped(proc.args, output, stderr, exit_observed=proc.poll() is not None and confirmed is not False)
+
+
+@contextmanager
+def tracked_start():
+    """Admit one tracked child and count it from before its Popen until its start settled.
+
+    The yielded ``publish(proc)`` registers the handle Popen returned; producers call it before any
+    durable registration, callback or reader can fail. A child published after Emergency Stop or the
+    generation's stop door began is stopped here by its own starter, outside every lock, before the
+    count is released, so the ordinary stop's wait (``kill_all_tracked_subprocesses``) never ends while
+    that handover is still owed; inside ``exit_finalization`` only Emergency Stop refuses or stops it. A
+    refused or failed start always settles. Never wraps a caller's Popen in a lock: the caller keeps its
+    own Popen, operation-start gate and error provenance.
+
+    Publication adds the handle, then reads the stop facts; a stop sets its fact, then snapshots. So a
+    child is in the stop's snapshot or its publisher saw the stop, with no lock between them; the count
+    is admitted under ``_start_settled``, which the stop's wait reads after its door began."""
+    global _spawning_subprocesses
+    finalizing = getattr(_FINALIZING, "active", False)
+    with _start_settled:
+        refusal = ("Emergency Stop has retired command admission" if _panic_requested else
+                   "this server generation's stop has begun: command admission is closed"
+                   if stop_begun() and not finalizing else "")
+        if not refusal:
+            _spawning_subprocesses += 1
+    if refusal:
+        raise CommandAdmissionClosed(refusal)
+    stopping: list = []
+
+    def publish(proc):
+        _record_group(proc)  # before Panic can name it: its request then reaches the whole tree
+        _active_subprocesses.add(proc)
+        if _panic_requested or (stop_begun() and not finalizing):
+            stopping.append(proc)
+        return proc
+
+    try:
+        yield publish
+    finally:
+        try:
+            for proc in stopping:  # Panic only requests; the ordinary stop's tree kill is synchronous
+                request_process_tree_kill(proc) if _panic_requested else _kill_process_group(proc)
+        except Exception:
+            log.warning("A child published into a stop was not stopped by its starter; it stays tracked",
+                        exc_info=True)
+        finally:
+            with _start_settled:
+                _spawning_subprocesses -= 1
+                _start_settled.notify_all()
+
+
+@contextmanager
+def exit_finalization():
+    """The restart exit's own finalization (``store_switch.switch_at_restart``), entered after the
+    generation's one stop finished: tracked starts on THIS thread pass that stop's closed admission and
+    publication under their own timeouts. Emergency Stop still refuses and ends them; other threads, and
+    this one after the block, stay refused."""
+    previous = getattr(_FINALIZING, "active", False)
+    _FINALIZING.active = True
+    try:
+        yield
+    finally:
+        _FINALIZING.active = previous
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
@@ -39,9 +218,10 @@ def _tracked_subprocess_run(cmd, **kwargs):
     output, decode tolerantly (errors='replace') so binary stdout/stderr (a MIPS
     interpreter, a DOOM framebuffer, raw bytes) surfaces as readable text instead
     of raising UnicodeDecodeError and collapsing the whole call into a
-    shell_error."""
-    global _spawning_subprocesses
+    shell_error. ``stop`` (``turn_stop_reader``) lets an in-process turn's Stop now
+    end the wait through the timeout's own group kill (``communicate_or_stop``)."""
     timeout = kwargs.pop("timeout", None)
+    stop = kwargs.pop("stop", None)
     record_path = None
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("errors", "replace")
@@ -61,19 +241,18 @@ def _tracked_subprocess_run(cmd, **kwargs):
     from ouroboros.tool_custody import external_handoff
     confirmed = external_handoff("shell_process")
     proc = None
-    _spawning_subprocesses += 1
+
     try:
-        if _panic_requested:
-            raise RuntimeError("Emergency Stop has retired command admission")
         from ouroboros.owner_pause import operation_start
 
-        with operation_start():
+        with tracked_start() as publish, operation_start():
             try:
-                proc = subprocess.Popen(cmd, **kwargs)
+                proc = contained_popen(subprocess.Popen, cmd, **kwargs)
             except (OSError, ValueError) as exc:
-                exc.process_not_started = True
+                if not hasattr(exc, "process_not_started"):
+                    exc.process_not_started = True
                 raise
-        _active_subprocesses.add(proc)  # publish before the spawning owner can exit
+            publish(proc)  # before the spawning owner can exit
         from ouroboros.workspace_executor import _register_process
         if target is not None:  # task scope only; the foreground receipt keeps its own condition below
             record_task_group(*target, proc.pid)
@@ -82,47 +261,258 @@ def _tracked_subprocess_run(cmd, **kwargs):
                 "record_type": "foreground", "executor_type": "local", "executor_id": "host",
                 "host_pid": proc.pid})
             if record_path is not None:
-                confirmed()
+                confirmed()  # root receipt; retained tree custody stays with this process
     except BaseException:
         if proc is None:
             confirmed()
+        else:
+            retire_tracked(proc)
         raise
-    finally:
-        _spawning_subprocesses -= 1
     try:
-        if _panic_requested:
-            request_process_tree_kill(proc)
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = communicate_or_stop(proc, timeout, stop, lambda: _kill_process_group(proc))
         return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
         proc.wait(timeout=5)
         raise
     finally:
+        retire_tracked(proc)
         if proc.poll() is not None:
             confirmed()
             from ouroboros.workspace_executor import _forget_process
-            _active_subprocesses.discard(proc)
             _forget_process(record_path)
 
 
+def _held(proc) -> dict:
+    return getattr(proc, "__dict__", {})
+
+
+_GENUINE_POPEN = subprocess.Popen  # the stdlib class itself: a test's patched name, wrapper or subclass is not it
+
+
+class _RetainedPopen(subprocess.Popen):
+    """Return the root's status without relinquishing its POSIX group identity.
+
+    waitid(WNOWAIT) leaves the exited leader waitable: its PID cannot be
+    recycled while this owner retains it. The same Popen waits/communicates
+    and returns the same status; only whole-tree retirement consumes it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._ouroboros_group_lock = threading.Lock()
+        self._ouroboros_group_held = False
+        self._ouroboros_group_birth = ""
+        super().__init__(*args, **kwargs)
+        self._ouroboros_group_birth = process_kernel_birth(self.pid)
+        self._ouroboros_group_held = True  # contained_popen supplied start_new_session
+        self._ouroboros_pgid = self.pid
+
+    def _observe(self, pid, flags):
+        try:
+            return observe_child_exit(pid, flags)
+        except ChildProcessError:
+            self._ouroboros_group_held = False
+            raise
+
+    def _internal_poll(self, _deadstate=None):
+        # Keep Popen's nonblocking wait lock and status semantics, using our
+        # observer directly. Its private _internal_poll arguments vary between
+        # supported CPython versions (3.14 no longer accepts _waitpid).
+        if self.returncode is not None or not self._waitpid_lock.acquire(False):
+            return self.returncode
+        try:
+            if self.returncode is None:
+                try:
+                    pid, status = self._observe(self.pid, os.WNOHANG)
+                    if pid == self.pid:
+                        self._handle_exitstatus(status)
+                except OSError as exc:
+                    if _deadstate is not None:
+                        self.returncode = _deadstate
+                    elif isinstance(exc, ChildProcessError):
+                        self.returncode = 0  # same missing-status result as Popen
+        finally:
+            self._waitpid_lock.release()
+        return self.returncode
+
+    def _try_wait(self, wait_flags):
+        try:
+            return self._observe(self.pid, wait_flags)
+        except ChildProcessError:
+            return self.pid, 0  # stdlib's missing-status result; tree ownership stays unknown
+
+    def __del__(self, _is_finalizing=sys.is_finalizing):
+        # Published live/unknown trees have a strong registry reference. This
+        # covers an unpublished caller's disposal and failed Popen construction.
+        # At interpreter teardown the kernel will consume our waitable children;
+        # Python's import machinery may already be gone (including in cyclic GC).
+        if _is_finalizing():
+            return
+        super().__del__()
+        if getattr(self, "returncode", None) is not None and self._ouroboros_group_held:
+            retained_child_group(self, release=True)
+
+
+class _ContainedPopen(subprocess.Popen):
+    """A Windows tracked child born into its own Job (``contained_popen``): created suspended, assigned to a Job
+    that refuses breakaway and does not kill on close, then resumed, so nothing it starts runs outside that Job,
+    whatever its parent chain. An MSYS2/Cygwin exec ends the Windows process that started the next program, which
+    a ``taskkill /T`` walk cannot pass, and every MSYS2 spawn breaks away from a Job that permits it (ARCHITECTURE
+    §1). A child its Job cannot hold still runs, its tree's end unknown (``_tree_remains``); one that cannot be
+    resumed never runs: its end is requested (or disclosed unconfirmed) and its start refused."""
+
+    def _execute_child(self, *args, **kwargs):
+        super()._execute_child(*args, **kwargs)
+        self._ouroboros_containment_attempted = True
+        job = create_kill_on_close_job(kill_on_close=False)  # leftovers outlive the command, as a group's do
+        if job is not None and assign_pid_to_job(job, self.pid):
+            self._ouroboros_job = job
+            weakref.finalize(self, close_job, job)
+        else:
+            close_job(job)
+            log.warning("Tracked child %d runs without its own Job; its tree's end stays unknown", self.pid)
+        if not resume_process(self.pid):  # it never ran: end it and refuse the start
+            # Popen will raise before the caller can publish this already-created child.
+            # Keep its handle for Panic/settlement even if the first end request fails.
+            _active_subprocesses.add(self)
+            receipt = request_process_tree_kill(self)
+            end = ("its end was requested before it ran" if receipt.get("requested") else
+                   f"its end is unconfirmed ({receipt.get('error', 'no request issued')})")
+            log.error("Tracked child %d could not be resumed; %s", self.pid, end)
+            error = OSError(f"tracked child {self.pid} could not be resumed; {end}")
+            error.process_not_started = False  # Created but never resumed is not a failed CreateProcess.
+            raise error
+
+
+def contained_popen(popen_cls, *args, **kwargs):
+    """Start a tracked child: ``popen_cls(*args, **kwargs)``, born contained on Windows (``_ContainedPopen``):
+    CREATE_SUSPENDED alone joins the producer's own flags, so no process group or console changes with it. POSIX
+    retains the new session leader with WNOWAIT until its tree settles. Both platforms pass patched classes
+    through unchanged; test doubles must supply an explicit containment measurement."""
+    if popen_cls is not _GENUINE_POPEN:
+        return popen_cls(*args, **kwargs)
+    if not IS_WINDOWS:
+        if not kwargs.get("start_new_session"):
+            raise ValueError("tracked POSIX children require their own session")
+        return _RetainedPopen(*args, **kwargs)
+    return _ContainedPopen(*args, **{**kwargs, "creationflags": kwargs.get("creationflags", 0) | WINDOWS_CREATE_SUSPENDED})
+
+
+def _record_group(proc) -> None:
+    """Publish the containment witness established at birth by ``contained_popen``."""
+    # A raw Popen or a numeric PGID is not a retained containment witness.
+    # contained_popen establishes the group at birth, including fast exits.
+    if _held(proc).get("_ouroboros_group_held"):
+        proc._ouroboros_pgid = proc.pid
+
+
 def _kill_process_group(proc):
-    """Kill a subprocess tree."""
+    """Kill a subprocess tree through the tree owner (a tracked Windows child: its own Job)."""
     kill_process_tree(proc)
 
 
-def kill_all_tracked_subprocesses(*, request_only=False):
-    """Request owned kills without locks, or perform ordinary tree cleanup."""
+def _tree_remains(proc) -> Optional[bool]:
+    """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
+    members). None when nothing measured holds it, so an exited root never stands for its tree."""
+    held = _held(proc)
+    if held.get("_ouroboros_tree_settled"):
+        return False
+    if held.get("_ouroboros_pgid"):
+        if "_ouroboros_group_held" not in held or not retained_child_group(proc):
+            return None  # an unknown/reaped/recycled leader cannot vouch for this number
+        from ouroboros.process_containment import process_group_has_live_members
+        return process_group_has_live_members(held["_ouroboros_pgid"])
+    if held.get("_ouroboros_job") is None:
+        return None
+    return job_has_running_member(held["_ouroboros_job"])
+
+
+def retire_tracked(proc) -> bool:
+    """Release only an exited root AND a measured empty tree; otherwise retain it.
+
+    A task-group record is discovery, not transfer of this live OS witness.
+    Foreground/external receipts describe the root separately. Idle workers
+    keep this registry alive; stop/idle probes retire naturally ended trees.
+    """
+    held = _held(proc)
+    if proc.poll() is None or _tree_remains(proc) is not False:
+        return False
+    held["_ouroboros_tree_settled"] = True
+    if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
+        return False
+    _active_subprocesses.discard(proc)
+    return True
+
+
+def _end_tree(proc) -> None:
+    """Request a held group/Job's end even after root exit. Unknown Job membership
+    is no obstacle to terminating that owned Job; no numeric fallback for lost groups."""
+    if "_ouroboros_group_held" in _held(proc):
+        _kill_process_group(proc)
+    elif (job := _held(proc).get("_ouroboros_job")) is not None:
+        if job_has_running_member(job) is not False:
+            terminate_job(job)  # the handle is authority even when the membership read failed
+    elif proc.poll() is None:
+        _kill_process_group(proc)
+
+
+def kill_all_tracked_subprocesses(*, request_only=False, deadline=None):
+    """Request owned kills without locks (Panic), or stop the tracked children (ordinary cleanup).
+
+    The ordinary stop kills its snapshot through the tree owner (``_end_tree``). With the generation
+    stop's ``deadline`` (admission is already closed) it also waits, until then, for starts still in
+    flight, stops what they published and confirms each exit; without one it adds no wait. An exit is
+    the root's and, measured, its contained tree's (``_tree_remains``): a dead root whose descendants
+    may still hold its pipes has not exited. Only handles whose exit it observed leave the registry: a
+    concurrent publication or an unconfirmed kill keeps its name. Returns ``None`` when every child it
+    addressed exited, else the live ``pids`` and the ``unpublished`` starts it could not see, which no
+    durable record names."""
     global _panic_requested
     if request_only:
         _panic_requested = True
         return [request_process_tree_kill(proc) for proc in _active_subprocesses.copy()]
-    with _subprocess_lock:
-        procs = list(_active_subprocesses)
+    procs = list(_active_subprocesses.copy())  # whole-set copies and updates: no publisher waits on this stop
     for proc in procs:
-        _kill_process_group(proc)
-    with _subprocess_lock:
-        _active_subprocesses.clear()
+        _end_tree(proc)
+    if deadline is not None:
+        with _start_settled:
+            _start_settled.wait_for(lambda: not _spawning_subprocesses, max(0.0, deadline - time.monotonic()))
+        late = [proc for proc in _active_subprocesses.copy() if proc not in procs]
+        for proc in late:  # its starter already handed it to the tree kill; this stop confirms the exit
+            _end_tree(proc)
+        procs += late
+    alive = [proc for proc in procs if not _exit_observed(proc, deadline)]
+    for proc in procs:
+        if proc not in alive:
+            retire_tracked(proc)
+    with _start_settled:
+        unpublished = _spawning_subprocesses
+    if alive or unpublished:
+        return {"state": "unconfirmed", "pids": sorted(proc.pid for proc in alive), "unpublished": unpublished}
+    return None
+
+
+def _exit_observed(proc, deadline) -> bool:
+    try:
+        if deadline is not None:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if proc.poll() is None:
+            return False
+    except subprocess.TimeoutExpired:
+        return False
+    while (remains := _tree_remains(proc)) is True and deadline is not None and time.monotonic() < deadline:
+        time.sleep(0.05)  # its killed members' exits, until the stop's own deadline
+    return remains is False
+
+
+def unsettled_tracked_children() -> Optional[dict]:
+    """What a joined stop must still disclose, without a wait: tracked children whose root or contained
+    tree may still run, and starts still in flight (a publication after the stop ran is stopped by its
+    starter, not confirmed)."""
+    alive = sorted(proc.pid for proc in _active_subprocesses.copy() if not retire_tracked(proc))
+    with _start_settled:
+        unpublished = _spawning_subprocesses
+    return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
@@ -155,69 +545,113 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     return scrub_repo_from_pythonpath(env, system_repo)
 
 
+def command_bound_spent(ctx: ToolContext | None) -> bool:
+    """Whether the task's real bound is already spent: its owner deadline has passed or its
+    explicit execution window (#939) has none left. A command started now would outlive the
+    bound by design, so the handlers refuse before any child starts, as ``delegate_start``
+    does; a bound still running, however short, is a clamp, not a refusal."""
+    if ctx is None:
+        return False
+    from ouroboros.model_wait import explicit_execution_window_remaining
+
+    execution_left = explicit_execution_window_remaining(ctx)
+    return deadline_expired(ctx) or (execution_left is not None and execution_left <= 0)
+
+
+def command_bound_refusal_text(tool_name: str) -> str:
+    return (f"⚠️ TASK_DEADLINE_BLOCKED ({tool_name}): this task's deadline or execution budget is already "
+            "spent, so no command was started. Finalize with the verified work so far.")
+
+
+def _longest_command_wait() -> tuple[int, str]:
+    """The longest wait one command can be given here and the wait that sets it: a physical representation, not a
+    policy. The loop's outer wait on the call's future takes at most ``threading.TIMEOUT_MAX`` and adds the settlement
+    margin; where ``subprocess`` reads the child's pipes with ``selectors.PollSelector`` (POSIX), ``poll(2)`` takes a C
+    ``int`` of milliseconds. Past either, the wait raised OverflowError instead of running the command."""
+    import selectors
+
+    from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
+
+    bounds = [(int(threading.TIMEOUT_MAX) - NESTED_SETTLEMENT_MARGIN_SEC,
+               "the call's outer wait: threading.TIMEOUT_MAX less the settlement margin")]
+    if os.name != "nt" and hasattr(selectors, "PollSelector"):
+        bounds.append(((2**31 - 1) // 1000, "the child's pipe reader: poll(2) takes a C int of milliseconds"))
+    return min(bounds)
+
+
+def _requested_command_timeout(default_timeout_sec: int, override_sec: Any = None) -> tuple[float, str]:
+    """The REQUESTED per-command timeout and where it came from, one precedence chain: per-call ``timeout_sec`` > env
+    ``OUROBOROS_TOOL_TIMEOUT_SEC`` > settings.json > config ``SETTINGS_DEFAULTS`` > the in-code last resort. A
+    non-finite ``timeout_sec`` (JSON ``1e400``, ``-Infinity``, ``NaN``) stays itself for the refusal to name; a
+    non-positive or non-numeric one asks for nothing, as before. An env/settings value equal to the config default is
+    honored (the prior ``!= default_setting`` skip fell through to the in-code 360 s)."""
+    if isinstance(override_sec, float) and not math.isfinite(override_sec):
+        return override_sec, "timeout_sec"
+    try:
+        requested = int(override_sec) if override_sec is not None else 0
+    except (TypeError, ValueError):
+        requested = 0
+    if requested > 0:
+        return requested, "timeout_sec"
+    raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
+    try:
+        if raw and int(raw) > 0:
+            return int(raw), "Tool Timeout (OUROBOROS_TOOL_TIMEOUT_SEC)"
+    except ValueError:
+        pass
+    try:
+        settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+        if settings_val > 0:
+            return settings_val, "Tool Timeout (OUROBOROS_TOOL_TIMEOUT_SEC)"
+    except Exception:
+        pass
+    cfg_default = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+    return (cfg_default if cfg_default > 0 else int(default_timeout_sec)), "the default timeout"
+
+
+def command_start_refusal(ctx: ToolContext | None, tool_name: str, override_sec: Any = None) -> str:
+    """Why a command must not start ('' when it may), decided before any child exists: the task's real bound is spent
+    (``command_bound_spent``), or its timeout asks for a wait this platform cannot represent
+    (``_longest_command_wait``), a non-finite one included. A representable timeout is never narrowed here."""
+    if command_bound_spent(ctx):
+        return command_bound_refusal_text(tool_name)
+    requested, source = _requested_command_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, override_sec)
+    longest, bound = _longest_command_wait()
+    if 0 < requested <= longest:  # compared as parsed: a JSON integer may lie past any float, NaN compares false
+        return ""
+    return (f"⚠️ TOOL_ARG_ERROR ({tool_name}): {source}={requested!r} seconds is not a wait this platform can "
+            f"represent; one command here waits at most {longest} seconds ({bound}). No command was started: ask for "
+            f"at most {longest} seconds, or use start_service for longer work.")
+
+
 def _resolve_effective_timeout(
     default_timeout_sec: int,
     ctx: ToolContext | None = None,
     override_sec: int | None = None,
 ) -> int:
-    """Resolve the effective per-command timeout as ONE normalized pipeline:
-    resolve the REQUESTED value from a single precedence chain (per-call
-    ``override_sec`` > env ``OUROBOROS_TOOL_TIMEOUT_SEC`` > settings.json > config
-    ``SETTINGS_DEFAULTS`` > the in-code last-resort ``default_timeout_sec``), then
-    apply the per-call ceiling, then clamp toward the remaining task-deadline budget
-    (60s floor when a deadline exists), then floor at 1s. The outer budget loop
-    remains the hard deadline enforcer.
+    """Resolve the effective per-command timeout as ONE normalized pipeline: the REQUESTED value
+    (``_requested_command_timeout``), narrowed only by the task's real bound: the nearer of the owner
+    deadline and the explicit execution window, less the finalization reserve
+    (``deadline_utils.deadline_clamped_timeout_sec``, the network tools' clamp too).
 
-    Hygiene fix (SSOT): the prior code skipped an env/settings value EQUAL to the
-    config default (``!= default_setting``), so ``OUROBOROS_TOOL_TIMEOUT_SEC=600``
-    (= the SETTINGS_DEFAULTS value) silently fell through to the in-code 360s default.
-    The configured value is now honored regardless of equality, and env/settings
-    values no longer BYPASS the ceiling/deadline clamp. RELEASE NOTE: installs that
-    relied on the buggy effective 360s now get the configured 600s — a foreground
-    command may hold the task longer (still bounded by ceiling + task deadline).
+    A request is honored as written: no separate per-call ceiling (the owner retired
+    ``OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC``), no floor that widens a short request, no
+    half of the remainder held back. Inside the reserve the child gets 1 s, a fast typed
+    timeout; a spent bound gets 1 s here and the handlers start nothing (``command_start_refusal``,
+    checked just before the child starts), so no resolution outlives it. A request this
+    platform cannot wait on is refused before any child starts, and the resolution stays within
+    that wait. The loop's outer wait (``loop_tool_execution._get_tool_timeout``) also takes a saved
+    Tool Timeout of its own: one past ``threading.TIMEOUT_MAX`` still raises there, for every tool.
     """
-    from ouroboros.config import get_per_call_timeout_ceiling_sec
-
-    # 1. Resolve the REQUESTED timeout from a single precedence chain.
-    requested: int | None = None
-    if override_sec is not None:
-        try:
-            ov = int(override_sec)
-        except (TypeError, ValueError):
-            ov = 0
-        if ov > 0:
-            requested = ov
-    if requested is None:
-        raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
-        if raw:
-            try:
-                v = int(raw)
-                if v > 0:
-                    requested = v
-            except ValueError:
-                pass
-    if requested is None:
-        try:
-            settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-            if settings_val > 0:
-                requested = settings_val
-        except Exception:
-            pass
-    if requested is None:
-        cfg_default = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-        requested = cfg_default if cfg_default > 0 else int(default_timeout_sec)
-
-    # 2. Per-call ceiling.
-    effective = min(requested, get_per_call_timeout_ceiling_sec())
-
-    # 3. Clamp toward the remaining task-deadline budget (60s floor when a deadline exists).
+    requested, _source = _requested_command_timeout(default_timeout_sec, override_sec)
+    longest, _bound = _longest_command_wait()
+    requested = requested if 0 < requested <= longest else longest
+    # Narrow toward the task's real bound; never widen, never past a spent one.
     if ctx is not None:
-        remaining = deadline_remaining_sec(ctx)
-        if remaining > 0:
-            effective = int(max(60, min(effective, remaining * 0.5)))
-
-    # 4. Floor at 1s.
-    return max(1, int(effective))
+        if command_bound_spent(ctx):
+            return 1
+        requested = deadline_clamped_timeout_sec(ctx, requested)
+    return max(1, int(requested))
 
 
 # The handlers that bound their child with ``_resolve_effective_timeout``. The loop's outer
@@ -245,8 +679,11 @@ def command_timeout_for_call(tool_name: str, args: Mapping[str, Any], ctx: ToolC
 from ouroboros.tools.process_facts import describe_returncode as _describe_returncode  # noqa: E402, F401 — historical private spelling for call sites and tests
 
 
-def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> str:
-    """Mask diagnostic copies before bounds can split a selected secret."""
+def _format_process_output(stdout: str, stderr: str) -> str:
+    """The complete labelled output with its diagnostic copies masked.
+
+    No bound is applied here: the producer's whole text reaches the exact-source delivery
+    (``tool_result_delivery``), which keeps it readable and bounds only what the mind is shown."""
     from ouroboros.tools.process_facts import redact_process_data
 
     stdout_text = redact_process_data(str(stdout or ""))
@@ -256,10 +693,7 @@ def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> 
         parts.append(f"STDOUT:\n{stdout_text}")
     if stderr_text.strip():
         parts.append(f"STDERR:\n{stderr_text}")
-    rendered = "\n\n".join(parts) if parts else "STDOUT:\n(empty)"
-    if len(rendered) > limit:
-        rendered = rendered[: limit // 2] + "\n...(truncated)...\n" + rendered[-limit // 2 :]
-    return rendered
+    return "\n\n".join(parts) if parts else "STDOUT:\n(empty)"
 
 
 def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
@@ -292,7 +726,7 @@ def _publish_finished_process_facts(ctx, res, started_ts) -> int:
 
 
 def _publish_unfinished_process_facts(
-    ctx, started_ts, *, timed_out: bool = False, spawn_error: BaseException | None = None,
+    ctx, started_ts, *, timed_out: bool = False, spawn_error: BaseException | None = None, killed: bool = False,
 ) -> None:
     """Typed facts for a child with no returncode (timeout / pre-exec failure).
 
@@ -317,8 +751,9 @@ def _publish_unfinished_process_facts(
                           timed_out=timed_out,
                           # The deadline is enforced BY the host killing the
                           # subprocess tree, so a timeout is always also a host
-                          # kill — the one fact a Windows kill can still carry.
-                          killed_by_host=timed_out,
+                          # kill — the one fact a Windows kill can still carry. A Stop now kill
+                          # (``killed``) is claimed only once its exit was observed.
+                          killed_by_host=timed_out or killed,
                           pre_exec_failure=(
                               type(spawn_error).__name__
                               if isinstance(spawn_error, OSError) else ""))

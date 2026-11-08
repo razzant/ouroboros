@@ -1,4 +1,4 @@
-"""unix_computer_use 0.5.3 on the remote backends: OSWorld guests and Macs over SSH (see test_unix_computer_use_targeting.py).
+"""unix_computer_use on the remote backends: OSWorld guests and Macs over SSH (see test_unix_computer_use_targeting.py).
 
 The same receipt contract as the local path, pinned at the transport boundary (``urlopen`` toward a guest, ``ssh``): a target
 is resolved from the remote's own inventory and activated by window id or pid, the guest program is executed here against a
@@ -39,13 +39,19 @@ class Guest:
     """``urlopen`` toward an OSWorld guest; ``answer(command)`` -> (returncode, output) per /execute call."""
 
     def __init__(self, answer):
-        self.answer, self.commands = answer, []
+        self.answer, self.commands, self.validations = answer, [], []
 
     def __call__(self, request, timeout=None):
         command = json.loads(request.data.decode("utf-8"))["command"]
-        self.commands.append(command)
-        returncode, output = self.answer(command[-1], len(self.commands))
-        body = {"status": "success", "output": output, "error": "", "returncode": returncode}
+        from tests.test_unix_computer_use_safety_contract import guest_key_validation
+        validation = guest_key_validation(command[-1])
+        if validation:
+            self.validations.append(command)
+            body = validation["result"]
+        else:
+            self.commands.append(command)
+            returncode, output = self.answer(command[-1], len(self.commands))
+            body = {"status": "success", "output": output, "error": "", "returncode": returncode}
 
         class Response:
             status = 200
@@ -201,6 +207,11 @@ def ssh(tmp_path, monkeypatch, script):
     return module, api, calls
 
 
+def is_input(command: str) -> bool:
+    """The remote input stage: a cliclick input, or the paste chord program (osascript JavaScript, #2589)."""
+    return "cliclick" in command or "osascript -l JavaScript" in command
+
+
 def mac_over_ssh(front, after=None, input_stderr=""):
     """Scripts: the listing reports ``front``; an activation ends with ``after`` (or ``front``) in front."""
     def script(command):
@@ -208,7 +219,7 @@ def mac_over_ssh(front, after=None, input_stderr=""):
             return 0, LISTING + "__FRONT__" + info_line(front)
         if "System Events" in command:
             return 0, f"__FRONT_BEFORE__{info_line(front)}\n__FRONT_AFTER__{info_line(after or front)}\n"
-        if "cliclick" in command:
+        if is_input(command):
             now = after or front
             stage = "__CLIPBOARD_WRITTEN__\n" if "pbcopy" in command else ""
             return 0, f"__FRONT_BEFORE__{info_line(now)}\n{stage}__FRONT_AFTER__{info_line(now)}\n", input_stderr
@@ -269,7 +280,12 @@ def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI))
     out = receipt(api.tools["type_text"](text="Привет 'мир'", via="paste"))
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
-    assert "pbcopy" in calls[-1][-1] and "cliclick kd:cmd t:v ku:cmd" in calls[-1][-1]
+    remote = calls[-1][-1]
+    # One ssh call (#2589): front read, the clipboard told the bytes are UTF-8, the stage marker, the local chord
+    # program through the Mac's own osascript (never cliclick t:v), front read.
+    assert (remote.index("__FRONT_BEFORE__") < remote.index("LC_ALL=en_US.UTF-8 pbcopy") < remote.index("echo __CLIPBOARD_WRITTEN__")
+            < remote.index("osascript -l JavaScript -e") < remote.index("__FRONT_AFTER__")), remote
+    assert "cliclick kd:" not in remote and "t:v" not in remote and len([c for c in calls if is_input(c[-1])]) == 1
 
 
 def run_guest_program(command: list[str], *, fronts: list[str], raise_probe: bool = False) -> tuple[list[str], str, int]:
@@ -516,12 +532,17 @@ def test_osworld_a_lost_answer_after_a_paste_is_not_retyped_and_negative_points_
     monkeypatch.setattr(module, "_platform", lambda: "macos")  # the host's own space never decides for a guest
     assert receipt(api.tools["click"](x=-5, y=20, raw=True))["ok"] is False and guest.commands == []
     # A stored transform from another display or backend that maps a point outside the guest is refused the same way.
-    api.tools["click"].__self__._save_transform({"sx": 1.0, "sy": 1.0, "ox": -1920, "oy": 0, "ts": 1, "platform": "macos"})
-    mapped = receipt(api.tools["click"](x=100, y=100))
+    impl = api.tools["click"].__self__
+    geometry = {"x": 0, "y": 0, "w": 1920, "h": 1080}
+    monkeypatch.setattr(impl, "_display_geometry", lambda _tf, **_kw: geometry)
+    impl._save_transform({"sx": 1.0, "sy": 1.0, "ox": -1920, "oy": 0, "ts": 1, "platform": "macos",
+                          "observation_id": "other-display", "display_geometry": geometry, "image_w": 1920, "image_h": 1080,
+                          "connection_identity": impl._connection_identity(), "backend": impl._active_backend_name()})
+    mapped = receipt(api.tools["click"](x=100, y=100, observation_id="other-display"))
     assert mapped["ok"] is False and "stored screenshot transform" in mapped["error"] and guest.commands == [], mapped
     for tool, args in (("move", {"x": 100, "y": 100}), ("left_click_drag", {"start_x": 100, "start_y": 100, "end_x": 200, "end_y": 200}),
                        ("mouse_down", {"x": 100, "y": 100}), ("mouse_up", {"x": 100, "y": 100})):
-        out = receipt(api.tools[tool](**args))
+        out = receipt(api.tools[tool](**args, observation_id="other-display"))
         assert out["ok"] is False and "stored screenshot transform" in out["error"] and guest.commands == [], (tool, out)
     # Untargeted: a lost answer after the clipboard program is final here too (the base retyped); a lost read carries no dispatch fact.
     plain = receipt(api.tools["type_text"](text="<b>x</b>"))
@@ -625,7 +646,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     """ssh exit 255 without the wrapper's completion marker: a refused connection or a channel broken after the input
     may have run; the receipt says unknown, keeps a received clipboard fact, and never says "not sent"."""
     def refused(command):
-        if "cliclick" in command:  # nothing of the wrapper's output came back
+        if is_input(command):  # nothing of the wrapper's output came back
             return 255, "", "ssh: connect to host mac.invalid port 22: Connection refused"
         return mac_over_ssh(SAFARI, KEYNOTE)(command)  # the switch itself succeeds
     module, api, calls = ssh(tmp_path, monkeypatch, refused)
@@ -639,7 +660,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert paste["dispatched"] is None and paste["reason"] == "ssh_failed" and "clipboard_replaced" not in paste and paste["method"] == "paste", paste
 
     def timed_out(command):  # the ssh call itself raised: the paste's method is kept, its clipboard stage makes no claim
-        if "cliclick" in command:
+        if is_input(command):
             raise subprocess.TimeoutExpired(command, 60)
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, timed_out)
@@ -647,7 +668,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert lost["transport_failed"] is True and lost["dispatched"] is None and lost["method"] == "paste" and "clipboard_replaced" not in lost, lost
 
     def cut_short(command):  # the input stage had started, then the channel broke: the clipboard stage is unknown
-        if "cliclick" in command:
+        if is_input(command):
             return 255, f"__FRONT_BEFORE__{info_line(SAFARI)}\n", "client_loop: send disconnect: Broken pipe"
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, cut_short)
@@ -656,7 +677,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert "started" in out["error"] and "unknown" in out["note"] and "not sent" not in out["note"]
 
     def cut_after_write(command):  # the clipboard marker came back before the break: a fact that is kept
-        if "cliclick" in command:
+        if is_input(command):
             return 255, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n", "client_loop: send disconnect: Broken pipe"
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, cut_after_write)

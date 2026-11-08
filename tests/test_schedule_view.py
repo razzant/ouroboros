@@ -6,7 +6,7 @@ import json
 import pytest
 
 from supervisor.queue_schedules import schedule_activity_projection, schedule_tool_projection
-from supervisor.schedule_view import decorate, digest
+from supervisor.schedule_view import cadence_words, decorate, digest
 
 NOW = datetime.datetime(2026, 10, 21, 12, tzinfo=datetime.timezone.utc)
 
@@ -17,8 +17,7 @@ def row(sid="s1", **kw):
 
 
 @pytest.mark.parametrize("name,expected", [
-    ("Follow-up of task abc", "Check the report"), ("Reminder of task abc", "Check the report"),
-    ("My report check", "My report check"), ("Follow-up of task abc extra", "Follow-up of task abc extra"),
+    ("Follow-up of task abc", "Check the report"), ("My report check", "My report check"), ("Follow-up of task abc extra", "Follow-up of task abc extra"),
 ])
 def test_only_legacy_generated_names_are_displayed_as_the_objective(name, expected):
     original = row(name=name)
@@ -34,10 +33,35 @@ def test_only_legacy_generated_names_are_displayed_as_the_objective(name, expect
 
 def test_note_name_uses_written_words_and_preserves_owner_names():
     note = row(name="Reminder of task abc", kind="notify", notification={"text": "n" * 120 + "\nMore"})
-    assert decorate(note, NOW)["display_name"] == "n" * 96
+    # The owner surface gets the whole first line (its CSS clamps it); the model's page stays bounded.
+    assert decorate(note, NOW)["display_name"] == "n" * 120
+    assert schedule_activity_projection({"tasks": [note]})["tasks"][0]["display_name"] == "n" * 120
+    assert schedule_tool_projection({"tasks": [note]})["tasks"][0]["display_name"] == "n" * 95 + "…"
     assert decorate(note, NOW)["kind"] == "note"
+    assert decorate({**note, "name": ""}, NOW)["display_name"] == "n" * 120
     note["name"] = "Owner's name"
     assert decorate(note, NOW)["display_name"] == "Owner's name"
+
+
+def test_a_generated_name_is_the_first_line_that_says_something_in_plain_words():
+    blank_first = row(name="Follow-up of task abc", task={"text": "\n  \n**Buy** milk\nlater", "chat_id": 42})
+    assert decorate(blank_first, NOW)["display_name"] == "Buy milk"
+    # An authored name stays as written, markdown and all; only the request's own line is projected.
+    assert decorate({**blank_first, "name": "**Mine**"}, NOW)["display_name"] == "**Mine**"
+
+
+@pytest.mark.parametrize("expr,words", [
+    ("0 9 * * *", "Daily at 09:00"), ("30 9,21 * * *", "Daily at 09:30 and 21:30"),
+    ("0 11,15,19 * * *", "Daily at 11:00, 15:00 and 19:00"), ("0 11 * * 0", "Every Sunday at 11:00"),
+    ("0 11 * * 3,7", "Every Wednesday and Sunday at 11:00"), ("*/15 * * * *", "Every 15 minutes"),
+    ("15 */2 * * *", "Every 2 hours at :15"), ("0 */6 * * *", "Every 6 hours"), ("0 * * * *", "Every hour"),
+    ("0 9 1 * *", ""), ("0 9 * * 1-5", ""), ("0 25 * * *", ""), ("*/1 * * * *", ""), ("@daily", ""), ("", ""),
+])
+def test_cadence_is_said_in_words_only_for_shapes_it_can_say_whole(expr, words):
+    assert cadence_words(expr) == words
+    view = decorate(row(trigger={"type": "cron", "expr": expr}), NOW)
+    assert view.get("cadence", "") == words
+    assert "cadence" not in decorate(row(), NOW), "a one-shot has a moment, not a cadence"
 
 
 @pytest.mark.parametrize("matching", [True, False])
@@ -56,7 +80,6 @@ def test_cache_and_liveness_facts_are_distinct(matching):
     ({"last_task_id": "last", "last_outcome": {"task_id": "older", "state": "completed"}}, None),
     ({"last_task_id": "last", "last_outcome": {"task_id": "last", "state": "completed"}}, False),
     ({"occurrence": {"phase": "claimed"}}, True),
-    ({"previous_run_open": {"task_id": "last", "since": "earlier"}}, True),
 ])
 def test_withdrawal_reports_only_known_work_facts(facts, expected):
     original = row(delete_requested_at="then", delete_requested_by="owner", delete_reason="finished", **facts)
@@ -93,8 +116,12 @@ def test_digest_orders_standing_first_then_attention_then_one_shots():
     ("2000-01-01T00:00:00+00:00", True, False),
 ])
 def test_paused_past_due_one_shot_is_marked(at, enabled, marked):
-    entry = digest([row(enabled=enabled, trigger={"type": "once", "run_at": at})], NOW)["one_shots"][0]
+    raw = row(enabled=enabled, trigger={"type": "once", "run_at": at})
+    entry = digest([raw], NOW)["one_shots"][0]
     assert ("time_passed_on" in entry) is marked
+    # Activity groups the same fact the model reads.
+    assert ("time_passed_on" in decorate(raw, NOW)) is marked
+    assert "time_passed_on" not in decorate({**raw, "completed_at": "done"}, NOW)
 
 
 def test_attention_includes_wait_errors_unconfirmed_notes_and_previous_runs():

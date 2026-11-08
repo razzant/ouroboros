@@ -47,3 +47,28 @@ for (const axis of ['x', 'y']) {
         assert.equal(f.frames.size, 0);
     });
 }
+
+// A named body (a capped part of a task card's Details, chat.js) is a region the keyboard can focus and scroll exactly
+// while it scrolls: WebKit offers no other way into a scroller with nothing focusable inside.
+test('a named body is a keyboard region exactly while it scrolls, and nothing without a name', () => {
+    const f = fixture();
+    const named = new Map();
+    Object.defineProperty(f.scroller, 'tabIndex', { set(value) { named.set('tabindex', String(value)); } });
+    Object.assign(f.scroller, {
+        setAttribute(name, value) { named.set(name, String(value)); },
+        removeAttribute(name) { named.delete(name); },
+        hasAttribute(name) { return named.has(name); },
+    });
+    const dispose = bindScrollFade(f.scroller, { region: 'Scrollable task notes' });
+    f.flush();
+    assert.deepEqual(Object.fromEntries(named), { tabindex: '0', role: 'region', 'aria-label': 'Scrollable task notes' });
+    f.scroller.scrollHeight = f.scroller.clientHeight;  // short now, or hidden: both measure no extent
+    f.observers[0].callback(); f.flush();
+    assert.deepEqual([...named.keys()], [], 'no tab stop while it does not scroll');
+    f.scroller.scrollHeight = 500;
+    f.observers[0].callback(); f.flush();
+    assert.equal(named.get('role'), 'region', 'a region again once it scrolls');
+    dispose();
+    const plain = fixture();  // its stub has no attribute API: a body without a name is only decorated
+    assert.doesNotThrow(() => { bindScrollFade(plain.scroller); plain.flush(); });
+});

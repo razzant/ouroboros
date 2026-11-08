@@ -12,12 +12,15 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import pathlib
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,8 @@ class _ExtensionRegistrations:
     ws_handlers: List[str] = field(default_factory=list)
     ui_tabs: List[str] = field(default_factory=list)
     settings_sections: List[str] = field(default_factory=list)
+    realtime_providers: List[str] = field(default_factory=list)
+    conversation_features: List[str] = field(default_factory=list)
     unload_callbacks: List[Callable[[], Any]] = field(default_factory=list)
     event_subscriptions: List[str] = field(default_factory=list)
     companion_names: List[str] = field(default_factory=list)
@@ -60,6 +65,9 @@ class _ExtensionRegistrations:
     # over small current control files, never rehash the publisher's payload.
     loaded_skill: Any = None
     context_snapshot: Optional[Dict[str, str]] = None
+    # Only scoped call work blocks automatic replacement; background tasks and
+    # ordinary responses do not.
+    active_call_work: int = 0
 
 
 @dataclass
@@ -127,6 +135,8 @@ class _StagedRegistrations:
     ws_handlers: Dict[str, Any] = field(default_factory=dict)
     ui_tabs: Dict[str, Any] = field(default_factory=dict)
     settings_sections: Dict[str, Any] = field(default_factory=dict)
+    realtime_providers: Dict[str, Any] = field(default_factory=dict)
+    conversation_features: Dict[str, Any] = field(default_factory=dict)
     unload_callbacks: List[Callable[[], Any]] = field(default_factory=list)
     event_subscriptions: List["_StagedEventSubscription"] = field(default_factory=list)
     companion_names: List[str] = field(default_factory=list)
@@ -184,11 +194,13 @@ _ws_handlers: Dict[str, Any] = {}      # {"ext_<len>_<token>_<message_type>": ha
 _ui_tabs: Dict[str, Any] = {}          # {"<skill>:<tab_id>": tab_spec}
 # Declarative settings sections keyed like UI tabs.
 _settings_sections: Dict[str, Any] = {}
+_realtime_providers: Dict[str, Any] = {}
+_conversation_features: Dict[str, Any] = {}
 
-# The five surface kinds, each naming the field that carries it on a staged
+# The surface kinds, each naming the field that carries it on a staged
 # snapshot AND on a published bundle, its live registry, and the word used in
 # refusals. Every walk over "all surfaces" — conflict detection, the atomic
-# swap, the child-catalog staging — reads this, so a sixth kind cannot be
+# swap, the child-catalog staging — reads this, so a new kind cannot be
 # added to some walks and forgotten by others.
 SURFACE_KINDS: Sequence[tuple[str, Dict[str, Any], str]] = (
     ("tools", _tools, "tool"),
@@ -196,12 +208,14 @@ SURFACE_KINDS: Sequence[tuple[str, Dict[str, Any], str]] = (
     ("ws_handlers", _ws_handlers, "ws handler"),
     ("ui_tabs", _ui_tabs, "ui tab"),
     ("settings_sections", _settings_sections, "settings section"),
+    ("realtime_providers", _realtime_providers, "realtime provider"),
+    ("conversation_features", _conversation_features, "conversation feature"),
 )
 
 # Dispatch surfaces: a physical call arrives on these, so each descriptor is
 # stamped with the publication that owns it. UI kinds are read as a snapshot
 # and carry no per-surface provenance.
-DISPATCH_SURFACE_KINDS = frozenset({"tools", "routes", "ws_handlers"})
+DISPATCH_SURFACE_KINDS = frozenset({"tools", "routes", "ws_handlers", "realtime_providers", "conversation_features"})
 
 
 def _lifecycle_lock_for(skill_name: str) -> threading.RLock:
@@ -301,6 +315,19 @@ def live_widget_files(skill: str, tab_id: str, generation: str) -> Optional[Dict
         return {path: bundle.widget_sources[path] for path in paths}
 
 
+def live_widget_route_generation(skill: str, tab_id: str) -> Optional[str]:
+    """Live publication of a classic module or route-iframe tab, whose mount may GET its own skill's routes."""
+    with _lock:
+        bundle = _extensions.get(skill)
+        tab = _ui_tabs.get(f"{skill}:{tab_id}")
+        if bundle is None or skill in _unloading or tab is None:
+            return None
+        render = tab["render"]
+        if render.get("kind") != "iframe" and (render.get("kind") != "module" or render.get("entry_type") == "module"):
+            return None
+        return str(bundle.generation_digest or "") or None
+
+
 def live_contribution_projection() -> List[Dict[str, Any]]:
     """Entries and revisions from the same publication, detached under one lock."""
     with _lock:
@@ -390,24 +417,45 @@ def _record_companion_name(bundle: _ExtensionRegistrations, name: str) -> None:
 
 
 @contextmanager
-def extension_work_scope(spec: Dict[str, Any], work: Any):
-    """Attach cancellable work to the exact publication already owning dispatch."""
+def extension_work_scope(spec: Dict[str, Any], work: Any, *, call_work: bool = True):
+    """Attach cancellable work to its publication; call work also excludes automatic replacement.
+
+    An ordinary response passes ``call_work=False``: replacing its publication
+    simply cancels it. Owner unload still cancels without joining teardown; a
+    late relative import in that teardown can fail after the package has been removed.
+    """
     from ouroboros.contracts.plugin_api import ExtensionRegistrationError
 
     name = str(spec.get("skill") or "")
     generation = str(spec.get("extension_generation") or "")
-    with _lock:
+    # Loading and call admission share this short entry fence. The call itself
+    # never holds the lifecycle lock, so an owner's disable remains immediate. An
+    # ordinary response can enter on the server loop and never waits for a load.
+    with (_lifecycle_lock_for(name) if call_work else nullcontext()), _lock:
         bundle = _extensions.get(name)
         if bundle is None or name in _unloading or bundle.generation_digest != generation:
             raise ExtensionRegistrationError("extension generation changed before response dispatch")
         bundle.supervised_futures.append(work)
+        if call_work:
+            bundle.active_call_work += 1
     try:
         yield
     finally:
         with _lock:
-            # Captured bundle identity: completing old work cannot detach a new
-            # generation's resource after unload/reload replaced the registry row.
+            # Captured identity: finishing old work never changes a replacement.
             bundle.supervised_futures[:] = [item for item in bundle.supervised_futures if item is not work]
+            if call_work:
+                bundle.active_call_work -= 1
+
+
+def realtime_load_refusal(skill_name: str) -> str:
+    """Typed automatic-replacement refusal; an idle publication remains replaceable."""
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if (bundle and (bundle.realtime_providers or bundle.conversation_features)
+                and bundle.active_call_work):
+            return "live_call_active"
+    return ""
 
 
 def snapshot() -> Dict[str, Any]:
@@ -420,6 +468,8 @@ def snapshot() -> Dict[str, Any]:
             "tools": sorted(_tools.keys()),
             "routes": sorted(_routes.keys()),
             "ws_handlers": sorted(_ws_handlers.keys()),
+            "realtime_providers": sorted(_realtime_providers.keys()),
+            "conversation_features": sorted(_conversation_features.keys()),
             "ui_tabs": [
                 dict(copy.deepcopy(value), key=key)
                 for key, value in sorted(_ui_tabs.items())

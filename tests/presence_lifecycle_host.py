@@ -106,8 +106,8 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     from ouroboros.task_status import reconcile_orphaned_running_tasks
     from supervisor import queue as _task_queue  # noqa: F401 -- normal supervisor import order for Panic
     from tests.test_presence_continuation import review, waits
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish
-    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER
+    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, finish, tool_call
+    from tests.test_presence_continuation_process import ROOT, ANSWER, MANUAL, LATE_CHILD, REVISED_ANSWER, TOOL_NOTE
 
     assert Path(os.environ["OUROBOROS_DATA_DIR"]).resolve() == (root / "data").resolve()
     assert Path(os.environ["HOME"]).resolve() == (root / "home").resolve()
@@ -129,6 +129,14 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
         event_bus_children = [child.pid for child in active_children()]
     patch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
     binding = seed(h.data)
+    # This standalone Host has local lane tables, but no supervisor queue or started pool generation:
+    # Presence bodies run on the disclosed degraded executor in-process. The boot reconcile judges a
+    # dead generation's row by the turn's own end fact (its controller), never by its stale lane row.
+    from supervisor import queue as _queue, workers as _workers
+    _queue.init(h.data)
+    _workers.init(ROOT, h.data, max_workers=1)
+    patch.setattr(_queue, "INITIALIZED", False)  # table setup above does not model a supervisor boot
+    patch.setattr(_workers, "_get_chat_agent", lambda: (_ for _ in ()).throw(AssertionError("no agent in the Host")))
     reconciled = reconcile_orphaned_running_tasks(h.data)
     inner_inference = loop.call_llm_with_retry
     inference_release = threading.Event()
@@ -192,21 +200,21 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
                               metadata={"presence": dict(ctx.task_metadata["presence"])})
             ctx._swarm_handoff_attempt = {"status": "scheduled", "task_id": LATE_CHILD}
             return review(answer=REVISED_ANSWER)
-        if scenario == "tool_delivered":
-            return finish("select", message=ANSWER)  # the actual receipt selects tool_delivered
+        if scenario == "tool_silent":
+            # Its tool delivered the result: the mind chooses silence; a receipt never chooses for it.
+            return {"content": None, "tool_calls": [tool_call("finish_task", {
+                "action": "finish", "silent": True, "answer": TOOL_NOTE}, "select")]}
+        if scenario == "wrap_up_foreign_tool" and h.calls == 3:
+            return review("foreign-tool")  # a tool the owner's tool-less Wrap up round cannot take
         return finish("select", message=REVISED_ANSWER if scenario == "late_child" else ANSWER)
 
     h.script = script
 
     def runner(**kwargs):
-        return run_presence_turn(repo_dir=ROOT, drive_root=h.data, agent_factory=h.factory, **kwargs)
-
-    # The proactive tool calls the module owner directly; keep its actual execution
-    # manager and admission while observing the same production agent constructor.
-    if scenario == "proactive":
-        import functools
-        patch.setattr("ouroboros.presence_runner.run_presence_turn",
-                      functools.partial(run_presence_turn, agent_factory=h.factory))
+        # The carrier's body in this process (the degraded executor: no pool generation is armed here) calls
+        # the injected runner with its own repo/drive/factory; the fixture's observed constructor wins.
+        kwargs.update(repo_dir=ROOT, drive_root=h.data, agent_factory=h.factory)
+        return run_presence_turn(**kwargs)
 
     app = create_host_service_app(h.data, presence_runner=runner)
     sock = socket.socket()

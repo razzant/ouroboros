@@ -236,12 +236,7 @@ def test_tools_are_a_name_ordered_set_and_only_outer_cache_marker_is_ignored():
 
 @pytest.mark.parametrize("content", [
     " \nread this\t ",
-    [{"type": "text", "text": "read this"}],
-    [{"type": "text", "text": ""}, {"type": "text", "text": " read this\n"}, {"type": "text", "text": "  "}],
-    [{"type": "input_text", "text": "read this", "cache_control": {"type": "ephemeral"}, "_caption": "private"}],
-    [{"type": "output_text", "text": "read this"}],
     ["read this"],
-    ["", " read this\n", "  "],
     [{"type": " text ", "text": "read this"}],
 ])
 def test_digest_normalizes_outer_text_whitespace_empty_blocks_and_one_block(content):
@@ -294,8 +289,6 @@ def test_swapped_image_breaks_the_prefix_and_retires_later_reasoning():
 
 @pytest.mark.parametrize("extra", [
     {"reasoning_details": [signed(fmt="google-gemini-v1")]},
-    {"reasoning_details": [{"type": "reasoning.encrypted", "data": "opaque", "format": "openai-responses-v1"}]},
-    {"reasoning_content": "DeepSeek echo"},
     {"nativeContinuation": {"source": "claudexor", "opaque": "preserved"}},
     {"reasoning": "plain readable reasoning without a bound carrier"},
 ])

@@ -13,6 +13,7 @@ evaluates both outside the loop it watches.
 from __future__ import annotations
 
 import contextlib
+import os
 import posixpath
 import queue
 import re
@@ -159,47 +160,71 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
     ``SUPERVISOR_EVENT_BATCH_MAX_EVENTS`` events; the ``SUPERVISOR_EVENT_BATCH_MAX_SEC``
     budget is checked between handlers (a handler already running finishes, so one
     slow handler can overrun it), then the loop runs bridge intake. The bus is one
-    object with two lanes (``supervisor/event_observation.py``): every ``get`` serves
-    the oldest control event while any exists, else the oldest telemetry frame, FIFO
-    inside each lane — the priority lives in the queue, so this ONE consumer takes
-    whatever comes out, never sorts, defers or re-puts. A ``restart_request`` goes to
-    ``on_restart``; every other event is lag-observed and dispatched. The remainder
-    stays queued for the next turn, so a producer that keeps the queue non-empty
-    can never starve owner-message intake. A dequeued event carrying a
-    ``delivery_id`` is released from the bus's outstanding-delivery membership after
-    its handler returned or raised, whichever path it took. A live final answer is
-    stamped as dequeued the moment it is taken (``finalization_timing``), and every
-    event's service time, take to handler return, feeds ``supervisor.loop_load.CONSUMER``
-    by type, with its lag by lane. Returns True
-    when the pass stopped at its bound (a backlog may remain: the caller skips its idle
-    sleep and polls intake without its wait)."""
+    object with two lanes (``supervisor/event_observation.py``) serving the oldest
+    control event while any exists, else the oldest telemetry frame, FIFO inside each
+    lane — the priority lives in the queue, so this ONE consumer takes whatever comes
+    out, never sorts, defers or re-puts. The pass takes its batch in ONE round trip
+    (``drain``; a bus without it, a plain queue, is read one ``get_nowait`` at a time)
+    and serves it in that order; a tail the pass did not serve — its time bound, or a
+    raise out of this loop — goes back to the FRONT of its lanes (``restore_front``),
+    so the next turn serves it first exactly as if it had stayed queued. An event put
+    while the pass runs waits for the next turn, behind at most the batch's own
+    bounded service. A ``restart_request`` goes to ``on_restart``; every other event is
+    lag-observed and dispatched. A producer that keeps the queue non-empty can never
+    starve owner-message intake. A served event carrying a ``delivery_id`` is released
+    from the bus's outstanding-delivery membership after its handler returned or raised,
+    whichever path it took. A live final answer is stamped as dequeued when this
+    consumer starts it (``finalization_timing``), and every event's service time, start
+    to handler return, feeds ``supervisor.loop_load.CONSUMER`` by type, with its lag by
+    lane. Returns True when the pass stopped at its bound (a backlog may remain: the
+    caller skips its idle sleep and polls intake without its wait)."""
     from ouroboros.finalization_timing import stamp_finalization_dequeue
     from supervisor import loop_load
     from supervisor.event_observation import event_lane
     from supervisor.events import dispatch_event
 
     deadline = time.monotonic() + SUPERVISOR_EVENT_BATCH_MAX_SEC
+    take = getattr(event_q, "drain", None)
+    batch = take(SUPERVISOR_EVENT_BATCH_MAX_EVENTS) if callable(take) else None
     drained = 0
-    while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
-        try:
-            evt = event_q.get_nowait()
-        except queue.Empty:
-            return False
-        drained += 1
-        taken, lag = time.monotonic(), None
-        try:
-            stamp_finalization_dequeue(evt)
-            if evt.get("type") == "restart_request":
-                on_restart(evt, ctx)
-                continue
-            lag = observe_worker_event_lag(liveness, evt)
-            dispatch_event(evt, ctx)
-        finally:
-            served = time.monotonic() - taken
-            _release_delivery(event_q, evt)
-            kind = str(evt.get("type") or "") if isinstance(evt, dict) else ""
-            loop_load.CONSUMER.note(kind, event_lane(evt), served, lag)
-    return True
+    try:
+        while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
+            if batch is None:
+                try:
+                    evt = event_q.get_nowait()
+                except queue.Empty:
+                    return False
+            elif drained < len(batch):
+                evt = batch[drained][0]
+            else:
+                return False  # the bus held fewer than the bound when the batch was taken
+            drained += 1
+            taken, lag = time.monotonic(), None
+            try:
+                stamp_finalization_dequeue(evt)
+                if evt.get("type") == "restart_request":
+                    on_restart(evt, ctx)
+                    continue
+                lag = observe_worker_event_lag(liveness, evt)
+                dispatch_event(evt, ctx)
+            finally:
+                served = time.monotonic() - taken
+                _release_delivery(event_q, evt)
+                kind = str(evt.get("type") or "") if isinstance(evt, dict) else ""
+                loop_load.CONSUMER.note(kind, event_lane(evt), served, lag)
+        return True
+    finally:
+        if batch is not None and drained < len(batch):
+            _restore_unserved(event_q, batch[drained:])
+
+
+def _restore_unserved(event_q: Any, envelopes: list) -> None:
+    """Hand an unserved batch tail back to the bus's front; a broken manager is logged loudly
+    (those events are lost with it, as the queue itself would be)."""
+    try:
+        event_q.restore_front(envelopes)
+    except Exception:
+        log.error("Could not return %d unserved supervisor events to the bus", len(envelopes), exc_info=True)
 
 
 # The supervisor_load row's window: a reporting cadence, never a gate or a deadline.
@@ -207,17 +232,51 @@ SUPERVISOR_LOAD_WINDOW_SEC = 60.0
 _LOAD_FAILURES_SEEN: set = set()
 
 
+STORE_SITES_LOG = "store_sites.jsonl"
+STORE_SITES_WINDOW_SEC = 600.0  # a publication's cadence (about the bytes of the row it explains), never a cut of what it holds
+_STORE_SITES_STARTED = [time.monotonic()]
+
+
 def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     """The row's further sections: a name and a zero-argument drain of its own window, one line each
-    (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead)."""
+    (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead, and
+    ``conversation_lane`` the lane's carriers now, each with its last own RSS report)."""
     from ouroboros import dialogue_retry, store_timing
-    from supervisor import queue
+    from supervisor import conversation_lane, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
         "store_locks": store_timing.drain,
         "dialogue_retry": dialogue_retry.snapshot,
+        "conversation_lane": conversation_lane.carrier_vitals,
     }
+
+
+def _publish_store_sites(drive_root: Any) -> Optional[dict]:
+    """At most one row of the whole store-site table per window into its own journal, after a busy minute's row (an idle
+    stretch folds in, ``window_sec`` says how long). In ``logs/supervisor.jsonl`` a table of 36 to 42 KB would leave the
+    256 KB tail every context reads six minutes; a row a minute would write 58 MB a day of continuous work, nine times
+    the row it explains. Rotated here, the one place that grows it. Fail-soft and logged once per class, as that row is."""
+    from ouroboros import store_timing
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    now = time.monotonic()
+    window_sec = now - _STORE_SITES_STARTED[0]
+    if window_sec < STORE_SITES_WINDOW_SEC:
+        return None
+    _STORE_SITES_STARTED[0] = now
+    try:
+        table = store_timing.drain_sites()
+        row = {"ts": utc_now_iso(), "type": "store_sites", "window_sec": round(window_sec, 3), "store_locks": table}
+        if table:
+            append_jsonl(drive_root / "logs" / STORE_SITES_LOG, row, lock_timeout_sec=0)
+            rotate_jsonl_log_if_needed(drive_root, STORE_SITES_LOG, "store_sites")
+        return row if table else None
+    except Exception as exc:
+        if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
+            _LOAD_FAILURES_SEEN.add(type(exc).__name__)
+            log.warning("store_sites row not recorded (%s)", type(exc).__name__, exc_info=True)
+        return None
 
 
 def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
@@ -231,8 +290,10 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
     return); ``lanes`` (control/telemetry -> ``depth`` and ``oldest_age_sec`` of the bus at
     this moment, None when the bus cannot say, and ``max_lag_sec``, the worst producer-stamp
     lag the drain saw); ``max_event_lag_sec`` over both lanes; then one key per
-    ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site), a failing
-    source answering ``{"error": <type>}``. The append never waits on the jsonl lock and a
+    ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site, and per site its
+    count, total and longest hold, ``hold_by_site``), a failing
+    source answering ``{"error": <type>}``. The whole store-site table has its own cadence and
+    journal (``_publish_store_sites``). The append never waits on the jsonl lock and a
     failure is logged once per class: diagnostics never cost the loop or a delivery. The boot
     document keeps the row's ``ts`` and ``max_event_lag_sec`` for the health answers.
     """
@@ -259,6 +320,7 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
                 row[name] = {"error": type(exc).__name__}
         BOOT.note_supervisor_load({"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]})
         append_jsonl(drive_root / "logs" / "supervisor.jsonl", row, lock_timeout_sec=0)
+        _publish_store_sites(drive_root)
         return row
     except Exception as exc:
         if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
@@ -290,13 +352,22 @@ def _release_delivery(event_q: Any, evt: Any) -> None:
 
 
 def flush_budget_projection(ctx: Any) -> None:
-    """One compatibility budget-projection write per loop turn, AFTER bridge intake.
+    """The usage-driven projections of one loop turn, paid once, AFTER bridge intake.
 
-    ``llm_usage`` events only mark ``ctx.budget_projection_dirty``; this is the one
-    place that pays the ledger render and the STATE_LOCK write. The flag clears only
-    when the writer returns True; a False (unknown or stale ledger marker) or an
-    exception keeps it dirty and the next attempt waits ``BUDGET_PROJECTION_RETRY_SEC``,
-    logged once per attempt, so a frozen-marker install does not render every turn."""
+    ``llm_usage`` events only mark: the root they name in ``LIVE_ROOT_COSTS``, whose
+    marked roots are read again here (the cost figure root heartbeats carry, so a
+    heartbeat itself reads no store), and ``ctx.budget_projection_dirty``. This is the
+    one place that pays the compatibility budget-projection ledger render and the
+    STATE_LOCK write. The flag clears only when the writer returns True; a False
+    (unknown or stale ledger marker) or an exception keeps it dirty and the next attempt
+    waits ``BUDGET_PROJECTION_RETRY_SEC``, logged once per attempt, so a frozen-marker
+    install does not render every turn."""
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+
+    try:
+        LIVE_ROOT_COSTS.refresh(getattr(ctx, "RUNNING", None), getattr(ctx, "DRIVE_ROOT", None))
+    except Exception:
+        log.warning("Live root cost figures not refreshed this turn", exc_info=True)
     if not getattr(ctx, "budget_projection_dirty", False):
         return
     now = time.monotonic()
@@ -325,7 +396,8 @@ def _published_loop_facts(liveness: list) -> dict:
 def _loop_thread_stack(ident: Optional[int], *, limit: int = _STALL_STACK_FRAMES,
                        facts: Optional[dict] = None) -> list[str]:
     """The loop thread's CURRENT stack, outermost first, at most ``limit`` innermost
-    ``path:line in func`` frames (repository files relative, others absolute). Walk code
+    ``path:line in func`` frames (repository files relative, other files absolute, a pseudo-filename
+    such as ``<string>`` as the interpreter names it). Walk code
     objects instead of traceback.extract_stack: linecache could read a stalled filesystem on
     this watchdog thread; no locals, no message bodies. A cut walk sets
     ``facts["loop_stack_truncated"]`` when ``facts`` is given, so a bounded stack is never
@@ -368,22 +440,39 @@ _ABSOLUTE_PATH = re.compile(r"^([A-Za-z]:)?[/\\]")
 _STACK_ROW = re.compile(r"^(?P<path>.*):(?P<line>\d+) in (?P<func>.*)$")
 
 
+def _runtime_roots() -> tuple[str, ...]:
+    """Where the Python runtime lives: ``sys.prefix`` and ``sys.base_prefix``, each as reported
+    and as resolved, lexically normalized and ending in one ``/``. A relocatable interpreter may
+    report its prefix through ``bin/..`` while loading modules from the normalized path, and
+    Homebrew reports its ``opt`` symlink while loading the standard library from the Cellar it
+    resolves to; the closing ``/`` keeps a sibling ``<prefix>-other`` outside."""
+    roots = set()
+    for prefix in filter(None, (sys.prefix, sys.base_prefix)):
+        spellings = [prefix]
+        with contextlib.suppress(OSError, ValueError):  # unresolvable: compared as reported; the watchdog lives on
+            spellings.append(os.path.realpath(prefix))
+        roots.update(posixpath.normpath(path.replace("\\", "/")).rstrip("/") + "/" for path in spellings)
+    return tuple(roots)
+
+
 def _innermost_repo_frame(stack: list[str]) -> str:
     """``path:function`` of the innermost frame inside the repository - a relative path, else
-    the innermost frame outside the Python runtime ('' when none) - without the line number,
-    so the samples of one stalled function fold into one row. A relocatable interpreter may
-    report its prefix through ``bin/..`` while loading modules from the normalized path, so
-    both sides are compared lexically normalized."""
-    runtime = tuple({posixpath.normpath(prefix.replace("\\", "/"))
-                     for prefix in (sys.prefix, sys.base_prefix) if prefix})
+    the innermost frame outside the Python runtime (``_runtime_roots``; '' when none) - without
+    the line number, so the samples of one stalled function fold into one row. A pseudo-filename
+    (``<frozen importlib._bootstrap>``, ``<string>``) names no file and is neither, so an import-lock
+    wait or exec'd code names its real caller. The path keeps the row's own spelling; only the
+    comparison is normalized."""
+    runtime = _runtime_roots()
     outside = ""
     for row in reversed(stack):
         parsed = _STACK_ROW.match(row)
         path, func = (parsed.group("path"), parsed.group("func")) if parsed else ("", "")
+        if not path or (path.startswith("<") and path.endswith(">") and "/" not in path and "\\" not in path):
+            continue
         key = f"{path}:{func}"
-        if path and not _ABSOLUTE_PATH.match(path):
+        if not _ABSOLUTE_PATH.match(path):
             return key
-        if path and not outside and not posixpath.normpath(path.replace("\\", "/")).startswith(runtime):
+        if not outside and not (posixpath.normpath(path.replace("\\", "/")) + "/").startswith(runtime):
             outside = key
     return outside
 
@@ -563,8 +652,8 @@ def _start_supervisor_liveness_watchdog(
     meanwhile. ``loop_thread_ident`` is the thread whose stack a stall row carries;
     it defaults to the CALLER, because the loop thread starts its own watchdog
     (startup phase included). ``stop_event`` is
-    a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (incl.
-    the crash-storm death path, which never sets the global restart flag), it is set so
+    a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (the
+    Fault door included, which never sets the global restart flag), it is set so
     this watchdog stops watching a now-stale liveness list (no false post-revival alert)."""
     from ouroboros.config import get_supervisor_liveness_deadline_sec
 

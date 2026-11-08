@@ -110,6 +110,18 @@ def test_a_remote_at_the_configured_managed_url_is_the_body_whatever_its_spellin
     assert layer_for(fact) == "body"
 
 
+def test_a_source_install_managed_remote_is_used_without_a_manifest(system, tmp_path):
+    """A source checkout's maintained managed remote is the configured source."""
+    _git(system, "remote", "add", "managed", MANAGED_URL)
+    official = _repo(tmp_path / "official-source-clone", remote=MANAGED_URL)
+
+    fact = body_fact(official, system_repo=system)
+
+    assert (fact.body, fact.how) == ("true", "managed_remote")
+    foreign = _repo(tmp_path / "foreign-source-clone", remote=FOREIGN_URL)
+    assert body_fact(foreign, system_repo=system).body == "false"
+
+
 def test_the_managed_url_is_the_installs_configured_source_not_a_fixed_official_one(system, tmp_path):
     mirror = _repo(tmp_path / "mirror-clone", remote="https://mirror.example.org/forks/ouro.git")
 
@@ -269,3 +281,9 @@ def test_the_vocabulary_is_closed():
     assert set(rbf.HOW_VALUES) == {"dir", "git_common_dir", "remote_chain", "managed_remote",
                                    "install_fork", "copy_origin", "unknown"}
     assert rbf.CHECKLIST_LAYERS == ("core", "body")
+
+
+def test_a_name_the_filesystem_refuses_is_a_failed_probe_not_an_error(tmp_path):
+    # An over-long component or an embedded NUL is a failed probe (None), never an exception (#2918).
+    assert rbf.repository_root(tmp_path / ("x" * 300) / "new.py") is None
+    assert rbf.repository_root(str(tmp_path / "bad\x00name.py")) is None

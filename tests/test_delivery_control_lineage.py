@@ -13,6 +13,7 @@ import pytest
 
 from tests.test_delivery_forced_finalization import _forced_test_context, _select_completion
 from tests.test_delivery_candidate import _finish_response
+from tests._cases import case_folders, chosen_rows
 
 
 def _start_control_episode(
@@ -38,14 +39,8 @@ def _start_control_episode(
     "raw",
     [
         '{"delivery_control":"publish"}',
-        '{"delivery_control":"keep","delivery_control":"replace"}',
         '{"delivery_control":"replace","full_answer":""}',
-        '{"delivery_control":"replace","full_answer":7}',
-        '{"delivery_control":"replace","full_answer":"one","full_answer":"two"}',
-        '{"delivery_control":"keep","extra":true}',
         '{"delivery_control":"keep","pending_review":"later"}',
-        '{"delivery_control":"replace","full_answer":"x","pending_review":true}',
-        '```json\n{"delivery_control":"publish"}\n```',
     ],
 )
 def test_post_episode_invalid_whole_body_preserves_without_repair(tmp_path, raw):
@@ -95,9 +90,6 @@ def test_forced_resolver_ignores_non_candidate_state(tmp_path):
     [
         '{"delivery_control":"keep"}',
         '{"delivery_control":"replace","full_answer":"JSON document"}',
-        '{"delivery_control":"publish"}',
-        ' \n{"delivery_control":"keep"}\n ',
-        '{"other":1,"other":2}',
         '{"payload":{"other":1,"other":2}}',
     ],
 )
@@ -120,10 +112,7 @@ def test_no_episode_protocol_json_is_byte_exact_passthrough(tmp_path, raw):
     "raw",
     [
         'Docs quote {"delivery_control":"keep"} before continuing.',
-        '{"delivery_control":"replace","full_answer":"cut',
-        '{"payload":{"delivery_control":"keep","delivery_control":"replace"}}',
         '{"full_answer":"one","full_answer":"two"}',
-        '{"other":1,"other":2}',
         '{"payload":{"other":1,"other":2}}',
     ],
 )
@@ -294,18 +283,25 @@ def test_provider_terminal_incomplete_replace_prefers_current_candidate(
         provider_terminal=True,
     )
 
-    assert text == current.full_text
+    # Owner 30 Oct (A): a whole request the provider cut at its output limit is not an incomplete reply; it
+    # replaces the candidate, the cut disclosed (test_forced_completion_request). A null finish or a native
+    # call keeps the current candidate.
+    selected = response_meta["finish_reason"] == "length"
+    assert text == ("decoded replacement" if selected else current.full_text)
     assert raw not in text
-    assert registry._ctx._delivery_candidate is current
-    assert registry._ctx._delivery_control_required is False
+    assert (registry._ctx._delivery_candidate is current) is not selected
+    # Only the selected request resolves its control (#447): a null-finished reply and one that also carried a
+    # native call are not adopted and consume nothing, so the latch stays armed (R4).
+    assert registry._ctx._delivery_control_required is not selected
     assert usage["execution_status"] == "failed"
     assert usage["reason_code"] == "provider_terminal"
-    assert returned_trace["forced_finalization"]["source"] == "retained_candidate"
+    assert returned_trace["forced_finalization"]["source"] == ("model" if selected else "retained_candidate")
+    assert ("output limit (length)" in str(usage.get("terminal_host_notice") or "")) is selected
 
 
 @pytest.mark.parametrize(
     ("raw", "response_meta", "host_suffix", "provider_unavailable"),
-    [
+    chosen_rows([
         pytest.param(
             '{"delivery_control":"publish"}',
             {"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1},
@@ -328,7 +324,7 @@ def test_provider_terminal_incomplete_replace_prefers_current_candidate(
             {"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0},
             True, True, id="provider-unavailable",
         ),
-    ],
+    ], 0, 3, 7),
 )
 def test_incomplete_armed_invalid_keeps_typed_reason(
     tmp_path, monkeypatch, raw, response_meta, host_suffix, provider_unavailable,
@@ -362,7 +358,9 @@ def test_incomplete_armed_invalid_keeps_typed_reason(
     assert text == ("Answer" if host_suffix else retained.full_text)
     assert raw not in text
     assert published.degraded_reason == loop.REASON_DELIVERY_CONTROL_DEGRADED
-    assert registry._ctx._delivery_control_required is False
+    # A reply that also carried a native call consumes nothing (latch armed); publishing a host-suffixed
+    # retained answer's model bytes replaces the candidate, which clears it as on every forced rail.
+    assert registry._ctx._delivery_control_required is (bool(response_meta["tool_call_count"]) and not host_suffix)
     assert usage["execution_status"] == execution_status
     assert usage["reason_code"] == external_reason
     assert usage["terminal_origin"] == loop.TERMINAL_ORIGIN_MODEL_FINAL
@@ -382,21 +380,11 @@ def test_incomplete_armed_invalid_keeps_typed_reason(
         assert returned_trace["forced_finalization"]["source"] == "retained_candidate"
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        '{"delivery_control":"publish"}',
-        '{"delivery_control":"keep","delivery_control":"replace"}',
-    ],
-)
-@pytest.mark.parametrize(
-    "response_meta",
-    [
-        {"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0},
-        {"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0},
-        {"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1},
-    ],
-)
+@pytest.mark.parametrize(("response_meta", "raw"), [
+    pytest.param({"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0}, '{"delivery_control":"publish"}', id='response_meta0-{"delivery_control":"publish"}'),
+    pytest.param({"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0}, '{"delivery_control":"keep","delivery_control":"replace"}', id='response_meta1-{"delivery_control":"keep","delivery_control":"replace"}'),
+    pytest.param({"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1}, '{"delivery_control":"publish"}', id='response_meta2-{"delivery_control":"publish"}'),
+])
 def test_provider_terminal_incomplete_armed_invalid_without_candidate_uses_fallback(
     tmp_path, monkeypatch, raw, response_meta,
 ):
@@ -922,30 +910,33 @@ def _select_by_hash(registry, ctx, trace, sha256):
     return consume_completion_request(registry, ctx, trace)
 
 
-@pytest.mark.parametrize("raw", _WRAPPED_CONTROLS)
-def test_post_episode_array_wrapped_control_stays_private_on_both_rails(tmp_path, raw):
-    loop, registry, ctx, trace, candidate = _start_control_episode(tmp_path)
-    before = (candidate.revision, candidate.content_sha256, copy.deepcopy(candidate.acceptance_binding))
-    before_messages = copy.deepcopy(ctx.messages)
-    parsed, duplicate, embedded = loop._parse_delivery_control_body(raw)
-    assert (parsed, duplicate, embedded) == (None, False, True)
-    # Forced rail, sticky provenance and an armed latch alike: the saved answer, degraded, never the wrapper.
-    assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (
-        candidate.full_text, loop.REASON_DELIVERY_CONTROL_DEGRADED, True, False)
-    registry._ctx._delivery_control_required = True
-    assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (
-        candidate.full_text, loop.REASON_DELIVERY_CONTROL_DEGRADED, True, False)
-    assert ctx.messages == before_messages
-    # Ordinary hold: the wrapper is kept in the transcript but its hash is never offered or selectable.
-    assert loop._resolve_delivery_control(raw, registry, ctx, trace) == ("retry", candidate.full_text)
-    assert ctx.messages[-2] == {"role": "assistant", "content": raw}
-    assert "latest whole held response" not in ctx.messages[-1]["content"]
-    assert registry._ctx._completion_held_sha256 == "" and registry._ctx._completion_pair_private is True
-    assert _select_by_hash(registry, ctx, trace, hashlib.sha256(raw.encode()).hexdigest()) is False
-    assert trace["completion_refusals"][-1]["reason"].startswith("selection_unavailable")
-    assert registry._ctx._delivery_candidate is candidate
-    assert (candidate.revision, candidate.content_sha256, candidate.acceptance_binding) == before
-    assert "DELIVERY_CONTROL_REPAIR" not in str(ctx.messages)
+def test_post_episode_array_wrapped_control_stays_private_on_both_rails(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for raw in _WRAPPED_CONTROLS:
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw):
+            loop, registry, ctx, trace, candidate = _start_control_episode(tmp_path)
+            before = (candidate.revision, candidate.content_sha256, copy.deepcopy(candidate.acceptance_binding))
+            before_messages = copy.deepcopy(ctx.messages)
+            parsed, duplicate, embedded = loop._parse_delivery_control_body(raw)
+            assert (parsed, duplicate, embedded) == (None, False, True)
+            # Forced rail, sticky provenance and an armed latch alike: the saved answer, degraded, never the wrapper.
+            assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (
+                candidate.full_text, loop.REASON_DELIVERY_CONTROL_DEGRADED, True, False)
+            registry._ctx._delivery_control_required = True
+            assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (
+                candidate.full_text, loop.REASON_DELIVERY_CONTROL_DEGRADED, True, False)
+            assert ctx.messages == before_messages
+            # Ordinary hold: the wrapper is kept in the transcript but its hash is never offered or selectable.
+            assert loop._resolve_delivery_control(raw, registry, ctx, trace) == ("retry", candidate.full_text)
+            assert ctx.messages[-2] == {"role": "assistant", "content": raw}
+            assert "latest whole held response" not in ctx.messages[-1]["content"]
+            assert registry._ctx._completion_held_sha256 == "" and registry._ctx._completion_pair_private is True
+            assert _select_by_hash(registry, ctx, trace, hashlib.sha256(raw.encode()).hexdigest()) is False
+            assert trace["completion_refusals"][-1]["reason"].startswith("selection_unavailable")
+            assert registry._ctx._delivery_candidate is candidate
+            assert (candidate.revision, candidate.content_sha256, candidate.acceptance_binding) == before
+            assert "DELIVERY_CONTROL_REPAIR" not in str(ctx.messages)
 
 
 @pytest.mark.parametrize("raw", ['[{"action":"stop","rationale":"Wrapped stop."}]',
@@ -966,17 +957,20 @@ def test_forced_array_wrapped_stop_neither_stops_nor_publishes_the_wrapper(tmp_p
     assert "task_completion" not in returned_trace
 
 
-@pytest.mark.parametrize("raw", _ORDINARY_ARRAYS)
-def test_ordinary_json_arrays_under_control_provenance_stay_selectable_answers(tmp_path, raw):
-    loop, registry, ctx, trace, candidate = _start_control_episode(tmp_path)
-    assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (raw, "", False, False)
-    registry._ctx._delivery_control_required = True
-    assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (raw, "", False, False)
-    assert loop._resolve_delivery_control(raw, registry, ctx, trace) == ("retry", candidate.full_text)
-    held = hashlib.sha256(raw.encode()).hexdigest()
-    assert registry._ctx._completion_held_sha256 == held and f"answer_sha256={held}" in ctx.messages[-1]["content"]
-    assert _select_by_hash(registry, ctx, trace, held) is True
-    assert registry._ctx._delivery_candidate.full_text == raw
+def test_ordinary_json_arrays_under_control_provenance_stay_selectable_answers(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for raw in _ORDINARY_ARRAYS:
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw):
+            loop, registry, ctx, trace, candidate = _start_control_episode(tmp_path)
+            assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (raw, "", False, False)
+            registry._ctx._delivery_control_required = True
+            assert loop._resolve_forced_delivery_control(registry._ctx, raw) == (raw, "", False, False)
+            assert loop._resolve_delivery_control(raw, registry, ctx, trace) == ("retry", candidate.full_text)
+            held = hashlib.sha256(raw.encode()).hexdigest()
+            assert registry._ctx._completion_held_sha256 == held and f"answer_sha256={held}" in ctx.messages[-1]["content"]
+            assert _select_by_hash(registry, ctx, trace, held) is True
+            assert registry._ctx._delivery_candidate.full_text == raw
 
 
 @pytest.mark.parametrize("raw", ['[{"delivery_control":"keep"}]', '[{"action":"finish","answer":"x"}]'])

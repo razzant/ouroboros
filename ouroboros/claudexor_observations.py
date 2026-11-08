@@ -5,7 +5,9 @@ engines' observations remain readable without authorizing exact availability.
 """
 from __future__ import annotations
 
+import re
 import time
+from datetime import datetime
 from typing import Any
 
 QUOTA_VIEW = "resources_freshness"
@@ -133,39 +135,105 @@ def resource_rows(rows: Any, harness: str, profile: str = "") -> list[dict]:
             and (not profile or row["target"]["profile_id"] == profile)] if isinstance(rows, list) else []
 
 
+# Field ranges are explicit (subagent_status_primitives.js has the same pattern):
+# Python 3.10 accepts an offset like +05:60, JS a 24:00 hour. The calendar day is
+# datetime's to reject (Feb 29 of a non-leap year, Apr 31).
+_INSTANT = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+                      r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)")
+
+
+def _future_instant(value: Any, now: float) -> float | None:
+    """An engine ISO instant with an offset that is still ahead, else None (invalid or past)."""
+    if not isinstance(value, str) or not _INSTANT.fullmatch(value):
+        return None
+    head, _, tail = value.partition(".")
+    if tail:  # Python 3.10 parses only 3 or 6 fractional digits; JS Date.parse takes any.
+        digits = re.match(r"\d+", tail).group()
+        head = f"{head}.{(digits + '000000')[:6]}{tail[len(digits):]}"
+    try:
+        at = datetime.fromisoformat(head.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return at if at > now else None
+
+
+def _applicable_measurement(constraint: Any, request_kind: str) -> bool:
+    """One window that measured this request: a finite ratio, every model, the requested kind.
+
+    The ratio is evidence that the window was observed, never a headroom policy.
+    Model-scoped windows stay unknown: the host does not match model spellings.
+    """
+    if not isinstance(constraint, dict):
+        return False
+    ratio = constraint.get("used_ratio")
+    models = constraint.get("applies_to_models")
+    prefixes = constraint.get("applies_to_model_prefixes", [])
+    kinds = constraint.get("applies_to_request_kinds", ["text", "image"])
+    return (isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and 0 <= ratio <= 1
+            and (models is None or models == []) and prefixes == []
+            and isinstance(kinds, list) and request_kind in kinds)
+
+
+def _subject_verdict(snapshots: list[dict], absent: bool, request_kind: str, now: float) -> dict:
+    """Simultaneous rows of ONE subject are constraints on it, never alternatives.
+
+    A dated, still-live engine block wins beside stale, free or absent rows, and
+    on a stale row too: the engine keeps such a cap in its own admission ledger.
+    Its reset is the next time to look again. Available needs every row fresh and
+    engine-available, no absence, and one applicable measured window.
+    """
+    blocks = [(at, row["availability"]) for row in snapshots
+              if isinstance(row.get("availability"), dict)
+              and row["availability"].get("state") in ("exhausted", "cooldown")
+              and (at := _future_instant(row["availability"].get("resets_at"), now)) is not None]
+    if blocks:
+        at, earliest = min(blocks, key=lambda block: block[0])
+        return {"state": "exhausted" if any(v["state"] == "exhausted" for _, v in blocks) else "cooldown",
+                "resets_at": earliest["resets_at"], "at": at}
+    available = snapshots and not absent and all(
+        row.get("freshness") == "fresh" and isinstance(row.get("availability"), dict)
+        and row["availability"].get("state") == "available" for row in snapshots)
+    if available and any(_applicable_measurement(constraint, request_kind) for row in snapshots
+                         for constraint in (row.get("constraints") if isinstance(row.get("constraints"), list) else [])):
+        return {"state": "available"}
+    return {"state": "unknown"}
+
+
+def _subject_key(row: dict) -> tuple:
+    subject = row["subject"]
+    return subject.get("harness"), subject.get("credential_route"), subject.get("subject_id")
+
+
 def quota_availability(value: dict, harness: str, *, model: str | None = None,
-                       profile: str = "", request_kind: str = "text") -> dict:
+                       profile: str = "", request_kind: str = "text", now: float | None = None) -> dict:
     """Project engine verdicts, never infer applicability from model spellings.
 
     Unknowns fail open at admission, not as a claim of execution readiness.
-    A stale sibling or explicit absence cannot prove an exhausted whole pool.
+    Each full subject (harness, credential route, subject id) is judged alone;
+    observed subjects are alternatives: one available suffices, one unknown
+    prevents an all-blocked claim, otherwise the earliest reset is a recheck.
+    This is the read roster, not the engine's enabled and ready pool.
     Monetary resources are deliberately not consulted.
     """
     unknown = {"state": "unknown", "resets_at": None}
     if not scope_honored(value, model, request_kind):
         return {**unknown, "reason": "availability_scope_unhonored"}
+    now = time.time() if now is None else now
     snapshots = subject_rows(value.get("snapshots"), harness, profile)
-    if not snapshots or subject_rows(value.get("absences"), harness, profile):
+    absences = subject_rows(value.get("absences"), harness, profile)
+    keys = list(dict.fromkeys(_subject_key(row) for row in snapshots + absences))
+    if not keys:
         return {**unknown, "reason": "quota_evidence_missing"}
-    verdicts = []
-    for row in snapshots:
-        availability = row.get("availability")
-        # A read-time engine availability uses per-constraint freshness. The
-        # aggregate can be stale because an unrelated sibling window expired.
-        constraints = row.get("constraints", [])
-        fresh = (isinstance(constraints, list) and any(
-            isinstance(c, dict) and c.get("freshness") == "fresh" for c in constraints
-        )) or row.get("freshness") == "fresh"
-        if not fresh or not isinstance(availability, dict) or availability.get("state") not in (
-            "available", "exhausted", "cooldown",
-        ):
-            return {**unknown, "reason": "quota_evidence_stale_or_incomplete"}
-        verdicts.append(availability)
+    absent = {_subject_key(row) for row in absences}
+    verdicts = [_subject_verdict([row for row in snapshots if _subject_key(row) == key], key in absent,
+                                 request_kind, now) for key in keys]
     if any(v["state"] == "available" for v in verdicts):
         return {"state": "available", "resets_at": None, "execution_guaranteed": False}
-    resets = [v.get("resets_at") for v in verdicts if isinstance(v.get("resets_at"), str)]
+    if any(v["state"] == "unknown" for v in verdicts):
+        return {**unknown, "reason": "quota_evidence_stale_or_incomplete" if snapshots else "quota_evidence_missing"}
+    earliest = min(verdicts, key=lambda v: v["at"])
     return {"state": "exhausted" if any(v["state"] == "exhausted" for v in verdicts) else "cooldown",
-            "resets_at": min(resets) if resets else None, "execution_guaranteed": False}
+            "resets_at": earliest["resets_at"], "execution_guaranteed": False}
 
 
 def _dated_row(row: dict, *, snapshot: bool) -> dict:

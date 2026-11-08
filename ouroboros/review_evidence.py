@@ -2,7 +2,7 @@
 
 Commit review freezes the task's browser/vision records once
 (``capture_commit_review_evidence``) and reads them back for a reconciled attempt;
-``collect_review_evidence`` projects the durable commit/advisory review record of a
+``collect_review_evidence`` projects the durable commit review record of a
 task or checkout. Status renderers and the shared section helpers live in their
 leaves and are re-exported here.
 """
@@ -14,7 +14,7 @@ import copy
 import hashlib
 import logging
 import pathlib
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from ouroboros.utils import truncate_review_artifact, truncate_within_limit  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 log = logging.getLogger(__name__)
@@ -29,12 +29,6 @@ from ouroboros.review_status_projection import (
 )
 from ouroboros.review_status_projection import (
     build_review_status_payload as build_review_status_payload,
-)
-from ouroboros.review_status_projection import (
-    _run_failure_reason as _run_failure_reason,
-)
-from ouroboros.review_status_projection import (
-    _review_status_run_to_dict as _review_status_run_to_dict,
 )
 from ouroboros.review_status_projection import (
     _review_status_attempt_payload as _review_status_attempt_payload,
@@ -96,7 +90,6 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
     """
     from ouroboros.artifacts import materialize_tool_args_source, materialize_tool_result_source, persist_exact_text_source
     from ouroboros.loop_messages import _visible_round_text
-    from ouroboros.observability import redact_projection
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_capabilities import STATEFUL_BROWSER_TOOLS
 
@@ -158,7 +151,8 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
             gap = {"tool_call_id": call.get("tool_call_id"), "status": "source_unavailable", "reason": str(exc)}
             row["following_response_gap"] = gap
             gaps.append(gap)
-        texts.append(json.dumps(redact_projection(row).value, ensure_ascii=False, indent=2, default=str))
+        # Rows carry the trace's records as stored; this view adds no mask of its own.
+        texts.append(json.dumps(row, ensure_ascii=False, indent=2, default=str))
     text = "\n\n".join(texts)
     canonical = canonical_data_root(ctx)
     exact, source_ref, issue = persist_exact_text_source(canonical, ctx.task_id, source_id="commit_review", text=text)
@@ -280,34 +274,6 @@ def commit_review_evidence_section(evidence: dict, *, delivery: str, compact: bo
     return header + "\nRecorded excerpt:\n" + truncate_within_limit(preview, room)
 
 
-def _split_advisory_runs_by_owner(runs: List[Any], task_id: str) -> tuple[List[Any], List[Any]]:
-    """Split repository advisory runs into this task's own rows and another task's.
-
-    Keyed on ROW IDENTITY, never on a scope key. Advisory runs are scoped by
-    repository, and several tasks legitimately review the same checkout, so a
-    repo-scoped list mixes owners: a root's post-task reflection was handed
-    another task's failed advisory commands with their identity stripped and
-    narrated them as its own failures. An empty ``repo_key`` widens the
-    candidate list to every advisory run on the drive, which is why the split
-    cannot key on that key either — the installation's history is not this
-    task's record.
-
-    A row carrying no ``task_id`` is legacy provenance: unknown, never
-    re-attributed in either direction, and left in the repository group it has
-    always been rendered in. A caller with no ``task_id`` (repository-readiness
-    surfaces) keeps whole-repository semantics, where nothing is foreign.
-    """
-    current = str(task_id or "")
-    if not current:
-        return list(runs), []
-    own: List[Any] = []
-    foreign: List[Any] = []
-    for run in runs:
-        owner = str(getattr(run, "task_id", "") or "")
-        (foreign if owner and owner != current else own).append(run)
-    return own, foreign
-
-
 def collect_review_evidence(
     drive_root: Any,
     *,
@@ -315,29 +281,25 @@ def collect_review_evidence(
     repo_dir: Any = None,
     canonical_root: Any = None,
     max_attempts: int = 3,
-    max_runs: int = 3,
     max_obligations: int | None = None,
     max_continuations: int = 3,
 ) -> Dict[str, Any]:
-    """Project this task's commit/advisory review record over the durable ledger.
+    """Project this task's commit review record over the durable ledger.
 
-    Repository readiness (``current_repo``, obligations, debts, the exact
-    snapshot match) stays repository-scoped — that is what "can this checkout be
-    committed" means. The RUN LISTS are attributed: ``recent_advisory_runs``
-    holds only rows this task owns (plus legacy rows with no recorded owner),
-    while another task's rows on the same checkout are carried separately under
-    ``foreign_advisory_runs`` so a reader cannot mistake them for this task's
-    own work. The repository stale marker is attributed the same way: shown to
-    every task on the checkout, with ``stale_task_id``/``stale_attribution``
-    naming whose mutation or review wrote it. A split-drive task's own
-    ``review_change`` attempts are read from ``canonical_root``; an unreadable one
-    is named (``canonical_attempts_unreadable``), never read as none.
+    Repository readiness (``current_repo``, obligations, debts) stays
+    repository-scoped — that is what "can this checkout be committed" means.
+    The repository stale marker is shown to every task on the checkout, with
+    ``stale_task_id``/``stale_attribution`` naming whose mutation or review
+    wrote it. The retired advisory lane's archived rows are neither this task's
+    record nor the checkout's readiness, so they are not projected. A split-drive
+    task's own ``review_change`` attempts are read from ``canonical_root``; an
+    unreadable one is named (``canonical_attempts_unreadable``), never read as none.
     """
     from ouroboros.review_state import (
         _LEGACY_CURRENT_REPO_KEY,
-        compute_snapshot_hash,
         load_state,
         make_repo_key,
+        stale_marker_status,
     )
     from ouroboros.review_status_projection import with_canonical_change_attempts
     from ouroboros.task_continuation import list_review_continuations
@@ -345,17 +307,9 @@ def collect_review_evidence(
     drive_root_path = pathlib.Path(drive_root)
     repo_dir_path = pathlib.Path(repo_dir) if repo_dir else None
     repo_key = make_repo_key(repo_dir_path) if repo_dir_path else ""
-    snapshot_hash = compute_snapshot_hash(repo_dir_path) if repo_dir_path else ""
 
     state = load_state(drive_root_path)
-    all_runs = list(state.advisory_runs or [])
     all_attempts = list(state.attempts or [])
-
-    if repo_key:
-        repo_runs = state.filter_advisory_runs(repo_key=repo_key)
-    else:
-        repo_runs = all_runs
-    own_runs, foreign_runs = _split_advisory_runs_by_owner(repo_runs, task_id)
 
     canonical_unreadable = ""
     if task_id:
@@ -365,10 +319,6 @@ def collect_review_evidence(
         scoped_attempts = state.filter_attempts(repo_key=repo_key)
     else:
         scoped_attempts = all_attempts
-
-    current_run = None
-    if snapshot_hash:
-        current_run = state.find_by_hash(snapshot_hash, repo_key=repo_key or None)
 
     open_obligations = state.get_open_obligations(repo_key=repo_key or None)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key or None)
@@ -383,26 +333,21 @@ def collect_review_evidence(
     else:
         scoped_continuations = continuations
     scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
-    stale_matches_repo = not repo_key or state.last_stale_repo_key in ("", repo_key)
+    # The marker speaks only when it staled the checkout's preflight look; one no look
+    # precedes is the retired advisory lane's history (owner decision: archive only).
+    marker, look_unreadable = stale_marker_status(state, drive_root_path, repo_key)
 
     evidence = {
         "task_id": task_id,
         "repo_key": repo_key,
         "current_repo": {
-            "snapshot_hash": snapshot_hash[:12] if snapshot_hash else "",
-            "advisory_status": str(getattr(current_run, "status", "") or "missing"),
-            "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
-            "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
-            "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or "") if stale_matches_repo else "",
+            "stale_reason": str(marker.get("reason") or ""),
+            "stale_ts": str(marker.get("ts") or ""),
             # Whose mutation or review wrote the marker; it never hides the marker.
-            **{key: value if stale_matches_repo else "" for key, value in state.stale_marker_provenance(task_id).items()},
+            **state.stale_marker_provenance(task_id, marker=marker),
         },
         "recent_attempts": [_attempt_to_dict(item) for item in (scoped_attempts[-max_attempts:] if max_attempts > 0 else [])],
         "omitted_attempts": max(0, len(scoped_attempts) - max_attempts) if max_attempts > 0 else len(scoped_attempts),
-        "recent_advisory_runs": [_run_to_dict(item) for item in (own_runs[-max_runs:] if max_runs > 0 else [])],
-        "omitted_advisory_runs": max(0, len(own_runs) - max_runs) if max_runs > 0 else len(own_runs),
-        "foreign_advisory_runs": [_run_to_dict(item) for item in (foreign_runs[-max_runs:] if max_runs > 0 else [])],
-        "omitted_foreign_advisory_runs": max(0, len(foreign_runs) - max_runs) if max_runs > 0 else len(foreign_runs),
         "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
         "omitted_obligations": max(0, len(open_obligations) - max_obligations) if max_obligations is not None else 0,
         "commit_readiness_debts": [_debt_to_dict(item) for item in open_debts],
@@ -413,24 +358,19 @@ def collect_review_evidence(
     }
     if canonical_unreadable:
         evidence["canonical_attempts_unreadable"] = canonical_unreadable
+    if look_unreadable:  # the marker above is shown unverified, never hidden by the read error
+        evidence["current_repo"]["preflight_unreadable"] = look_unreadable
     evidence["has_evidence"] = any([
         evidence["recent_attempts"],
-        evidence["recent_advisory_runs"],
-        # Another task's runs are still evidence about this checkout: the lens
-        # must not report "nothing recorded" when it is holding rows it simply
-        # may not attribute to this task.
-        evidence["foreign_advisory_runs"],
         evidence["open_obligations"],
         evidence["commit_readiness_debts"],
         evidence["continuations"],
         evidence["corrupt_continuations"],
-        # Nor when the canonical rows it should hold could not be read.
+        # The lens must not report "nothing recorded" when the canonical rows it should hold could not be read.
         bool(canonical_unreadable),
-        evidence["current_repo"]["advisory_status"] not in ("", "missing"),
+        bool(look_unreadable),
         # Omission counters signal truncated evidence even when visible lists are empty
         evidence["omitted_attempts"] > 0,
-        evidence["omitted_advisory_runs"] > 0,
-        evidence["omitted_foreign_advisory_runs"] > 0,
         evidence["omitted_obligations"] > 0,
         evidence["omitted_continuations"] > 0,
         evidence["omitted_corrupt"] > 0,
@@ -462,65 +402,6 @@ def _attempt_to_dict(item: Any) -> Dict[str, Any]:
     for key in ("readiness_warnings", "obligation_ids", "degraded_reasons", "triad_models"):
         data[key] = [str(x) for x in (getattr(item, key, []) or [])]
     return data
-
-
-_RESPONDED_STATUSES = frozenset({"fresh", "stale"})
-
-
-def _run_to_dict(item: Any) -> Dict[str, Any]:
-    """Serialise AdvisoryRunRecord with responded/skipped/error status summary.
-
-    The row carries its own IDENTITY: the owning ``task_id`` ("" = a legacy row
-    written before the field existed — unknown, never re-attributed), the
-    complete ``snapshot_hash`` of the tree that was reviewed (a 12-char prefix
-    cannot be joined back to an exact snapshot), and the ``attempt``/``phase``
-    of the lifecycle that produced it. A stripped row is why one root narrated
-    another task's advisory failures as its own. The keys are additive; every
-    historical reader keeps working.
-    """
-    valid_items = [entry for entry in list(getattr(item, "items", []) or []) if isinstance(entry, dict)]
-    fail_items = [
-        {
-            "severity": str(entry.get("severity", "") or "advisory"),
-            "item": str(entry.get("item", "") or ""),
-            "reason": str(entry.get("reason", "") or ""),
-        }
-        for entry in valid_items
-        if str(entry.get("verdict", "")).upper() == "FAIL"
-    ]
-    total_items = len(valid_items)
-
-    status = str(getattr(item, "status", "") or "")
-    bypass_reason = str(getattr(item, "bypass_reason", "") or "")
-    raw_result_text = str(getattr(item, "raw_result", "") or "")
-
-    status_summary = status if status in {"bypassed", "skipped", "parse_failure", "error"} else status or "unknown"
-    if status in _RESPONDED_STATUSES:
-        status_summary = (
-            "responded_with_findings" if fail_items
-            else "responded_clean" if total_items > 0
-            else "responded_empty"
-        )
-
-    return {
-        "ts": str(getattr(item, "ts", "") or ""),
-        "task_id": str(getattr(item, "task_id", "") or ""),
-        "attempt": int(getattr(item, "attempt", 0) or 0),
-        "phase": str(getattr(item, "phase", "") or ""),
-        "snapshot_hash": str(getattr(item, "snapshot_hash", "") or ""),
-        "status": status,
-        "status_summary": status_summary,
-        "repo_key": str(getattr(item, "repo_key", "") or ""),
-        "bypass_reason": bypass_reason,
-        "snapshot_summary": str(getattr(item, "snapshot_summary", "") or ""),
-        "findings": fail_items,
-        "total_items": total_items,
-        "raw_result_present": bool(raw_result_text),
-        "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
-        "prompt_chars": int(getattr(item, "prompt_chars", 0) or 0),
-        "model_used": str(getattr(item, "model_used", "") or ""),
-        "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
-    }
 
 
 def _obligation_to_dict(item: Any) -> Dict[str, Any]:
@@ -567,8 +448,20 @@ from ouroboros.review_evidence_sections import (  # noqa: E402, F401 -- intentio
     _accept_effective_claims,
     _accept_owner_directives,
     _accept_receipt_exhibits,
-    _accept_redact_cap,
+    _accept_cap,
     _accept_task_contract,
     _accept_verification_summary,
     _owner_content_projection,
 )
+
+
+def evidence_material(deliveries: tuple) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the optional task-evidence
+    exhibit over a placeholder record for each of ``deliveries``, every source state and compaction. The record is
+    data."""
+    base = {"task_id": "⟨task⟩", "selected_count": 1, "unselected_count": 1, "source_complete": True, "gap_count": 0,
+            "source_chars": 9, "source_ref": {"path": "⟨path⟩", "sha256": "⟨sha⟩"}, "session_relative_path": "⟨path⟩",
+            "preview": "⟨preview⟩"}
+    return [commit_review_evidence_section({**base, "source_status": status, "session_source_status": status},
+                                           delivery=delivery, compact=compact)
+            for delivery in deliveries for status in ("ready", "⟨other⟩") for compact in (False, True)]

@@ -42,7 +42,8 @@ from ouroboros.effort_evidence import validated_effort_resolution, validated_pro
 from ouroboros.gateways import claudexor_metadata as metadata
 from ouroboros.gateways.claudexor_identity import validated_catalog_match
 from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
-from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway
+from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway, tag_absent_run_read
+from ouroboros.gateways.claudexor_threads import ClaudexorThreadGateway
 from ouroboros.gateways.claudexor_uploads import ClaudexorUploadGateway
 from ouroboros.observability import timed_phase
 
@@ -95,8 +96,7 @@ DAEMON_BUSY_CODES = frozenset({"daemon_busy", "daemon_unavailable", "daemon_reco
 
 def _observation_reason(exc: BaseException) -> str:
     """The typed reason for a read-only observation hole."""
-    return (_OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout)
-            else "daemon_unreachable")
+    return _OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout) else "daemon_unreachable"
 
 
 def _request_timeout(timeout_sec: Optional[float]) -> Dict[str, Any]:
@@ -431,7 +431,8 @@ def run_message_supported(operations: list[dict]) -> bool:
     )
 
 
-class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, ClaudexorObservationGateway):
+class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, ClaudexorObservationGateway,
+                       ClaudexorThreadGateway):
     """Thin typed client over the Claudexor ``/v2`` control API."""
 
     def __init__(self, endpoint: Optional[DaemonEndpoint] = None, *, home: Optional[pathlib.Path] = None):
@@ -579,6 +580,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if isinstance(context.get("cause"), dict):
             facts = {key: context[key] for key in ("stage", "cause", "preflight") if key in context}
             error.reported_cause = run_failure_cause({"safeMessage": json.dumps(facts, ensure_ascii=False)})
+        tag_absent_run_read(response, error)  # a 404 run read names its caller; it proves nothing about the run
         return error
 
     # -- operations ------------------------------------------------------------
@@ -687,24 +689,32 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             path += "?" + urlencode(query)
         return _model_object(self._request("GET", path, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {})))
 
-    def upload_model_request(self, request: Dict[str, Any], *,
-                             idempotency_key: str) -> Dict[str, Any]:
+    def upload_model_request(self, request: Dict[str, Any] | bytes, *, idempotency_key: str,
+                             sha256: str = "", size_bytes: int | None = None) -> Dict[str, Any]:
         """Upload exact request JSON without spending a generation or logging content.
 
         Stage keys derive from the caller's invocation identity, never the prompt.
         An explicit retry can finish an uploaded/finalized handle after a lost
         reply. A cancelled or still-writing upload remains a typed refusal; this
         method never creates another upload or inference to hide that outcome.
+        Bytes carry the physical candidate's already-validated digest and size;
+        dictionary callers (including image generation) retain JSON preparation here.
         """
         key = _model_idempotency_key(idempotency_key)
-        if not isinstance(request, dict):
+        if isinstance(request, bytes):
+            data = request
+            if not re.fullmatch(r"[0-9a-f]{64}", sha256) or size_bytes != len(data):
+                raise ClaudexorUnavailable("invalid_model_payload", "Prepared request needs its exact digest and size")
+        elif isinstance(request, dict):
+            try:
+                data = json.dumps(request, ensure_ascii=False, allow_nan=False,
+                                  sort_keys=True, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise ClaudexorUnavailable("invalid_model_payload", "Model request is not valid JSON") from exc
+            sha256, size_bytes = hashlib.sha256(data).hexdigest(), len(data)
+        else:
             raise ClaudexorUnavailable("invalid_model_payload", "Model request must be a JSON object")
-        try:
-            data = json.dumps(request, ensure_ascii=False, allow_nan=False,
-                              sort_keys=True, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError, UnicodeError) as exc:
-            raise ClaudexorUnavailable("invalid_model_payload", "Model request is not valid JSON") from exc
-        digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        digest = "sha256:" + sha256
         stage_key = hashlib.sha256(key.encode("utf-8")).hexdigest()
         created = _model_object(self._request(
             "POST", "/v2/uploads",
@@ -712,7 +722,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
                        # Bind create's existing metadata identity to the bytes too:
                        # equal length alone would let an open upload change payload.
                        "name": f"model-request-{digest.removeprefix('sha256:')}.json",
-                       "sizeBytes": len(data)},
+                       "sizeBytes": size_bytes},
             headers={"Idempotency-Key": f"model-upload-{stage_key}"},
         ))
         upload_id = created.get("uploadId")
@@ -739,7 +749,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if resource.get("purpose") != "model":
             raise ClaudexorUnavailable("resource_purpose_mismatch", "Model upload returned an Agent attachment")
         ref = _model_payload_ref({name: resource.get(name) for name in ("resourceId", "sha256", "sizeBytes")})
-        if ref["sha256"] != digest or ref["sizeBytes"] != len(data):
+        if ref["sha256"] != digest or ref["sizeBytes"] != size_bytes:
             raise ClaudexorUnavailable("model_payload_integrity_error", "Finalized model request differs from uploaded bytes")
         return ref
 
@@ -901,9 +911,10 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
     def ensure_full_access(self, root: str) -> Dict[str, Any]:
         """Create a missing scoped full grant; the caller owns when to request it.
 
-        Scoped GET also returns default false for an absent trust file. The
-        actual-file list distinguishes absence from an explicit refusal; its
-        path remains authoritative when a legacy record has no repoRoot.
+        A daemon that names ``source`` distinguishes absence (``default``, grant)
+        from an explicit refusal (``file``). An older daemon omits ``source``;
+        the file list still distinguishes them, and its path stays authoritative
+        when a legacy record has no repoRoot.
         """
         target = str(root)
         body = self._request("GET", f"/v2/trust?repoRoot={quote(target, safe='')}")
@@ -915,20 +926,26 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("malformed_response", "Scoped trust lookup returned a different root")
         if state["allowFullAccess"]:
             return state
-        body = self._request("GET", "/v2/trust")
-        entries = body.get("entries") if isinstance(body, dict) else None
-        if not isinstance(entries, list):
-            raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
-        for entry in entries:
-            entry = _trust_state(entry)
-            if entry["path"] == state["path"]:
-                if entry["allowFullAccess"]:
-                    return entry
-                raise ClaudexorUnavailable(
-                    "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
-                    "Lower this call with access=workspace_write or select Working files on the actor row.",
-                    status_code=403,
-                )
+        refusal = ClaudexorUnavailable(
+            "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
+            "Lower this call with access=workspace_write or select Working files on the actor row.",
+            status_code=403,
+        )
+        # An unrecognized source keeps the list: only the two named values skip it.
+        source = state.get("source")
+        if source == "file":
+            raise refusal
+        if source != "default":
+            body = self._request("GET", "/v2/trust")
+            entries = body.get("entries") if isinstance(body, dict) else None
+            if not isinstance(entries, list):
+                raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
+            for entry in entries:
+                entry = _trust_state(entry)
+                if entry["path"] == state["path"]:
+                    if entry["allowFullAccess"]:
+                        return entry
+                    raise refusal
         granted = _trust_state(self._request(
             "POST", "/v2/trust", json_body={"repoRoot": target, "allowFullAccess": True},
         ))
@@ -956,37 +973,6 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "run start returned no handle")
         return body
-
-    def create_thread(self, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
-        """Create one durable v3 conversation thread.
-
-        Claudexor owns continuity and profile routing. This client only carries
-        the strict request and the caller's stable idempotency identity.
-        """
-        body = self._request(
-            "POST", "/v2/threads", json_body=dict(request),
-            headers={"Idempotency-Key": str(idempotency_key)},
-        )
-        if not isinstance(body, dict) or not str(body.get("id") or ""):
-            raise ClaudexorUnavailable("malformed_response", "thread create returned no id")
-        return body
-
-    def start_thread_turn(
-        self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str,
-    ) -> Dict[str, Any]:
-        """Append one turn through the public v3 thread pipeline."""
-        body = self._request(
-            "POST", f"/v2/threads/{quote(str(thread_id), safe='')}/turns",
-            json_body=dict(request), headers={"Idempotency-Key": str(idempotency_key)},
-        )
-        if not isinstance(body, dict):
-            raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
-        return body
-
-    def get_thread(self, thread_id: str) -> Dict[str, Any]:
-        """Read turns, native-session bindings, and continuity receipts."""
-        body = self._request("GET", f"/v2/threads/{quote(str(thread_id), safe='')}")
-        return body if isinstance(body, dict) else {}
 
     def get_run(self, run_id: str, *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
         body = self._request("GET", f"/v2/runs/{run_id}", timeout_sec=timeout_sec)
@@ -1074,6 +1060,18 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "Run decision returned a non-object response")
         return body
+
+    def run_result_taken_supported(self) -> bool:
+        """Does the serving engine's own decision vocabulary (``GET /v2/agent-capabilities``
+        ``runDecisionActions``) name ``taken``? Presence decides, never a version."""
+        actions = self.agent_capabilities().get("runDecisionActions")
+        return isinstance(actions, list) and "taken" in actions
+
+    def take_run_result(self, run_id: str, *, idempotency_key: str) -> Dict[str, Any]:
+        """Tell the engine its caller holds this terminal patch result whole (Claudexor's ``taken``
+        decision): its copy then follows ordinary retention. The wire spelling lives here alone."""
+        return self.decide_run(run_id, {"action": "taken", "reason": "captured_result"},
+                               idempotency_key=idempotency_key)
 
     def answer_interaction(self, run_id: str, interaction_id: str,
                            answers: List[Dict[str, Any]], *,

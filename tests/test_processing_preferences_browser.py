@@ -2,9 +2,22 @@
 import pytest
 from tests import test_subscription_role_routes_browser as roles
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
+# The shared disclosure caret: a drawn chevron, no glyph, pointing right when closed (-45°) and down when open
+# (45°); its turn is a transition, so the angle is awaited.
+CARET = """([summary, angle]) => {
+    const c = getComputedStyle(summary, '::before');
+    const drawn = !['none', 'normal'].includes(c.content) && parseFloat(c.width) > 0
+        && parseFloat(c.borderRightWidth) > 0 && parseFloat(c.borderBottomWidth) > 0;
+    const m = new DOMMatrixReadOnly(c.transform);
+    return drawn && Math.round(Math.atan2(m.b, m.a) * 180 / Math.PI) === angle;
+}"""
+
+
+def caret(summary, angle):
+    summary.page.wait_for_function(CARET, arg=[summary.element_handle(), angle])
 
 
 def test_processing_settings_save_reopen_and_actor_reference(role_ui):
@@ -16,19 +29,18 @@ def test_processing_settings_save_reopen_and_actor_reference(role_ui):
     page.locator('[data-global-processing]').select_option('fast')
     main = page.locator('[data-model-role="main"]')
     assert not main.locator('details').evaluate('e => e.open')
-    # The collapsed override must be recognizable as a disclosure: the glyph is
+    # The collapsed override must be recognizable as a disclosure: the caret is
     # drawn by CSS, so only a real render can prove it is there and flips open.
-    marker = "s => getComputedStyle(s, '::before').content"
-    assert main.locator('summary').evaluate(marker) == '"▸ "'
+    caret(main.locator('summary'), -45)
     main.locator('summary').click()
-    assert main.locator('summary').evaluate(marker) == '"▾ "'
+    caret(main.locator('summary'), 45)
     main.locator('[data-model-role-processing]').select_option('standard')
     assert 'Standard (override)' in main.locator('summary').text_content()
     main_model = ui['settings']['OUROBOROS_MODEL']
     page.locator('[data-settings-tab="agents"]').click()
     actor = page.locator('[data-subagent-row]').first
     assert 'Fast (from Models)' in actor.locator('[data-processing-summary]').text_content()
-    assert actor.locator('[data-processing-details] > summary').evaluate(marker) == '"▸ "'
+    caret(actor.locator('[data-processing-details] > summary'), -45)
     actor.locator('[data-processing-details] > summary').click()
     # The first row is a reviewer: its processing is the processing of its reviews.
     assert actor.locator('[data-subagent-field="review_eligible"]').is_checked()

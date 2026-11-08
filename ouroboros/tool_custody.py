@@ -4,7 +4,8 @@ An invocation that unwound cannot launch again. Its known executor or supervisor
 receipt can still be pending. These readers preserve that distinction for Pause,
 Continue, cold sleep and idle-worker retirement without a second ledger or
 business-status classification.
-Untracked descendants/remote effects remain the same disclosed gap as exit zero.
+Descendants a task's scope census cannot see (``task_scope_blockers``) and remote effects
+remain the same disclosed gap as exit zero.
 """
 from __future__ import annotations
 
@@ -352,11 +353,13 @@ def local_producers_settled() -> bool:
     """
     from ouroboros import budget_pause, custody_owed
     from ouroboros._usage_wait import _ABANDONED_SENDS
+    from ouroboros.tools.shell_process import unsettled_tracked_children
 
     with budget_pause._TOOL_LOCK:
         unsettled = any(not row["settled"].is_set()
                         for rows in budget_pause._TOOL_FUTURES.values() for row in rows.values())
-    return not unsettled and not _ABANDONED_SENDS and not custody_owed.pending()
+    return (unsettled_tracked_children() is None and not unsettled
+            and not _ABANDONED_SENDS and not custody_owed.pending())
 
 
 def retain_unconfirmed_host_operation(reason: str) -> None:
@@ -560,6 +563,7 @@ def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """
     import pathlib
     from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_containment import pid_is_zombie
     from ouroboros.workspace_executor import _PROCESS_STATE_DIR, _load_process_record, _valid_process_record
 
     folder = pathlib.Path(drive_root) / "state" / _PROCESS_STATE_DIR
@@ -585,10 +589,72 @@ def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
         if record.get("executor_type") == "local":
             if pid <= 0:
                 raise ValueError("workspace_executor_custody_invalid")
-            if pid_provably_gone(pid):
+            if pid_provably_gone(pid) or (record.get("record_type") == "foreground" and pid_is_zombie(pid)):
+                # A WNOWAIT leader has returned. This receipt describes the
+                # root; task scope and the live registry still own its tree.
                 continue
         elif record.get("backend_completed") is True and (pid <= 0 or pid_provably_gone(pid)):
             continue
         blockers.append({"kind": "workspace_executor", "task_id": task_id,
                          "record_id": record["id"], "executor_type": record["executor_type"]})
     return blockers
+
+
+def task_scope_blockers(drive_root: Any, task_id: str, *, found: dict | None = None) -> list[dict]:
+    """This task's own process scope (``process_scope``) that may still run, without signalling it.
+
+    The membership its terminal cleanup ends (``process_scope.scope_members`` over one ``census``):
+    the scope marker each of its commands, executor commands and task-scoped services carries and
+    every descendant inherits, in a session of its own (``setsid``) too; its recorded groups under
+    the pgid-reuse rule (what reaches a macOS platform binary); its known members by pid and birth.
+    A live member blocks; an unreadable record, table or recorded identity is unknown, never none.
+    A keep-alive or session service and the managed daemon shed the marker at spawn and lead no
+    recorded group: never held here. ``found``, a hold's own poll: the members its last read found,
+    re-checked first in one identity read, so the whole table (on macOS one ``ps -E`` of every
+    process) is read again only once they ended. The census's disclosed residuals remain, as at
+    task end; Windows and Docker-executor children are ``unsupported`` there and hold nothing here.
+    """
+    import json
+    from ouroboros.platform_layer import IS_WINDOWS
+    from ouroboros.process_census import IDENTITY_ALIVE, census, read_identities
+    from ouroboros.process_scope import _record_markers, _saved_members, scope_members, task_scope_path
+
+    found = {} if found is None else found
+
+    def unknown(detail: str) -> list[dict]:
+        return [{"kind": "task_scope_unknown", "task_id": task_id, "detail": detail}]
+
+    try:
+        record = json.loads(task_scope_path(drive_root, task_id).read_bytes())
+        markers, groups, known = _record_markers(record), list(record.get("groups") or []), _saved_members(record)
+        floor = float(record.get("minted_epoch") or 0.0)
+    except FileNotFoundError:
+        found.clear()
+        return []  # nothing launched under this task, or its terminal cleanup settled and retired it
+    except Exception as exc:
+        return unknown(f"record: {type(exc).__name__}")
+    if IS_WINDOWS:
+        return []
+    try:
+        identities = read_identities(found) if found else {}
+        alive = sorted(pid for pid, identity in identities.items()
+                       if identity.state == IDENTITY_ALIVE and identity.birth == found.get(pid))
+        if alive:
+            return [{"kind": "task_scope_process", "task_id": task_id, "pid": pid} for pid in alive]
+        rows = census(markers)
+        if rows is None:
+            return unknown("process table unreadable")
+        captured = [*known, *({"pid": pid, "birth": birth} for pid, birth in found.items())]
+        view = scope_members(rows, markers=markers, groups=groups, captured=captured, scope_start_epoch=floor,
+                             exclude={os.getpid()})
+    except Exception as exc:
+        return unknown(f"membership: {type(exc).__name__}")
+    alive = {pid: row.birth for pid, row in view["members"].items() if row.state == IDENTITY_ALIVE}
+    owed = {(item["pid"], item["birth"]) for item in view["captured_unverified"]}
+    pending = {pid: birth for pid, birth in found.items() if (pid, birth) in owed}
+    found.clear()
+    found.update(pending)  # a partial table never forgets a member an earlier read identified
+    found.update(alive)
+    return ([{"kind": "task_scope_process", "task_id": task_id, "pid": pid} for pid in sorted(alive)]
+            + [{"kind": "task_scope_unknown", "task_id": task_id, "detail": f"{item['pid']}: {item['reason']}"}
+               for item in view["captured_unverified"]])

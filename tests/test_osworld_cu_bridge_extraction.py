@@ -127,7 +127,6 @@ def test_cu_bridge_launcher_reexports_every_moved_identity():
 @pytest.mark.parametrize("helper,owner", [
     ("_is_default_desktop_server", step_agent_env),
     ("confined_claims_dir", step_agent_claims),
-    ("task_claim_key", step_agent_claims),
     ("scored_claim_state", step_agent_claims),
 ])
 def test_pre_admission_audit_reaches_step_helpers(helper, owner, monkeypatch):

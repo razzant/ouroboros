@@ -225,6 +225,10 @@ class RunCustody:
     # or a successor continues in the snapshot (``SUPERSEDED``: its capture is the one).
     patch_captured: bool = False
     patch_disposed: str = ""
+    # #1651: the PATCH_DISPOSED row's own facts, so readers never replay the chain: the task that recorded
+    # it ("" = not recorded, as on rows reduced before this field) and a reject over a result proven lost.
+    patch_disposed_by: str = ""
+    patch_result_lost: bool = False
     # CR1-3: an apply-intent row exists with no resolution and no disposition —
     # the target tree MAY carry the patch (crash between apply and the disposition
     # row), so any later disposition over this run is ambiguous until inspected.
@@ -675,6 +679,8 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         disposition = str(row.get("disposition") or "")
         if disposition:
             custody.patch_disposed = disposition
+            custody.patch_disposed_by = str(row.get("disposed_by_task_id") or "")
+            custody.patch_result_lost = bool(row.get("result_lost"))
             custody.patch_apply_pending = False  # a recorded disposition completes the apply-intent story
     elif kind == SETTLED:
         # A RUN-level fact: it no longer clears the registration obligation -
@@ -820,6 +826,8 @@ def record_patch_disposed(drive_root: Any, custody: RunCustody, *, disposition: 
     lands, the snapshot and the captured patch persist as conflict material.
     """
     custody.patch_disposed = str(disposition or "")
+    custody.patch_disposed_by = str(payload.get("disposed_by_task_id") or "")
+    custody.patch_result_lost = bool(payload.get("result_lost"))
     custody.patch_apply_pending = False  # a disposition completes the intent story
     return emit(drive_root, PATCH_DISPOSED, {
         "run_id": custody.run_id, "task_id": custody.task_id,

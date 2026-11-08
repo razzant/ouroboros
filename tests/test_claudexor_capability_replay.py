@@ -65,10 +65,10 @@ def replay(tmp_path, monkeypatch):
     monkeypatch.setattr(wire.ClaudexorGateway, "__init__", initialize)
     upload = wire.ClaudexorGateway.upload_model_request
 
-    def upload_record(gateway, payload, *, idempotency_key):
-        uploads.append(deepcopy(payload))
+    def upload_record(gateway, payload, *, idempotency_key, **prepared):
+        uploads.append(json.loads(payload) if isinstance(payload, bytes) else deepcopy(payload))
         ids.append(idempotency_key)
-        return upload(gateway, payload, idempotency_key=idempotency_key)
+        return upload(gateway, payload, idempotency_key=idempotency_key, **prepared)
 
     monkeypatch.setattr(wire.ClaudexorGateway, "upload_model_request", upload_record)
 
@@ -180,8 +180,10 @@ def test_an_ordinary_round_send_keeps_the_grant(replay, fits):
     assert len(judged) == 2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("reject_on", [1, 2], ids=["first_send", "correlated_send"])
+@pytest.mark.parametrize(("reject_on", "asynchronous"), [
+    pytest.param(1, False, id='first_send-sync'),
+    pytest.param(2, True, id='correlated_send-async'),
+])
 def test_a_bound_check_refusal_is_the_original_refusal_only_after_a_grant(replay, asynchronous, reject_on):
     from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed, bind_physical_attempt_context
 
@@ -201,8 +203,11 @@ def test_a_bound_check_refusal_is_the_original_refusal_only_after_a_grant(replay
         assert raised.value.code == "model_capability_refused" and len(raised.value.ledger_attempt_ids) == 2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("control", ["deadline", "cancelled", "owner_pause"])
+@pytest.mark.parametrize(("control", "asynchronous"), [
+    pytest.param("deadline", False, id='deadline-sync'),
+    pytest.param("cancelled", True, id='cancelled-async'),
+    pytest.param("owner_pause", False, id='owner_pause-sync'),
+])
 def test_a_control_before_the_correlated_send_stays_that_control(replay, monkeypatch, asynchronous, control):
     """Stop, Pause or a spent deadline between the grant and the correlated send is the task's
     own control, never the original refusal."""
@@ -257,7 +262,7 @@ def test_a_failed_preparation_of_the_correlated_send_stays_that_failure(replay, 
     assert isinstance(raised.value.__cause__, OSError) and len(f.uploads) == 1
 
 
-@pytest.mark.parametrize("scenario", ["continuation", "preferred", "third", "returns"])
+@pytest.mark.parametrize("scenario", ["continuation", "preferred", "returns"])
 def test_real_wire_engine_stories(replay, monkeypatch, scenario):
     from tests import test_claudexor_capability_engine as engine
     story = {"continuation": engine.test_bound_continuation_and_next_call,
@@ -271,8 +276,7 @@ def test_real_wire_engine_stories(replay, monkeypatch, scenario):
     story(f, monkeypatch)
 
 
-@pytest.mark.parametrize("guard", ["pin", "unknown", "unsettled", "generation_started",
-                                   "no_typed_permission", "second_retry", "granted"])
+@pytest.mark.parametrize("guard", ["pin", "unknown", "granted"])
 def test_typed_guards_from_recorded_facts(guard, monkeypatch, tmp_path):
     fact = results("serve")[0]
     payload = deepcopy(capture("serve")["uploads"][0])

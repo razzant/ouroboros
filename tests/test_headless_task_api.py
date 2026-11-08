@@ -16,6 +16,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import store_import
+from ouroboros.gateway import tasks
 from ouroboros.gateway.tasks import (
     _compose_task_text,
     _resolve_workspace_root,
@@ -170,6 +171,101 @@ def test_task_api_admission_refusal_is_terminal_not_scheduled_phantom(tmp_path, 
     assert result["reason_code"] == "project_routing_fence"
     assert result["admission_cleanup"] == {"child_drive_removed": True}
     assert not (data / "state" / "headless_tasks" / "blocked-root").exists()
+
+
+def test_task_api_publishes_its_admission_outside_q_and_writes_the_receipt_with_the_row_still_queued(tmp_path, monkeypatch):
+    """Q spans memory only: the row is enqueued under Q, the snapshot that makes it durable before the 202 is
+    published outside Q, and the receipt is written under Q again with the row revalidated still queued."""
+    import supervisor.queue as queue
+    from ouroboros.task_results import load_task_result
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    pending = []
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.setattr(queue, "PENDING", pending)
+    monkeypatch.setattr(queue, "RUNNING", {})
+    seen = []
+    real_write = tasks.write_task_result
+
+    def persist(reason=""):
+        seen.append((reason, queue._queue_lock._is_owned(), [row["id"] for row in pending]))
+        return True
+
+    def write(root, task_id, status, **fields):
+        seen.append(("receipt", queue._queue_lock._is_owned(), [row["id"] for row in pending]))
+        return real_write(root, task_id, status, **fields)
+
+    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(tasks, "write_task_result", write)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    response = TestClient(app).post("/api/tasks", json={"description": "durable", "task_id": "outside-q", "memory_mode": "empty"})
+    assert response.status_code == 200 and response.json()["status"] == "scheduled"
+    assert seen == [("api_task_create", False, ["outside-q"]), ("receipt", True, ["outside-q"])]
+    stored = load_task_result(data, "outside-q")
+    assert stored["api_admission"]["status"] == "accepted" and stored["result"] == "Task accepted and durably scheduled."
+
+
+def _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, task_id, write_in_window):
+    """POST one API task whose durability barrier (outside Q) finds ``write_in_window`` already written the record:
+    a Stop's terminal or a launch's ``running`` landed between the enqueue and the receipt."""
+    import supervisor.queue as queue
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {})
+
+    def persist(reason=""):
+        write_in_window(data)
+        return True
+
+    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    response = TestClient(app).post("/api/tasks", json={"description": "durable", "task_id": task_id, "memory_mode": "empty"})
+    assert response.status_code == 200
+    return data
+
+
+def test_a_stop_in_the_barrier_window_keeps_its_terminal_words_and_the_receipt_writes_only_its_token(tmp_path, monkeypatch):
+    """Review F5: a task created and stopped inside the barrier window ends ``cancelled`` with the Stop's own result
+    text, never "accepted"; the receipt adds the token the readback needs and nothing the Stop wrote."""
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    def stop(data):
+        write_task_result(data, "stopped-in-window", "cancelled", result="Task cancelled by user/agent request.",
+                          metadata={"stopped_by": "owner"}, artifact_status="")
+
+    data = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "stopped-in-window", stop)
+    stored = load_task_result(data, "stopped-in-window")
+    assert stored["status"] == "cancelled" and stored["result"] == "Task cancelled by user/agent request."
+    assert stored["metadata"] == {"stopped_by": "owner"} and stored["artifact_status"] == ""
+    assert stored["api_admission"]["status"] == "accepted"
+
+
+def test_a_launch_in_the_barrier_window_keeps_its_words_and_still_gets_the_admissions_facts(tmp_path, monkeypatch):
+    """The receipt never overwrites another writer's word, and never drops an admission fact the record lacks: a
+    row the tick assigned meanwhile (the mirror's ``running`` and "Assigned to a worker.") keeps both and gains the
+    admission's facts no other writer records."""
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    def launch(data):
+        write_task_result(data, "launched-in-window", "running", result="Assigned to a worker.", description="durable")
+
+    data = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "launched-in-window", launch)
+    stored = load_task_result(data, "launched-in-window")
+    assert stored["status"] == "running" and stored["result"] == "Assigned to a worker."
+    assert stored["memory_mode"] == "empty" and stored["allowed_resources"] == {} and "deadline_at" in stored
+    assert stored["api_admission"]["status"] == "accepted"
 
 
 def test_task_api_retains_possible_admission_when_snapshot_is_unconfirmed(tmp_path, monkeypatch):
@@ -760,7 +856,9 @@ def test_large_input_manifest_survives_real_queue_snapshot_restore(tmp_path, mon
     task_id = response.json()["task_id"]
     assert len(queue.PENDING) == 1
     expected = queue.PENDING[0]["task_contract"]["attachment_manifest_ref"]
-    snapshot = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    from ouroboros.queue_observation import load_queue_document
+
+    snapshot = load_queue_document(data)  # the contract is published once (shared); the reader expands it
     assert snapshot["pending"][0]["task"]["task_contract"]["attachment_manifest_ref"] == expected
     queue.PENDING.clear()
     assert queue.restore_pending_from_snapshot() == 1

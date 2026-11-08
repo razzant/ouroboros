@@ -61,7 +61,7 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
     Room growth is evidence for the next changed author request. It cannot
     itself mint another paid plan envelope. Health/roster/cycle rails stay with
     the existing engine, which still decides whether any dispatch is earned.
-    The owner's words that caused the work follow the same rule: a replay takes
+    My human's words for the work follow the same rule: a replay takes
     the recorded section (a wave recorded without one stays without), a fresh
     request takes the run's words now (``owner_words_text``).
     """
@@ -102,8 +102,32 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
             "own_dialogue": own, "related_rooms": pointers, **({"owner_words": words} if words else {})}
 
 
+def _recorded_masking(root: pathlib.Path, task_id: str, wave: dict, digest: str, coverage: Any) -> dict:
+    """The masking fact an earlier-schema wave recorded for its room snapshot. The retired engine
+    kept it in the exact wave (``evidence_manifest_full.own_dialogue.secrets_redacted``), never in
+    the snapshot bytes; it is carried only as recorded. A wave record this reader cannot read
+    leaves the snapshot, verified by its own ref, readable: whether those bytes were masked is
+    then unknown, so no flag is claimed and the coverage names the lost record as a gap."""
+    from ouroboros.tools.plan_review_artifacts import read_wave
+
+    manifest = wave.get("evidence_manifest_full")
+    if not isinstance(manifest, dict) and isinstance(wave.get("wave_artifact"), dict) and wave["wave_artifact"]:
+        try:
+            manifest = read_wave(root, task_id, wave["wave_artifact"]).get("evidence_manifest_full")
+        except (OSError, ValueError) as exc:
+            gap = {"kind": f"masking_record_unavailable:{type(exc).__name__}"}
+            return {"coverage": {**(coverage if isinstance(coverage, dict) else {}), "masking": {"gaps": [gap]}}}
+    own = manifest.get("own_dialogue") if isinstance(manifest, dict) else None
+    recorded = isinstance(own, dict) and own.get("secrets_redacted") is True and own.get("sha256") in (None, digest)
+    return {"secrets_redacted": True} if recorded else {}
+
+
 def plan_chat_reader(root: pathlib.Path, task_id: str):
-    """Resolve snapshot-qualified chat ranges only through recorded task custody."""
+    """Resolve snapshot-qualified chat ranges only through recorded task custody.
+
+    An earlier-schema wave's snapshot keeps the masking flag that wave recorded, or a named
+    coverage gap when that wave record is unreadable. An ask's carrier records none, so a
+    snapshot an ask captured while room capture still masked may hold masks it never named."""
     from ouroboros.artifacts import read_actor_source_bytes
 
     def read(locator: str):
@@ -132,8 +156,10 @@ def plan_chat_reader(root: pathlib.Path, task_id: str):
         for wave in reversed(state.get("waves") or []):
             ref = wave.get("dialogue_source_ref") or {}
             if ref.get("sha256") == digest and wave.get("dialogue_chat_id") == chat_id:
-                raw = read_actor_source_bytes(root, task_id, ref)
-                return {"text": raw.decode("utf-8"), "coverage": json.loads(raw.split(b"\n", 1)[0]).get("coverage", {})}
+                raw = read_actor_source_bytes(root, task_id, ref)  # the snapshot's own failures refuse
+                coverage = json.loads(raw.split(b"\n", 1)[0]).get("coverage", {})
+                return {"text": raw.decode("utf-8"), "coverage": coverage,
+                        **_recorded_masking(root, task_id, wave, digest, coverage)}
         return None
     return read
 
@@ -176,6 +202,10 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
     if row.get("type") == "quiz_closed":
         actor = "owner" if quiz.get("closed_actor") == "owner" else f"task {quiz.get('closed_by_task_id')}"
         return f"[question closed without answer {qid}] by {actor}: {quiz.get('closed_reason') or ''}. No approval recorded."
+    if row.get("type") == "quiz_answer" and quiz.get("secret_request") and isinstance(quiz.get("secret_outcome"), dict):
+        from ouroboros.owner_quiz import secret_outcome_summary
+
+        return f"[secret request {qid}] {secret_outcome_summary(quiz)}"  # host metadata: plugin and field ids, never a value
     if row.get("type") == "quiz_answer":
         index = quiz.get("answered_index")
         # The choice is my human's; an offered option's words are the asking task's, never theirs.
@@ -195,6 +225,9 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
 def _line(number: int, row: dict) -> str:
     body = _quiz_text(row, provenance=True) if row.get("type") in {"quiz", "quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict) \
         else str(row.get("text") or "")
+    reaction = row.get("reaction") if isinstance(row.get("reaction"), dict) else {}
+    fact = str(reaction.get("words") or "")  # a reaction's labelled fact, beside the row's own words, never in them
+    body = f"{body}\n{fact}" if body and fact else body or fact
     names = [next((str(a[k]) for k in _ATTACHMENT_NAME_KEYS if a.get(k)), "")
              for a in (row.get("attachments") or []) if isinstance(a, dict)]
     body = body.replace("\n", "\n  ") + (f" [attachments: {', '.join(n for n in names if n)}]" if any(names) else "")
@@ -258,7 +291,7 @@ def dialogue_view(own: dict, keep: int | None = None) -> tuple[str, str, dict]:
     snapshot_section = (
         "## OWN ROOM SNAPSHOT (this ask)\n\n" + header + "\n\n"
         f"Captured {own.get('captured_at') or 'time unavailable'}. "
-        f"Not inline: {progress} progress rows and {len(others) - progress} host rows{cut}. The complete redacted "
+        f"Not inline: {progress} progress rows and {len(others) - progress} host rows{cut}. The complete "
         f"snapshot `{locator}` ({facts['snapshot_lines']} lines) is in task custody: a session reads "
         f"`{own.get('file') or '(not persisted for this dry run)'}`; a native episode reads "
         f"read_file(root='artifact_store', path='{(own.get('source_ref') or {}).get('path') or ''}'); a participant "
@@ -344,7 +377,7 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     Each slot's fit lands in ``dialogue_delivery``; a session slot with an engine bound also
     records ``input_limit`` (the bound, the measured ``prompt_chars``, ``fits``).
     """
-    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, slot_retrieves, slot_is_session
+    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, ROOM_SNAPSHOT_ROLE, slot_retrieves, slot_is_session
     from ouroboros.tools.review_synthesis import build_plan_review_messages, per_slot_input_token_limits
     from ouroboros.tools.plan_packet import plan_user_stable_len
     from ouroboros.tools.scope_required_sources import source_text_identity
@@ -361,10 +394,10 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     api = [slot for slot in slots if not slot_retrieves(slot)]
     limits = per_slot_input_token_limits([s.model for s in api], output_reserve=PLAN_REVIEW_MAX_TOKENS,
                                        tokenizer_margin=155_000, slots=api)
-    # What each session reviewer may read of the room: the snapshot declared as an OBSERVED
-    # source (never a required manifest, which would order multi-MB reads), so the harness
-    # journal fold records per-reviewer coverage as a fact (`review_session_reads`).
-    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"],
+    # What each retrieving reviewer may read of the room: the snapshot declared as an OBSERVED
+    # source (never a required manifest, which would order multi-MB reads), so the host's or
+    # the harness journal's fold records per-reviewer coverage as a fact.
+    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"], "observed_role": ROOM_SNAPSHOT_ROLE,
                   **source_text_identity(str(own.get("text") or "").encode("utf-8"))}]
                 if own.get("source_ref") and own.get("file") else [])
     for slot in slots:

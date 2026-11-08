@@ -368,6 +368,105 @@ def restored_handoff_unproven(task: dict, existing: Optional[dict], *, ancestor_
     return host_unscoped(task) and possible
 
 
+PRESTART_PROOF = "returned_before_body"  # the carried copy of a pre-body return, in a later hold or Resume record
+SEED_RETURN = "_seed_return"  # D5: a returning stop gave back a turn cut before its first save; carried by value
+
+
+def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
+    """An owner text turn of the conversation lane cut before its first model call (D5). Every tool batch and answer
+    follows a model call, which the usage ledger records apart from the working file: zero recorded calls is the positive
+    proof that nothing took effect, a lost file included. No working file (a saved turn returns from it), park, owed or
+    delivered final or Stop, and a non-terminal result complete it; a later attempt, continuation, wake, call, Presence,
+    child or any unreadable fact keeps the interrupted path."""
+    from ouroboros.consciousness_authority import wake_cause
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+    from ouroboros.working_checkpoint import checkpoint_path, final_answer_registered, live_park
+    from supervisor.restart_retention import _cancel_intent_active, presence_turn
+
+    task_id, root = str(task.get("id") or ""), pathlib.Path(root)
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if (not task_id or not task.get("_is_direct_chat") or attempt != 1 or governing_continuation(task)
+            or wake_cause(metadata) or presence_turn(task, root) or metadata.get("execution_transport") is not None
+            or task.get("configured_subagent") or task.get("parent_task_id") not in (None, "", task_id)):
+        return False
+    try:
+        stored = load_task_result(root, task_id, strict=True) or {}
+        if not stored or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED} or (
+                checkpoint_path(root, task_id, attempt).is_file() or live_park(root, task_id, attempt)
+                or final_answer_registered(root, task_id) or _cancel_intent_active(root, task_id)):
+            return False
+        from supervisor import queue
+        cost = queue.reconstruct_task_cost(task_id, fields=True, drive_root=root)
+        return (cost.get("cost_accounting_status") == "available" and not cost.get("ledger_integrity_degraded")
+                and int(cost.get("total_rounds") or 0) == 0)
+    except Exception:
+        log.warning("Return of %s before its first model call is unprovable; interrupted path", task_id, exc_info=True)
+        return False
+
+
+def _seed_unsent(task: dict, seed: dict, stored: Optional[dict]) -> dict:
+    """The D5 proof holds until the attempt it gave back launches (a launch marks or records that attempt)."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+
+    attempt = task.get("_attempt")
+    if (not task.get("_is_direct_chat") or governing_continuation(task) or type(attempt) is not int
+            or seed.get("from_attempt") != attempt - 1):
+        return {}
+    if stored is None:
+        from supervisor import queue
+
+        stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or queue.DRIVE_ROOT),
+                                  str(task.get("id") or ""), strict=True) or {}
+    marked, recorded = stored.get("admitted_dispatch_attempt"), stored.get("task_attempt")
+    if (not stored or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}
+            or stored.get("admission_outcome") == "never_admitted"
+            or "admitted_dispatch_attempt" in stored and (type(marked) is not int or marked >= attempt)
+            or type(recorded) is int and recorded >= attempt):
+        return {}
+    return {"seed_return": True, "from_attempt": attempt - 1, "cause": str(seed.get("cause") or "")}
+
+
+def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
+    """The proof that a lane turn's first attempt came back before its body and never launched since (#2555).
+
+    The carrier's pre-body Pause event, checked by the supervisor's park, is the proof:
+    its scheduled result keeps that limit (``before_task_start``, attempt 1, no calls),
+    and a later quit hold or Resume record carries it by value (``PRESTART_PROOF``). A
+    body start records its attempt and every pooled launch of this scoped row commits its
+    dispatch mark before the put, so a result with neither proves none since. This is not
+    ``admitted_dispatch='none'``: the lane did put the turn on its carrier. ``{}`` when
+    unproven; an unreadable result raises and the caller keeps its hold. Restore,
+    hold revalidation and Resume read the same evidence; readability grants no Resume.
+    A turn a returning stop gave back before its first working save carries its own
+    proof on the row (``SEED_RETURN``, D5), valid until the attempt it gave back launches.
+    """
+    from ouroboros.project_admission import host_unscoped
+
+    if isinstance(task.get(SEED_RETURN), dict):  # D5: a turn given back before its first save; its own proof
+        return _seed_unsent(task, task[SEED_RETURN], stored)
+    if (not task.get("_is_direct_chat") or not host_unscoped(task) or governing_continuation(task)
+            or type(task.get("_attempt")) is not int or task["_attempt"] != 1 or "admitted_dispatch" in task
+            or task.get("original_task_id") or task.get("timeout_retry_from")):
+        return {}
+    if stored is None:
+        from supervisor import queue
+
+        stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or queue.DRIVE_ROOT),
+                                  str(task.get("id") or ""), strict=True) or {}
+    if (stored.get("status") != STATUS_SCHEDULED or stored.get("started_at") or stored.get("task_attempt") is not None
+            or stored.get("admission_outcome") == "never_admitted"
+            or "admitted_dispatch" in stored or "admitted_dispatch_attempt" in stored):
+        return {}
+    limit = stored.get("resource_limit") if isinstance(stored.get("resource_limit"), dict) else {}
+    for proof in (limit, limit.get(PRESTART_PROOF)):
+        if (isinstance(proof, dict) and proof.get("before_task_start") is True and proof.get("cause") == "owner_pause"
+                and proof.get("task_attempt") == 1 and proof.get("replay_safe") is True
+                and proof.get("physical_calls") == 0):
+            return {key: proof[key] for key in ("before_task_start", "cause", "task_attempt", "replay_safe",
+                                                "physical_calls")}
+    return {}
+
+
 def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bool = True,
                                    prepare_admission: Optional[Callable[[dict], bool]] = None, **enqueue_kwargs: Any) -> Any:
     """Admit a host producer's row together with its positive scheduled receipt.
@@ -407,6 +506,7 @@ def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bo
             write_task_result(queue.DRIVE_ROOT, tid, STATUS_SCHEDULED, strict_existing_dict=True, create_only=True,
                               chat_id=admitted.get("chat_id"), root_task_id=admitted.get("root_task_id") or tid,
                               metadata=admitted.get("metadata") if isinstance(admitted.get("metadata"), dict) else {},
+                              **{key: admitted[key] for key in ("suggested_name",) if admitted.get(key)},
                               host_admission={"token": token, "status": "accepted"},
                               result="Task accepted and scheduled.")
         except Exception:
@@ -552,8 +652,8 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
     New launchers stamp the attempt BEFORE put, including when the RUNNING
     mirror later fails. An old source with no addressed mark proves no such
     protocol; retain it rather than guess. Earlier attempt marks never reset.
-    A direct first launch stores 0 (agent), while its checkpoint names 1
-    (owner_wait). Only that unmarked, owner-bound launch uses the source's 1.
+    A direct or carried Presence first launch stores 0 (agent), while its checkpoint
+    names 1 (owner_wait). Only that unmarked, owner-bound launch uses the source's 1.
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
 
@@ -573,7 +673,7 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
     owner = stored.get("execution_owner")
     if (type(observed) is int and observed == 0 and target == 2 and source.get("task_attempt") == 1
             and "admitted_dispatch_attempt" not in stored and isinstance(owner, dict)
-            and owner.get("kind") == "direct"
+            and owner.get("kind") in {"direct", "presence"}
             and type(owner.get("task_attempt")) is int and owner["task_attempt"] == 0):
         observed = 1
     return ("task_attempt" not in stored
@@ -632,7 +732,7 @@ def revalidate_project_holds() -> None:
         ProjectAdmissionError, _strict_admission_snapshot, host_unscoped,
         project_admission_guard, task_project_membership, validate_project_admission,
     )
-    from supervisor import queue
+    from supervisor import queue, workers
     from supervisor.queue_snapshot import _descends_from, _interrupted_ancestors, _fence_snapshot_running_rows, _exact_pause_row
     from supervisor.schedule_occurrence import first_dispatch_unsent, restore_allowed
     from supervisor.update_merge import assisted_resume_authorizes
@@ -640,6 +740,7 @@ def revalidate_project_holds() -> None:
     from ouroboros.project_placement import pending_placement, refresh_pending_placement
     from ouroboros.owner_wait import restore_owner_wait_allowed
     from ouroboros.delegate_recovery import planned_handoff_resume_allowed
+    from ouroboros.workspace_admission import admitted_absent_workspace
     from supervisor.events_budget import BUDGET_HOLD_KEY, native_continuation_repair
 
     from supervisor.budget_resume import revalidate_consumed_resume_holds
@@ -731,8 +832,9 @@ def revalidate_project_holds() -> None:
             # A first-attempt schedule receipt that still proves no handoff outranks an
             # earlier launcher's Project mark of that attempt (``first_dispatch_unsent``).
             unsent = not governing and first_dispatch_unsent(task)
+            returned = prestart_returned_unsent(task, stored)
             if (stored.get("admission_outcome") == "never_admitted"
-                    or not granted and not unsent and (
+                    or not granted and not unsent and not returned and (
                         stored.get("status") != STATUS_SCHEDULED or stored.get("started_at")
                         or task.get("admitted_dispatch") != "none"
                         or "admitted_dispatch" in stored and stored["admitted_dispatch"] != "none")):
@@ -794,7 +896,9 @@ def revalidate_project_holds() -> None:
                 guard = project_admission_guard(queue.DRIVE_ROOT, basis, snapshot=snapshot)
             with guard:
                 workspace = str(task.get("workspace_root") or "")
-                if workspace:
+                # A folder admitted as merely absent (#1799) keeps that admission while its address stays absent.
+                if workspace and not admitted_absent_workspace(task, system_repo_dir=workers.REPO_DIR,
+                                                               drive_root=queue.DRIVE_ROOT):
                     path = pathlib.Path(workspace)
                     if not path.is_dir() or os.path.normcase(str(path.resolve(strict=True))) != os.path.normcase(workspace):
                         raise ValueError("The original prepared folder is unavailable or resolves elsewhere.")
@@ -819,7 +923,7 @@ def revalidate_project_holds() -> None:
     # Unknown persistence puts the exact original hold back; later passes recheck.
     changed = any(prior != {key: task[key] for key in effects if key in task}
                   for prior, task in zip(before, held))
-    persisted = not changed or queue.persist_queue_snapshot(reason="project_hold_revalidated") is True
+    persisted = not changed or queue.publish_queue_snapshot(reason="project_hold_revalidated") is True
     for task, prior in released:
         if persisted:
             task.pop("_managed_update_resume", None)  # a spent resolver resume never reaches a worker
@@ -982,8 +1086,8 @@ def scheduled_admission_rejection(
         extra = {"root_task_id": str(root_task_id or "")}
     elif reason in {"root_budget_fence", "root_owner_paused"}:
         detail = (
-            "Subagent not scheduled: the owner paused this task tree; it accepts no new "
-            "work until the owner resumes it." if reason == "root_owner_paused" else
+            "Subagent not scheduled: this task tree is paused; it accepts no new "
+            "work until it is resumed." if reason == "root_owner_paused" else
             "Subagent not scheduled: the root budget is paused and requires an "
             "explicit replay-safe resume, cancellation, or a new run."
         )

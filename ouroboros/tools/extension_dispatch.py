@@ -81,6 +81,10 @@ def _dispatch_mcp_tool_result(
 ) -> ToolResult:
     """Run one MCP tool while preserving provider-owned result facts."""
     from ouroboros.safety import check_safety as _mcp_check_safety
+    from ouroboros.owner_pause import admit_tool_dispatch, OwnerPauseRefused
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.usage_accounting import UsageAccountingError
 
     is_safe, safety_msg = _mcp_check_safety(
         name,
@@ -93,7 +97,10 @@ def _dispatch_mcp_tool_result(
     try:
         from ouroboros.mcp_client import _call_mcp_tool_result as _mcp_call
 
-        result = _mcp_call(name, args or {})
+        admit_tool_dispatch(ctx)
+        result = _mcp_call(name, args or {}, ctx)  # the calling task owns returned images
+    except (PhysicalDispatchInterrupted, OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError):
+        raise
     except Exception as exc:
         text = f"⚠️ TOOL_ERROR ({name}): {exc}"
         return ToolResult(status="error", code="TOOL_ERROR", text=text)
@@ -263,6 +270,12 @@ def _dispatch_extension_tool_untagged(
     if not _ext_safe:
         return _extension_result("blocked", "SAFETY_VIOLATION", _ext_safety_msg)
 
+    from ouroboros.owner_pause import admit_tool_dispatch, run_tool_handler, submit_async_operation, OwnerPauseRefused
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.usage_accounting import UsageAccountingError
+    controls = (PhysicalDispatchInterrupted, OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError)
+
     if ext_tool.get("out_of_process"):
         try:
             from ouroboros.extension_process_runner import (
@@ -274,7 +287,10 @@ def _dispatch_extension_tool_untagged(
             text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
             return _extension_result("error", "EXTENSION_ERROR", text)
         try:
+            admit_tool_dispatch(ctx)
             result_str = dispatch_extension_tool_subprocess(ext_tool, ctx, call_args)
+        except controls:
+            raise
         except Exception as exc:
             text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
             timed_out = (
@@ -322,11 +338,6 @@ def _dispatch_extension_tool_untagged(
     except Exception as exc:
         text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {type(exc).__name__}: {exc}"
         return _extension_result("error", "EXTENSION_ERROR", text)
-    from ouroboros.owner_pause import run_tool_handler, submit_async_operation, OwnerPauseRefused
-    from ouroboros.model_wait import ModelWaitInterrupted
-    from ouroboros.usage_accounting import UsageAccountingError
-    controls = (OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError)
-
     try:
         result = run_tool_handler(ctx, handler, *((ctx,) if _wants else ()), **call_args)
     except controls:

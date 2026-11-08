@@ -8,7 +8,6 @@ import pytest
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 from tests.test_configured_session_restore import InputReached
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("origin", ["owner", "parent", "relay"])
@@ -222,6 +221,7 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
     canonical = json.loads(cctx._configured_startup_wake)
     assert canonical["status"] == "configured_session_continuation"
     assert canonical["wake"]["wake_events"][0]["text"] == old, "the deferred ACK keeps its canonical source"
+    assert stub_delegate_engines == engine_calls, "the handoff and the bootstrap observe no engine"
 
     def first_input(call, *_args, **_kwargs):
         texts = [str(row.get("content") or "") for row in call.messages]
@@ -233,7 +233,11 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
         if case != "unsaved":
             assert joined.rindex(correction) > joined.rindex(old), "the later correction stays latest"
         assert not ds._load_state(cctx, run_id)["pending_wake"], "the ready save ACKed the canonical wake"
-        assert stub_delegate_engines == engine_calls
+        # The one contact since the handoff is the starter's round-top placement of the correction (restored with
+        # the transcript, or re-drained from the replayed mailbox) into the run it still holds open; the wake's
+        # own mail is a tool result, not a corpus row, so nothing else is owed. The undiscovered engine leaves the
+        # row for the next round and this first round goes on to its model call.
+        assert stub_delegate_engines == engine_calls + (["gateway"] if case != "unsaved" else [])
         raise InputReached
 
     monkeypatch.setattr(loop, "_dispatch_round_model", first_input)

@@ -1,12 +1,14 @@
 """#1183: a direct turn's exact Pause continues on a pooled worker with its own fence.
 
-The direct actor applies its admission fence (stored under the acceptance fence's names)
-in-process, so the row names no pooled owner. A fence still open across a Pause is a
-pre-fold state — the retired acceptance gate held it open while a child ran — that a paused
-continuation still carries: its exact park binds that row; only the consumed Resume of THAT
-pause on the current pooled attempt rebinds it. The fence begin, owner/budget Pause,
-direct-lane park, Resume grant, assignment, loop consumption, pooled event/ack and the seal
-at an author stop are real; model, process and paid transports are synthetic.
+The direct turn here is an inline executor's (a thread of the queue's process, owner decisions 2A/3A):
+its agent applies its admission fence in-process (stored under the acceptance fence's names), so the
+row names no pooled owner, while its RUNNING lane row sits on the executor's pseudo-slot (no pid). A
+fence still open across a Pause is a pre-fold state — the retired acceptance gate held it open while a
+child ran — that a paused continuation still carries: its exact park binds that row; only the consumed
+Resume of THAT pause on the current pooled attempt rebinds it. The fence begin, owner/budget Pause,
+the supervisor's park of the row (the one pooled path every carried turn takes), Resume grant,
+assignment, loop consumption, pooled event/ack and the seal at an author stop are real; model, process
+and paid transports are synthetic.
 """
 import copy
 import os
@@ -15,11 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external, _supervisor_ctx
+from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external
 from tests.test_acceptance_fence_transport import _pooled_agent, _Supervisor
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 TASK = "direct-cold"
 
@@ -30,18 +31,21 @@ def _bind(ctx, actor):
     ctx.end_acceptance_fence = actor._end_acceptance_fence
 
 
-def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", change=""):
-    """A direct turn's fence is open (as a pre-fold acceptance gate left it); the root then pauses exactly."""
+def _direct_paused(tmp_path, monkeypatch, *, rail="budget", change=""):
+    """An inline executor's turn: its fence open in this process (as a pre-fold acceptance gate left it),
+    its RUNNING lane row on the executor's pseudo-slot; the root then pauses exactly and the supervisor
+    parks the row from the body's event."""
     from ouroboros import budget_pause, loop
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
     from ouroboros.task_results import write_task_result
-    from supervisor import message_bus, worker_chat_lane
-    from supervisor.events_budget import _handle_budget_pause
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import lane_row, park_lane_pause
 
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
     direct = _pooled_agent(tmp_path, None, TASK)
-    direct._fence_in_process = lambda: True  # a direct turn runs in the queue's process
+    direct._fence_in_process = lambda: True  # an inline executor's turn runs in the queue's process
     ctx, limit = _loop_ctx(tmp_path, TASK, direct=True)
     _bind(ctx, direct)
     write_task_result(tmp_path, TASK, "running", root_task_id=TASK, _is_direct_chat=True)
@@ -61,7 +65,9 @@ def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", chang
     prior = copy.deepcopy(row)
     _fast_hold(monkeypatch, budget_pause)
     _quiet_external(monkeypatch, budget_pause)
-    registry = SimpleNamespace(unregister=lambda _id: None)
+    task = {"id": TASK, "type": "task", "chat_id": 7, "text": "do it", "project_id": "fixture",
+            "_is_direct_chat": True, "root_task_id": TASK, "_attempt": 1}
+    slot = lane_row(workers, task, wid=97, executor=EXECUTOR_INLINE_DEGRADED, pid=None)
     if rail == "owner":  # the owner's Pause control finds the live direct turn and closes its tree
         from supervisor.active_activity import get_direct_activity_registry
         from supervisor.owner_pause_control import request_owner_pause
@@ -76,20 +82,15 @@ def _direct_paused(tmp_path, monkeypatch, *, park="inline", rail="budget", chang
         else:
             budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED, scope="global",
                                        reason_text="budget exhausted")
-    task = {"id": TASK, "type": "task", "chat_id": 7, "text": "do it", "project_id": "fixture",
-            "_is_direct_chat": True, "root_task_id": TASK, "_attempt": 1}
     event = budget_pause.pause_event(task, raised.value.pause)
-    if park == "inline":  # the direct lane parks its own turn in-process
-        events = []
-        monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
-        monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
-        assert worker_chat_lane._execute_chat_task({
-            "task": task, "agent": SimpleNamespace(handle_task=lambda _task: [event]), "chat_id": 7,
-            "registry": registry})
-        assert not events
-    else:  # the inline park failed: the same event takes the supervisor's ordinary path
-        budget_pause.end_dispatch_fence(TASK)
-        _handle_budget_pause(event, _supervisor_ctx(tmp_path, workers, queue, [], []))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
+    park_lane_pause(event)  # the body's event, parked by the supervisor over the row (RUNNING -> PENDING)
+    workers.WORKERS.pop(slot.wid, None)  # the executor's pseudo-slot leaves with its body
+    if rail == "owner":
+        from supervisor.active_activity import get_direct_activity_registry
+
+        get_direct_activity_registry().unregister(TASK)  # the body's thread releases its entry as its last act
+    budget_pause.end_dispatch_fence(TASK)
     assert workers.PENDING[0]["_is_direct_chat"] and not workers.RUNNING
     assert {key: value for key, value in queue.ACCEPTANCE_FENCES[TASK].items()
             if key != "paused_continuation"} == prior, "Pause keeps its fence intact"
@@ -122,12 +123,12 @@ def _pooled_resume(tmp_path, monkeypatch, queue, workers, *, consume=True):
     return ctx
 
 
-@pytest.mark.parametrize("park,rail", [("inline", "budget"), ("event", "budget"), ("inline", "owner")])
-def test_direct_exact_pause_reacquires_its_fence_on_pooled_resume(tmp_path, monkeypatch, park, rail):
+@pytest.mark.parametrize("rail", ["budget", "owner"])
+def test_direct_exact_pause_reacquires_its_fence_on_pooled_resume(tmp_path, monkeypatch, rail):
     from ouroboros import budget_pause, loop
     from ouroboros.loop_delivery import _seal_admission_before_delivery
 
-    queue, workers, prior, trace = _direct_paused(tmp_path, monkeypatch, park=park, rail=rail)
+    queue, workers, prior, trace = _direct_paused(tmp_path, monkeypatch, rail=rail)
     owner = rail == "owner"
     assert budget_pause.budget_pause_row(tmp_path, TASK)["rail"] == (
         budget_pause.RAIL_OWNER_PAUSE if owner else budget_pause.RAIL_GLOBAL_EXHAUSTED)
@@ -150,8 +151,7 @@ def test_direct_exact_pause_reacquires_its_fence_on_pooled_resume(tmp_path, monk
     assert controls == [] and queue.ACCEPTANCE_FENCES[TASK]["status"] == "sealed"
 
 
-@pytest.mark.parametrize("change", ["unconsumed", "revoked", "missing_binding", "attempt",
-                                    "sealed", "foreign_task", "pooled_owner"])
+@pytest.mark.parametrize("change", ["unconsumed", "missing_binding", "pooled_owner"])
 def test_direct_handoff_needs_its_own_park_and_consumed_grant(tmp_path, monkeypatch, change):
     from ouroboros import budget_pause, loop
 

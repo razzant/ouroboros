@@ -7,7 +7,9 @@ report is a gap, never a fabricated verification. The fact is not an input to
 ``reduce_verdict`` and cannot create PASS or erase a later finding.
 
 Cyber Pro also freezes ``evidence_at_decision`` when the author chooses.
-The ``landing`` field (kind ``commit_landing``) is a different fact, written only after Git succeeds.
+The ``landing`` field (kind ``commit_landing``) is a different fact, written only after Git succeeds,
+as is the record's ``commit_landings``: each commit that landed under it, against the reviewed tree,
+with the author decision that governed that commit.
 """
 
 from __future__ import annotations
@@ -16,12 +18,17 @@ import copy
 import hashlib
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 FACT_KIND = "review_replaced_by_subagents"
 EVIDENCE_KIND = "evidence_at_decision"
 LANDING_KEY = "landing"
 LANDING_KIND = "commit_landing"
+COMMIT_LANDINGS_KEY = "commit_landings"
+_LANDING_TEXT = ("commit_sha", "tree_sha", "parent_sha", "author_subject", "author_disposition", "author_reason",
+                 "recorded_at")
+_RELATIONS = frozenset({"same", "different", "unknown"})
+_OBJECT_NAME = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full SHA-1 or SHA-256 Git object name
 _FEEDBACK = frozenset({"none_received", "received", "unavailable", "unknown"})
 _GAPS = frozenset({"report_unreadable", "subject_mismatch", "digest_mismatch", "actor_identity_unknown"})
 _BILLING = frozenset({"subscription", "measured", "unknown"})
@@ -57,8 +64,9 @@ AUTHOR_DISPOSITION_SCHEMA: Dict[str, Any] = {
     },
     "required": ["disposition", "rationale"],
     "description": (
-        "Explicitly accept the current attributed candidate after reading the referenced outcome. "
-        "Never overrides Blocking. Optional subagent_check is author evidence, not a seat and not a PASS."
+        "Explicitly accept the candidate this call stages (omitted paths: the paths the referenced review covered) "
+        "after reading the referenced outcome. Never overrides Blocking. Optional subagent_check is author evidence, "
+        "not a seat and not a PASS."
     ),
 }
 
@@ -417,13 +425,26 @@ def validate_landing(value: Any, *, subject_hash: str = "") -> Optional[Dict[str
     }
 
 
+_DELTA_KEYS = ("relation", "reviewed_base", "reviewed_tree", "staged_base", "staged_tree", "text")
+
+
+def validate_subject_delta(value: Any, *, subject_hash: str = "") -> Optional[Dict[str, str]]:
+    """How the staged tree an author continuation landed differs from the reviewed one, as published before Git
+    (``review_collection.disclose_subject_delta``, #2680)."""
+    if (not isinstance(value, dict) or value.get("relation") not in {"same", "different", "unknown"}
+            or not all(isinstance(value.get(key, ""), str) for key in _DELTA_KEYS)):
+        return None
+    return {key: str(value.get(key) or "") for key in _DELTA_KEYS}
+
+
 def carry_recorded_doctrine(normalized: Dict[str, Any], record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Keep a valid fact, snapshot and landing. A bad attachment rejects the record."""
+    """Keep a valid fact, snapshot, landing and subject delta. A bad attachment rejects the record."""
     subject = str(normalized.get("subject_hash") or "")
     for key, checker in (
         (FACT_KIND, validate_replacement_fact),
         (EVIDENCE_KIND, validate_evidence_snapshot),
         (LANDING_KEY, validate_landing),
+        ("subject_delta", validate_subject_delta),
     ):
         if key not in record:
             continue
@@ -455,7 +476,7 @@ def enrich_author_commit(author: Dict[str, Any], *, actors: Any, prior_decision:
     return body
 
 
-_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action")
+_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta")
 
 
 def decision_for_ledger(decision: Any, record_id: str) -> Dict[str, Any]:
@@ -501,6 +522,62 @@ def with_landing(decision: Dict[str, Any], landing: Dict[str, Any]) -> Dict[str,
     body = {key: copy.deepcopy(value) for key, value in decision.items() if key != "source_ref"}
     body[LANDING_KEY] = copy.deepcopy(landing)
     return body
+
+
+def commit_landing_fact(subject: Any, commit: Any, *, recorded_at: str, decision: Any = None) -> Optional[Dict[str, str]]:
+    """A commit that landed under a record, typed against the tree that record reviewed.
+
+    ``same``/``different`` compare the commit's own tree with the record's ``subject.tree_sha``;
+    either one missing is ``unknown``. It speaks for this record only: a different tree never
+    says the code went unreviewed, and nothing here is a verdict or a PASS. ``author_subject``
+    names the author decision that governed the commit (its ``subject_hash``), ``""`` for none;
+    that ``decision``'s disposition and reason are copied when it is the one named, so a later
+    decision on the same record never speaks for this commit.
+    """
+    commit = commit if isinstance(commit, dict) else {}
+    sha, tree = (str(commit.get(key) or "").strip().lower() for key in ("commit_sha", "tree_sha"))
+    if not _OBJECT_NAME.fullmatch(sha):
+        return None
+    reviewed = str((subject if isinstance(subject, dict) else {}).get("tree_sha") or "").strip().lower()
+    relation = "unknown" if not (tree and reviewed) else "same" if tree == reviewed else "different"
+    author = str(commit.get("author_subject") or "")
+    governed = decision if isinstance(decision, dict) and author and decision.get("subject_hash") == author else {}
+    return {"commit_sha": sha, "tree_sha": tree, "parent_sha": str(commit.get("parent_sha") or ""),
+            "reviewed_subject": relation, "author_subject": author,
+            "author_disposition": str(governed.get("disposition") or ""), "author_reason": str(governed.get("rationale") or ""),
+            "recorded_at": str(recorded_at or "")}
+
+
+def landed_record(record: Dict[str, Any], landing: Any, commit: Any, *, recorded_at: str,
+                  retain: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = None
+                  ) -> Optional[Dict[str, Any]]:
+    """``record`` with what one successful Git command adds, or ``None`` when it holds it already.
+
+    Every bound commit joins ``commit_landings`` (oldest first, every one, one row per commit) with
+    the decision the record holds for it as it lands. The author's ``landing`` joins only a record
+    that holds the author's decision; ``retain`` keeps the earlier decision's source chain. Critic
+    subject, author subject and landed commit stay apart.
+    """
+    body, changed = dict(record), False
+    checked, author = validate_landing(landing), body.get("author_decision")
+    if checked is not None and isinstance(author, dict) and author.get(LANDING_KEY) != checked:
+        decision = with_landing(author, checked)
+        body["author_decision"] = retain(body, decision) if retain else decision
+        changed = True
+    fact = commit_landing_fact(body.get("subject"), commit, recorded_at=recorded_at, decision=body.get("author_decision"))
+    kept = [row for row in body.get(COMMIT_LANDINGS_KEY) or [] if isinstance(row, dict)]
+    if fact is not None and all(row.get("commit_sha") != fact["commit_sha"] for row in kept):
+        body[COMMIT_LANDINGS_KEY], changed = [*kept, fact], True
+    return body if changed else None
+
+
+def public_commit_landings(record: Any) -> List[Dict[str, str]]:
+    """The record's landed commits as a card reads them, oldest first; an unrecognized relation reads ``unknown``."""
+    rows = record.get(COMMIT_LANDINGS_KEY) if isinstance(record, dict) else None
+    return [{**{key: str(row.get(key) or "") for key in _LANDING_TEXT},
+             "reviewed_subject": row.get("reviewed_subject") if row.get("reviewed_subject") in _RELATIONS else "unknown"}
+            for row in rows if isinstance(row, dict) and _OBJECT_NAME.fullmatch(str(row.get("commit_sha") or ""))
+            ] if isinstance(rows, list) else []
 
 
 def public_card_decision(decision: Any) -> Optional[Dict[str, Any]]:

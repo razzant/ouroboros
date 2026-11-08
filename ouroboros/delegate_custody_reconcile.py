@@ -28,6 +28,14 @@ if TYPE_CHECKING:  # annotation-only name; lazy under future annotations, never 
 log = logging.getLogger("ouroboros.delegate_custody")
 
 
+def _mark_root_cost(drive_root: Any, custody: Any) -> None:
+    """A custody transition this process made (a run started or settled): the root's live cost
+    figure is read again at the next supervisor flush (RV_MAIN M7). In a worker the memo is idle."""
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+
+    LIVE_ROOT_COSTS.mark(drive_root, getattr(custody, "root_task_id", "") or getattr(custody, "task_id", ""))
+
+
 def _custody():
     """The parent custody module, read at call time.
 
@@ -43,11 +51,12 @@ def _custody():
 
 def open_runs(drive_root: Any, state: Optional[Dict[str, "RunCustody"]] = None) -> List[RunCustody]:
     """Runs with a durable start and no durable settlement (``state``: a shared
-    pre-read snapshot, so a batch of audits pays one read; else the held rows)."""
+    pre-read snapshot, so a batch of audits pays one read; else the held rows that
+    may be open, so the settled held majority is never decoded: ``open_held_runs``)."""
     if state is None:
-        from ouroboros.delegate_custody_current import held_runs
+        from ouroboros.delegate_custody_current import open_held_runs
 
-        state = held_runs(drive_root)
+        state = open_held_runs(drive_root)
     return [custody for custody in state.values() if not custody.settled]
 
 
@@ -170,20 +179,21 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     as retained, through no transport. ``gateway_factory`` defaults to
     ``attach_only_gateway``; a kill boundary names it explicitly.
 
-    ``deliberate_terminal`` is the terminal status the KILLING caller is about to
-    write, when that terminal is the task's own deliberate end (an owner
-    cancellation). The kill boundary audits custody before its terminal write, so
-    the durable result the inverted floor otherwise reads does not exist yet; the
-    caller already knows the verdict and states it here rather than having the
-    host guess or re-read a file that is not there. Empty means "no verdict from
-    me", which is what every host bound (deadline, reap) and every read-only
-    sweep passes.
+    ``deliberate_terminal`` is the caller's verdict on the task's open runs: the
+    terminal status a KILLING caller is about to write when that terminal is the
+    task's deliberate end (an owner cancellation), or ``interrupted`` for an
+    abrupt loss whose task continues in a later attempt (a signal-death retry, the
+    work an owner Restart returns or a fault holds). The kill boundary audits
+    custody before its terminal write, so the durable result the inverted floor
+    otherwise reads does not exist yet; the caller already knows the verdict and
+    states it here rather than having the host guess or re-read a file that is
+    not there. Empty means "no verdict from me", which is what every host bound
+    (deadline, reap) and every read-only sweep passes.
     """
     mine = str(task_id or "")
     if not mine:
         return []
-    from ouroboros.delegate_custody_current import task_snapshot
-    from ouroboros.delegate_custody_current import held_runs
+    from ouroboros.delegate_custody_current import open_held_runs, task_snapshot
 
     view = task_snapshot(drive_root, mine)  # one read; pending starts remain the admitted sweep's duty
     if run_ids is not None:
@@ -196,7 +206,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     # sweep tick); deferred registrations stay with the periodic sweep. A
     # project with ANY unsettled run is live; unsettled runs are held rows.
     owned = [r for r in view["runs"].values() if r.project_owned and r.project_id and r.settled]
-    live = ({r.project_id for r in held_runs(drive_root).values() if r.project_id and r.run_id and not r.settled}
+    live = ({r.project_id for r in open_held_runs(drive_root).values() if r.project_id and r.run_id and not r.settled}
             if owned else set())
     owed = [r for r in owned if r.project_id not in live]
     if not held and not owed:
@@ -236,8 +246,8 @@ def reconcile_orphaned_runs(
     # replaying the custody log takes seconds, and a candidate exists ⇒ its owner was
     # registered earlier (admission takes ``_queue_lock`` before any spawn), so an owner
     # absent from the LATER snapshot is really gone rather than merely not yet admitted.
-    from ouroboros.delegate_custody_current import held_runs
-    candidates = [c for c in held_runs(drive_root).values()
+    from ouroboros.delegate_custody_current import open_held_runs
+    candidates = [c for c in open_held_runs(drive_root).values()
                   if not c.settled]  # settled collection debt belongs to the body's independent held-row reader
     # The class ONE STEP EARLIER (P34R.2): an invocation whose POST the daemon may have
     # accepted but whose worker died before record_started has no run row for the sweep
@@ -489,6 +499,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         mode=str(body.get("mode") or ""),
         isolation=str(execution.get("isolation") or ""),
         delegated=bool(execution.get("delegated")))
+    _mark_root_cost(drive_root, custody)
     _custody().record_started(drive_root, custody, shape={
         # The stored invocation is the single source of a replay's facts — the same
         # doctrine the explicit retry path follows.
@@ -530,14 +541,16 @@ def _owner_terminal_is_deliberate(drive_root: Any, task_id: str, *,
     the run: an undignified nanny death must not kill a healthy paid run, and
     "unknown" is exactly the case the answer is about. No reason-code table and no
     special crash branch: the axis the finalizers already write is the class. The
-    spared run's own ``maxSeconds`` stays its damage limit (ARCHITECTURE, custody).
+    spared run keeps the bounds it started with: the ``maxSeconds`` it was sent, else none
+    but its own end, a later verdict and the owner's Stop (a run of an unbounded task is
+    sent no invented window; ARCHITECTURE, custody).
 
     ``review_owned`` raises that floor to the ONE verdict that also speaks for a
     review panel's run: an explicit cancellation. Task association does not confer
     lifecycle authority, so a reviewed task that merely finished — completed,
     degraded, best-effort or failed — is not a verdict about its own reviewer, and
-    killing the live panel on it is exactly the incident behind issue #1006. The panel's own bounds (its slot window and the run's ``maxSeconds``)
-    stay the reviewer's damage limit.
+    killing the live panel on it is exactly the incident behind issue #1006. The panel's own bounds (its slot window and the run's ``maxSeconds``,
+    where the task gives it any) stay the reviewer's limit.
     """
     from ouroboros.outcomes import (
         EXECUTION_BEST_EFFORT,
@@ -570,6 +583,7 @@ def _reconcile_collection(drive_root: Any, gateway: Any, custody: RunCustody, *,
     before = run(drive_root, custody.run_id) or custody
     if detail is not None:
         _custody().settle_run(drive_root, gateway, custody, detail)
+        _mark_root_cost(drive_root, custody)
     after = run(drive_root, custody.run_id) or before
     _custody().record_settled_unread(drive_root, after)
     result = {"run_id": after.run_id, "task_id": after.task_id,
@@ -616,6 +630,7 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
     if _custody().is_terminal(detail):
         if review_owned:
             settled = _custody().settle_run(drive_root, gateway, custody, detail)
+            _mark_root_cost(drive_root, custody)
             _custody().record_settled_unread(drive_root, custody)
             result = {"run_id": custody.run_id, "task_id": custody.task_id,
                       "action": "settle_attempted", **settled, **_custody().output_disposition(custody)}

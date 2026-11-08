@@ -1,6 +1,6 @@
 """Ouroboros — the numeric runtime knobs and their clamps.
 
-Worker count, task liveness windows, per-call ceilings, reviewer budgets,
+Worker count, task liveness windows, reviewer budgets,
 subagent caps and delegation windows, plus fixed process and transport
 bounds. Environment-or-default getters clamp into documented bands, so a typo
 falls back to the shipped value instead of disabling a rail.
@@ -33,6 +33,9 @@ ARTIFACT_COMPRESSION_TIMEOUT_SEC = 120.0
 # Kill-and-reap bound for one captured local Git read (vcs_read history/identity); it sits
 # inside the default ToolEntry envelope so the reader reports and reaps before the loop abandons.
 GIT_READ_CAPTURE_TIMEOUT_SEC = 300.0
+# Read bound for one Claudexor answer the engine gives only after re-hashing every byte it names (a thread export
+# item, a thread retirement or its abandon); expiry leaves the outcome unknown, never refused.
+CLAUDEXOR_WHOLE_BYTES_READ_SEC = 900.0
 
 
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024
@@ -67,6 +70,28 @@ EXTENSION_STREAM_METADATA_BYTES = 512 * 1024
 # Only the out-of-process WS relay is limited: the existing reserve refills gradually.
 WS_RELAY_BURST = 60
 WS_RELAY_REFILL_PER_SEC = 1.0
+# MCP task sessions (mcp_task_session) and their browser-policy callback (mcp_browser_guard): structural
+# bounds, not cognition timeouts. A caller waits CLOSE_WAIT for a session's end (inside the loop's MCP timeout
+# + 3 s outer margin; the SDK's own shutdown continues on the worker) and RETURN_WAIT for an answered call's end
+# record; an idle session notices a departed server within IDLE_POLL. One policy question must arrive within
+# GUARD_READ of its acceptance and fit GUARD_LINE_BYTES (the asker sends a larger body as unavailable);
+# GUARD_WORKERS decide at once and GUARD_PENDING questions (deciding or waiting) are held, more are refused.
+# A stdio server's stderr is logged at its transport's end as at most STDERR_TAIL_BYTES of whole last lines. That
+# bounds only the read and the record's lines, not the file: the server writes its temporary stderr file directly, so
+# a task session's file grows on disk with whatever its server writes until the loop ends (no ring buffer).
+MCP_TASK_SESSION_CLOSE_WAIT_SEC = 2.0
+MCP_TASK_SESSION_RETURN_WAIT_SEC = 1.0
+MCP_TASK_SESSION_IDLE_POLL_SEC = 0.25
+MCP_BROWSER_GUARD_READ_SEC = 10.0
+MCP_BROWSER_GUARD_LINE_BYTES = 32 * 1024 * 1024
+MCP_BROWSER_GUARD_WORKERS = 16
+MCP_BROWSER_GUARD_PENDING = 64
+MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
+MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
+# A remote MCP sign-in (mcp_oauth): one authorization-server request is bounded by HTTP_TIMEOUT; a refresh holds
+# its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
+MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0
+MCP_OAUTH_LOCK_WAIT_SEC = 45.0
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
@@ -78,7 +103,7 @@ WORKER_SPAWN_GRACE_SEC = 90.0
 # Readiness is a contract distinct from process liveness
 # (`proc.is_alive`, worker_health.py) and from the task idle rail (queue_timeouts.py): a deadlocked child is alive.
 WORKER_READY_WINDOW_SEC = 90.0
-# Consecutive readiness failures of one slot before it is parked and reported (three strikes, like the crash-storm fence).
+# Consecutive readiness failures of one slot before it is parked and reported (three strikes).
 WORKER_READY_MAX_ATTEMPTS = 3
 # One extension for a child that wrote its own entry progress, measured from birth, never from the last poll.
 WORKER_READY_CEILING_SEC = 300.0
@@ -146,16 +171,17 @@ def _optional_bound_setting(key: str, *, low: int) -> Optional[int]:
 
 def get_max_rounds() -> Optional[int]:
     """The total round limit of one task loop; ``None`` = no limit (the shipped default).
-    Presence turns add their own finite inline cap (``loop._resolve_loop_max_rounds``)."""
+    A Place turn adds none; only a retained pre-Places Presence turn still carries the positive
+    inline cap it was admitted with (``loop.carried_inline_round_cap``), the narrower binds."""
     return _optional_bound_setting("OUROBOROS_MAX_ROUNDS", low=1)
 
 
 def get_task_abs_ceiling_sec() -> Optional[int]:
     """Absolute wall-clock backstop per task, independent of activity; ``None`` = no lifetime
     bound (the shipped default). Budget/cost and an explicit deadline stay separate hard axes,
-    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. A set
-    value is floored at 300 s so a typo cannot end every task at birth."""
-    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300)
+    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. An
+    accepted positive value applies as written; a typo takes the finite legacy fallback."""
+    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=1)
 
 
 _CURRENT_TASK_CEILING = object()
@@ -182,29 +208,22 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
     """
     if global_ceiling is _CURRENT_TASK_CEILING:
         global_ceiling = get_task_abs_ceiling_sec()
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if owner.get("lane") == "conversation" and owner.get("kind") in {"direct", "presence"}:
+        # An owner's or a correspondent's turn carried by the conversation lane has no
+        # project ceiling: it runs as long as its dialogue lives (#1959, "the bubble is the
+        # work"), as it did in the server process; Stop and its own deadline bound it.
+        global_ceiling = None
     bounds = [float(value) for value in (explicit_execution_timeout_sec(task), global_ceiling) if value is not None]
     return min(bounds) if bounds else None
 
 
-# The finite window ONE physical operation that inherits the task lifetime keeps when the task
-# has none: a delegated agent-session run, a retrieving review session, a VLM child, the
-# plan/preflight tool envelopes, an active-operation idle lease. It is the former shipped task
-# ceiling, so an unlimited task never turns a wedged operation into an unbounded one and never
-# shrinks those operations to a transport bound; a finite lifetime and every deadline still
-# narrow it. Structural, not a settings key.
-OPERATION_WINDOW_FALLBACK_SEC = 21600
-
-
-def operation_window_sec(task_lifetime_sec: Optional[float]) -> float:
-    """The outer window of an operation bounded by the task lifetime: that lifetime when it
-    is finite (``get_task_abs_ceiling_sec()``), else ``OPERATION_WINDOW_FALLBACK_SEC``."""
-    return float(OPERATION_WINDOW_FALLBACK_SEC if task_lifetime_sec is None else task_lifetime_sec)
-
-
-def get_per_call_timeout_ceiling_sec() -> int:
-    """SSOT ceiling for an explicit per-call run_command/run_script timeout_sec
-    (and the outer tool-execution cap that accommodates it)."""
-    return _clamped_number_setting("OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", low=1, cast=int)
+# How long one typed in-flight fact (a cognitive operation lease, a review drain's in-slot
+# mark) may spare the idle rail when its task has no finite execution bound, so a lost
+# terminal row cannot hide silence forever. Attention only: it never stops, times out or
+# narrows the operation it describes, which an explicit window, deadline or lifetime bounds
+# or nothing does. Structural, not a settings key.
+IDLE_LEASE_MAX_SEC = 21600
 
 
 def get_model_substitution_redos() -> int:
@@ -229,11 +248,6 @@ def get_safety_call_timeout_sec() -> float:
     return _clamped_number_setting("OUROBOROS_SAFETY_CALL_TIMEOUT_SEC", low=5.0, high=600.0)
 
 
-def get_update_letter_timeout_sec() -> float:
-    """Transport ceiling of the update-letter LIGHT one-shot (`update_letter.py`)."""
-    return _clamped_number_setting("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", low=10.0, high=600.0)
-
-
 def get_ui_translation_timeout_sec() -> float:
     """Transport ceiling of ONE translation-generator batch call (`ui_translation.py`)."""
     return _clamped_number_setting("OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC", low=10.0, high=600.0)
@@ -249,11 +263,6 @@ def get_llm_transport_read_timeout_sec() -> float:
 
     The DEAD-SOCKET bound, not a latency target; explicit per-call timeouts win."""
     return _clamped_number_setting("OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC", low=60.0, high=7200.0)
-
-
-def get_plan_task_deadline_min_sec() -> float:
-    """Minimum useful deadline-scaled planning-swarm window (v6.54.3, 1.5)."""
-    return _clamped_number_setting("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", low=30.0, high=3600.0)
 
 
 def get_claudexor_quota_refresh_timeout_sec() -> int:
@@ -330,8 +339,9 @@ def get_supervisor_liveness_deadline_sec(settings: Optional[dict] = None) -> int
 
 
 def get_post_task_evolution_budget_usd() -> float:
-    """Optional per-window USD budget for post-task evolution (0 = use the
-    existing EVOLUTION_BUDGET_RESERVE / TOTAL_BUDGET gating only)."""
+    """Start floor of a post-task promotion: below this remaining global budget (USD) a pending
+    request is dropped instead of starting its campaign. 0 (default) adds no floor beyond the
+    ordinary TOTAL_BUDGET admission; it is no per-cycle or per-window budget and caps no cycle."""
     return _clamped_number_setting("OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", low=0.0)
 
 
@@ -367,9 +377,9 @@ def get_max_subagent_depth() -> int:
     )
 
 
-# delegate_wait's ToolEntry per-call timeout (above it a configured ceiling buys a
-# KILLED call, not a longer wait; pinned by test) and the hard max WINDOW per call
-# (F5): 1800 < 2100 (kill) < 2400 (lease) — decoupled, a raised timeout never widens it.
+# One delegate_wait hold with its teardown, above the hard max WINDOW per call (F5) and
+# below the external-wait lease (delegate_progress): 1800 < 2100 < 2400. The call's own
+# outer bound is the task lifetime + 120 s, or none without one: neither widens a window.
 DELEGATE_WAIT_CEILING_SEC = 2100
 DELEGATE_WAIT_WINDOW_MAX_SEC = 1800
 

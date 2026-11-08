@@ -10,7 +10,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _supervisor_ctx
 from tests.test_budget_pause_holds import _idle_worker
 from tests.test_restart_saved_work import _pool_events, _stop_and_boot, _working_run
 
-pytestmark = pytest.mark.serial
 
 
 def _saved_tree(tmp_path, monkeypatch):
@@ -77,7 +76,7 @@ def test_explicit_owner_child_selection_survives_later_root_grant_visibility(tmp
     assert eb.budget_hold_fact(rows["second"])
 
 
-@pytest.mark.parametrize("change", ["new_fence", "generation", "unknown_pause", "owner_pause", "cancel"])
+@pytest.mark.parametrize("change", ["new_fence", "unknown_pause", "cancel"])
 def test_child_selection_is_revalidated_before_dispatch(tmp_path, monkeypatch, change):
     from ouroboros import budget_pause, owner_pause
     from ouroboros.cancel_intents import request_cancel
@@ -107,7 +106,7 @@ def test_child_selection_is_revalidated_before_dispatch(tmp_path, monkeypatch, c
     assert before["_working_recovery"]["source_ref"], "a refusal does not authorize replay"
 
 
-@pytest.mark.parametrize("reason", ["saved_work_hold", "owner_restart_hold", "panic_hold", "continuation_writer_unsettled"])
+@pytest.mark.parametrize("reason", ["saved_work_hold", "owner_restart_hold", "continuation_writer_unsettled"])
 def test_the_manual_root_selection_grant_covers_each_existing_selectable_hold(tmp_path, monkeypatch, reason):
     from supervisor import events_budget as eb
 

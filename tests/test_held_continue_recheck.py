@@ -22,9 +22,11 @@ import pytest
 
 from ouroboros import delegate_custody as dc
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._delegate_capture_child import idle_maintenance_child  # noqa: F401
 from tests.test_owner_continue import NONCE, _interrupted
+from tests._cases import case_folders
 
-pytestmark = pytest.mark.serial  # module-global latches and the delegate custody cache
+pytestmark = [pytest.mark.usefixtures("idle_maintenance_child")]  # module-global latches and the delegate custody cache
 
 PRED = "pred-1"
 DUTY = "held_continuation_recheck"
@@ -123,21 +125,24 @@ def _admit_held_behind(tmp_path, monkeypatch, census):
     return queue, workers, _held(workers, ack)
 
 
-@pytest.mark.parametrize("blocker", LIVE_BLOCKERS, ids=[row["kind"] for row in LIVE_BLOCKERS])
-def test_every_live_blocker_kind_holds_until_the_census_clears_then_the_duty_releases(tmp_path, monkeypatch, blocker):
-    from supervisor.continuation_admission import recheck_held_continuations
-    from supervisor.events_budget import HOLD_CONTINUATION_WRITER, budget_hold_fact
+def test_every_live_blocker_kind_holds_until_the_census_clears_then_the_duty_releases(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for blocker in LIVE_BLOCKERS:
+        tmp_path = next(case_paths)
+        with subtests.test(blocker=blocker), monkeypatch.context() as monkeypatch:
+            from supervisor.continuation_admission import recheck_held_continuations
+            from supervisor.events_budget import HOLD_CONTINUATION_WRITER, budget_hold_fact
 
-    census = [dict(blocker)]
-    _queue, _workers, held = _admit_held_behind(tmp_path, monkeypatch, census)
-    assert recheck_held_continuations() == []
-    assert budget_hold_fact(held)["reason"] == HOLD_CONTINUATION_WRITER
-    assert _selections(tmp_path, held["id"]) == []
+            census = [dict(blocker)]
+            _queue, _workers, held = _admit_held_behind(tmp_path, monkeypatch, census)
+            assert recheck_held_continuations() == []
+            assert budget_hold_fact(held)["reason"] == HOLD_CONTINUATION_WRITER
+            assert _selections(tmp_path, held["id"]) == []
 
-    census.clear()
-    assert recheck_held_continuations() == [held["id"]]
-    assert budget_hold_fact(held) is None
-    assert recheck_held_continuations() == [], "a selected row is no longer held"
+            census.clear()
+            assert recheck_held_continuations() == [held["id"]]
+            assert budget_hold_fact(held) is None
+            assert recheck_held_continuations() == [], "a selected row is no longer held"
 
 
 def test_concurrent_passes_and_a_terminal_reconciliation_select_the_row_once(tmp_path, monkeypatch):

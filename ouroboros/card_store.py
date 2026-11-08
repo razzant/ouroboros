@@ -74,12 +74,14 @@ def read_app_bytes(root: Any, sha256: Any) -> Optional[bytes]:
 
 
 def write_card(root: Any, *, chat_id: int, task_id: str, title: str, fallback_text: str, kind: str,
-               body: Dict[str, Any], replace: str = "") -> Dict[str, Any]:
-    """Store a new card, or give an earlier card of the same chat a new body (same id, revision + 1).
+               body: Dict[str, Any], replace: str = "", same_room: Any = None) -> Dict[str, Any]:
+    """Store a new card, or give an earlier card of the same room a new body (same id, revision + 1).
 
     ``body`` holds the kind's keys (``components`` and optional ``data``, ``widget`` or
     ``app``). A replaced card keeps its presses; the replacing task becomes its author,
-    the task that receives later presses.
+    the task that receives later presses. ``same_room(card)`` says a card stored under
+    another chat now lives in ``chat_id`` (its work moved into this Project), never a
+    card of an unrelated room.
     """
     now = utc_now_iso()
     if not replace:
@@ -92,7 +94,7 @@ def write_card(root: Any, *, chat_id: int, task_id: str, title: str, fallback_te
     def mutate(current: Dict[str, Any]) -> Dict[str, Any]:
         if not current:
             raise CardStoreError("CARD_REPLACE_NOT_FOUND", f"card {replace} does not exist")
-        if current.get("chat_id") != chat_id:
+        if current.get("chat_id") != chat_id and not (same_room and same_room(current)):
             raise CardStoreError("CARD_REPLACE_OTHER_CHAT", f"card {replace} belongs to another chat")
         for key in _BODY_KEYS:
             current.pop(key, None)

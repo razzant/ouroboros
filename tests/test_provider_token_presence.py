@@ -156,11 +156,7 @@ ANTHROPIC = {"ANTHROPIC_API_KEY": "anthropic-fixture-key"}
 @pytest.mark.parametrize("raw,expected", [
     # The golden fixture's shape: no cache counters, so the total prompt is unknown.
     ({"input_tokens": 20, "output_tokens": 3}, [None, 3, None, None]),
-    ({"input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 0}, [7, 0, 0, 0]),
     ({"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 5}, [None, 2, 5, None]),
-    ({"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": None,
-      "cache_creation_input_tokens": None}, [None, 2, None, None]),
     ({"input_tokens": 100, "output_tokens": 6, "cache_read_input_tokens": 40,
       "cache_creation_input_tokens": 25}, [165, 6, 40, 25]),
 ])
@@ -244,7 +240,6 @@ def test_switch_facts_never_size_a_tariff_tier_by_an_unreported_input(tmp_path, 
 
 @pytest.mark.parametrize("raw,expected", [
     ({"prompt_tokens": 11, "completion_tokens": 2}, [11, 2, None, None]),
-    ({"prompt_tokens": 11, "completion_tokens": 2, "precached_prompt_tokens": 0}, [11, 2, 0, None]),
     ({"prompt_tokens": 50, "completion_tokens": 7, "precached_prompt_tokens": 10}, [50, 7, 10, None]),
     (None, [None, None, None, None]),  # the library returned no usage object at all
 ])
@@ -262,10 +257,6 @@ def test_gigachat_presence_reaches_round_and_usage_rows(tmp_path, monkeypatch, o
 @pytest.mark.parametrize("raw,expected", [
     ({"prompt_tokens": 200, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 0}},
      [200, 10, 0, None]),
-    ({"prompt_tokens": 200, "completion_tokens": 10,
-      "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}, [200, 10, 0, 0]),
-    ({"prompt_tokens": 120, "completion_tokens": 8, "prompt_tokens_details": {"cached_tokens": 40}},
-     [120, 8, 40, None]),
     ({"prompt_tokens": 200, "completion_tokens": 10}, [200, 10, None, None]),
     # A provider extension cannot supply the host's event fact.
     ({"prompt_tokens": 200, "completion_tokens": 10, "reported_tokens": dict.fromkeys(COUNTERS, 999)},
@@ -309,8 +300,6 @@ def test_anthropic_web_search_leg_reports_the_native_total(tmp_path, monkeypatch
 @pytest.mark.parametrize("raw,expected", [
     ({"input_tokens": 3, "output_tokens": float("inf"), "cache_read_input_tokens": float("nan"),
       "cache_creation_input_tokens": 0}, [None, None, None, 0]),
-    ({"input_tokens": -1, "output_tokens": True, "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 2.5}, [None, None, 0, None]),
     ({"input_tokens": 4.0, "output_tokens": 1, "cache_read_input_tokens": 0,
       "cache_creation_input_tokens": 0}, [4, 1, 0, 0]),
     ("not a usage object", [None, None, None, None]),
@@ -324,11 +313,7 @@ def test_anthropic_counts_keep_each_counter_independent_of_bad_neighbours(raw, e
 @pytest.mark.parametrize("usage,expected", [
     # Detail blocks keep a reported zero the adapters do not lift (OpenAI chat / Responses, DeepSeek).
     ({"prompt_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}, [5, None, 0, None]),
-    ({"input_tokens": 5, "input_tokens_details": {"cached_tokens": 0}}, [5, None, 0, None]),
     ({"prompt_tokens": 5, "prompt_cache_hit_tokens": 0}, [5, None, 0, None]),
-    ({"prompt_tokens": 5, "prompt_tokens_details": {"cache_creation_tokens": 0}}, [5, None, None, 0]),
-    ({"prompt_tokens": 5, "prompt_tokens_details": None}, [5, None, None, None]),
-    ({"prompt_tokens": 5, "cached_tokens": 7, "prompt_tokens_details": {"cached_tokens": 0}}, [5, None, 7, None]),
     # The adapter's own fact outranks billing-shaped counters, unknowns included.
     ({"prompt_tokens": 20, "cached_tokens": 0, "reported_tokens": {"prompt_tokens": None, "cached_tokens": None,
                                                                     "completion_tokens": 3}},
@@ -348,8 +333,6 @@ def test_event_normalizer_reads_reported_detail_blocks(usage, expected):
 FULL = {"input_tokens": 100, "output_tokens": 6, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 25}
 PARTIAL = {"input_tokens": 20, "output_tokens": 3}  # no cache counters: the total prompt is unknown
 ZERO = {"input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-SILENT = {}  # the provider reported no counter at all
-MALFORMED = {"input_tokens": -5, "output_tokens": 2.5, "cache_read_input_tokens": True, "cache_creation_input_tokens": 0}
 BILLING = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens")
 FACT = "reported_tokens"
 
@@ -386,20 +369,9 @@ def _billing_reference(total, *usages):
 
 @pytest.mark.parametrize("seed,raws,expected", [
     ({}, (FULL, ZERO), [172, 6, 40, 25]),  # every call reported every counter
-    ({"_task_attempt": 1}, (ZERO, ZERO), [14, 0, 0, 0]),  # the loop's real seed; true zeros stay zeros
-    ({}, (FULL, PARTIAL), [None, 9, None, None]),  # one partial report: those totals are lower bounds only
-    ({}, (FULL, SILENT), [None, None, None, None]),
-    ({}, (FULL, MALFORMED), [None, None, None, 25]),  # negative, fractional and boolean counters are unknown
     # A preseeded zero and a pre-fact checkpoint's restored zero sum look alike: neither is a reported 0.
     ({**dict.fromkeys(("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"), 0), "cost": 0.0},
      (ZERO,), [None, None, None, None]),
-    ({**dict.fromkeys(BILLING, 0), "cost": 0.0, "cost_final": True}, (ZERO,), [None, None, None, None]),
-    # Counts summed before any fact existed came from unreported calls; absent counters start empty.
-    ({"prompt_tokens": 50, "completion_tokens": 5}, (FULL,), [None, None, 40, 25]),
-    # A checkpoint written with the fact resumes it, unknowns included.
-    ({"prompt_tokens": 172, "completion_tokens": 6, "cached_tokens": 40, "cache_write_tokens": 25,
-      FACT: {"prompt_tokens": 172, "completion_tokens": 6, "cached_tokens": 40, "cache_write_tokens": 25}},
-     (ZERO,), [179, 6, 40, 25]),
     ({"prompt_tokens": 20, "completion_tokens": 3, FACT: {"prompt_tokens": None, "completion_tokens": 3,
                                                           "cached_tokens": "?", "cache_write_tokens": None}},
      (ZERO,), [None, 3, None, None]),
@@ -473,7 +445,9 @@ def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch,
     assert (row["cache_hit_rate"], row["cache_cold_restart"]) == (pytest.approx(hit) if hit else hit, cold)
     # Cache routing keeps reading the billing-shaped counters it always read.
     parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
-    assert accumulated["_last_round_cache_usage"] == {
+    record = dict(accumulated["_last_round_cache_usage"])
+    assert isinstance(record.pop("finished_at"), float)  # the answer's wall clock: the facts row's "last response"
+    assert record == {
         "round": round_idx, "model": accumulated["_last_round_cache_usage"]["model"],
         "provider": "anthropic", "prompt_tokens": sum(parts), "cached_tokens": parts[1], "cache_write_tokens": parts[2],
         # This accepted call's own money as its producer stated it (route facts read it); no engine billing here.

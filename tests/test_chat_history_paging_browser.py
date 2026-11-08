@@ -23,7 +23,7 @@ from tests._store_shared import seed_result
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 MAIN = "#chat-messages"
 HISTORY_URL = "/api/chat/history"
 _FRAMES = "() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))"
@@ -637,8 +637,12 @@ def _rooms_behind_other_traffic(root):
     ``history-quiet`` holds the owner's request that started it (a retained origin)
     and 12 messages in the oldest archive, behind eleven archives of other rooms;
     ``history-deep`` holds 400 messages (more than two pages) in two archives of its
-    own, five archives of another room between and after them.
+    own, five archives of another room between and after them. The upgrade is settled:
+    its maintenance pass has derived every room's appearance keys, as it does once the
+    import is done (until it has, a Project's window names `chat_appearances_deriving`
+    and is never complete).
     """
+    from ouroboros import room_appearances
     from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
@@ -670,6 +674,13 @@ def _rooms_behind_other_traffic(root):
     dialogue_test.seed(root, live={"chat": [
         _human(index, busy["chat_id"], text=f"OTHER_ROOM_LIVE {index}") for index in range(20)]})
     dialogue_test.import_all(root)  # the upgrade imports the old archives
+    # The server runs its own maintenance beside this process, and a pass moves the mark only from the value it read,
+    # so this one repeats until nothing is owed.
+    for _pass in range(10):
+        if not room_appearances.owed(root):
+            break
+        room_appearances.run(root, lambda: False)
+    assert not room_appearances.owed(root), "the appearance pass is done"
     return quiet, deep
 
 

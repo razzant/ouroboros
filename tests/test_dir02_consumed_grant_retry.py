@@ -1,5 +1,4 @@
 # tests/test_dir02_consumed_grant_retry.py
-import json
 import queue as stdqueue
 from types import SimpleNamespace
 
@@ -20,7 +19,6 @@ from tests.test_resume_handover import _stop_boot
 from tests.test_swarm_host_admission import host as host  # pytest fixture export
 from tests.test_worker_crash_retry import _make_worker
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("return_first", [False, True],
@@ -54,8 +52,7 @@ def test_consumed_g1_selection_after_recovery(
 
     # Silence beside a held descendant manufactures no reap job.
     assert queue._has_pending_descendant("held")
-    clock[0] += max(float(queue.get_task_idle_timeout_sec()),
-                    float(queue.get_per_call_timeout_ceiling_sec()) + 120.0) + 1
+    clock[0] += float(queue.get_task_idle_timeout_sec()) + 1
     queue.enforce_task_timeouts()
     assert "held" in workers.RUNNING
     assert not workers.RUNNING["held"].get("finalization_requested_at")
@@ -81,14 +78,13 @@ def test_consumed_g1_selection_after_recovery(
     meta = workers.RUNNING["held"]
     dead_attempt = meta["attempt"]
     assert (dead_attempt != exact["task_attempt"]) is return_first
-    saved = json.loads(wc.checkpoint_path(host.root, "held", dead_attempt).read_text())
+    saved = wc.read_working(host.root, "held", dead_attempt)[1]
     assert saved["working"]["boundary"] == ("post_batch" if return_first else "resumed")
     workers.WORKERS[0] = _make_worker(busy_task_id="held", exitcode=1)
     jobs = stdqueue.Queue()
     monkeypatch.setattr(queue, "_reap_queue", jobs)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
     monkeypatch.setattr(workers, "respawn_worker", lambda *_a, **_k: None)
     monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *_a, **_k: {

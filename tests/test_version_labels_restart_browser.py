@@ -22,7 +22,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.test_version_labels_browser import CARET, DRAFT, FACTS, HEALTH_READS, MAIN, PIN, settle_labels
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 _ROWS_SHOWN = "(n) => document.querySelectorAll('#chat-messages [data-history-id]').length >= n"
 _NEWEST_SOCKET_OPEN = "(n) => window.__testSockets.length >= n && window.__testSockets.at(-1).readyState === WebSocket.OPEN"
 
@@ -74,7 +74,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
             assert pinned["below"] > 200, pinned
             page.wait_for_timeout(300)
             before = page.evaluate(FACTS, MAIN)
-            assert (before["nav"], before["about"]) == (f"v{old}", f"app {old} | rt {old}"), before
+            assert (before["nav"], before["about"]) == (f"v{old}", f"App {old} · Runtime {old}"), before
             page.screenshot(path=str(evidence / "restart-before.png"), animations="disabled")
 
             page.evaluate(HISTORY_LANDED)
@@ -105,7 +105,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
             assert after["keptDocument"] and "_ouro_reason" not in after["url"], after
             assert after["draft"] == DRAFT and after["caret"] == [CARET, CARET] and after["focused"], after
             assert after["sameNodes"] and after["rowKept"] and after["drift"] <= 6, after
-            assert (cold["nav"], cold["about"]) == (f"v{new}", f"app {new} | rt {new}"), cold
-            assert (after["nav"], after["about"]) == (f"v{new}", f"app {new} | rt {new}"), after
+            assert (cold["nav"], cold["about"]) == (f"v{new}", f"App {new} · Runtime {new}"), cold
+            assert (after["nav"], after["about"]) == (f"v{new}", f"App {new} · Runtime {new}"), after
         finally:
             browser.close()

@@ -15,7 +15,7 @@ from tests.ui_failure_evidence import FailureEvidence
 
 def state_reads(url: str) -> bool:
     """Every shared state read of the page: the first `/api/state` and each `?bindings_since=` read after it
-    (#2307, chat_activity.js createStateSnapshotSequencer). A `**/api/state` glob matches the first alone."""
+    (#2307, state_snapshots.js createStateSnapshotSequencer). A `**/api/state` glob matches the first alone."""
     return urlsplit(url).path == "/api/state"
 
 _CAPTURE_TEST_SOCKET = """() => {
@@ -28,10 +28,10 @@ _CAPTURE_TEST_SOCKET = """() => {
         }
     };
 }"""
-# One page-wide /api/state read is in flight at a time (chat_activity.js
+# One page-wide /api/state read is in flight at a time (state_snapshots.js
 # createStateSnapshotSequencer.gate): a forced refresh that lands behind an
-# in-flight read starts only after that read settles, so the socket-open census
-# can still be reading after the socket reports OPEN. A frame emitted on the test
+# in-flight read starts once that read settles, or at once when a socket change
+# retires it, so the socket-open census can still be reading after OPEN. A frame emitted on the test
 # socket exists nowhere on the server; a complete census whose request started
 # after that frame concludes its card by absence, exactly as it would a task the
 # queue really lost. Tests that emit such frames wait for the reads to land first.
@@ -200,10 +200,12 @@ def run_chat_viewport_smoke(
         return result
 
     def feed_wheel_point(page):
-        # .chat-live-card is overflow:hidden (web/style.css). WebKit treats
-        # that as a scrollport and does not chain the wheel to #chat-messages.
-        # The feed center is often that card. Cards are flex-start, so aim
-        # at a point on the feed that is not inside such a scrollport.
+        # A general feed gesture: aim at a point that is not inside any
+        # overflow:hidden/auto/scroll box, so the wheel reaches #chat-messages
+        # whatever sits under the pointer. A wheel aimed at a card's heading or
+        # actions is its own check (test_history_continuity_browser.py, #1524);
+        # the historical Linux report was not reproduced by card-aimed checks in
+        # macOS/Linux Chromium and Playwright WebKit; the system WKWebView is untested.
         return page.locator("#chat-messages").evaluate(
             """feed => {
                 const box = feed.getBoundingClientRect();
@@ -620,9 +622,8 @@ def run_chat_viewport_smoke(
                 state = jump_state(page)
                 assert state["remaining"] <= 6 and state["dotHidden"], state
 
-                # The reader's own wheel leaves the live edge. Aim it outside any
-                # card scrollport (WebKit swallows a wheel there, see
-                # feed_wheel_point); only a wheel that moved nothing at all is
+                # The reader's own wheel leaves the live edge, aimed by
+                # feed_wheel_point; only a wheel that moved nothing at all is
                 # retried, inside one 30 s deadline.
                 page.evaluate("""() => {
                     window.__readerScrolls = 0;

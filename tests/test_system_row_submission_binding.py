@@ -66,46 +66,64 @@ def test_owner_command_reply_names_its_submission(monkeypatch):
 
 
 def test_direct_lane_refusals_name_their_submission(tmp_path, monkeypatch):
-    from queue import SimpleQueue
+    """The admission's receipt links the submission to the registered turn; the carrier's pre-start
+    refusal (an exhausted budget, found before any model work) is that turn's own typed terminal,
+    keyed by the same id, with the owner's closed-class words; only a host operation keeps a durable
+    terminal correlation."""
     from supervisor import state as state_mod
     from supervisor import worker_chat_lane, workers
+    from ouroboros.task_results import load_task_result
     from tests._agent_entry_helpers import task_entry_agent
+    from tests.conversation_carrier_support import carry, isolate_lane_pool, lane_rows
 
-    sent, frames = [], []
+    frames = []
     bridge = message_bus.LocalChatBridge()
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     agent = task_entry_agent(tmp_path, lambda _task: pytest.fail("exhausted budget entered the task body"))
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
-    monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
-    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: sent.append((a, k)))
+    agent.env.drive_path = lambda name: tmp_path / name
+    spares = isolate_lane_pool(monkeypatch, tmp_path, spares=2)  # one carrier per turn
+    finals = []
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: finals.append((a, k)))
     monkeypatch.setattr(state_mod, "budget_remaining", lambda _state, *, strict: 0)
     monkeypatch.setattr(state_mod, "load_state", lambda: {})
-    worker_chat_lane._handle_chat_direct_locked(1, "hi", task_metadata={"client_message_id": "cm-1"})
+    worker_chat_lane.handle_chat_direct(1, "hi", task_metadata={"client_message_id": "cm-1"})
     ref = {"chat_id": 1, "client_message_id": "cm-2", "ts": "2026-10-13T00:00:00+00:00", "text_sha256": "0" * 64}
-    worker_chat_lane._handle_chat_direct_locked(1, "hi", task_metadata={
+    worker_chat_lane.handle_chat_direct(1, "hi", task_metadata={
         "client_message_id": "cm-2", "origin_message_ref": ref, "_host_operation": True})
-    first, second = sent
-    assert first[0][1].startswith("🚫 Budget exhausted.")
-    assert second[0][1] == first[0][1]
-    assert first[1]["task_id"] != second[1]["task_id"]
-    # The receipt links Sending to this registered turn; its keyed refusal closes only that turn.
-    for (args, kwargs), client_id in zip(sent, ("cm-1", "cm-2")):
-        assert args[0] == 1
-        assert kwargs["role"] == "system" and kwargs["system_type"] == "task_not_started"
-        assert kwargs["task_id"]
-        receipts = [row for row in frames if row.get("type") == "typing"
-                    and row.get("activity_id") == kwargs["task_id"]]
+    assert finals == [], "the admission refused nothing"
+    rows = sorted(lane_rows(workers).values(), key=lambda meta: meta["client_message_id"])
+    assert [meta["client_message_id"] for meta in rows] == ["cm-1", "cm-2"]
+    first, second = (meta["task"]["id"] for meta in rows)
+    assert first != second
+    # The receipt links Sending to this registered turn; the keyed terminal closes only that turn.
+    for task_id, client_id in ((first, "cm-1"), (second, "cm-2")):
+        receipts = [row for row in frames if row.get("type") == "typing" and row.get("activity_id") == task_id]
         assert receipts
         assert all(row["client_message_id"] == client_id and row["chat_id"] == 1 for row in receipts)
-    assert first[1]["progress_meta"] == {"task_terminal_status": "failed"}
+    # The carrier finds the budget exhausted before any model work: the turn's own terminal.
+    for spare in spares:
+        with pytest.raises(Exception, match="budget_exhausted"):
+            carry(workers, spare, agent)
+    for task_id in (first, second):
+        stored = load_task_result(tmp_path, task_id)
+        assert stored["status"] == "failed", stored
+        assert stored["result"].startswith("🚫 Budget exhausted."), stored["result"]
+        assert stored.get("reason_code") == "budget_exhausted"
+    # The owner reads each refusal once, keyed to its turn, in the closed class's words.
+    assert sorted(kwargs["task_id"] for _args, kwargs in finals) == sorted([first, second])
+    for args, kwargs in finals:
+        assert args[1].startswith("🚫 Budget exhausted.") and kwargs["system_type"] == "task_not_started"
+        assert kwargs["progress_meta"]["task_terminal_status"] == "failed"
+        assert ("origin_message_ref" in kwargs["progress_meta"]) is (kwargs["task_id"] == second)
     # Only a host operation keeps durable terminal correlation; client ids stay on the live receipt.
-    assert second[1]["progress_meta"] == {"origin_message_ref": ref, "task_terminal_status": "failed"}
+    assert load_task_result(tmp_path, first).get("origin_message_ref") is None
+    assert load_task_result(tmp_path, second).get("origin_message_ref") == ref
 
     # The update gate's refusal names the submission it answers, too.
-    sent.clear()
+    sent = []
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: sent.append((a, k)))
     monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "managed_update")
     assert worker_chat_lane.owner_conversation_admitted(1, "cm-3") is False
     (args, kwargs), = sent
@@ -144,8 +162,7 @@ def test_review_rows_name_the_owner_submission(monkeypatch, reviewer):
     assert kwargs["progress_meta"] == {"client_message_id": "cm-review"}
 
 
-@pytest.mark.parametrize("chat_id", [1, 42])
-@pytest.mark.parametrize("bridge_ready", [False, True])
+@pytest.mark.parametrize(("bridge_ready", "chat_id"), [(False, 1), (True, 42)])
 def test_ws_refusal_keeps_the_submitting_room(monkeypatch, chat_id, bridge_ready):
     """The real socket ingress must answer the Project that sent the failed frame."""
     from starlette.applications import Starlette

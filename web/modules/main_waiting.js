@@ -8,6 +8,7 @@ import { projectReference, nameProjectReference } from './project_reference.js';
 import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction,
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
 import { syncParkedPhase } from './task_phase_chip.js';
+import { memberState, resumeAttemptWords, workOfEpisode } from './work_status.js';
 import { unknownDeliveryRemovable } from './question_presentation.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
@@ -88,7 +89,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         heading.append(title, phaseEl);
         root.append(heading, reason, controls, timelineEl);
         bubble.append(sender, root);
-        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name }, { taskId: id }) : null;
+        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name },
+            { taskId: id, beside: title }) : null;
         if (reference) controls.append(reference);
         // The message stands only while the census says the task needs the owner, so its chip is the owner's move.
         record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference,
@@ -106,7 +108,13 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
     function paint(record, row) {
         record.row = row;
         record.title.textContent = row.task_name || row.title || row.project_name || 'Task';
-        record.reason.textContent = tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
+        // What it needs, then its latest refused Resume as dated history in the door's words (never a second message).
+        const attempt = resumeAttemptWords(row.last_resume);
+        // Beside its own Resume button a plain resume pause says nothing more: the button is the whole ask.
+        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? ''
+            : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
+        record.reason.textContent = [needs, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
+        record.reason.hidden = !record.reason.textContent;
         if (record.reference) nameProjectReference(record.reference, { id: row.project_id, name: row.project_name });
         syncParkedPhase(record, connected ? row.phase : 'unknown', row);
         if (canResume(record) && !record.resume) {
@@ -117,7 +125,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         if (row.cancelable === true && !record.stop) {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'btn btn-xs btn-default';
+            button.className = 'btn btn-sm btn-default ui-hit-area';
             button.textContent = tx(TASK_CONTROL_TRIGGER_LABEL);
             button.addEventListener('click', () => {
                 if (!connected || !record.available || record.row.cancelable !== true) return;
@@ -270,10 +278,13 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             const actionsComplete = data?.main_attention_complete === true;
             mutate(() => {
                 const current = new Set();
-                for (const row of actions) {
-                    const id = String(row.task_id || row.activity_id || '');
+                for (const action of actions) {
+                    const id = String(action.task_id || action.activity_id || '');
                     if (!id) continue;
                     current.add(id);
+                    // The same body's work projection says the task's latest refused Resume (`last_resume`).
+                    const attempt = memberState(data, id)?.last_resume || workOfEpisode(data, id)?.last_resume;
+                    const row = attempt ? { ...action, last_resume: attempt } : action;
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);

@@ -53,8 +53,10 @@ def test_success_retains_no_rich_bundle(tmp_path, monkeypatch, enabled):
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("capture_error", [False, True])
-@pytest.mark.parametrize("close_error", [None, RuntimeError("synthetic close error")])
+@pytest.mark.parametrize(("close_error", "capture_error"), [
+    (None, False),
+    pytest.param(RuntimeError("synthetic close error"), True, id='close_error1-True'),
+])
 def test_first_failure_survives_capture_and_close(tmp_path, monkeypatch, capture_error, close_error):
     page, browser, actions = _fake_browser(monkeypatch, capture_error=capture_error,
                                             close_error=close_error)

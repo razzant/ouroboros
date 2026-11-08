@@ -14,12 +14,20 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = {"sha": "evolution-browser-fixture", "supervisor_ready": True, "active_chat_activities": [], "projects": [], "runtime_mode": "advanced",
          "evolution_enabled": False, "evolution_state": {"status": "disabled", "enabled": False, "detail": "Evolution mode is off."},
          "bg_consciousness_enabled": True, "bg_consciousness_state": {"status": "sleeping", "spent_24h_usd": 1.25, "daily_usd": 10}}
+
+
+# Where the installation's newest identity record sits, as a stretch after the last tag. The axis breaks at the quiet
+# months only while they are over three times the next-longest stretch (web/modules/evolution.js `timeAxis`), and that
+# record is one end of such a stretch: the fixture's 102-day silence stands out only while the tail is under 34 days. It
+# belongs to the fixture's own calendar, not the suite's clock: stamped "now" it lapsed on 2026-10-31 and the quiet
+# months stopped being drawn as a gap.
+RECORD_AFTER_LAST_TAG = timedelta(days=25)
 
 
 def history(*, refresh="idle", versions=True, error=""):
@@ -51,7 +59,7 @@ def history(*, refresh="idle", versions=True, error=""):
     return {"versions": rows if versions else [], "saved_at": datetime.now(timezone.utc).isoformat(),
             "refresh": {"state": refresh, "started_at": "", "finished_at": "", "error": error, "unmeasured": 0},
             "install": {"identity": {"at_versions": identity if versions else [], "first_at": dates[14].isoformat(),
-                                     "latest": {"at": datetime.now(timezone.utc).isoformat(), "chars": 26500}},
+                                     "latest": {"at": (dates[-1] + RECORD_AFTER_LAST_TAG).isoformat(), "chars": 26500}},
                         "scratchpad": {"at_versions": [None] * len(rows) if versions else [], "first_at": "", "latest": None}},
             "checkpoints": [], "generated_at": datetime.now(timezone.utc).isoformat()}
 
@@ -78,7 +86,7 @@ def open_evolution(ui, answer, *, width=1100, height=750, scheme="dark", state=S
 
 def overflow(page):
     return page.evaluate("""() => {
-        const box = document.querySelector('#page-evolution .costs-scroll');
+        const box = document.querySelector('#page-evolution');  // the tab body is its own scroller
         return {page: document.documentElement.scrollWidth - innerWidth, panel: box.scrollWidth - box.clientWidth};
     }""")
 
@@ -106,14 +114,15 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
             for (const [b, text] of labels) if (p.x > b.x && p.x < b.x + b.width && p.y > b.y && p.y < b.y + b.height) out.push(text); }
         return [...new Set(out)]; }""")
     assert covered == [], f"the line runs through these milestone labels: {covered}"
-    assert page.locator(".evo-chart text", has_text="no tags").count() == (1 if width > 500 else 0), "the quiet months are a gap"
+    assert page.locator(".evo-chart text", has_text="no releases").count() == (1 if width > 500 else 0), "the quiet months are a gap"
     assert page.locator("#evo-campaign-chip").inner_text() == "Off"
-    assert page.locator("#evo-consciousness").inner_text().startswith("Consciousness sleeping")
-    assert page.locator("#evo-consciousness-allowance").inner_text() == "Allowance (24 h): $1.25 / $10.00"
+    # One quiet pointer to the Consciousness tab; its allowance is that tab's fact.
+    assert page.locator("#evo-consciousness").inner_text().startswith("Consciousness: sleeping")
+    assert page.locator("#evo-consciousness-allowance").count() == 0
     # The line and its area stop at the axis break; only the dashed bridge crosses the quiet months.
     runs = page.evaluate("""() => document.querySelector('.evo-ch-line').getAttribute('d').split('M').filter(Boolean)
         .map((run) => run.split('L').map((pair) => Number(pair.split(',')[0])))""")
-    gap = page.evaluate("""() => { const t = [...document.querySelectorAll('.evo-chart text')].find((n) => n.textContent === 'no tags');
+    gap = page.evaluate("""() => { const t = [...document.querySelectorAll('.evo-chart text')].find((n) => n.textContent === 'no releases');
         return t ? Number(t.getAttribute('x')) : null; }""")
     assert len(runs) == 2 and (gap is None or all(max(r) < gap or min(r) > gap for r in runs)), (runs, gap)
     assert overflow(page) == {"page": 0, "panel": 0}
@@ -139,10 +148,64 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
     page.locator('[data-measure="identity"]').click()
     assert page.locator('[data-measure="identity"]').get_attribute("aria-pressed") == "true"
     assert page.locator('[data-measure="code_lines"]').get_attribute("aria-pressed") == "false"
+    page.locator(".evo-method > summary").click()  # how a measure is counted reads behind its disclosure
     assert page.locator(".evo-caption").inner_text().startswith("This installation · Identity: characters of identity.md")
-    assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26.5K chars", "the newest journal record ends the line"
+    assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26,500 characters", "the newest journal record ends the line"
     assert overflow(page) == {"page": 0, "panel": 0}
     setup_browser.capture(page, f"evolution-identity-{width}")
+
+
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_campaign_keeps_readable_text_when_status_and_actions_grow(subscription_ui, running, language):
+    """A wide window can hold a narrow card. No overflow alone missed a one-word-wide objective."""
+    objective = "Autonomously improve Ouroboros by acting on the highest-value backlog or process-memory signal."
+    state = {**STATE, "evolution_enabled": running,
+             "evolution_state": {"status": "running" if running else "disabled", "enabled": running,
+                                 "detail": "Evolution task is running now.", "campaign": {"objective": objective}},
+             "bg_consciousness_state": {"status": "sleeping", "next_wake_at": "2026-11-04T15:41:00+03:00",
+                                        "detail": "Sleeping until the next scheduled wake.",
+                                        "spent_24h_usd": 39.94, "daily_usd": 300, "unknown_unmetered": 1}}
+    page = subscription_ui["page"]
+    if language == "de":
+        page.route("**/api/ui/i18n", lambda route: route.fulfill(json={"language": "de", "english": False,
+                   "revision": 1, "entries": {key: {"text": text} for key, text in {
+                       "Start campaign…": "Verbesserungskampagne starten…", "Pause": "Kampagne pausieren",
+                       "New objective…": "Neues Kampagnenziel festlegen…",
+                       "Run review…": "Unabhängige Überprüfung starten…"}.items()}}))
+    open_evolution(subscription_ui, history(), state=state)
+    page.locator(".evo-detail-title").wait_for()
+    if language == "de":
+        page.wait_for_function("() => document.querySelector('#evo-review').textContent.includes('Überprüfung')")
+    page.locator("#evo-start").focus()
+    for width, slot in [(1100, None), (1100, 650), (1100, 480), (900, None), (1440, None), (390, None)]:
+        page.set_viewport_size({"width": width, "height": 844 if width == 390 else 750})
+        page.locator("#page-evolution").evaluate("(node, slot) => node.style.maxWidth = slot ? slot + 'px' : ''", slot)
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        sizes = page.evaluate("""() => {
+            const card = document.querySelector('.evo-campaign'), main = card.querySelector('.evo-campaign-main');
+            const r = card.getBoundingClientRect(), m = main.getBoundingClientRect(), s = getComputedStyle(card);
+            const buttons = [...card.querySelectorAll('button:not([hidden])')];
+            return {available: card.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight),
+                main: m.width, outside: buttons.some(n => { const b = n.getBoundingClientRect();
+                    return b.left < r.left || b.right > r.right + 1 || n.scrollHeight > n.clientHeight + 1; }),
+                clipped: main.scrollWidth > main.clientWidth + 1, count: buttons.length};
+        }""")
+        assert sizes["main"] >= min(320, sizes["available"]) - 1, sizes
+        assert not sizes["outside"] and not sizes["clipped"], sizes
+        # Start, Pause, Run review and the Consciousness pointer: Pause keeps its place and is offered only while a
+        # campaign runs.
+        assert sizes["count"] == 4
+        assert page.locator("#evo-stop").is_enabled() == running
+        assert objective in page.locator(".evo-campaign-lines").inner_text()
+        assert page.evaluate("() => document.activeElement.id") == "evo-start"
+        assert overflow(page) == {"page": 0, "panel": 0}
+        setup_browser.capture(page, f"evolution-reading-{language}-{running}-{width}-{slot or 'auto'}")
+    # The real action is still operable after reflow; cancel the dialog, never send a live command.
+    page.locator("#evo-start").click()
+    page.locator("[data-confirm-input]").wait_for(state="visible")
+    page.keyboard.press("Escape")
+    assert not any(path == "/api/command" for path, _body in subscription_ui["posts"])
 
 
 def test_history_states_never_hold_the_campaign_or_drop_a_saved_copy(subscription_ui):
@@ -301,7 +364,8 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     page.clock.install()
     open_evolution(subscription_ui, history(), state=state)
     start, pause, chip = page.locator("#evo-start"), page.locator("#evo-stop"), page.locator("#evo-campaign-chip")
-    assert (chip.inner_text(), start.is_visible(), pause.is_visible()) == ("Off", True, False)
+    # Pause keeps its place: present and inactive while there is nothing to pause.
+    assert (chip.inner_text(), start.is_visible(), pause.is_visible(), pause.is_enabled()) == ("Off", True, True, False)
 
     def send(button, *, confirm=True):
         sent, read = len(commands), len(reads)
@@ -309,7 +373,7 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
         if confirm:
             page.locator("[data-confirm-ok]").click()  # an empty objective: the backend's own
         until(page, lambda: len(commands) > sent and len(reads) > read)  # the command, then the state read after it
-        page.wait_for_function("() => !document.querySelector('#evo-stop').disabled")
+        page.wait_for_function("() => !document.querySelector('#evo-start').disabled")  # the gateway answered
         page.evaluate("() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 0)))")
 
     def poll(now):
@@ -321,13 +385,14 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     answers["command"] = "refuse"
     send(start)
     assert commands == ["/evolve on"] and page.locator(".toast", has_text="Could not send /evolve on").count() == 1
-    assert (start.is_visible(), pause.is_visible()) == (True, False), "a refused Start was never queued"
+    assert (start.is_visible(), pause.is_visible(), pause.is_enabled()) == (True, True, False), "a refused Start was never queued"
 
     answers["command"] = "queue"
     send(start)
-    assert chip.inner_text() == "Off", "the read right after the queued Start still says off"
+    assert reads[-1] == "disabled", "the read right after the queued Start still says off"
+    assert chip.inner_text() == "Starting…", "the chip says the unconfirmed Start, never Off beside an offered Pause"
     assert pause.is_visible() and pause.is_enabled(), "Pause stays offered while the Start is unconfirmed"
-    assert start.is_visible()
+    assert start.is_visible() and start.is_enabled(), "a Start that never applies stays retryable"
     setup_browser.capture(page, "evolution-start-unconfirmed")
 
     poll(RUNNING)
@@ -351,7 +416,7 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     assert commands[-1] == "/evolve off" and chip.inner_text() == "Running", "the Pause is only queued"
     poll(STATE)
     page.wait_for_function("() => document.querySelector('#evo-campaign-chip').textContent === 'Off'", timeout=5000)
-    assert (start.is_visible(), pause.is_visible()) == (True, False), "off again, and nothing left unconfirmed"
+    assert (start.is_visible(), pause.is_visible(), pause.is_enabled()) == (True, True, False), "off again, and nothing left unconfirmed"
 
     answers["command"] = "lose"
     send(start)

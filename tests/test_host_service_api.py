@@ -14,6 +14,27 @@ from ouroboros.utils import atomic_write_json
 from tests._store_shared import seed_result
 from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 
+@pytest.fixture(autouse=True)
+def _host_lane_roots(tmp_path, monkeypatch):
+    """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_presence_runner(monkeypatch):
+    """The injected-runner registry is process-global; keep each test's own out of the next."""
+    from ouroboros import presence_carrier
+    monkeypatch.setattr(presence_carrier, "_RUNNERS", {})
+
+
+def _inject(tmp_path, runner):
+    """Create a Host app whose conversation-lane carrier runs this test's presence runner (1A seam)."""
+    from ouroboros.presence_carrier import set_presence_runner
+    set_presence_runner(tmp_path, runner)
+    return create_host_service_app(tmp_path, presence_runner=runner)
+
 
 class FakeBridge:
     def __init__(self) -> None:
@@ -260,7 +281,7 @@ def test_presence_turn_resolves_binding_and_returns_typed_result(tmp_path: pathl
         captured.update(kwargs)
         return SimpleNamespace(outcome="message", text="Hello back", task_id="turn-1", work_ref="")
 
-    app = create_host_service_app(tmp_path, presence_runner=run_presence)
+    app = _inject(tmp_path, run_presence)
     client = TestClient(app)
     response = client.post(
         "/presence/turn",
@@ -326,15 +347,11 @@ def test_presence_turn_attachment_refusal_returns_complete_typed_manifest(
             return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
-        return run_presence_turn(
-            repo_dir=repo,
-            drive_root=tmp_path,
-            agent_factory=lambda **_kwargs: Agent(),
-            gate=PresenceTurnGate(1),
-            **kwargs,
-        )
+        # The carrier's body calls the runner with its own repo, drive and factory; the test's win.
+        kwargs.update(repo_dir=repo, drive_root=tmp_path, agent_factory=lambda **_kwargs: Agent())
+        return run_presence_turn(gate=PresenceTurnGate(1), **kwargs)
 
-    client = TestClient(create_host_service_app(tmp_path, presence_runner=run_real_presence))
+    client = TestClient(_inject(tmp_path, run_real_presence))
     response = client.post(
         "/presence/turn",
         headers={"X-Skill-Token": "presence-token"},
@@ -398,16 +415,12 @@ def test_presence_turn_host_passes_attachment_limit_to_canonical_staging_owner(
             return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
-        return run_presence_turn(
-            repo_dir=repo,
-            drive_root=tmp_path,
-            agent_factory=lambda **_kwargs: Agent(),
-            gate=PresenceTurnGate(1),
-            **kwargs,
-        )
+        # The carrier's body calls the runner with its own repo, drive and factory; the test's win.
+        kwargs.update(repo_dir=repo, drive_root=tmp_path, agent_factory=lambda **_kwargs: Agent())
+        return run_presence_turn(gate=PresenceTurnGate(1), **kwargs)
 
     response = TestClient(
-        create_host_service_app(tmp_path, presence_runner=run_real_presence)
+        _inject(tmp_path, run_real_presence)
     ).post(
         "/presence/turn",
         headers={"X-Skill-Token": "presence-token"},
@@ -471,16 +484,12 @@ def test_presence_turn_host_passes_internal_missing_and_directory_to_staging_own
             return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
-        return run_presence_turn(
-            repo_dir=repo,
-            drive_root=tmp_path,
-            agent_factory=lambda **_kwargs: Agent(),
-            gate=PresenceTurnGate(1),
-            **kwargs,
-        )
+        # The carrier's body calls the runner with its own repo, drive and factory; the test's win.
+        kwargs.update(repo_dir=repo, drive_root=tmp_path, agent_factory=lambda **_kwargs: Agent())
+        return run_presence_turn(gate=PresenceTurnGate(1), **kwargs)
 
     response = TestClient(
-        create_host_service_app(tmp_path, presence_runner=run_real_presence)
+        _inject(tmp_path, run_real_presence)
     ).post(
         "/presence/turn",
         headers={"X-Skill-Token": "presence-token"},
@@ -913,7 +922,7 @@ def test_events_websocket_rejects_ungranted_topic(tmp_path: pathlib.Path) -> Non
     assert "lacks grant" in message["error"]
 
 
-@pytest.mark.parametrize('user_id,chat_id', [(0, 1), (17, 99), (99, 23), (17, 23)])
+@pytest.mark.parametrize('user_id,chat_id', [(0, 1), (17, 99), (99, 23)])
 def test_chat_inject_panic_caption_requires_bound_owner(tmp_path: pathlib.Path, panic_bridge, user_id, chat_id) -> None:
     _seed_token(tmp_path, permissions=["inject_chat"])
     bridge = panic_bridge

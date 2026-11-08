@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from hashlib import sha256
 from typing import Any, Mapping
+
+log = logging.getLogger(__name__)
 
 # Recorded beside the owner's words when a declared child is scheduled: its selection carries them
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
@@ -25,7 +28,7 @@ def declared_inputs_carry_owner_words(task: Mapping[str, Any]) -> bool:
     return task.get(DECLARED_WORDS_FACT) is True or metadata.get(DECLARED_WORDS_FACT) is True
 
 
-def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
+def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = False) -> dict[str, Any]:
     """Composition fact retained by existing work-order/model-send sources.
 
     This selects automatic inputs, never filesystem access or semantic purity;
@@ -33,33 +36,49 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
     the same selection, each recipient named in ``limitations``.
     The selection persists for the task; first-position/mail ordering is the
     caller's ordinary collaboration procedure, not a second host controller.
-    The owner's words that caused the work are included when the task was
-    scheduled with ``DECLARED_WORDS_FACT``; an older declared task names them
-    among the omitted inputs, as its work order always did.
+    My human's words for the work are included when the task was scheduled with
+    ``DECLARED_WORDS_FACT``; an older declared task names them among the omitted
+    inputs, as its work order always did. A native request (``native``: the one
+    context builder's) and a work order of a session task scheduled with its room
+    rows (``work_order_room_words``) name the marks in force and the knowledge
+    outline among the included inputs; an older session task's work order keeps
+    the literals it was rendered with, so its retained bytes and fingerprint stay
+    stable. This receipt describes case-input selection; standing owner rules are
+    separate context/host governance, outside the canonical work order.
     """
     from ouroboros.contracts.task_contract import task_input_sources
 
     if task_input_sources(task) != "declared":
         return {}
-    selected = ["explicitly selected task documents (attachment_paths), copied as this task's inputs"
-                ] if _selected_documents(task) else []
+    selected = (["explicitly selected task documents (attachment_paths), copied as this task's inputs"
+                 ] if _selected_documents(task) else []) + (
+        ["explicitly selected input files (input_files), retained by the host before this task was queued"]
+        if _selected_input_files(task) else [])
     with_words = declared_inputs_carry_owner_words(task)
+    current = native or work_order_room_words(task) is not None
+    words_item = ("my human's words for this work, verbatim and dated as the host carries them down the task tree, "
+                  "or the host's marker that none are recorded" if current else
+                  "the owner's words that caused this work, verbatim as the host carries them down the task tree, "
+                  "or the host's marker that none are recorded")
+    no_words_item = ("my human's words for this work" if current else "the owner's words that caused this work"
+                     ) + " (shared children receive them verbatim; include them in context if this case needs them)"
     return {
         "input_sources": "declared",
         "included": [
             "SYSTEM.md and BIBLE.md; reference-book projections; own-body DESIGN navigation or source-gap disclosure",
             "explicit assignment, question, evidence and normalized task authority",
-            *(["the owner's words that caused this work, verbatim as the host carries them down the task tree, "
-               "or the host's marker that none are recorded"] if with_words else []), *selected,
+            *([words_item] if with_words else []), *selected,
+            *(["the memory marks in force (this room's and the global ones) and the knowledge outline "
+               "(every note by address and title)"] if current else []),
             "runtime access, tools, workspace, clock, resource and budget facts",
             "the inherited delegation_budget.intent_note: parent-authored advice carried in the task contract, never authority",
             "this child's own retained progress, tool and event history",
         ],
         "omitted_automatic": [
             "shared autobiography: identity, WORLD, the top level of the life account, the parent's room page "
-            "(with the words that started its project) and the memory marks of that room and the global ones",
-            *([] if with_words else ["the owner's words that caused this work (shared children receive them verbatim; "
-                                     "include them in context if this case needs them)"]),
+            + ("and its open conversation" if current else
+               "(with the words that started its project) and the memory marks of that room and the global ones"),
+            *([] if with_words else [no_words_item]),
             "shared review history, health narratives, update letters, registry and installed-skill summaries",
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",
@@ -97,6 +116,18 @@ def _selected_documents(task: Mapping[str, Any]) -> str:
             "its own request selects.\n" + "\n".join(f"- {path}" for path in paths))
 
 
+def _selected_input_files(task: Mapping[str, Any]) -> str:
+    """The parent's ``input_files`` disclosure; "" when the task selected none."""
+    rows = task.get("prepared_input_files")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+            "this task. The first start of this work order verifies those copies against these digests and its "
+            "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+            + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
+                        for row in rows if isinstance(row, dict)))
+
+
 def _text(value: Any) -> str:
     if isinstance(value, list):
         value = "\n".join(f"- {item}" for item in value if str(item).strip())
@@ -106,7 +137,7 @@ def _text(value: Any) -> str:
 def assignment_instructions(ctx: Any) -> str:
     """Host-authored assignment with a predecessor brief for each direct start.
 
-    The owner's words that caused the work follow the contract: a root's own
+    My human's words for the work follow the contract: a root's own
     corpus, a child's inherited words, or the host's absence marker; a declared
     contract scheduled before ``DECLARED_WORDS_FACT`` keeps the selection it
     started with and carries none. Full predecessor reports are read through the
@@ -147,6 +178,17 @@ def assignment_instructions(ctx: Any) -> str:
     )
 
 
+def work_order_room_words(task: Mapping[str, Any]) -> list | None:
+    """The bound room's rows a session task was scheduled with (``owner_words.ROOM_FIELD``, by value, at the top
+    level or under ``metadata``); ``None`` for a task scheduled before the key existed, whose work order keeps the
+    constants it was rendered with. The key is read here alone."""
+    from ouroboros.owner_words import ROOM_FIELD
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    rows = task.get(ROOM_FIELD, metadata.get(ROOM_FIELD))
+    return list(rows) if isinstance(rows, list) else None
+
+
 def _owner_words_section(task: Mapping[str, Any]) -> str:
     """The owner's words carried into this task by value; "" for a task scheduled without them.
 
@@ -154,15 +196,22 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     give the same bytes, so a source-range check never sees a digest mismatch. A
     declared task scheduled before ``DECLARED_WORDS_FACT`` carries the field too, but
     its receipt names the words among the omitted inputs, so its work order holds none
-    and keeps the bytes and fingerprint it started with.
+    and keeps the bytes and fingerprint it started with. A session task's room rows
+    (``work_order_room_words``) follow the field's rows, one row per identity; nothing
+    is read from a store here, so the order is a function of the record. The key also
+    tells the heading and frame: a record without it keeps the literals it launched with.
     """
     from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import render_owner_words, task_governing_words
+    from ouroboros.owner_words import FIELD, _deduped, render_owner_words, task_governing_words
 
     if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
         return ""
-    return render_owner_words(*task_governing_words(task), audience="session",
-                              root_task_id=str(task.get("root_task_id") or ""))
+    rows, absent = task_governing_words(task)
+    room = work_order_room_words(task)
+    if room is not None:
+        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    return render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
+                              current=room is not None)
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:
@@ -191,6 +240,7 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         ("TASK CONTRACT AUTHORITY", remaining_contract),
         ("INHERITED TASK INPUTS", contract.get("attachment_manifest")),
         ("SELECTED DOCUMENTS", _selected_documents(task)),
+        ("SELECTED INPUT FILES", _selected_input_files(task)),
     ]
     authority = {
         "task_id": str(task.get("id") or ""),
@@ -439,44 +489,137 @@ def session_constitution_pointer(ctx: Any, *, target_root: str, source_root: str
 
 
 def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: Any, *, snapshot: Any,
-                                payload: bool, execution_root: str) -> Any:
+                                payload: bool, execution_root: str, in_place: str = "") -> Any:
     """What ONE first start's private copy may write outside it, prepared before the binding, the host
     references and the request name it (``workspace_preflight.session_service_directories``).
 
     The delegating task's drive owns the short scratch, keyed by the snapshot. A same-tree
-    continuation from another task can receive a different scratch. A skill payload, an engine
-    directory copy and a session without a copy get none; a retry replays recorded old paths and
-    never comes here, even if the original task's drive or the OS already retired them."""
+    continuation from another task can receive a different scratch. ``in_place`` is the invocation
+    of an in-place run, which has no copy: at full access it gets its own scratch, named and never
+    granted; a ``workspace_write`` one gets none, since that would be a new grant. A skill payload,
+    an engine directory copy and any other session without a copy get none; a retry replays
+    recorded old paths and never comes here, even if the original task's drive or the OS already
+    retired them."""
     from ouroboros.tool_access_paths import canonical_data_root
     from ouroboros.workspace_preflight import ServiceDirectories, session_service_directories as prepare
 
-    if snapshot is None or payload:
+    if payload or (snapshot is None and not (in_place and authority.access == "full")):
         return ServiceDirectories()
     return prepare(gateway, route.route_id, access=authority.access, mode=authority.mode,
                    data_root=canonical_data_root(ctx), drive_root=getattr(ctx, "drive_root", ""),
-                   task_id=str(getattr(ctx, "task_id", "") or ""), key=snapshot.snapshot_id,
+                   task_id=str(getattr(ctx, "task_id", "") or ""),
+                   key=snapshot.snapshot_id if snapshot is not None else f"in-place-{in_place}",
                    execution_root=execution_root)
 
 
+def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocation_id: str, target_root: str) -> Any:
+    """One in-place run's scratch preparation, deferred: ``delegate_directory.in_place_start`` calls it
+    only after accepting the start (``session_service_directories`` with ``in_place``)."""
+    from functools import partial
+
+    return partial(session_service_directories, ctx, gateway, route, authority, snapshot=None, payload=False,
+                   execution_root=target_root, in_place=invocation_id)
+
+
+_ATTACHMENTS_HOLDER = (" An attachment named under a row is retained by the host: the task that started this "
+                       "session holds it and can be asked for it.")
+START_TAIL_FACT = ("[Host fact: these rows of my human's were not in the work order or instructions above; "
+                   "the host carries them with this start, verbatim." + _ATTACHMENTS_HOLDER + "]")
+CONTINUATION_TAIL_FACT = ("[Host fact: these rows of my human's stand in no earlier start of this session; "
+                          "the host carries them with this continuation, verbatim." + _ATTACHMENTS_HOLDER + "]")
+
+
+def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
+    """My human's rows of the starter's set at this handoff (``words_unseen_in``: the room read live) whose
+    identity ``text`` does not hold, each with the reply target that follows it in the set (another author's
+    words beside theirs, under its own stamp), under the session heading, the gap line of a store that could
+    not be read (``work_words``) and ``fact`` as the host's closing lines; "" when ``text`` holds them all. A text
+    with no stamp holds none: every row rides."""
+    from ouroboros.owner_relay import words_unseen_in
+    from ouroboros.owner_words import REPLY_TARGET, render_owner_words, work_words
+
+    unseen = words_unseen_in(ctx, text)
+    if not unseen:
+        return ""
+    rows, take = [], False
+    rows_all, _marker, gaps = work_words(ctx)
+    for row in rows_all:
+        take = take if row.get("source") == REPLY_TARGET else row in unseen
+        if take:
+            rows.append(row)
+    meta = getattr(ctx, "task_metadata", None)
+    root = str((meta.get("root_task_id") if isinstance(meta, Mapping) else "") or getattr(ctx, "task_id", "") or "")
+    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
+
+
+def session_memory_references(ctx: Any) -> str:
+    """The marks in force for the session task's room (this room's and the global ones) and the knowledge outline
+    (the global shelf's and its room's: every note by address and title, people's summaries kept) as text in a
+    session's start request: what a native helper's view holds, pinned outside the canonical work order and its
+    fingerprint, so a session task scheduled before the update starts with them too. The stores are read once as
+    they stand, through the memory view's own capture and render (``memory_view._capture_marks``, ``render_room``
+    over a marks-only snapshot) and the helper's outline (``context_sections.helper_navigation_sections``); nothing
+    is written or activated here. A retry replays the recorded bytes."""
+    import dataclasses
+
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.context_sections import helper_navigation_sections
+    from ouroboros.memory_inventory import membership_facts
+    from ouroboros.memory_view import (MemoryViewSnapshot, ROLE_DEFAULTS, _capture_marks, render_room, room_labeler,
+                                       view_room_id)
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    head = ("\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+            "What my memory holds for this work as this start was prepared, as a native helper's request holds it: "
+            "the marks in force for this work's room and the global ones, then the knowledge outline (every note by "
+            "address and title). The calls named beside them are the host's own readers, not yours.\n\n")
+    meta = getattr(ctx, "task_metadata", None)
+    task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
+    try:
+        root = canonical_data_root(ctx)
+        room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids)
+        spec = dataclasses.replace(ROLE_DEFAULTS["child"], room_id=room)
+        store = ChronicleStore(root)  # a chronicle never activated holds no mark; nothing activates it here
+        marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
+        marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
+        outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or "")))
+    except Exception as exc:  # an unreadable store is a named gap in the start, never a withheld start
+        log.warning("session references: my memory could not be read at this start", exc_info=True)
+        return head + f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline."
+    return head + "\n\n".join(part for part in (
+        marks_text or "No marks are in force for this work's room or globally.", outline) if part)
+
+
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
-                            private_copy: bool = False, payload_skill: str = "", service: Any = None) -> str:
+                            private_copy: bool = False, payload_skill: str = "", service: Any = None,
+                            start_body: str | None = None) -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
-    Own-body DESIGN navigation and BIBLE path, and the installed instruction-skill index for any workspace;
+    Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
+    inputs included: they govern the work, as BIBLE does), the marks in force and the knowledge outline as text
+    (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
+    installed instruction-skill index for any workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
     possibly a folder below that root, or the scratch ``service`` grants); a read-only session
-    has no copy, so it gets neither. A retry replays the recorded bytes."""
+    has no copy, so it gets neither. A retry replays the recorded bytes. ``start_body`` (a start
+    that continues no run: the prompt and instructions composed so far) closes the text with the
+    start tail: my human's rows of the starter's set that body does not hold (``unseen_words_section``),
+    so the interval between a session task's scheduling and its first start loses nothing; a
+    continuation's rows ride its own prompt instead (``delegate_continuation``)."""
+    from ouroboros.safety_config import owner_rules_section
     from ouroboros.skill_catalogue import session_skill_index, skill_contract_references  # lazy skill reads
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
-            + session_skill_index(ctx))
+            + owner_rules_section(session=True) + session_memory_references(ctx) + session_skill_index(ctx))
+    tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
+    tail = f"\n\n{tail}" if tail else ""
     if payload_skill:
         from ouroboros.body_candidate import serving_repo_dir_for
 
-        return text + skill_contract_references(serving_repo_dir_for(ctx))
+        return text + skill_contract_references(serving_repo_dir_for(ctx)) + tail
     if private_copy:
         from pathlib import Path
 
@@ -488,8 +631,8 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
         root, body = _own_body_source(ctx, target_root, source_root)  # the copy's repository root
         root = root if body else git_ancestor(start) or start
         return text + session_environment_facts(root, data_root=canonical_data_root(ctx), body=body, write_root=start,
-                                                **({"service": service} if service is not None else {}))
-    return text
+                                                **({"service": service} if service is not None else {})) + tail
+    return text + tail
 
 
 def start_binding_fingerprints(ctx: Any, prompt: str) -> tuple[str, str]:
@@ -514,5 +657,5 @@ __all__ = [
     "assignment_instructions", "compile_external_work_order", "canonical_work_order_source",
     "work_order_source_projection",
     "validate_work_order_source_response",
-    "start_binding_fingerprints", "work_order_fingerprint",
+    "start_binding_fingerprints", "work_order_fingerprint", "work_order_room_words", "unseen_words_section",
 ]

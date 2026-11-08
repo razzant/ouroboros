@@ -13,7 +13,8 @@ log = logging.getLogger(__name__)
 
 
 def stamp_paid_review_owner(attempt: Any, *, paid: bool) -> None:
-    """Bind a newly-paid attempt to the current process custody owner."""
+    """Bind an attempt whose reviewer workers this process owns (a reserved roster, paid or not yet)
+    to the current process custody owner; ``paid`` False with no reservation binds nothing."""
     if not paid or int(getattr(attempt, "review_owner_pid", 0) or 0) > 0:
         return
     from ouroboros.process_custody import current_custody_session_id

@@ -283,9 +283,9 @@ class WindowObservations:
 # metadata with a hard expiry (no background thread holds anything): the worker
 # grants it for one window, bounded by min(task deadline, the run's own
 # maxSeconds horizon, this absolute ceiling), and releases it when the wait
-# returns. The ceiling exceeds the delegate_wait ToolEntry timeout (2100s, which
-# DELEGATE_WAIT_CEILING_SEC equals) by +300 headroom so a full window plus its
-# own teardown never draws silence attention mid-hold.
+# returns. The ceiling exceeds one hold's bound (DELEGATE_WAIT_CEILING_SEC, 2100s:
+# the 1800s max window plus its teardown) by +300 headroom so a full window never
+# draws silence attention mid-hold; the call's own outer bound is the task lifetime.
 DELEGATE_WAIT_LEASE_GRACE_SEC = 120
 EXTERNAL_WAIT_LEASE_CEILING_SEC = DELEGATE_WAIT_CEILING_SEC + 300
 
@@ -347,6 +347,50 @@ def emit_external_wait_lease(ctx: Any, run_id: str, until_ts: float,
         })
     except Exception:
         log.debug("external-wait lease emission failed", exc_info=True)
+
+
+class HoldLease:
+    """ONE idle-rail lease for a whole supervising hold (``delegate_supervision.supervised_wait``),
+    spoken only when it changes.
+
+    The hold observes its run(s) every three seconds through ``_delegate_wait(observation_only)``,
+    which used to grant, re-grant and release a fresh lease on every beat: three control events
+    per beat per held run (``external_wait_lease`` reached 788 a minute on 01.11), each a bus
+    round trip, a dispatch and a frame, restating a fact that had not changed. The hold now grants
+    one lease (one ``lease_id``) before its first observation, renews it only once less than the
+    teardown grace remains (so a beat bounded by the read window can never outlive it), and
+    releases it once when the hold ends. The bound is the same ``external_wait_lease_until`` over
+    the observed run's own timing (read once per run: a run's start and cap never change); a
+    renewal that would not move the expiry later (a run at its own horizon, a spent deadline)
+    is not spoken.
+    """
+
+    def __init__(self, ctx: Any) -> None:
+        import uuid
+
+        self._ctx, self._lease_id, self._until, self._run_id = ctx, uuid.uuid4().hex, 0.0, ""
+        self._timing: Dict[str, Any] = {}
+
+    def renew(self, run_id: str) -> None:
+        if self._until - time.time() > DELEGATE_WAIT_LEASE_GRACE_SEC:
+            return
+        from ouroboros import delegate_custody as custody
+        from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
+        from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
+
+        if run_id not in self._timing:
+            started, max_seconds = custody.run_timing(custody.custody_root(self._ctx), run_id)
+            self._timing[run_id] = (parse_deadline_ts(started), max_seconds)
+        until = external_wait_lease_until(
+            self._ctx, window_within_deadline(self._ctx, int(_READ_TIMEOUT_SEC)), *self._timing[run_id])
+        if until > self._until:
+            self._until, self._run_id = until, run_id
+            emit_external_wait_lease(self._ctx, run_id, until, lease_id=self._lease_id)
+
+    def release(self) -> None:
+        if self._until:
+            emit_external_wait_lease(self._ctx, self._run_id, 0.0, lease_id=self._lease_id)
+            self._until = 0.0
 
 
 def poll_bound(seconds_left: float, *, strict: bool = False) -> float:

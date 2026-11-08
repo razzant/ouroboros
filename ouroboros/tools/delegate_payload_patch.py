@@ -232,8 +232,8 @@ def _write_payload_patch_artifacts(
                               "baseline commit; refusing to capture over an ambiguous "
                               "baseline")
     resolved_root = exec_root.resolve()
-    # Final loader-visible inventory; raises SkillPayloadUnreadable on
-    # credential-shaped files (the existing refusal — caller discloses it typed).
+    # Final loader-visible inventory; a credential-like name (a child-created
+    # `.env`) rides like any file. Reserved paths are reported below, refused at apply.
     final_rel = sorted(
         path.relative_to(resolved_root).as_posix()
         for path in _iter_payload_files(resolved_root)

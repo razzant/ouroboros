@@ -18,8 +18,8 @@ from tests.candidate_checkout import (
     assert_served_candidate as _assert_served_candidate,
     case_checkout, require_candidate_interpreter, verify_checkout,
 )
-from ouroboros.test_environment import isolated_environment
-from ouroboros.test_evidence import diagnostic_directory
+from ouroboros.test_environment import isolated_environment, owned_process_temp
+from ouroboros.test_evidence import diagnostic_directory, keep_startup_log
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
@@ -63,7 +63,7 @@ def _open_review_checkpoint(card, *, open_card=True):
     if open_card:
         card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
     assert card.is_visible()
-    door = card.locator(":scope > [data-live-foot] [data-live-review-summary]")
+    door = card.locator(":scope > :is([data-live-summary-button], [data-live-foot]) [data-live-review-summary]")
     door.wait_for(state="visible", timeout=5_000)
     assert door.get_attribute("aria-expanded") == "false"
     door.click()
@@ -103,17 +103,18 @@ def _wait_health(url: str, timeout_sec: int = 30) -> None:
 def _wait_supervisor_ready(url: str, timeout_sec: int = 45) -> None:
     """Wait past port readiness until the direct test runtime can serve history."""
     deadline = time.time() + timeout_sec
-    last = ""
+    last = error = ""
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"{url}/api/state", timeout=2) as resp:  # noqa: S310 - local test server
-                payload = json.loads(resp.read().decode("utf-8"))
+                payload = json.load(resp)
                 if payload.get("supervisor_ready") is True:
                     return
+                error = payload.get("supervisor_error") or error
         except Exception as exc:
             last = str(exc)
         time.sleep(0.25)
-    raise RuntimeError(f"server supervisor did not become ready: {last}")
+    raise RuntimeError(f"server supervisor did not become ready: {error or last}")
 
 
 def _run_core_ui_assertions(url: str) -> None:
@@ -293,7 +294,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             OUROBOROS_STARTER_SKILLS='["builtin/telegram"]', OUROBOROS_STARTER_SKILLS_TURN_ON=False,
         )
         (data_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
-        env = isolated_environment(tmp_path, checkout)
+        env = isolated_environment(tmp_path, checkout, process_temp=owned_process_temp())
         env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),
@@ -337,6 +338,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             # Only proven teardown releases the copy.
             candidate.release()
 
+        @keep_startup_log(tmp_path, "server-stdio.log")
         def start_server() -> None:
             nonlocal active_proc, active_container
             from ouroboros.process_containment import ProcessContainer
@@ -346,13 +348,9 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             active_container = ProcessContainer()
             # Pin before spawn.
             candidate.hold()
-            active_proc = active_container.spawn(
-                [_fixture_python(), "server.py"],
-                cwd=checkout,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            with (tmp_path / "server-stdio.log").open("ab") as log:
+                active_proc = active_container.spawn(
+                    [_fixture_python(), "server.py"], cwd=checkout, env=env, stdout=log, stderr=subprocess.STDOUT)
             _wait_health(url)
             _wait_supervisor_ready(url)
             _assert_served_candidate(url, checkout, data_dir, active_proc.pid, candidate)
@@ -364,7 +362,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
         try:
             start_server()
             yield {
-                "url": url, "data_dir": data_dir, "restart_server": restart_server,
+                "url": url, "data_dir": data_dir, "restart_server": restart_server, "env": env,
                 "repo_dir": checkout, "candidate_identity": candidate.identity,
                 # Static and Python origin proof.
                 "candidate_sentinel": candidate.sentinel_bytes,
@@ -954,7 +952,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
     direct_server_with_data,
     browser_engine,
 ):
-    """Collapsed root summaries stay compact without destroying full activity."""
+    """A collapsed root keeps its whole latest line; an empty one reserves no band."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -1038,11 +1036,8 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 assert running.locator('[data-live-title]').text_content().strip() == "Short task"
                 assert named.get_attribute("data-expanded") == "0"
                 named_activity = named.locator('[data-live-activity]')
-                activity_text = named_activity.text_content().strip()
-                assert activity_text
-                assert len(activity_text) <= 240
-                assert activity_text.endswith(("…", "..."))
-                assert unique_tail not in activity_text
+                # Whole (owner 30.10, B): past the preview, through the tail, no cut marker.
+                assert named_activity.text_content().strip() == long_activity
                 assert named_activity.get_attribute("title") is None
                 geometry = named.evaluate(
                     """card => {
@@ -1062,7 +1057,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                     }"""
                 )
                 assert geometry["title"]["lines"] <= 2.2, geometry
-                assert geometry["activity"]["lines"] <= 3.2, geometry
+                assert geometry["activity"]["lines"] >= 9, geometry  # whole, unclamped
                 assert geometry["scrollWidth"] <= geometry["clientWidth"] + 1, geometry
                 named_meta = named.locator('[data-live-meta]').inner_text().split()
                 # Final ledger: the plain amount, never the open-ledger ceiling.
@@ -1097,7 +1092,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 assert bands["unnamed-act"]["finished"] is False, bands
                 assert bands["running-act"]["finished"] is False, bands
                 assert all(0.9 <= bands[task_id]["title"]["lines"] <= 1.2 for task_id in bands), bands
-                assert 2.9 <= bands["named-act"]["activity"]["lines"] <= 3.2, bands
+                assert 2.9 <= bands["named-act"]["activity"]["lines"], bands  # whole, unclamped (B)
                 assert 0.9 <= bands["running-act"]["activity"]["lines"] <= 1.2, bands
                 assert bands["unnamed-act"]["activity"]["display"] == "none", bands
                 # Empty activity reserves no band, even after finish; an unnamed turn uses its note as title.
@@ -1147,14 +1142,14 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 row = running.evaluate(
                     """card => {
                         const btn = card.querySelector(':scope > [data-live-summary-button]');
-                        const r = (s) => card.querySelector(`:scope > [data-live-foot] ${s}`).getBoundingClientRect();
-                        return {height: btn.getBoundingClientRect().height, metaBottom: r('[data-live-meta]').bottom,
+                        const r = (s) => btn.querySelector(s).getBoundingClientRect();
+                        return {height: btn.getBoundingClientRect().height, door: r('[data-live-disclosure]').top,
                             reviewTop: r('[data-live-review-summary]').top};
                     }"""
                 )
-                # The quiet count leads the action row under the meta; the summary keeps its height.
-                assert row["reviewTop"] >= row["metaBottom"] - 2, row
-                assert abs(row["height"] - before_reviews) <= 1, row
+                # The quiet count is Details' twin in the head (B); a wide summary keeps its height.
+                assert abs(row["reviewTop"] - row["door"]) <= 1, row
+                assert width < 600 or abs(row["height"] - before_reviews) <= 1, row
                 assert all(not bands[task_id]["clipped"] for task_id in bands), bands
                 assert all("Reviews" not in bands[task_id]["reviews"] for task_id in bands), bands
 
@@ -1163,7 +1158,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 line_toggle.wait_for(state="visible", timeout=5_000)
                 line_toggle.click()
                 page.wait_for_function(
-                    "tail => document.querySelector('.chat-live-card[data-task-id=\"named-act\"]')"
+                    "tail => document.querySelector('.chat-live-card[data-task-id=\"named-act\"] > [data-live-timeline]')"
                     ".innerText.includes(tail)",
                     arg=unique_tail,
                 )
@@ -2449,8 +2444,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         # full-width row below both.
         # Main and side controls start on one flex row. A terminal projection may
         # leave the main box empty; their shared top still distinguishes it
-        # from a real wrap, whose row gap would move the side down.
-        assert abs(facts["rootSideTop"] - facts["rootMainTop"]) <= 1, facts
+        # from a real wrap, whose row gap would move the side down (a door centres in its 24px group).
+        assert abs(facts["rootSideTop"] - facts["rootMainTop"]) <= 2, facts
         assert facts["rootTitleTop"] >= max(facts["rootMainBottom"], facts["rootSideBottom"]) - 1, facts
         assert all(card["scrollWidth"] <= card["clientWidth"] + 1 for card in facts["cardFacts"]), facts
         assert min(card["titleWidth"] for card in facts["cardFacts"] if not card["collapsedChild"]) >= 160, facts
@@ -2460,14 +2455,14 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                    if not card["collapsedChild"]) <= 3.2, facts
         assert max(card["activityLines"] for card in facts["cardFacts"]
                    if card["collapsedChild"]) <= 1.2, facts
-        # #623: a collapsed child keeps its identity row: its title beside the chip
-        # and side controls, whole if short, ellipsized if long (child-01). The summary is reading content, no
-        # button (#1998): the title holds the whole role as its text, however much of it shows.
+        # #623: a collapsed child keeps its identity row: title beside chip and controls, whole if short, wrapped
+        # if long (child-01). The summary is reading content, no button (#1998): the title holds the whole role
+        # as its text, however much shows.
         assert page.get_by_text(long_role, exact=True).count() == 1
         for card in facts["cardFacts"]:
             if card["collapsedChild"]:
-                assert 0 < card["titleClient"] and (
-                    card["titleScroll"] > card["titleClient"] + 1) == (card["id"] == "layout-child-01"), card
+                assert 0 < card["titleClient"] and card["titleScroll"] <= card["titleClient"] + 1 and (
+                    card["titleLines"] > 1.5) == (card["id"] == "layout-child-01"), card
                 assert abs(card["titleTop"] - card["mainTop"]) <= 4, card
                 assert card["summaryBottom"] - card["mainTop"] <= 2.2 * card["titleHeight"] + 8, card
         assert all(card["activityTitle"] is None for card in facts["cardFacts"]), facts
@@ -2529,7 +2524,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
                     visible: button.classList.contains('visible'),
                     width: b.width, height: b.height,
-                    centerDelta: Math.abs((b.left + b.width / 2) - (w.left + w.width / 2)),
+                    endInset: w.right - b.right,
                     gap: w.top - b.bottom,
                     toolbarOverlap: overlap(b, t),
                     previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
@@ -2545,7 +2540,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         if require_overflow:
             assert facts["remaining"] > 48, facts
         assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
-        assert facts["centerDelta"] <= 1 and abs(facts["gap"] - 8) <= 1, facts
+        # ↓ latest stands at the composer's end, never over the middle of the column.
+        assert abs(facts["endInset"] - 8) <= 1 and abs(facts["gap"] - 8) <= 1, facts
         assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
         assert facts["boxShadow"] != "none", facts
         return facts
@@ -2620,7 +2616,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
                 for card in wide_facts[:2]:
-                    assert abs(card["mainTop"] - card["sideTop"]) <= 1, wide_facts
+                    assert abs(card["mainTop"] - card["sideTop"]) <= 2, wide_facts
                 # #623: the depth-2 collapsed child is in the 560px container regime
                 # yet keeps ONE identity row: chip, title, side controls.
                 deep = wide_facts[2]
@@ -2739,7 +2735,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert panel_facts["cardWidth"] >= panel_facts["panelWidth"] * 0.9, panel_facts
                 assert panel_facts["cardScroll"] <= panel_facts["cardClient"] + 1, panel_facts
                 assert panel_facts["titleWidth"] >= 180, panel_facts
-                assert abs(panel_facts["mainTop"] - panel_facts["sideTop"]) <= 1, panel_facts
+                assert abs(panel_facts["mainTop"] - panel_facts["sideTop"]) <= 2, panel_facts
                 assert panel_facts["titleTop"] >= max(panel_facts["mainBottom"], panel_facts["sideBottom"]) - 1, panel_facts
                 assert_jump_geometry(
                     wide, "#panel-pchat-layout-project", require_overflow=False

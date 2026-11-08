@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import json
-import re
 import os
 from pathlib import Path
 
 import pytest
 from tests import test_subscription_role_routes_browser as roles
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 
@@ -31,11 +30,11 @@ def test_saved_fallback_context_keeps_incomplete_number_through_stay_and_auto(ro
     field = row.locator('[data-model-role-context]')
     expect(field).to_have_value('')
     assert not field.get_attribute('id').startswith('s-')
-    expect(page.locator('#settings-unsaved-indicator')).not_to_have_class(re.compile('is-visible'))
+    expect(page.locator('#settings-status')).not_to_have_text('Unsaved changes')
     field.press('1')
     field.press('e')
     assert field.evaluate('input => input.validity.badInput && input.value === ""')
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('#settings-status')).to_have_text('Unsaved changes')
     field.evaluate('input => { window.__fallbackDraftNode = input; }')
     page.locator('[data-nav-page="chat"]').click()
     expect(page.get_by_role('button', name='Stay', exact=True)).to_be_visible()
@@ -48,7 +47,7 @@ def test_saved_fallback_context_keeps_incomplete_number_through_stay_and_auto(ro
     field.fill('')
     assert not field.evaluate('input => input.validity.badInput')
     expect(field).to_have_attribute('aria-invalid', 'false')
-    expect(page.locator('#settings-unsaved-indicator')).not_to_have_class(re.compile('is-visible'))
+    expect(page.locator('#settings-status')).not_to_have_text('Unsaved changes')
     field.fill('32768')
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()

@@ -420,7 +420,7 @@ test('a completion row carrying the answer renders as an ordinary Ouroboros mess
             globalThis.CustomEvent = priorCustomEvent;
         }
         assert.deepEqual(opened, {
-            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '' },
+            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '', pointer: false },
         });
     } finally {
         instance?.destroy();
@@ -474,8 +474,8 @@ test('the mirrored answer replays from history exactly as it arrived live', asyn
 });
 
 test('the fold is CSS over the complete answer: clamp always, fade only when folded, tokens only', () => {
-    const block = styleSource.slice(styleSource.indexOf('(chat: Project completion mirror)'));
-    const rules = block.slice(0, block.indexOf('design-system:migrated-end'));
+    const block = styleSource.slice(styleSource.indexOf('"Project completion mirror"'));
+    const rules = block.slice(0, block.indexOf('A block that exists only for open attention'));
     assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
     assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
     // The Project is the route to the complete answer; the mirror never expands in place.

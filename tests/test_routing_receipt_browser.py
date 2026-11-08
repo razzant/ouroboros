@@ -18,7 +18,7 @@ from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 subscription_ui = setup.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TITLE = "Fix duplicate posts in the RSS import"
 WORDS = "Keep the old feed address and add a redirect from /feed.xml."
 LINE = """cmid => {
@@ -85,6 +85,7 @@ def test_a_routed_message_receipt_reads_the_same_live_and_after_reload(
     bubble.scroll_into_view_if_needed()
     bubble.screenshot(path=str(out / f"receipt-{producer}-live-{theme}-{width}.png"), animations="disabled")
 
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === WebSocket.OPEN")
     bubble.locator(".msg-routing-annotation").wait_for()
@@ -97,7 +98,7 @@ def test_a_routed_message_receipt_reads_the_same_live_and_after_reload(
     assert live == {"lead": f"Passed on to «{TITLE}» in", "reference": "Open project Blog", "name": "Blog",
                     "cut": False, "status": "delivered"}, live
     assert replay == live
-    assert ui["errors"] == []
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 # The compact work names (the reported case: msg-1793137452751-1 → 8a5774f9). An older host stored a nameless work's
@@ -197,6 +198,7 @@ def test_receipt_work_names_show_compact_live_after_reload_and_reconnect(subscri
         return {case: page.evaluate(SHOWN, f"preview-{case}") for case in CASES}
 
     seen = {"live": painted("live")}
+    ui["errors"].watch(page)  # the reload may cut off this page's own reads; other pages stay strict
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === WebSocket.OPEN")
     seen["reload"] = painted("reload")
@@ -227,4 +229,4 @@ def test_receipt_work_names_show_compact_live_after_reload_and_reconnect(subscri
     for phase, rows in seen.items():
         assert rows == seen["live"], phase
         assert not any(row["cut"] or row["stored_text_in_dom"] for row in rows.values()), (phase, rows)
-    assert ui["errors"] == []
+    assert not ui["errors"].unexpected(), ui["errors"].report()

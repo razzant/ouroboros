@@ -130,9 +130,13 @@ export function onboardingSettingsDraft({
 } = {}) {
     const clean = (value) => trim(value);
     return {
+        OUROBOROS_CONNECTIONS: state.connections || [],
         ...Object.fromEntries(providerFields.map(
             (field) => [field.settingKey, clean(state[field.stateKey])],
         )),
+        // The saved legacy address, so readiness and discovery read the pair the runtime reads;
+        // no wizard field edits it, and completion keeps the saved value.
+        ...(clean(state.legacyCompatibleBaseUrl) ? { OPENAI_BASE_URL: clean(state.legacyCompatibleBaseUrl) } : {}),
         ...Object.fromEntries(budgetFields.filter((field) => state[field.stateKey] !== '').map(
             (field) => [field.settingKey, Number(state[field.stateKey] || 0)],
         )),
@@ -353,10 +357,8 @@ export function agentsOutcomeText(connected = [], {
         return 'Accounts could not be checked. Your draft is kept; refresh the connection '
             + 'or configure API access to continue.';
     }
-    if (!connected.length) {
-        return 'Connect Codex to start without an API key, or add API access below. '
-            + 'Other subscriptions remain available for agents.';
-    }
+    // Nothing connected: the rows and the reason beside Continue already say what to do.
+    if (!connected.length) return '';
     const labels = joinLabels(familyLabels(connected, snapshot, { catalogKnown }));
     if (skipPresets) {
         return `Signed in to ${labels}, but you chose to `
@@ -520,7 +522,7 @@ export function familyRowHtml(family, { status, connected = false, connectable =
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
             </span>
-            ${connectable ? `<button type="button" class="btn btn-secondary" data-agent-connect="${escapeHtml(family.harness)}">
+            ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
             </button>` : ''}
         </div>
@@ -556,6 +558,7 @@ export function agentsStepHtml({ compact = false, showRoster = true } = {}) {
             <h3>Subscriptions</h3>
             <div id="agents-status-note" class="agent-service-note" hidden></div>
             <div id="agents-family-list" class="agent-family-list"></div>
+            <div class="wizard-inline-note agent-limits-note">Subscription limits still apply. This connection does not enable paid credits or change your provider's spending limits.</div>
             <div id="agents-login-host"></div>
             <div id="agents-outcome" class="agent-outcome"></div>
         </div>

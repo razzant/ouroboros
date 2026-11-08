@@ -123,13 +123,18 @@ def test_run_discards_unbounded_installer_output(monkeypatch, tmp_path):
 
     class Proc:
         returncode = 0
+        def poll(self):
+            return self.returncode
         def wait(self, timeout=None):
             captured["timeout"] = timeout
             return 0
 
     def fake_popen(*args, **kwargs):
         captured.update(kwargs)
-        return Proc()
+        proc = Proc()
+        from tests.test_tracked_tree_containment import fake_tree_read
+        fake_tree_read(monkeypatch, proc, remains=False)
+        return proc
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     result = _run(["tool"], cwd=tmp_path, env={}, timeout_sec=1)

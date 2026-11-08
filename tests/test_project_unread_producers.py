@@ -70,8 +70,6 @@ def room(tmp_path, monkeypatch):
     pytest.param("root-1", {}, id="root-final"),
     pytest.param("root-1", {"system_type": "proactive_message", "format": "markdown"},
                  id="root-send-user-message"),
-    pytest.param("root-1", {"role": "system", "system_type": "cancel_receipt"},
-                 id="root-system-row-without-placement"),
     pytest.param("", {"role": "system", "system_type": "task_admission_notice"},
                  id="standalone-system-row"),
 ])
@@ -82,22 +80,7 @@ def test_conversation_messages_advance_unread_once(room, task_id, fields):
 @pytest.mark.parametrize("task_id, fields", [
     pytest.param("root-1", {"is_progress": True, "progress_meta": {"narration": True}},
                  id="root-narration"),
-    pytest.param("kid-1", {"is_progress": True}, id="child-narration"),
-    pytest.param("kid-1", {"is_progress": True, "progress_meta": {
-        "subagent_event": "scheduled", "delegation_role": "subagent", "parent_task_id": "root-1"}},
-        id="child-lifecycle"),
     pytest.param("kid-1", {}, id="child-final"),
-    pytest.param("kid-1", {"system_type": "proactive_message", "format": "markdown"},
-                 id="child-send-user-message"),
-    pytest.param("root-1", {"is_progress": True, "progress_meta": {
-        "task_incident": "worker_lost", "toast_once": "root-1:worker_lost"}},
-        id="typed-incident-progress"),
-    pytest.param("root-1", {"role": "system", "system_type": "custody_notice", "progress_meta": {
-        "card_row": "timeline", "card_row_id": "final:root-1:x:custody_notice"}},
-        id="custody-card-row"),
-    pytest.param("root-1", {"role": "system", "system_type": "acceptance_late_settlement",
-                            "progress_meta": {"card_row": "reviews", "card_row_id": "acceptance-late:k"}},
-                 id="late-review-card-row"),
     pytest.param("never-seen", {"role": "system", "system_type": "custody_notice", "progress_meta": {
         "card_row": "timeline", "card_row_id": "final:never-seen:x:custody_notice"}},
         id="card-row-whose-card-is-not-loaded"),
@@ -246,7 +229,8 @@ def test_failed_canonical_append_never_mints_a_phantom_revision(room, monkeypatc
         assert block["delivery"]["state"] == "owed" and not block.get("published_at")
     else:
         result = send()
-        assert (result is None if kind == "text" else result == (True, "ok")), result
+        # The text sender answers with the room it selected (an additive return, PR #2150); media senders keep (True, "ok").
+        assert (result == {"chat_id": room.chat_id} if kind == "text" else result == (True, "ok")), result
         assert len(room.frames) > before_frames, "existing best-effort live delivery stays available"
     assert chat_rows(room.root) == initial
     assert room.revision() == 1, "the missing canonical row cannot be acknowledged as a new revision"

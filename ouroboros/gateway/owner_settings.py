@@ -1,9 +1,9 @@
 """The owner-scoped settings WRITE seam — one lock, one commit boundary.
 
 Every owner endpoint that persists SETTINGS goes through here: the generic
-``POST /api/settings``, the FIVE single-decision owner endpoints (runtime mode,
-auto-grant, context mode, safety mode, desktop keep-running), and the atomic
-``POST /api/onboarding/complete``. Membership is defined by calling
+``POST /api/settings``, the single-decision owner endpoints (runtime mode,
+auto-grant, context mode, the Safety model, levels and rules, desktop keep-running),
+a model-wait card's saved choice, and the atomic ``POST /api/onboarding/complete``. Membership is defined by calling
 ``_owner_update_settings`` — directly with a transform, or through
 ``_owner_write_settings`` with a whole document — not by wearing the decorator:
 the capability-evidence acknowledgement writes its own route-fingerprinted
@@ -32,14 +32,21 @@ re-implemented (or silently skipped) per call site:
    the field became unreadable — the client cannot tell "nothing was written"
    from an old or truncated response. ``unsaved_error`` is the one pre-commit
    refusal shape, and it always carries ``saved=false``.
+5. **The writer's receipt is the settings history.** ``_owner_update_settings``
+   returns the before → after of every key its commit changed, taken under its
+   own lock; the generic save, the Safety owner endpoints and a model-wait card's
+   saved choice record exactly that (``record_settings_change``), so no endpoint
+   keeps a key list of its own. The other writers keep no such record.
 """
 
 from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import logging
 import pathlib
+import re
 import threading
 from typing import Any, Callable, Dict, Optional, Sequence
 
@@ -49,6 +56,7 @@ from starlette.responses import JSONResponse
 from ouroboros.config import DATA_DIR
 from ouroboros.config import defaults_for_settings_document as _defaults_for_settings_document
 from ouroboros.context_mode_compat import normalize_context_mode_compat
+from ouroboros.control_actor import PAUSE_AUTHORS
 from ouroboros.gateway._helpers import json_error, request_drive_root
 from ouroboros.settings_integrity import SettingsIntegrityError, read_settings_json_verified
 from ouroboros.utils import append_jsonl, utc_now_iso, write_text_atomic
@@ -105,6 +113,18 @@ def settings_document_mutation():
 
 class SettingsPreconditionFailed(RuntimeError):
     """A locked-in precondition refused the write; nothing was persisted."""
+
+
+class SettingsDocumentUnreadable(SettingsPreconditionFailed):
+    """The settings document exists but does not read as a JSON object (an open the OS refuses, broken
+    JSON, another JSON type). Only an absent document is new: this one is never merged into or written
+    over as if it were empty, and its bytes stay exactly as they are."""
+
+
+UNREADABLE_SETTINGS_REFUSAL = (
+    "settings.json exists but could not be read as a settings document, so a write would replace what "
+    "it holds; nothing was written. Repair or move the file, then try again."
+)
 
 
 class SettingsLockUnavailable(RuntimeError):
@@ -182,6 +202,8 @@ def owner_write_guard(endpoint: Callable) -> Callable:
             return unsaved_error(str(exc), 503, code="settings_locked")
         except SettingsDocumentBusy as exc:
             return unsaved_error(str(exc), 503, code="settings_busy")
+        except SettingsDocumentUnreadable as exc:
+            return unsaved_error(str(exc), 409, code="settings_unreadable")
         except SettingsPreconditionFailed as exc:
             return unsaved_error(str(exc), 409, code="settings_precondition_failed")
 
@@ -216,6 +238,103 @@ def owner_audit(request: Request, action: str, payload: Dict[str, Any]) -> None:
 
 _owner_audit = owner_audit  # Existing settings writers retain their import surface.
 
+# A settings write may declare where it came from, as a Pause press declares its author: a declaration
+# grants nothing and identifies nobody (``client_host`` is never an actor). The app's own pages declare
+# ``app``; a write without a valid declaration came from the ``api`` and its actor is ``not declared``.
+SURFACE_HEADER, ACTOR_HEADER, TASK_HEADER = "X-Ouroboros-Surface", "X-Ouroboros-Actor", "X-Ouroboros-Task-Id"
+APP_SURFACE = "app"
+_SURFACE_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+_ROW_PHRASES = {  # the two decisions the owner reads by name; any other key is said by its name
+    "OUROBOROS_MODEL": "Main model: {old} → {new}.",
+    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": "Consciousness allowance: {old} → {new} USD per rolling 24 hours.",
+}
+# Who changed it, in the owner's words; the surface and the task stay in the event (DESIGN principle 7).
+_ROW_ACTORS = {"ouroboros": "Changed by Ouroboros.", "owner": "Changed by you."}
+
+
+def declared_settings_origin(request: Request) -> Dict[str, str]:
+    """``{surface, actor[, actor_task_id]}`` as the request declared them; malformed parts are dropped."""
+    from ouroboros.task_results import validate_task_id
+
+    headers = getattr(request, "headers", None) or {}
+    surface = str(headers.get(SURFACE_HEADER) or "").strip().lower()
+    actor = str(headers.get(ACTOR_HEADER) or "").strip().lower()
+    origin = {"surface": surface if _SURFACE_RE.fullmatch(surface) else "api",
+              "actor": actor if actor in PAUSE_AUTHORS else "not declared"}
+    try:
+        origin["actor_task_id"] = validate_task_id(headers.get(TASK_HEADER))
+    except ValueError:
+        pass
+    return origin
+
+
+def _withheld(key: str, change: Dict[str, Any]) -> str:
+    """Why a change keeps only its key name: ``secret`` (the contract's registry, an owner-defined
+    secret) or ``structure`` (rows, maps, a roster: they can carry credentials); ``""`` for a scalar."""
+    from ouroboros.config import SETTINGS_DEFAULTS
+    from ouroboros.secret_masking import is_custom_secret_setting_key
+    from ouroboros.settings_setup_contract import SECRET_SETTING_KEYS, secret_provider_setting_keys
+
+    if (key in SECRET_SETTING_KEYS or key in secret_provider_setting_keys()
+            or is_custom_secret_setting_key(key, known_setting_keys=SETTINGS_DEFAULTS)):
+        return "secret"
+    for value in change.values():
+        if isinstance(value, str) and value.lstrip()[:1] in ("[", "{"):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                continue
+        if isinstance(value, (dict, list)):
+            return "structure"
+    return ""
+
+
+def _shown(change: Dict[str, Any], side: str) -> str:
+    if side not in change:
+        return "not set"
+    value = change[side]
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return (value or "empty") if isinstance(value, str) else json.dumps(value)
+
+
+def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, str]) -> str:
+    """The one System row of a change the app did not declare: what changed and who changed it, in one
+    line, so a withheld value or a text of several lines (the owner's rules) is said by its key alone. The
+    event keeps the text, the surface, the declared actor and its task."""
+    parts = [f"{key} changed." if "withheld" in change or any("\n" in str(value) for value in change.values())
+             else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_shown(change, "old"), new=_shown(change, "new"))
+             for key, change in changes.items()]
+    return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
+
+
+def record_settings_change(request: Request, changes: Dict[str, Dict[str, Any]]) -> None:
+    """Record one committed settings write: the writer's receipt, never a second reading of the file.
+
+    One ``owner_api_action`` (``action="settings_changed"``) names every changed key: a scalar with its
+    old/new (a side its document did not set is omitted), a secret or a structure as
+    ``{"withheld": "secret"|"structure"}``, plus the declared origin. A write the app did not declare also
+    puts one quiet System row (``settings_changed``) in Main; the app's own Save already says what it
+    saved. Neither step can undo or fail the save."""
+    if not changes:
+        return
+    try:
+        origin = declared_settings_origin(request)
+        projected = {key: {"withheld": reason} if (reason := _withheld(key, change)) else dict(change)
+                     for key, change in changes.items()}
+        owner_audit(request, "settings_changed", {**origin, "changes": projected})
+        if origin["surface"] == APP_SURFACE:
+            return
+        from supervisor import message_bus
+        from supervisor.state import control_value, load_state
+
+        known, owner_chat = control_value(load_state(), "owner_chat_id")
+        if known and owner_chat:  # a display-only backup value never addresses Main
+            message_bus.send_with_budget(int(owner_chat), settings_change_text(projected, origin),
+                                         role="system", system_type="settings_changed")
+    except Exception:
+        log.warning("Settings saved; their change record or Main row failed", exc_info=True)
+
 
 def settings_document_digest() -> str:
     """What the settings document looked like at a given instant.
@@ -241,7 +360,7 @@ def settings_document_digest() -> str:
         return f"unreadable:{type(exc).__name__}:{uuid4()}"
 
 
-def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None, *, strict: bool = False) -> Dict[str, Any]:
     """Read settings for owner endpoints without applying runtime-mode ratchets.
 
     "Raw" is about the RATCHETS, never about the migrations: the document is normalized
@@ -254,7 +373,11 @@ def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None) -> D
     snapshot that changed refuses this reader exactly as it refuses ``load_settings``
     instead of serving the unverified file as defaults-with-a-document. Only the
     ratchets and the one-window context-pair persistence are skipped here. ``document_out``
-    receives the normalized document alone: what the owner has authored, no defaults."""
+    receives the normalized document alone: what the owner has authored, no defaults.
+
+    ``strict`` (every write, and a form that judges a key against the document) tells an absent
+    document, which is new and empty, from a present one that cannot be read as an object, which
+    raises ``SettingsDocumentUnreadable`` instead of reading as defaults."""
     from ouroboros import config as _config
 
     # An existing (even unreadable) document keeps the optional bounds it ran under.
@@ -267,9 +390,13 @@ def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None) -> D
                 raw, settings_path=_config.SETTINGS_PATH, warn_ambiguous=True,
             )
             document = _config.normalize_settings_raw(raw)
-    except SettingsIntegrityError:
+        elif strict and (raw is not None or _settings_document_present()):
+            raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL)
+    except (SettingsIntegrityError, SettingsDocumentUnreadable):
         raise
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
         log.debug("Failed to read raw owner settings; using defaults", exc_info=True)
     if document_out is not None:
         document_out.update(document)
@@ -277,30 +404,54 @@ def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None) -> D
     return merged
 
 
-def _owner_settings_document() -> Dict[str, Any]:
-    """The normalized settings document alone (what the owner authored, no defaults)."""
+def _settings_document_present() -> bool:
+    from ouroboros import config as _config
+
+    try:
+        return _config.SETTINGS_PATH.exists()
+    except OSError:
+        return True  # a document that cannot even be looked at is never an absent one
+
+
+def _owner_settings_document(*, strict: bool = False) -> Dict[str, Any]:
+    """The normalized settings document alone (what the owner authored, no defaults); ``strict`` as
+    in ``_owner_read_settings_raw``."""
     document: Dict[str, Any] = {}
-    _owner_read_settings_raw(document_out=document)
+    _owner_read_settings_raw(document_out=document, strict=strict)
     return document
 
 
-def fields_on_saved_document(changes: Dict[str, Any]) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+class _SavedDocumentFields:
+    """``fields_on_saved_document``'s transform. The writer hands it the authored document of its own
+    single read under the lock, so the optional check and the merge judge exactly what is replaced."""
+
+    def __init__(self, changes: Dict[str, Any], check: Optional[Callable[[Dict[str, Any]], str]]) -> None:
+        self.changes, self.check = changes, check
+
+    def __call__(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        from ouroboros import config as _config
+        from ouroboros.settings_scales import OPTIONAL_BOUND_LEGACY
+
+        refusal = str(self.check(document) or "") if self.check is not None else ""
+        if refusal:
+            raise SettingsPreconditionFailed(refusal)
+        if _settings_document_present():
+            return {**document, **self.changes}
+        effective = _config.load_settings_lock_held()
+        return {**{key: effective[key] for key in OPTIONAL_BOUND_LEGACY}, **self.changes}
+
+
+def fields_on_saved_document(changes: Dict[str, Any],
+                             check: Optional[Callable[[Dict[str, Any]], str]] = None) -> _SavedDocumentFields:
     """The ``_owner_update_settings`` transform of an incidental writer: exactly ``changes`` land on
     the document as it is on disk inside that lock. Nothing the merged read shows is authored beside
     them (a default, an environment value, an unauthored proposal) and every saved value stays as the
     read translates it, a pending next-boot runtime mode included, so the ratchets meet only unchanged
     values. A document this creates carries the optional bounds as they resolve now, because a
     document's presence turns their absence into the legacy finite value
-    (``settings_scales.defaults_for_settings_document``)."""
-    def land(_read: Dict[str, Any]) -> Dict[str, Any]:
-        from ouroboros import config as _config
-        from ouroboros.settings_scales import OPTIONAL_BOUND_LEGACY
-
-        if _config.SETTINGS_PATH.exists():
-            return {**_owner_settings_document(), **changes}
-        effective = _config.load_settings_lock_held()
-        return {**{key: effective[key] for key in OPTIONAL_BOUND_LEGACY}, **changes}
-    return land
+    (``settings_scales.defaults_for_settings_document``). ``check`` (optional) judges that same document
+    first; a non-empty reason refuses with ``SettingsPreconditionFailed`` and writes nothing."""
+    return _SavedDocumentFields(changes, check)
 
 
 def _owner_write_settings(
@@ -311,8 +462,8 @@ def _owner_write_settings(
     allow_safety_lowering: bool = False,
     precondition: Optional[Callable[[], str]] = None,
     boundary: Optional[CommitBoundary] = None,
-) -> None:
-    """Write owner-controlled settings without applying the runtime-mode ratchet.
+) -> Dict[str, Dict[str, Any]]:
+    """Write owner-controlled settings without applying the runtime-mode ratchet; returns the receipt.
 
     Skipping that ONE ratchet is the whole reason this writer exists; everything else comes from
     ``config.prepare_settings_for_persist``, the single point every persisting writer passes through.
@@ -329,7 +480,7 @@ def _owner_write_settings(
     a non-empty return value aborts with ``SettingsPreconditionFailed``. ``boundary`` (optional) is
     marked committed the moment the bytes land, so the caller can tell a failed save from a failed
     post-save step."""
-    _owner_update_settings(
+    return _owner_update_settings(
         lambda _current: settings,
         authored_keys=authored_keys,
         allow_context_lowering=allow_context_lowering,
@@ -356,7 +507,7 @@ def _owner_update_settings(
     precondition: Optional[Callable[[], str]] = None,
     boundary: Optional[CommitBoundary] = None,
     whole_document: bool = False,
-) -> None:
+) -> Dict[str, Dict[str, Any]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
     An owner endpoint changes a single decision inside a document it does not otherwise
@@ -385,7 +536,14 @@ def _owner_update_settings(
     than before it, and ``boundary`` flips the instant the bytes land. A model slot the document
     never authored and the transform left as read is not written (``unedited_unauthored_slots``),
     unless the caller names it in ``authored_keys`` (a wait card's explicit choice, default-equal
-    included) or hands over a ``whole_document`` it authored (Settings save, onboarding)."""
+    included) or hands over a ``whole_document`` it authored (Settings save, onboarding).
+
+    The read is strict: only an absent document is new, and a present one that does not read as
+    an object refuses every writer with ``SettingsDocumentUnreadable``, its bytes untouched. A
+    ``fields_on_saved_document`` transform receives that one read's authored document.
+
+    Returns the commit's receipt (``_committed_changes``), taken under the same lock after the bytes
+    land; empty when nothing was written or nothing changed."""
     from ouroboros import config as _config
 
     _config._guard_live_settings_write()
@@ -404,11 +562,11 @@ def _owner_update_settings(
             if refusal:
                 raise SettingsPreconditionFailed(refusal)
         document: Dict[str, Any] = {}
-        current = _owner_read_settings_raw(document_out=document)
+        current = _owner_read_settings_raw(document_out=document, strict=True)
         shown = dict(current)
-        proposed = transform(current)
+        proposed = transform(dict(document) if isinstance(transform, _SavedDocumentFields) else current)
         if proposed is None:
-            return
+            return {}
         to_write = dict(proposed)
         if not whole_document:
             from ouroboros.server_runtime import unedited_unauthored_slots
@@ -422,15 +580,41 @@ def _owner_update_settings(
         write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
         if boundary is not None:
             boundary.commit()
+        try:
+            return _committed_changes(document, shown, to_write)
+        except Exception:  # the bytes are saved; a receipt that cannot be taken never unsaves them
+            log.warning("Settings saved; their change receipt could not be taken", exc_info=True)
+            return {}
     finally:
         _config._release_settings_lock(fd)
+
+
+def _committed_changes(document: Dict[str, Any], shown: Dict[str, Any], written: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Each key one commit changed: ``{"old": …, "new": …}``, a side omitted where its document does not set it.
+
+    The change is judged as the reader sees both documents (authored values over the same defaults, every
+    known key typed as its default declares, so 150 and "150" are one value): a default that a
+    whole-document save writes out is no change. The recorded sides are the authored values."""
+    from ouroboros import config as _config
+    from ouroboros.settings_scales import normalize_effort_document
+
+    before = _config.coerce_settings_raw(shown)
+    after = _config.coerce_settings_raw({**_defaults_for_settings_document(True), **normalize_effort_document(written)})
+    old, new = _config.coerce_settings_raw(document), _config.coerce_settings_raw(written)
+    return {key: {side: values[key] for side, values in (("old", old), ("new", new)) if key in values}
+            for key in sorted(set(before) | set(after)) if before.get(key, _ABSENT) != after.get(key, _ABSENT)}
+
+
+_ABSENT = object()
 
 
 __all__ = [
     "CommitBoundary",
     "STALE_SETTINGS_READ_REFUSAL",
+    "SettingsDocumentUnreadable",
     "SettingsLockUnavailable",
     "SettingsPreconditionFailed",
+    "UNREADABLE_SETTINGS_REFUSAL",
     "settings_document_mutation",
     "_CONTEXT_MODE_KEYS",
     "_owner_audit",
@@ -442,6 +626,7 @@ __all__ = [
     "_owner_write_settings",
     "owner_write_guard",
     "post_commit_failure_response",
+    "record_settings_change",
     "settings_document_digest",
     "unsaved_error",
 ]

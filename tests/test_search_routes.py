@@ -5,12 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.search_routes import resolve_web_search_route
+from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
 from ouroboros.tools import search
 from tests import test_extensions_api as extension_fixtures
 from tests.test_extensions_api import _write_ext
 
 _clean_extensions = extension_fixtures._clean_extensions
+RECOMMENDED = SEARCH_MODELS['anthropic']  # the curated table's Anthropic row, never a literal here
 
 
 @pytest.fixture(autouse=True)
@@ -50,20 +51,11 @@ def test_generic_extension_search_executes_when_builtin_search_is_unavailable(tm
 
 
 @pytest.mark.parametrize('source,selected,expected', [
-    ('auto', 'future', [('openai', 'future'), ('openrouter', 'openai/future'), ('anthropic', 'claude-sonnet-4-6')]),
-    ('auto', 'vendor/future', [('openrouter', 'vendor/future'), ('anthropic', 'claude-sonnet-4-6')]),
-    ('auto', 'anthropic/future', [('openrouter', 'anthropic/future'), ('anthropic', 'future')]),
-    ('auto', 'anthropic::future', [('anthropic', 'future')]),
-    ('auto', 'openai::future', [('openai', 'future'), ('openrouter', 'openai/future')]),
-    ('auto', 'openrouter::vendor/future', [('openrouter', 'vendor/future')]),
-    ('openai', 'future', [('openai', 'future')]),
-    ('openrouter', 'future', [('openrouter', 'openai/future')]),
-    ('anthropic', 'old-ignored-setting', [('anthropic', 'claude-sonnet-4-6')]),
-    ('anthropic', 'anthropic::future', [('anthropic', 'future')]),
+    # A blank saved Model is the recommended one of every source Auto tries.
+    ('auto', '', [('openai', SEARCH_MODELS['openai']), ('openrouter', SEARCH_MODELS['openrouter']), ('anthropic', RECOMMENDED)]),
+    ('auto', 'future', [('openai', 'future'), ('openrouter', 'openai/future'), ('anthropic', RECOMMENDED)]),
+    ('auto', 'vendor/future', [('openrouter', 'vendor/future'), ('anthropic', RECOMMENDED)]),
     ('openai', 'anthropic::future', []), ('openai', 'vendor/future', []),
-    # Auto keeps the legs that need no model when no built-in transport serves the saved one.
-    ('auto', 'claudexor::codex=future', [('anthropic', 'claude-sonnet-4-6')]),
-    ('auto', 'openai::vendor/future', [('anthropic', 'claude-sonnet-4-6')]),
 ])
 def test_dispatch_uses_resolved_candidates_and_truthful_failed_legs(monkeypatch, source, selected, expected):
     for key in ('OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
@@ -115,7 +107,7 @@ def test_openrouter_only_legacy_auto_and_context_projection_preserve_saved_defau
 
 
 @pytest.mark.parametrize('saved,sent,source', [('anthropic/claude-opus-4-6', 'claude-opus-4-6', 'selection'),
-                                               ('vendor/future', 'claude-sonnet-4-6', 'provider_default')])
+                                               ('vendor/future', RECOMMENDED, 'provider_default')])
 def test_auto_sends_a_saved_legacy_anthropic_model_on_the_direct_anthropic_leg(monkeypatch, saved, sent, source):
     from ouroboros import llm
     for key in ('OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_BASE_URL'):
@@ -136,7 +128,7 @@ def test_auto_sends_a_saved_legacy_anthropic_model_on_the_direct_anthropic_leg(m
     assert [(leg['source'], leg['outcome']) for leg in result['legs_tried']] == [('anthropic', 'succeeded')]
 
 
-@pytest.mark.parametrize('saved', ['claudexor::codex=future', 'deepseek::deepseek-chat', 'openai-compatible::local', ''])
+@pytest.mark.parametrize('saved', ['claudexor::codex=future', 'openai-compatible::local', ''])
 def test_a_ddgs_pin_ignores_any_saved_model_and_still_searches(monkeypatch, saved):
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'ddgs')
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', saved)
@@ -149,8 +141,7 @@ def test_a_ddgs_pin_ignores_any_saved_model_and_still_searches(monkeypatch, save
     assert result['answer'] == 'ddgs: q' and [leg['outcome'] for leg in result['legs_tried']] == ['succeeded']
 
 
-@pytest.mark.parametrize('source,saved', [('auto', 'claudexor::codex=future'), ('openai', 'claudexor::codex=future'),
-                                          ('auto', 'anthropic::vendor/future'), ('anthropic', 'anthropic::vendor/future')])
+@pytest.mark.parametrize('source,saved', [('auto', 'claudexor::codex=future'), ('auto', 'anthropic::vendor/future'), ('anthropic', 'anthropic::vendor/future')])
 def test_an_unsupported_selection_is_disclosed_under_auto_and_refused_by_a_strict_source(monkeypatch, source, saved):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic')
     monkeypatch.setitem(sys.modules, 'ddgs', None)
@@ -158,14 +149,13 @@ def test_an_unsupported_selection_is_disclosed_under_auto_and_refused_by_a_stric
     if source == 'auto':
         assert route['unapplied_model'] == saved and 'error' not in route
         assert [(leg['source'], leg['model'], leg['model_source']) for leg in route['legs']] == [
-            ('anthropic', 'claude-sonnet-4-6', 'provider_default')]
+            ('anthropic', RECOMMENDED, 'provider_default')]
     else:
         assert route['error'] and not route['legs'] and 'unapplied_model' not in route
 
 
 @pytest.mark.parametrize('override,expected,origin', [
-    (None, 'claude-sonnet-4-6', 'provider_default'),
-    ('', 'claude-sonnet-4-6', 'provider_default'),
+    (None, RECOMMENDED, 'provider_default'),
     ('claude-opus-4-6', 'claude-opus-4-6', 'selection'),
     ('claude-future-native', 'claude-future-native', 'selection'),
 ])
@@ -189,7 +179,7 @@ def test_anthropic_native_per_call_model_reaches_provider_while_saved_legacy_sta
     assert result['legs_tried'][0]['model'] == expected
 
 
-@pytest.mark.parametrize('override', ['openai::future', 'vendor/future', 'anthropic::vendor/future', 'anthropic/vendor/future'])
+@pytest.mark.parametrize('override', ['openai::future', 'vendor/future', 'anthropic/vendor/future'])
 def test_anthropic_pin_refuses_foreign_per_call_model_without_dispatch(monkeypatch, override):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic')
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'anthropic')
@@ -199,6 +189,97 @@ def test_anthropic_pin_refuses_foreign_per_call_model_without_dispatch(monkeypat
         monkeypatch.setattr(search, '_web_search_' + name, forbidden)
     result = json.loads(search._web_search(SimpleNamespace(task_metadata={}), 'query', model=override))
     assert result['route']['error'] and result['legs_tried'] == []
+
+
+# A model the call names is mandatory (owner decision, 1 Nov 2026): only legs that send it run, a routed model
+# or named connection has exactly one, and a known refusal or an unsupported route never brings in another
+# model, connection, source or ddgs. The mind gets the failure and decides what to do next.
+
+def _every_source_ready(monkeypatch, source):
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    for key in ('OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
+        monkeypatch.setenv(key, 'synthetic')
+    monkeypatch.delenv('OPENAI_BASE_URL', raising=False)
+    monkeypatch.setenv(CONNECTIONS_KEY, json.dumps([{'kind': 'openai', 'name': 'work', 'api_key': 'work-key'}]))
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', source)
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', 'saved-model')  # the saved choice is no substitute either
+    monkeypatch.setitem(sys.modules, 'ddgs', SimpleNamespace())
+
+
+def _refusing_legs(monkeypatch):
+    calls = []
+
+    def leg(name):
+        def refused(_ctx, _query, **kwargs):
+            calls.append((name, kwargs['model'].removeprefix('anthropic::'), kwargs.get('connection', '')))
+            error = RuntimeError('HTTP 400 this model is refused')
+            error.status_code = 400
+            raise error
+        return refused
+
+    for name in ('openai', 'openrouter', 'anthropic'):
+        monkeypatch.setattr(search, '_web_search_' + name, leg(name))
+    monkeypatch.setattr(search, '_web_search_ddgs', lambda query: calls.append(('ddgs', '', '')) or json.dumps(
+        {'answer': 'ddgs answer', 'answer_type': 'summary', 'sources': [], 'backend': 'ddgs'}))
+    return calls
+
+
+@pytest.mark.parametrize('source,named,expected', [
+    ('auto', 'anthropic::future', [('anthropic', 'future', '')]),
+    ('openrouter', 'future', [('openrouter', 'openai/future', '')]),
+    # No built-in transport sends these: refused before any send, never replaced by Auto's other legs.
+    ('auto', 'claudexor::codex=future', []),
+    ('auto', 'openai::vendor/future', []),
+    ('ddgs', 'future', []),  # ddgs takes no model, so a named one is refused rather than dropped
+])
+def test_a_model_the_call_names_is_mandatory(monkeypatch, source, named, expected):
+    _every_source_ready(monkeypatch, source)
+    calls = _refusing_legs(monkeypatch)
+    result = json.loads(search._web_search(SimpleNamespace(pending_events=[], task_metadata={}), 'query', model=named))
+    assert calls == expected
+    assert 'error' in result and 'answer' not in result
+    assert [(leg['source'], leg['model'], leg.get('connection', '')) for leg in result['legs_tried']] == expected
+    assert result['route']['model'] == named and 'This call named its model' in result['route']['note']
+    if expected:
+        assert all(leg['model_source'] == 'selection' for leg in result['route']['legs'])
+    else:
+        assert result['route']['error'] and result['route']['legs'] == []
+
+
+def test_a_named_native_model_may_use_its_other_provider_but_an_unknown_outcome_stops(monkeypatch):
+    _every_source_ready(monkeypatch, 'auto')
+    calls = []
+
+    def openai_refused(_ctx, _query, **kwargs):
+        calls.append(('openai', kwargs['model']))
+        error = RuntimeError('HTTP 404 model not found')
+        error.status_code = 404
+        raise error
+
+    def openrouter_answered(_ctx, _query, **kwargs):
+        calls.append(('openrouter', kwargs['model']))
+        return json.dumps({'answer': 'the same model elsewhere', 'answer_type': 'summary', 'sources': [],
+                           'backend': 'openrouter_server_tool'})
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail('a named model never reaches another model or ddgs')
+
+    monkeypatch.setattr(search, '_web_search_openai', openai_refused)
+    monkeypatch.setattr(search, '_web_search_openrouter', openrouter_answered)
+    monkeypatch.setattr(search, '_web_search_anthropic', forbidden)
+    monkeypatch.setattr(search, '_web_search_ddgs', forbidden)
+    ctx = SimpleNamespace(pending_events=[], task_metadata={})
+    result = json.loads(search._web_search(ctx, 'q', model='future'))
+    assert calls == [('openai', 'future'), ('openrouter', 'openai/future')]
+    assert result['answer'] == 'the same model elsewhere'
+    assert [(leg['source'], leg['outcome']) for leg in result['legs_tried']] == [('openai', 'failed'), ('openrouter', 'succeeded')]
+    calls.clear()
+    monkeypatch.setattr(search, '_web_search_openai', lambda _ctx, _query, **kwargs: calls.append(('openai', kwargs['model']))
+                        or search._unknown_provider_outcome('openai_responses'))
+    result = json.loads(search._web_search(ctx, 'q', model='future'))
+    assert calls == [('openai', 'future')] and result['reason_code'] == 'provider_outcome_unknown'
+    assert [leg['outcome'] for leg in result['legs_tried']] == ['provider_outcome_unknown']
 
 
 # #1697: an attempted leg, a failed or unavailable one, and the source that answered stay distinct.
@@ -258,6 +339,11 @@ def test_settings_preview_endpoint_serves_the_unavailable_causes(monkeypatch):
     assert {leg['source']: leg['unavailable_reason'] for leg in data['unavailable']} == {
         'openai': 'no_credentials', 'anthropic': 'package_missing'}
     assert 'secret-7f3' not in json.dumps(data)  # causes never carry a secret value
+    # No saved Model: the preview is the resolver's route, each leg on its source's recommended model.
+    assert data == resolve_web_search_route(settings=dict(saved)) and data['model'] == ''
+    assert {leg['source']: (leg['model'], leg['model_source']) for leg in data['legs'] + data['unavailable']} == {
+        source: (SEARCH_MODELS[source], 'provider_default') for source in ('openai', 'openrouter', 'anthropic')
+    } | {'ddgs': ('', 'provider_default')}
 
 
 def _progress_ctx():
@@ -436,16 +522,260 @@ def test_registry_offers_web_search_when_a_leg_is_eligible(tmp_path, monkeypatch
     assert registry.get_schema_by_name('web_search') is not None
 
 
-@pytest.mark.parametrize('source,model', [('openai', 'openai/gpt-5.2'), ('openrouter', 'anthropic::future')])
-def test_registry_explains_an_unsupported_selection_without_claiming_a_missing_key(tmp_path, monkeypatch, source, model):
+@pytest.mark.parametrize('source,model,named,leg', [('openai', 'openai/gpt-5.2', 'gpt-5.5', ('openai', 'gpt-5.5')),
+                                                   ('openrouter', 'anthropic::future', 'vendor/model', ('openrouter', 'vendor/model'))])
+def test_an_unsupported_saved_selection_leaves_web_search_to_a_call_that_names_a_model(
+        tmp_path, monkeypatch, source, model, named, leg):
+    """An unsupported saved Model no longer withholds the tool while its Source can serve: the omitted call
+    reports the selection's error and sends nothing; a call naming a valid model reaches its leg."""
     _search_settings(monkeypatch, source, OPENAI_API_KEY='synthetic', OPENROUTER_API_KEY='synthetic')
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', model)
     route = resolve_web_search_route()
+    assert route['error'] and not route['legs']
+    sent = []
+
+    def answered(_ctx, _query, **kwargs):
+        sent.append((leg[0], kwargs['model']))
+        return json.dumps({'answer': 'found', 'answer_type': 'summary', 'sources': [], 'backend': leg[0]})
+
+    monkeypatch.setattr(search, '_web_search_' + leg[0], answered)
     registry = _task_registry(tmp_path)
     hidden, rows, _lines = _withheld(registry)
-    assert hidden and [row['reason'] for row in rows] == ['unsupported_selection']
-    assert rows[0]['details']['web_search'] == route['error']
-    result = registry.execute_result('web_search', {'query': 'q'})
-    assert result.code == 'CAPABILITY_UNAVAILABLE' and route['error'] in result.text
-    assert 'unsupported_selection' in result.text and 'missing_credential' not in result.text
+    assert not hidden and rows == [] and registry.get_schema_by_name('web_search') is not None
+    omitted = registry.execute_result('web_search', {'query': 'q'})
+    assert omitted.code == 'TOOL_ERROR' and route['error'] in omitted.text and sent == []
+    found = registry.execute_result('web_search', {'query': 'q', 'model': named})
+    assert sent == [leg] and json.loads(found.text)['answer'] == 'found'
+
+
+def test_registry_withholds_web_search_only_when_no_call_could_run(tmp_path, monkeypatch):
+    _search_settings(monkeypatch, 'openai', OPENROUTER_API_KEY='synthetic')  # the pinned source has no key
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', 'openai/gpt-5.2')
+    route = resolve_web_search_route()
+    registry = _task_registry(tmp_path)
+    hidden, rows, _lines = _withheld(registry)
+    assert hidden and [row['reason'] for row in rows] == ['unsupported_selection+missing_credential']
+    assert rows[0]['details']['web_search'] == f"{route['error']}; web_search_backend: openai no_credentials"
+    refused = registry.execute_result('web_search', {'query': 'q', 'model': 'gpt-5.5'})
+    assert refused.code == 'CAPABILITY_UNAVAILABLE' and route['error'] in refused.text
     assert registry.get_schema_by_name('web_search') is None
+
+
+# A named connection is a choice only a selection or a call makes (owner decision, 1 Nov 2026): an install whose only
+# accounts are named offers the tool to the call that names one, while an omitted call and a bare id stay built-in.
+
+def _named_only(monkeypatch, source, saved, row, **packages):
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    _search_settings(monkeypatch, source)
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', saved)
+    monkeypatch.setenv(CONNECTIONS_KEY, json.dumps([row]))
+    _discoverable(monkeypatch, **{'anthropic': True, 'ddgs': False, **packages})
+
+
+_OPENAI_WORK = {'kind': 'openai', 'name': 'work', 'api_key': 'work-key'}
+
+
+@pytest.mark.parametrize('source,saved,row,named,sent', [
+    ('auto', '', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),
+    ('openai', 'openai/gpt-5.2', _OPENAI_WORK, 'openai@work::future', ('openai', 'future', 'work')),  # saved unusable
+    ('anthropic', '', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, 'anthropic@team::future', ('anthropic', 'future', 'team')),
+])
+def test_a_named_connection_only_install_offers_web_search_to_the_call_that_names_it(
+        tmp_path, monkeypatch, source, saved, row, named, sent):
+    _named_only(monkeypatch, source, saved, row)
+    calls = _refusing_legs(monkeypatch)
+    registry = _task_registry(tmp_path)
+    hidden, rows, _lines = _withheld(registry)
+    assert not hidden and rows == [] and registry.get_schema_by_name('web_search') is not None
+    # An omitted call and a bare id never reach the named account; the failure says which one a call may name.
+    omitted = registry.execute_result('web_search', {'query': 'q'})
+    bare = registry.execute_result('web_search', {'query': 'q', 'model': 'future'})
+    assert omitted.code == bare.code == 'TOOL_ERROR' and not any(connection for _s, _m, connection in calls)
+    assert json.loads(omitted.text)['named_connections'] == [f"{row['kind']}@{row['name']}"]
+    assert 'named_connections' not in json.loads(bare.text)  # the call named its model; that failure is its own
+    assert all('connection' not in leg for leg in resolve_web_search_route()['legs'])
+    calls.clear()
+    refused = registry.execute_result('web_search', {'query': 'q', 'model': named})
+    assert calls == [sent] and refused.code == 'TOOL_ERROR'  # sent there and only there, even when refused
+
+
+def test_a_failed_search_with_a_built_in_route_does_not_advertise_named_connections(tmp_path, monkeypatch):
+    _named_only(monkeypatch, 'auto', '', _OPENAI_WORK)
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'synthetic')
+    _refusing_legs(monkeypatch)
+    result = _task_registry(tmp_path).execute_result('web_search', {'query': 'q'})
+    assert result.code == 'TOOL_ERROR' and 'named_connections' not in json.loads(result.text)
+
+
+@pytest.mark.parametrize('source,row,packages', [
+    ('anthropic', _OPENAI_WORK, {}),  # a pinned Source refuses another source's connection
+    ('ddgs', _OPENAI_WORK, {}),  # ddgs takes no model, so no call could name one
+    ('auto', {**_OPENAI_WORK, 'enabled': False}, {}),  # a disabled row cannot serve
+    ('auto', {'kind': 'openai', 'name': 'keyless'}, {}),  # nor one without its credential
+    ('auto', {'kind': 'openai-compatible', 'name': 'vllm', 'base_url': 'https://compatible.invalid/v1'}, {}),  # no search transport
+    ('anthropic', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, {'anthropic': False}),  # its SDK is missing
+])
+def test_a_named_connection_no_call_could_use_leaves_web_search_withheld(tmp_path, monkeypatch, source, row, packages):
+    _named_only(monkeypatch, source, '', row, **packages)
+    hidden, rows, _lines = _withheld(_task_registry(tmp_path))
+    assert hidden and rows and search._available_web_search_backends() == []
+
+
+@pytest.mark.parametrize('sdk', [False, True])
+def test_the_registry_names_a_named_connections_own_cause(tmp_path, monkeypatch, sdk):
+    """Only anthropic@team has a key, under the Anthropic Source with a blank Model. Without its SDK the registry
+    names that cause beside the built-in leg's missing key, never a lone missing key; with it, the call runs there."""
+    _named_only(monkeypatch, 'anthropic', '', {'kind': 'anthropic', 'name': 'team', 'api_key': 'k'}, anthropic=sdk)
+    calls = _refusing_legs(monkeypatch)
+    registry = _task_registry(tmp_path)
+    hidden, rows, _lines = _withheld(registry)
+    result = registry.execute_result('web_search', {'query': 'q', 'model': 'anthropic@team::future'})
+    if sdk:
+        assert not hidden and rows == [] and calls == [('anthropic', 'future', 'team')] and result.code == 'TOOL_ERROR'
+        return
+    reason, detail = 'missing_credential+package_missing', 'web_search_backend: anthropic no_credentials, anthropic@team package_missing'
+    assert hidden and [(row['reason'], row['details']['web_search']) for row in rows] == [(reason, detail)]
+    assert result.code == 'CAPABILITY_UNAVAILABLE' and f"'web_search' is unavailable: {reason} ({detail})." in result.text
+    assert calls == []
+
+
+# A blank Model is the owner's "follow the recommendations" (owner decision, 1 Nov 2026): it stays blank through
+# load, an ordinary Settings save and reload, while every saved model, an old shipped one included, stays saved.
+
+@pytest.mark.parametrize('stored,expected', [
+    (None, {'OUROBOROS_WEBSEARCH_MODEL': '', 'OUROBOROS_WEBSEARCH_BACKEND': 'auto'}),  # a fresh install
+    ({'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2'}, {'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2', 'OUROBOROS_WEBSEARCH_BACKEND': 'auto'}),
+    ({'OUROBOROS_WEBSEARCH_BACKEND': 'anthropic', 'OUROBOROS_WEBSEARCH_MODEL': 'claude-opus-4-6'},
+     {'OUROBOROS_WEBSEARCH_MODEL': 'claude-opus-4-6', 'OUROBOROS_WEBSEARCH_BACKEND': 'anthropic'}),
+])
+def test_settings_keep_a_blank_search_model_blank_and_a_saved_one_saved(tmp_path, monkeypatch, stored, expected):
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway import settings as settings_mod
+    from tests.test_owner_settings_write_seam import _settings_app
+
+    for key in cfg.SETTINGS_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / 'data' / 'settings.json'
+    path.parent.mkdir()
+    monkeypatch.setattr(cfg, 'DATA_DIR', path.parent)
+    monkeypatch.setattr(cfg, 'SETTINGS_PATH', path)
+    cfg.reset_runtime_mode_baseline_for_tests()
+    if stored is not None:
+        path.write_text(json.dumps({'OPENROUTER_API_KEY': 'synthetic', **stored}), encoding='utf-8')
+    search_keys = tuple(expected)
+    app = _settings_app(monkeypatch, path)
+    app.router.routes.append(Route('/api/settings', endpoint=settings_mod.api_settings_get, methods=['GET']))
+    client = TestClient(app)
+    shown = client.get('/api/settings').json()
+    assert {key: shown[key] for key in search_keys} == expected
+    # The Settings page posts the fields it shows: an unrelated save writes them back as shown.
+    saved = client.post('/api/settings', json={'TOTAL_BUDGET': '25', **{key: shown[key] for key in search_keys}})
+    assert saved.status_code == 200, saved.text
+    on_disk = json.loads(path.read_text(encoding='utf-8'))
+    assert on_disk.get('OUROBOROS_WEBSEARCH_MODEL', '') == expected['OUROBOROS_WEBSEARCH_MODEL']
+    reloaded = cfg.load_settings()
+    assert {key: reloaded[key] for key in search_keys} == expected
+    route = resolve_web_search_route(settings=reloaded)
+    if expected['OUROBOROS_WEBSEARCH_MODEL'] == '':
+        assert all(leg['model'] == SEARCH_MODELS[leg['source']] and leg['model_source'] == 'provider_default'
+                   for leg in route['legs'] + route['unavailable'])
+    elif expected['OUROBOROS_WEBSEARCH_BACKEND'] == 'anthropic':
+        assert route['ignored_legacy_model'] == 'claude-opus-4-6'  # the legacy bare spelling keeps its meaning
+    else:
+        assert route['legs'][0]['model'] == 'openai/gpt-5.2' and route['legs'][0]['model_source'] == 'selection'
+    # Editing the field authors a choice.
+    assert client.post('/api/settings', json={'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.5'}).status_code == 200
+    assert json.loads(path.read_text(encoding='utf-8'))['OUROBOROS_WEBSEARCH_MODEL'] == 'gpt-5.5'
+    cfg.reset_runtime_mode_baseline_for_tests()
+
+
+# Credential plans (benchmark isolation, the manifest disclosure) read the search slot as the legs this
+# resolver sends for the target's own Source and Model, never as a chat route and never by Main's provider.
+
+@pytest.mark.parametrize(("search", "search_keys", "main"), [
+    pytest.param("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
+    pytest.param("gpt-5.2", {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}, "anthropic::owner-main", id='gpt-5.2-search_keys1-anthropic::owner-main'),  # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
+    pytest.param("google/gemini-2.5-pro", {"OPENROUTER_API_KEY"}, "openrouter/model", id='google/gemini-2.5-pro-search_keys2-openrouter/model'),  # An OpenRouter catalog id (a single-model pin) plans that leg only, never Auto's other-model fallback.
+    pytest.param("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}, "anthropic::owner-main", id='openai@work::gpt-5.5-search_keys3-anthropic::owner-main'),  # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
+])
+def test_the_web_search_slot_plans_the_legs_its_configured_search_sends(main, search, search_keys):
+    """The search Model is no chat route: the plan takes the legs ``search_routes`` resolves for the
+    target's own Source and Model, so the isolated run searches in the target's order whatever Main is.
+    A blank search is not pinned to the chat slots' provider: its recommended direct legs are planned
+    and their keys copied (a run that must stay on one provider pins its search, as the provenance `_LIVE` does)."""
+    from devtools.benchmarks.common.server_runner import build_isolated_settings
+    from ouroboros.provider_models import provider_credential_plan
+
+    live = {"OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": main, "OUROBOROS_WEBSEARCH_MODEL": search,
+            "OPENROUTER_API_KEY": "or-value", "OPENAI_API_KEY": "oa-value", "ANTHROPIC_API_KEY": "an-value",
+            "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "work", "api_key": "work-value"}]}
+    chat_only = provider_credential_plan({**live, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"})["planned_keys"]
+    assert set(provider_credential_plan(live)["planned_keys"]) == set(chat_only) | search_keys
+    out = build_isolated_settings(live, OUROBOROS_MODEL=main, OUROBOROS_MODEL_LIGHT=main)
+    assert {key for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY") if key in out} >= (
+        search_keys - {"OUROBOROS_CONNECTIONS"})
+    first = resolve_web_search_route(settings=out)["legs"][0]
+    target = resolve_web_search_route(settings=live)["legs"][0]
+    assert (first["source"], first["model"], first.get("connection", "")) == (
+        target["source"], target["model"], target.get("connection", ""))  # the isolated run searches as the target
+
+
+_NOT_SEARCH_KEYS = ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION", "OUROBOROS_MODEL_CONSCIOUSNESS",
+                    "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_FALLBACK", "OUROBOROS_MODEL_SAFETY")
+
+
+_SEARCH_CHOICE = ("OUROBOROS_WEBSEARCH_BACKEND", "OUROBOROS_WEBSEARCH_MODEL")
+
+
+@pytest.mark.parametrize(("main", "saved", "override", "search_keys"), [
+    pytest.param("deepseek::chat", {}, {}, {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, id='deepseek::chat-saved0-override0-search_keys0'),  # nothing saved: Auto, not this process's Source
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {}, set(), id='deepseek::chat-saved2-override2-search_keys2'),  # The saved Source travels with its Model: a ddgs pin's stale model never becomes paid Auto search,
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {"OUROBOROS_WEBSEARCH_BACKEND": "openai"}, {"OPENAI_API_KEY"}, id='deepseek::chat-saved4-override4-search_keys4'),  # A benchmark's explicit Source wins over the saved one.
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_MODEL": "vendor/future"}, {}, {"OPENROUTER_API_KEY"}, id='deepseek::chat-saved6-override6-search_keys6'),  # never Auto's other-model fallback
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "openai"}, {}, {"OPENAI_API_KEY"}, id='minimax::chat-saved1-override1-search_keys1'),
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "anthropic", "OUROBOROS_WEBSEARCH_MODEL": "claude-opus-4-6"}, {}, {"ANTHROPIC_API_KEY"}, id='minimax::chat-saved3-override3-search_keys3'),  # nor does a legacy bare id under the Anthropic pin change meaning (the recommended model is still the one sent).
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "openai", "OUROBOROS_WEBSEARCH_MODEL": "openai/gpt-5.2"}, {}, {"OPENAI_API_KEY"}, id='minimax::chat-saved5-override5-search_keys5'),  # An unusable saved Model leaves the Source's recommended leg planned: a call naming its own model meets it.
+])
+def test_an_isolated_document_searches_as_the_saved_one_whatever_main_or_the_host(monkeypatch, saved, override, search_keys, main):
+    """The real isolated document keeps the saved Source with its Model (an explicit override wins), and its grant
+    is planned from that pair, whatever Main is and whatever this process's own Source and Model are; the run's
+    route then offers exactly the granted legs."""
+    from devtools.benchmarks.common.secrets import isolated_credential_grants
+    from devtools.benchmarks.common.server_runner import build_isolated_settings
+    from ouroboros.provider_models import PROVIDER_CREDENTIAL_GROUPS
+
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "anthropic")
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "anthropic::host-search")
+    search_group = {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}
+    live = {**dict.fromkeys(_NOT_SEARCH_KEYS, main), "OPENAI_API_KEY": "oa", "OPENROUTER_API_KEY": "or", "ANTHROPIC_API_KEY": "an",
+            "DEEPSEEK_API_KEY": "ds", "MINIMAX_API_KEY": "mm", **saved}
+    out = build_isolated_settings(live, **override)
+    assert {key: out.get(key) for key in _SEARCH_CHOICE} == {key: {**saved, **override}.get(key) for key in _SEARCH_CHOICE}
+    grants = isolated_credential_grants(out)
+    assert set(grants["planned_keys"]) & search_group == search_keys
+    assert {key for key in search_group if key in out} == search_keys
+    assert set(PROVIDER_CREDENTIAL_GROUPS[main.partition("::")[0]]) <= set(grants["planned_keys"])
+    route, saved_route = resolve_web_search_route(settings=out), resolve_web_search_route(settings={**live, **override})
+
+    def meaning(of):  # readiness differs (the isolated document holds only planned keys); the planned legs do not
+        return of["source"], of.get("ignored_legacy_model"), sorted((leg["source"], leg["model"]) for leg in of["legs"] + of["unavailable"])
+    assert meaning(route) == meaning(saved_route)  # the isolated run searches as the saved document does
+    if route.get("error"):  # a call naming its own model is what runs there, on the recommended leg's credential
+        route = resolve_web_search_route(settings=out, model="")
+    keyed = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+    # Credentials reach what the run will send, and nothing but the target's own legs is eligible.
+    assert {keyed[leg["source"]] for leg in route["legs"] if leg["source"] in keyed} == search_keys
+
+
+def test_a_ddgs_search_plans_no_credential_of_its_own():
+    """ddgs ignores a saved model, so the slot's route spelling plans nothing (it once planned its provider)."""
+    from ouroboros.provider_models import provider_credential_plan
+
+    settings = {"OUROBOROS_MODEL": "openrouter/model", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs",
+                "OUROBOROS_WEBSEARCH_MODEL": "anthropic::saved-search"}
+    plan = provider_credential_plan(settings)
+    assert "ANTHROPIC_API_KEY" not in plan["planned_keys"] and "anthropic" not in plan["providers"]

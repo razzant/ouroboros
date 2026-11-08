@@ -26,12 +26,14 @@ def fixture(name: str):
 
 
 def _document() -> str:
-    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css")
+    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css", "settings.css")
                      if (WEB / name).exists())
     return (
         f'<!doctype html><html><head>{sheets}</head><body><main id="content"></main>'
         '<script type="module">'
-        'import {initSkills} from "/static/modules/skills.js";'
+        'const [{initSkills},{startHostModules},{getContributions}]=await Promise.all(['
+        'import("/static/modules/skills.js"),import("/static/modules/host_modules.js"),import("/static/modules/contributions.js")]);'
+        'if(new URL(location.href).searchParams.has("host_modules")){const contributions=getContributions();contributions.attach();window.hostRuntime=startHostModules({store:contributions});}'
         'window.skillsView=initSkills({showPage:(page)=>{window.shownPage=page;},'
         'openSettingsTab:(tab)=>{window.settingsTab=tab;}});'
         'document.querySelector("#page-skills").classList.add("active");'

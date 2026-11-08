@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import os
 from hashlib import sha256
+from typing import Any
 
 
 HOST_INSTRUCTIONS = (
-    "You are a delegated worker running inside the workspace assigned by your host. Your "
-    "assignment and explicit owner/task constraints govern your work. Do not run git "
+    "You are a delegated worker running inside the workspace assigned by your host. The words of "
+    "your host's human carried with your assignment state what was asked; your assignment divides "
+    "and scopes your part within them and never overrides what they ask or forbid. Explicit limits "
+    "in the assignment still bind. Later words of that human may reach you during a turn as a host "
+    "message whose first line begins \"[Owner words quoted verbatim\"; if the engine defers them, "
+    "the same rows appear under the heading MY HUMAN'S WORDS FOR THIS WORK on your next turn. They "
+    "are that human's exact words. Do not run git "
     "commit, tag, push, rebase, reset or any other history-moving command: your host "
     "captures changes against its recorded baseline and decides whether to integrate "
     "them. A private delegated snapshot can preserve committed changes in that diff, "
     "but a moved HEAD is disclosed as an instruction violation; it does not authorize "
     "a commit or apply. A self_worktree capture separately requires an unchanged HEAD. "
     "Do not review or accept your own change, do not "
-    "touch the host's runtime controls or memory, or modify its skills. If your environment "
+    "touch the host's runtime controls, or modify its memory or skills; unless your assignment "
+    "restricts reads, you may read the memory files your session references name. If your environment "
     "offers a way to ask your host a clarifying "
     "question, you may use it: your host may answer from its task context; a question "
     "that carries an engine expiry times out benignly if unanswered — continue with "
@@ -60,6 +67,19 @@ UNPROVEN_BOUNDARY_INSTRUCTION = (
 # releases a copy (`delegate_named_evidence.retain_named_evidence` reads it from here); a session
 # is told it, never asked to guess.
 EVIDENCE_DIRNAME = ".review-evidence"
+# Disposable by purpose, never by name, kind or size (#2642): generated build/dependency output is not
+# automatically excluded from a Git copy's capture, and named evidence applies no cache, binary or size filter,
+# so a tool's default location can turn this output into a durable payload.
+CHECK_BYPRODUCTS = ("build or dependency output that only serves your checks (environments, dependency "
+                    "installs, compiled output, tool caches)")
+# What the host declares about the scratch it made for one run, before the run uses it.
+# Purpose and ownership, never a promise that the contents come back byte for byte.
+DISPOSABLE_SCRATCH = (
+    "disposable by the host's declaration: never captured; it follows this task, or a reviewer's checking "
+    "copy through continuation, until release, unless the producer or owner retains it (the OS "
+    "may clear it sooner), so anything left only there may be lost: keep edits in your working tree and "
+    "return the results you need; nothing installed there is reinstalled for a later session, which "
+    "builds its own from the project's files")
 
 
 def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
@@ -68,11 +88,11 @@ def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
 
     ``launcher`` names safe_test, for a copy of the body, whose checkout carries it; any
     other project hears the same place with no command it lacks. The session's own
-    temporary directory may still differ. ``granted`` is the exact scratch the session's
-    engine grants it (``workspace_preflight.session_service_directories``): then it is the
-    one place named, the place its request permits."""
+    temporary directory may still differ. ``granted`` is the exact scratch the host made
+    for the session (``workspace_preflight.session_service_directories``), granted by its
+    engine or, at full access, merely named: then it is the one place named."""
     if granted:
-        return f"{'pass --temp-parent ' if launcher else 'in '}{granted}, the scratch your engine grants this run"
+        return f"{'pass --temp-parent ' if launcher else 'in '}{granted}, this run's disposable scratch"
     from pathlib import Path
 
     from ouroboros.test_environment import default_temp_parent, git_ancestor
@@ -96,34 +116,52 @@ def disposable_state_instruction(evidence_root: str, *, investigation: bool = Fa
     Work product stays in the private copy; disposable process state is the
     session's task-owned scratch, released or retained by its producer outside
     every Git tree, so verification never discovers a checkout by walking up; new
-    named evidence goes where the host retains it. ``evidence_root`` "" is a copy
+    named evidence goes where the host retains it. Build and dependency output that only
+    serves checks is disposable by purpose, never by name or size (#2642): in a Git copy it
+    may stay only as new files Git ignores (tracking overrides ignore rules),
+    never in the evidence folder, whose retention applies no such filter. ``evidence_root`` "" is a copy
     captured whole: a payload or folder product retains no evidence folder, while an
     evidence-only investigation's copy is itself retained (its PURPOSE line names the
-    folder), so it learns only where outside scratch goes. Project-neutral: the body's
+    folder), so it learns to keep that output out and where outside scratch goes. Project-neutral: the body's
     own launcher is named in its environment facts. ``granted`` is the engine-granted
     scratch, named instead of the host's default temp parent (``scratch_fact``).
     """
     scratch = scratch_fact(granted=granted)
     if not evidence_root and investigation:
-        return f"Disposable process state you keep outside this copy goes outside every Git working tree ({scratch})."
+        return (f"This copy is itself your retained evidence, so keep {CHECK_BYPRODUCTS} out of it; disposable "
+                f"process state you keep outside this copy goes outside every Git working tree ({scratch}).")
     if not evidence_root:
         return ("This copy is itself the result: every file you leave in it becomes part of what is "
-                "captured, so keep test scratch, environments and evidence outside it and outside every "
+                f"captured, so keep test scratch, {CHECK_BYPRODUCTS} and evidence outside it and outside every "
                 f"Git working tree ({scratch}); no evidence folder is retained for this run, so report "
                 "verification results in your answer.")
-    return ("Disposable process state you create — test scratch, package-manager temporaries — is not "
-            f"part of that work: keep it outside every Git working tree ({scratch}); durable package "
-            "downloads go only to the shared download cache your host names. Keep verification "
-            f"evidence worth returning under {evidence_root}: the host retains new files there before it "
-            "releases the copy and never applies them; files the project already tracks there stay "
-            "ordinary work product.")
+    return ("Disposable process state you create — test scratch, package-manager temporaries and "
+            f"{CHECK_BYPRODUCTS} — is not part of that work: keep it outside every Git working tree ({scratch}) "
+            "or, where a tool must keep it in the project tree, in new files Git ignores here (tracking overrides "
+            "ignore rules), setting each tool's output and cache location rather than "
+            "trusting a default, which may land where it is captured or in the author's checkout; durable package "
+            "downloads go only to the shared download cache your host names. Keep verification evidence worth "
+            f"returning under {evidence_root}: the host retains new files there before it releases the copy and "
+            "never applies them; files the project already tracks there stay ordinary work product. That folder "
+            "is for reports, logs, sources, repro scripts and intended binaries of any size; its retention applies "
+            "no cache, binary, size or ignore filter, so by-products left there are kept too, and a link or special "
+            "entry is only recorded as a gap.")
 
 
+# Persisted with every run's instructions, which a resumed vendor session may keep from its
+# first request (#2513): run-specific facts are scoped to their run, and the current one is
+# named by identity (this turn's host facts, the harness's starting directory), never by position.
 _ACCESS_PRECEDENCE = (
     "this line governs native process access, while explicit task constraints "
-    "and the assigned edit target still bind. When a private delegated snapshot "
-    "exists, the later DELEGATED EXECUTION BINDING is the assigned edit target "
-    "and supersedes path fields in the inherited contract."
+    "and the assigned edit target still bind. This access, the concrete edit, evidence, "
+    "scratch and copy-local environment locations, and what a private copy makes read-only "
+    "belong to ONE run: a continued run's own host facts in its current turn restate them "
+    "within the same owner, task, target and access ceiling, and work orders, bindings or "
+    "evidence quoted from an earlier run are history wherever they appear. When a private "
+    "delegated snapshot exists, the current run's DELEGATED EXECUTION BINDING is the assigned "
+    "edit target and supersedes path fields in the inherited contract. A run's root is the "
+    "directory your harness started its current turn in; a path inside an earlier run's copy "
+    "means the same relative path from there."
 )
 
 ACCESS_INSTRUCTIONS = {
@@ -148,8 +186,9 @@ ACCESS_INSTRUCTIONS = {
 INVESTIGATION_INSTRUCTION = (
     " PURPOSE: this is an evidence-only investigation. Your private copy exists so you can run the "
     "checks you judge useful (tests, scripts, fixtures, temporary files); nothing in it is applied to "
-    "the reviewed or researched tree or creates an obligation to apply it. Put any file worth keeping "
-    "under .review-evidence/: the host retains that folder and the copy's other changes as evidence."
+    "the reviewed or researched tree or creates an obligation to apply it. Put any file worth returning "
+    "under .review-evidence/: the host retains that folder and the copy's other changes as evidence, with "
+    "no cache or binary filter."
 )
 
 
@@ -228,8 +267,10 @@ def execution_binding_text(execution_root: str, authority_root: str,
         f"{authority or '(unknown)'} is a read-only identity/reference until the "
         "parent explicitly integrates the captured result. Do not write, patch, "
         "stage, reset, clean, or commit the authority root, another checkout or the operator's "
-        "files. If the harness cannot honor this binding, stop with a typed execution-root "
-        "mismatch instead of falling back to the authority root."
+        "files. Compare only the directory your harness started this run in, physically: another "
+        "spelling of it, such as through a symlink, matches, and a later cd changes nothing. If it is "
+        "not this root, stop with a typed execution-root mismatch instead of falling back to the "
+        "authority root."
     )
 
 
@@ -248,15 +289,27 @@ def directory_copy_binding_instruction(authority_root: str, binding_sha256: str 
     )
 
 
-def in_place_binding_instruction(root: str) -> str:
-    """Tell an in-place Git writer that its host's own folder is its working tree."""
+def in_place_binding_instruction(root: str, service: Any = None) -> str:
+    """Tell an in-place Git writer that its host's own folder is its working tree. ``service`` is
+    what ``subagent_work_order.session_service_directories`` made for it: its disposable scratch,
+    or the typed reason there is none."""
+    scratch, why = getattr(service, "scratch", ""), getattr(service, "limitation", "")
+    place = (f"{scratch_fact(granted=scratch)}, {DISPOSABLE_SCRATCH}" if scratch else scratch_fact()
+             + (f" (no disposable scratch could be made for this run: {why}; nothing owns or removes that place, "
+                "so report the gap)" if why else ""))
     return (
         "\n\nDELEGATED IN-PLACE BINDING (typed host fact): you work directly in "
         f"{str(root or '').strip() or '(unknown)'}, your host task's own folder, as it chose. Every change lands "
         "there as you make it and nothing is captured for a separate apply. Your host may be working there too: "
         "change only what the assignment needs; never reset, clean, stash, check out or commit. Keep test "
-        "scratch, environments and caches outside every Git working tree, " + scratch_fact() + "."
+        "scratch, environments and caches outside every Git working tree, " + place + "."
     )
+
+
+def no_copy_binding_instruction(workdir: str) -> str:
+    """Name the root of a run no binding renderer covers (read-only, a direct folder): where
+    the engine starts it, ``execution.workspaceRoot`` or else ``scope.root``."""
+    return f"\n\nThis run has no private copy: its working directory is {str(workdir or '').strip() or '(unknown)'}."
 
 
 def apply_execution_binding(instructions: str, execution_root: str,

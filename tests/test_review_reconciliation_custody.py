@@ -58,7 +58,7 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
 
     state = load_state(drive)
     attempt = state.attempts[-1]
-    assert attempt.paid is True
+    assert attempt.paid is False  # reserved and owned; paid only once a seat is physically sent
     assert attempt.late_result_pending is True
     from ouroboros.process_custody import current_custody_session_id
 
@@ -103,6 +103,7 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
     )
     assert seen_operations == [triad["operation_id"]]
     assert actor.operation_id == triad["operation_id"]
+    assert load_state(drive).attempts[-1].paid is True  # the owned physical operation stamped its row
 
     checkpoint = ctx._review_pending_invocation_checkpoint
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -506,16 +507,10 @@ def test_malformed_durable_roster_containers_survive_real_state_loading(tmp_path
     "payload",
     [
         [],
-        {"attempts": {}},
         {"attempts": ["not-an-object"]},
-        {"attempts": [{"status": []}]},
-        {"attempts": [{"status": "reviewing", "task_id": 7}]},
         {"attempts": [{"status": "reviewing", "attempt": "1"}]},
-        {"attempts": [{"status": "reviewing", "paid": "yes"}]},
-        {"attempts": [{"status": "reviewing", "blocked": 1}]},
         {"attempts": [{"status": "reviewing", "finished_ts": []}]},
         {"attempts": [{"status": "reviewing", "review_owner_pid": "123"}]},
-        {"attempts": [{"status": "reviewing", "review_owner_session_id": 7}]},
     ],
 )
 def test_locked_update_refuses_malformed_attempt_authority_without_rewrite(

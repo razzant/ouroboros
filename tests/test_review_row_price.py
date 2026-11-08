@@ -1,8 +1,8 @@
-"""One review row, one price: Settings → Agents and ``## Review`` show the same words.
+"""One review row, one price: Settings → Agents and ``## Review seat activity`` show the same words.
 
 Both read what one review by the row actually cost (``review_price``: the median of its recent
 reviews on its model, with their count and range) — ``GET /api/review-pool``'s row cost rendered by
-``reviewCostText`` and the seat's ``cost_hint`` in ``## Review`` — so the owner and the model read one
+``reviewCostText`` and the seat's ``cost_hint`` in ``## Review seat activity`` — so the owner and the model read one
 number in one wording; a session row spends a seat and time, a local route no API money, a row
 without history is "cost unknown".
 """
@@ -47,8 +47,10 @@ def pool(root, monkeypatch):  # noqa: F811
 
 
 def _seat_hints() -> dict:
-    text = review_facts_block()
-    return {seat["seat_id"]: seat["cost_hint"] for seat in json.loads(text.split("\n\n", 1)[1])["pool"]}
+    """Each seat's price as ``## Review seat activity`` (the changing part beside ``## Review``) prints it."""
+    activity: list = []
+    review_facts_block(activity_out=activity)
+    return {seat["seat_id"]: seat["cost_hint"] for seat in json.loads(activity[0].split("\n\n", 1)[1])["seats"]}
 
 
 def _settings_texts(costs: dict, rows: list) -> list:

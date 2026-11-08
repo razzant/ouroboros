@@ -16,7 +16,6 @@ from tests.test_preflight_node import requires_node
 from tests.test_preflight_receipts import _git, _tiny_repo
 from tests.test_run_tests_script import run_tests as run_tests
 
-pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
 SHORT_TEMP = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
                                 reason="the short AF_UNIX temp-root default is macOS and Linux")
@@ -82,6 +81,66 @@ def test_temp_parent_is_short_on_macos_and_linux_and_the_platform_default_elsewh
     monkeypatch.setattr(test_environment.sys, "platform", platform)
     monkeypatch.setattr(test_environment.tempfile, "gettempdir", lambda: str(tmp_path))
     assert test_environment.default_temp_parent() == (tmp_path if platform == "win32" else Path("/tmp"))
+    # Session scratch alone moves out of the OS cleaners' /tmp (O3, owner Q1=A narrowed by A-1):
+    # the preflight, commit-admission and safe_test parent above is unchanged.
+    assert test_environment.session_scratch_parent() == (tmp_path if platform == "win32" else Path("/var/tmp"))
+
+
+@SHORT_TEMP
+def test_session_scratch_parent_keeps_the_deepest_nested_manager_socket_inside_the_bound(tmp_path):
+    """The real witness of the four extra bytes: safe_test rooted in a session scratch under
+    ``session_scratch_parent()`` (as a delegated session's instructions ask), then a real manager
+    socket in both nested layouts a run makes there: an owned process temp (``c<8>``) and the pytest
+    session root with its ``tmp`` (``p<8>/tmp``, the deepest: 95 of 104 bytes under ``/private/var/tmp``)."""
+    parent = test_environment.session_scratch_parent().resolve()
+    scratch = Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
+    probe = tmp_path / "probe.py"
+    probe.write_text(f'''
+import json, multiprocessing, os, pathlib, sys, tempfile
+sys.path.insert(0, {str(REPO)!r})
+from ouroboros.test_environment import declare_scratch, owned_process_temp
+if __name__ == "__main__":  # a spawned manager child re-imports this file
+    root = pathlib.Path(os.environ["OUROBOROS_TEST_TEMP_ROOT"])
+    session = pathlib.Path(tempfile.mkdtemp(prefix="p", dir=root))  # tests/conftest.py's pytest root
+    declare_scratch(session, "pytest-session")
+    found = {{}}
+    for layout, temp in (("process", owned_process_temp()), ("pytest", session / "tmp")):
+        temp.mkdir(exist_ok=True)
+        os.environ["TMPDIR"] = tempfile.tempdir = str(temp)
+        with multiprocessing.Manager() as manager:
+            queue = manager.Queue()
+            queue.put("owned")
+            assert queue.get(timeout=5) == "owned"
+            found[layout] = {{"address": manager.address, "tmpdir": str(temp)}}
+    print(json.dumps(found))
+''', encoding="utf-8")
+    try:
+        result = subprocess.run([sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--temp-parent",
+                                 str(scratch), "--timeout", "180", "--", sys.executable, str(probe)],
+                                cwd=REPO, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        found = json.loads(result.stdout.splitlines()[-1])
+        for layout in ("process", "pytest"):
+            address = Path(found[layout]["address"])
+            assert address.is_relative_to(scratch) and Path(found[layout]["tmpdir"]).is_relative_to(scratch), found
+            assert len(os.fsencode(address)) < 104, (layout, len(os.fsencode(address)), address)
+        assert "SAFE_TEST_RELEASED" in result.stderr and not any(scratch.iterdir())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_a_nested_gate_lives_under_its_owner_and_a_top_level_gate_keeps_the_default_parent(tmp_path, monkeypatch):
+    owner = (tmp_path / "owner").resolve()
+    owner.mkdir()
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(owner))
+    nested = test_environment.gate_root()
+    assert nested.parent == owner and (nested / test_environment.SCRATCH_MARKER).is_file(), "its owner's release takes it"
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT")
+    parent = (tmp_path / "default").resolve()
+    parent.mkdir()
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
+    top = test_environment.gate_root()
+    assert top.parent == parent and top.name.startswith("obs-"), "a record of a kept root needs this name"
 
 
 def test_fingerprint_environment_projection_creates_no_directories(tmp_path):
@@ -121,7 +180,8 @@ def test_real_manager():
         assert queue.get(timeout=5) == 'owned'
         address = manager.address
         assert len(os.fsencode(address)) < 104
-        pathlib.Path({str(manager_report)!r}).write_text(json.dumps({{'address': address, 'tmpdir': os.environ['TMPDIR']}}), encoding='utf-8')
+        pathlib.Path({str(manager_report)!r}).write_text(json.dumps({{
+            'address': address, 'tmpdir': os.environ['TMPDIR'], 'engine': os.environ.get('OUROBOROS_UI_BROWSER_ENGINE')}}), encoding='utf-8')
 ''', encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "real nested runtime witnesses")
@@ -130,6 +190,7 @@ def test_real_manager():
     for key in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.setenv(key, str(ambient))
     monkeypatch.setattr(tempfile, "tempdir", str(ambient))
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", "webkit")  # safe_test keeps a person's choice; the gate never does
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the gate must really run two workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
@@ -139,17 +200,22 @@ def test_real_manager():
     assert Path(json.loads(node_report.read_text(encoding="utf-8"))["node"]).resolve() == Path(selected).resolve()
     facts = json.loads(manager_report.read_text(encoding="utf-8"))
     assert Path(facts["tmpdir"]).is_relative_to(Path("/tmp").resolve())
+    assert facts["engine"] is None
 
 
 @SHORT_TEMP
-def test_a_gate_rooted_in_the_inherited_long_temp_fails_its_nested_manager(tmp_path, monkeypatch):
+def test_a_gate_rooted_in_the_inherited_long_temp_cannot_hold_its_nested_managers_socket(tmp_path, monkeypatch):
     """The negative of the short default: the same real gate rooted where the old non-macOS rule
     put it (the inherited TMPDIR) gives its nested multiprocessing manager a socket path past the
-    AF_UNIX limit (#2110: the reporter's Linux fence and saved-pause failures)."""
+    AF_UNIX limit (#2110: the reporter's Linux fence and saved-pause failures). The interpreter
+    refuses it, or (CPython 3.14) listens in the shared /tmp instead: never inside that parent."""
     repo = _tiny_repo(tmp_path)
+    report = tmp_path / "manager.json"
     (repo / "tests/test_serial.py").write_text(
-        "import multiprocessing, pytest\n\n\n@pytest.mark.serial\ndef test_real_manager():\n"
-        "    with multiprocessing.Manager() as manager:\n        assert manager.Queue() is not None\n",
+        "import json, multiprocessing, os, pathlib, pytest\n\n\n@pytest.mark.serial\ndef test_real_manager():\n"
+        "    with multiprocessing.Manager() as manager:\n        assert manager.Queue() is not None\n"
+        f"        pathlib.Path({str(report)!r}).write_text(json.dumps({{\n"
+        "            'address': manager.address, 'tmpdir': os.environ['TMPDIR']}), encoding='utf-8')\n",
         encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "a nested manager")
@@ -158,14 +224,22 @@ def test_a_gate_rooted_in_the_inherited_long_temp_fails_its_nested_manager(tmp_p
     for key in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.setenv(key, str(ambient))
     monkeypatch.setattr(tempfile, "tempdir", str(ambient))
-    monkeypatch.setattr(preflight_runner, "default_temp_parent", lambda: Path(tempfile.gettempdir()))
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT", raising=False)  # a top-level gate takes the default parent
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: Path(tempfile.gettempdir()))
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
     error = preflight_runner.run_hermetic_pytest(repo, timeout=120, max_output=12000)
-    assert error and "AF_UNIX path too long" in error, error
+    if error or not report.exists():
+        assert error and "AF_UNIX path too long" in error, error
+    else:
+        facts = json.loads(report.read_text(encoding="utf-8"))
+        print(f"NESTED_MANAGER {facts}")
+        # The gate's temp was inside the long parent and its manager listened elsewhere: one healthy there disproves it.
+        assert Path(facts["tmpdir"]).is_relative_to(ambient.resolve()), facts
+        assert not Path(facts["address"]).resolve().is_relative_to(ambient.resolve()), facts
 
 
 @POSIX

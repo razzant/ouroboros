@@ -18,6 +18,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_change import run_review_change
 from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 from tests import _contributor_packet_shared as shared
+from tests._worlds import clone_repository, world
 from tests.review_pool_rosters import set_review_pool
 
 GOAL = "Make the installed body's helper return the proposal's constant."
@@ -380,6 +381,50 @@ def test_a_new_round_of_the_same_index_is_a_new_physical_review_not_a_replay(sta
     assert len({send["retry_key"] for send in sends}) == 4
 
 
+def test_a_reused_verdict_names_the_rows_of_my_human_its_seats_were_not_sent_by_identity(staged_body, tmp_path, monkeypatch):
+    """The identical request after my human wrote again is the settled record, free; beside the verdict rides one
+    host fact naming the rows the reused seats were not sent — each by the reference of its stamp, whole, never by
+    likeness (``msg m-1`` is not ``msg m-12``, the longer token the briefs hold), read from the record's retained
+    briefs. A reuse with nothing new carries no fact; a reuse whose briefs cannot be read back names every row;
+    nothing is held or bought."""
+    repo = Path(staged_body["repo"])
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive", task_id="task-reuse")
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да", "msg_id": "m-12", "received": "2026-11-05T10:00:00+00:00"}]
+    ask = dict(root="system_repo", surface="change", goal=GOAL, scope=SCOPE, subject="index")
+    first = run_review_change(ctx, **ask)
+    assert first["reused"] is False and "owner_words_since_review" not in first and len(sends) == 3
+    record = review_ledger.load_record(ctx.drive_root, first["record_id"])
+    briefs = [ref for seat in record["rows"] for ref in seat["source_refs"] if ref.get("role") == "prompt"]
+    assert briefs and all(ref["status"] == "retained" for ref in briefs)
+    same = run_review_change(ctx, **ask)
+    assert same["reused"] is True and "owner_words_since_review" not in same and len(sends) == 3
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "да", "msg_id": "m-1"})
+    later = run_review_change(ctx, **ask)
+    assert later["reused"] is True and later["record_id"] == first["record_id"] and len(sends) == 3
+    assert later["owner_words_since_review"]["rows"] == ["[owner · owner_mailbox of task task-reuse · msg m-1]\nда"]
+    assert "not sent these words" in later["owner_words_since_review"]["host_fact"]
+    def gone(*_args, **_kwargs):
+        raise OSError("the retained brief cannot be read")
+
+    monkeypatch.setattr(review_ledger, "read_source", gone)
+    every = run_review_change(ctx, **ask)
+    assert every["reused"] is True and len(sends) == 3
+    assert [row.split("\n")[0] for row in every["owner_words_since_review"]["rows"]] == [
+        "[received 2026-11-05T10:00:00+00:00 · owner · owner_mailbox of task task-reuse · msg m-12]",
+        "[owner · owner_mailbox of task task-reuse · msg m-1]"]
+
+
+def _lay_project(folder: Path) -> None:
+    shared.git(folder, "init", "-q")
+    (folder / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (folder / "lib.py").write_text("LIB = 'base'\n", encoding="utf-8")
+    shared.git(folder, "add", "-A")
+    shared.git(folder, "commit", "-q", "-m", "base")
+    shared.git(folder, "remote", "add", "origin", "https://example.com/third-party/project.git")
+
+
 def _foreign_project(tmp_path, monkeypatch) -> tuple:
     """The production geometry of a project review: the body and its data under one
     Ouroboros home, the reviewed project elsewhere under the user's files; the project
@@ -387,14 +432,7 @@ def _foreign_project(tmp_path, monkeypatch) -> tuple:
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path))
     set_review_pool(monkeypatch, shared.golden_pool())
     system = Path(shared.init_installed_body(tmp_path / "ouroboros")["repo"])
-    project = (tmp_path / "work" / "project").resolve()
-    project.mkdir(parents=True)
-    shared.git(project, "init", "-q")
-    (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (project / "lib.py").write_text("LIB = 'base'\n", encoding="utf-8")
-    shared.git(project, "add", "-A")
-    shared.git(project, "commit", "-q", "-m", "base")
-    shared.git(project, "remote", "add", "origin", "https://example.com/third-party/project.git")
+    project = clone_repository(world("foreign-project", _lay_project), (tmp_path / "work" / "project").resolve())
     drive = tmp_path / "ouroboros" / "data"
     for sub in ("logs", "locks", "state"):
         (drive / sub).mkdir(parents=True)
@@ -537,11 +575,11 @@ def _pending_then_answering_seat(seat_id: str, token: str):
     return answer, starts
 
 
-def _paid_rows(drive: Path, project: Path) -> list:
+def _paid_rows(drive: Path, project: Path, *, paid_only: bool = True) -> list:
     from ouroboros.review_state import load_state, make_repo_key
 
     return [row for row in load_state(drive).filter_attempts(repo_key=make_repo_key(project), tool_name="review_change")
-            if row.paid]
+            if row.paid or not paid_only]
 
 
 def test_a_rerun_of_a_pending_round_rejoins_its_operation_and_passes_a_reached_ceiling(tmp_path, monkeypatch):
@@ -633,23 +671,23 @@ class _ProcessDied(BaseException):
     """The review process dies mid-wave: nothing settles, no cleanup of ours runs."""
 
 
-def _dies_right_after_the_paid_stamp(monkeypatch):
-    """The process is lost the moment the wave's paid row is durable: the row says
-    ``reviewing`` with its seats reserved and tokenless, and no seat ever answers."""
+def _dies_right_after_the_reservation(monkeypatch):
+    """The process is lost the moment the wave's reserved row is durable: the row says
+    ``reviewing`` with its seats reserved, tokenless and owned, and no seat is ever sent."""
     import ouroboros.tools.review_change as review_change_mod
-    from ouroboros.review_dispatch import ReviewPaidStamp
 
     real = review_change_mod.install_paid_stamp
 
     def install(ctx, wave):
         holder = real(ctx, wave)
-        write = ctx._review_paid_stamp
+        stamp = ctx._review_paid_stamp
+        reserve = stamp.reserve
 
-        def write_then_die() -> None:
-            write()
+        def reserve_then_die() -> None:
+            reserve()
             raise _ProcessDied()
 
-        ctx._review_paid_stamp = ReviewPaidStamp(write_then_die, fail_closed=True)
+        stamp.reserve = reserve_then_die
         return holder
 
     monkeypatch.setattr(review_change_mod, "install_paid_stamp", install)
@@ -670,11 +708,12 @@ def _restart(monkeypatch, *, dead_pid: int):
 
 
 def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pay(tmp_path, monkeypatch):
-    """D2-02. The paid attempt row of a ``review_change`` wave is bound to the process
-    that pays it, as the gate's rows are. When that process dies mid-wave (a tokenless
+    """D2-02. The reserved attempt row of a ``review_change`` wave is bound to the process
+    that owns its seats, as the gate's rows are. When that process dies mid-wave (a tokenless
     seat still reserved), the next generation's startup reconciliation proves the owner
     dead and closes the row as an infra failure — so a rerun of the round pays a NEW
-    wave instead of forever collecting an open operation nobody can finish."""
+    wave instead of forever collecting an open operation nobody can finish. A wave lost
+    before its first send spent no paid cycle (#2410)."""
     import os
 
     from ouroboros.review_owner_custody import reconcile_review_custody_on_process_start
@@ -686,19 +725,20 @@ def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pa
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
     ask = dict(subject="index", goal="Bump", scope="app.py")
     with monkeypatch.context() as dying:
-        _dies_right_after_the_paid_stamp(dying)
+        _dies_right_after_the_reservation(dying)
         with pytest.raises(_ProcessDied):
             run_review_change(ctx, **ask)
-    assert sends == []  # paid, then lost before any seat was sent
-    rows = _paid_rows(ctx.drive_root, project)
-    assert len(rows) == 1 and rows[0].status == "reviewing", rows
+    assert sends == []  # reserved, then lost before any seat was sent
+    rows = _paid_rows(ctx.drive_root, project, paid_only=False)
+    assert len(rows) == 1 and rows[0].status == "reviewing" and not rows[0].paid, rows
+    assert rows[0].review_owner_pid == os.getpid()
     assert all(not row.get("pending_invocation_id") for row in rows[0].triad_raw_results)  # tokenless
     lost_record = rows[0].review_record_id
 
     _restart(monkeypatch, dead_pid=os.getpid())
     outcome = reconcile_review_custody_on_process_start(ctx.drive_root)
     assert [row.review_record_id for row in outcome["reconciled"]] == [lost_record], outcome
-    rows = _paid_rows(ctx.drive_root, project)
+    rows = _paid_rows(ctx.drive_root, project, paid_only=False)
     assert (rows[0].status, rows[0].block_reason, rows[0].late_result_pending) == ("failed", "infra_failure", False)
 
     restarted = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.system_repo_dir, drive_root=ctx.drive_root,
@@ -708,8 +748,8 @@ def test_a_wave_lost_to_process_death_is_closed_at_startup_and_a_new_wave_may_pa
     assert rerun["record_id"] != lost_record
     assert sorted(send["slot_id"] for send in sends) == ["s1", "t1", "t2"]  # a new wave, nothing rejoined
     assert all(not send["reconcile_only"] for send in sends)
-    rows = _paid_rows(ctx.drive_root, project)
-    assert [row.status for row in rows] == ["failed", "reviewed"]
+    assert [(row.status, row.paid) for row in _paid_rows(ctx.drive_root, project, paid_only=False)] == [
+        ("failed", False), ("reviewed", True)]
 
 
 def test_the_same_restart_keeps_a_tokened_pending_round_for_its_exact_rejoin(tmp_path, monkeypatch):

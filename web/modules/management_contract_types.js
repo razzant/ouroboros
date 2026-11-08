@@ -39,7 +39,7 @@
  * @property {Object=} health_observations
  * @property {boolean=} dispatch_live
  * @property {Object[]=} review_findings
- * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review
+ * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
  * @property {Object=} grants
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
@@ -85,6 +85,14 @@
 /**
  * @typedef {Object} SkillRevisionRequest
  * @property {string=} expected_content_hash
+ */
+
+/**
+ * No body (or `{}`) reviews the current bytes; both fields continue stopped seats of one earlier
+ * Skills-page review on its recorded bytes, each named as its history row's `continuable_seats` does.
+ * @typedef {Object} SkillReviewRequest
+ * @property {{record_id: string, content_hash: string}=} review_reference
+ * @property {Array<{seat_id: string, operation_id: string}>=} continue_seats
  */
 
 /**
@@ -239,6 +247,7 @@
  * @property {boolean=} paid
  * @property {Object[]=} seats
  * @property {Object=} governance
+ * @property {Object[]=} continuable_seats  // this review's stopped seats its own author may continue
  * @property {string=} job_id
  * @property {string=} job_status
  * @property {string=} group_id
@@ -393,7 +402,7 @@
 
 /**
  * Engine or host preparation problem. POST may prepare Node/npm:
- * 409 maintenance_restart_required asks for chat-header Restart;
+ * 409 maintenance_restart_required asks for Restart Claudexor in Accounts;
  * 409/503 maintenance_preparation_failed reports failure. Both carry
  * context.acceptance=not_submitted, scope=this_attempt. Optional inspection failure still
  * permits POST. After 503 acceptance=unknown, keep the same body and Idempotency-Key,
@@ -546,8 +555,11 @@
 
 /**
  * @typedef {Object} OpenAICompatibleModelsRequest
+ * @property {string=} connection Named compatible row; omitted uses the built-in pair.
  * @property {string} baseUrl
  * @property {string=} apiKey
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} apiKeySetting Which built-in pair a kept apiKey belongs to;
+ *   omitted uses the saved effective pair.
  */
 
 /**
@@ -591,6 +603,17 @@
  */
 
 /**
+ * A remote server's sign-in, present once it asked for one.
+ * @typedef {Object} McpSignIn
+ * @property {string} state  // signed_in | sign_in_required
+ * @property {string=} reason
+ * @property {?string=} since
+ * @property {string=} issuer
+ * @property {boolean=} pending
+ * @property {string=} required_scope
+ */
+
+/**
  * One configured MCP server (a configuration error row carries only id, enabled, tool_count, last_error, code).
  * @typedef {Object} McpServerStatus
  * @property {string} id
@@ -606,6 +629,8 @@
  * @property {*=} env_from_settings
  * @property {string[]=} configuration_warnings
  * @property {boolean=} schemas_at_start
+ * @property {boolean=} task_session
+ * @property {boolean=} browser_policy
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens
@@ -620,6 +645,7 @@
  * @property {boolean=} complete
  * @property {string=} publication_error
  * @property {string=} code
+ * @property {McpSignIn=} sign_in
  */
 
 /**
@@ -644,6 +670,35 @@
  */
 
 /**
+ * `POST /api/mcp/sign-in`: begin, complete (state with code or error, or returned_url) or sign_out.
+ * @typedef {Object} McpSignInRequest
+ * @property {string} action
+ * @property {string=} server_id
+ * @property {string=} state
+ * @property {string=} code
+ * @property {string=} iss
+ * @property {string=} error
+ * @property {string=} error_description
+ * @property {string=} returned_url
+ * @property {string=} client_id
+ * @property {string=} client_secret
+ */
+
+/**
+ * @typedef {Object} McpSignInResponse
+ * @property {boolean} ok
+ * @property {string=} server
+ * @property {string=} url
+ * @property {string=} redirect_uri
+ * @property {string=} scope
+ * @property {?boolean=} revoked
+ * @property {Object=} listing
+ * @property {string=} code
+ * @property {string=} reason
+ * @property {string=} error
+ */
+
+/**
  * @typedef {Object} McpTestRequest
  * @property {string=} server_id
  * @property {Object=} server
@@ -663,7 +718,8 @@
 
 /**
  * The last apply attempt on /api/update/status (`{}` when none), kept across restarts; never authority.
- * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence.
+ * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence;
+ * a boot `failed` names `rollback_incomplete`.
  * @typedef {Object} UpdateProgress
  * @property {string=} operation_id
  * @property {string=} generation
@@ -695,6 +751,7 @@
  * @property {boolean} active
  * @property {string=} phase
  * @property {string=} task_id
+ * @property {string=} attempt_id
  * @property {boolean=} restart_required
  * @property {boolean=} local_work_recovery
  */
@@ -743,6 +800,7 @@
 /**
  * @typedef {Object} CommandRequest
  * @property {string} cmd
+ * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface
  * @property {string=} visible_text
  * @property {string=} visible_task_id
@@ -755,6 +813,14 @@
  * @property {boolean=} ok
  * @property {boolean=} deduped
  * @property {string=} task_id
+ */
+
+/**
+ * `POST /api/command` 400/409. `accepted: false` only when refused before queueing; without it the outcome is unknown.
+ * @typedef {Object} CommandRefusal
+ * @property {string} error
+ * @property {boolean=} accepted // always false when present
+ * @property {string=} reason_code // boot_changed: `if_boot` named an earlier server
  */
 
 /**

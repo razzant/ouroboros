@@ -83,6 +83,7 @@ def _read_counts(monkeypatch):
     monkeypatch.setattr(pathlib.Path, "read_text", text)
     monkeypatch.setattr(skill_peer_inventory, "parse_skill_manifest_text", parse)
     monkeypatch.setattr(skill_identity, "payload_digest", digest)
+    skill_peer_inventory._peer_manifest_facts.cache_clear()  # count from a new process's empty reuse
     return counts
 
 
@@ -110,11 +111,12 @@ def test_dispatch_reuses_locations_but_keeps_each_fresh_state_read(
         assert dispatch()
         # Every peer's enablement and the subject are read fresh per observation; an OFF
         # peer's manifest is neither read nor parsed, since an OFF peer cannot conflict.
+        # An ON peer's bytes are read every time, parsed only while its text is new.
         assert counts == {
             "locations": observations,
             "enabled": observations * (peers + 1),
             "manifest_text": observations * (on + 1),
-            "peer_parse": observations * on,
+            **({"peer_parse": on} if peers == 12 else {}),
             "hash:fresh_ext": observations,
         }, (surface, supervisor_present, peers, counts)
 
@@ -146,8 +148,12 @@ def test_schema_enumeration_checks_a_skill_once_and_reads_again_next_time(live_r
     assert counts["enabled"] == 13 and counts["peer_parse"] == 0
 
 
-@pytest.mark.parametrize("surface", ["http", "ws", "tool"])
-@pytest.mark.parametrize("change", ["review", "payload", "peer", "membership"])
+@pytest.mark.parametrize(("change", "surface"), [
+    ("review", "http"),
+    ("payload", "ws"),
+    ("peer", "tool"),
+    ("membership", "http"),
+])
 def test_next_dispatch_observes_cross_process_changes(live_route, monkeypatch, surface, change):
     dispatch = _consumer(live_route, surface, monkeypatch)
     assert dispatch()
@@ -183,6 +189,42 @@ def test_next_dispatch_observes_cross_process_changes(live_route, monkeypatch, s
     _in_another_process(code, drive=str(live_route["drive_root"]), digest=live_route["content_hash"],
                         selected=str(live_route["skill_dir"]), peer=str(live_route["skills_root"] / "peer_00"))
     assert not dispatch(), (surface, change)
+
+
+@pytest.mark.parametrize("point", ["inside_reconcile", "before_second_observation"])
+def test_a_peer_edit_inside_one_ws_dispatch_is_seen_although_its_old_text_was_parsed(live_route, monkeypatch, point):
+    """A WS frame reconciles, yields to a thread and observes again. An equal-size conflicting edit with a
+    restored mtime landing in either window is refused, though the peer's previous text is already parsed."""
+    peer = live_route["skills_root"] / "peer_00" / "SKILL.md"
+    peer.write_text(peer.read_text(encoding="utf-8").replace("conflicts: []", 'conflicts: ["other_ext"]'),
+                    encoding="utf-8")
+    skill_loader.save_enabled(live_route["drive_root"], "peer_00", True)
+    dispatch = _consumer(live_route, "ws", monkeypatch)
+    assert dispatch()  # the previous text is parsed and held
+    landed = []
+
+    def land():
+        if not landed:
+            _in_another_process(
+                "from pathlib import Path\nimport os\np = Path(peer)\ns = p.stat()\n"
+                "raw = p.read_bytes(); changed = raw.replace(b'other_ext', b'fresh_ext')\n"
+                "assert changed != raw and len(changed) == len(raw)\np.write_bytes(changed)\n"
+                "os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))\n", peer=str(peer))
+            landed.append(point)
+
+    if point == "inside_reconcile":
+        finalize = loader._finalize_extension_reconcile
+        monkeypatch.setattr(loader, "_finalize_extension_reconcile", lambda *a, **k: (land(), finalize(*a, **k))[1])
+    else:
+        to_thread = asyncio.to_thread
+
+        async def boundary(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "runtime_state_for_skill_name":
+                land()
+            return await to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", boundary)
+    assert not dispatch() and landed == [point]
 
 
 def test_post_load_observation_does_not_reuse_reconcile_start_membership(live_route, monkeypatch):

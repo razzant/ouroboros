@@ -31,10 +31,11 @@ _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "
           "skill_state": "state/skills/{id}/{state_file}.json",
           "run": "task_drives/{child}/delegated_runs/{id}.json",
           "verification_receipts": "task_results/artifacts/{id}/verification_receipts.jsonl",
-          "storage": "state/storage_measurement.json",  # the last two finished counts (installation-wide) + removers
+          "storage": "state/storage_measurement.json",  # the last two finished counts (installation-wide) + removers + disk
           "knowledge_history": "memory/knowledge_history.jsonl",  # global knowledge writes, bodies left out
-          "update_letter": "state/update_letter.json",  # the letter with its whole range qualification
-          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "chat")}}
+          "update_letter": "state/update_letter.json",  # the description with its whole range qualification
+          "update_material": "state/update_material.json",  # the offered range's commits, rows and read recipe
+          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "chat", "store_sites")}}
 _ID_KINDS = {"task_result", "run", "review_ledger", "skill_state", "verification_receipts"}
 # op=blob reads the observability CAS by digest. The digest in a task-source handle's name is that file's own
 # hash, read through the source's reader; a miss names that reader instead of another plane (BIBLE P1).
@@ -43,8 +44,9 @@ _BLOB_KIND_HINT = ("; op=blob reads observability CAS blobs only. A digest in a 
                    "result names, memory_read(source_ref={kind, root, path, size, sha256, task_id})")
 # ``context_snapshot``: the skill's current declared context snapshot, the address its outdated note names.
 _STATES = ("review", "review_job", "health", "enabled", "deps", "grants", "context_snapshot")
-# Each knowledge history row holds both complete versions of its note, so the ordinary
-# 8 MiB log window would cover hours of writes; this read budget covers far more of them.
+# A knowledge history row holds the complete version it published and, unless it names an
+# earlier row, the one it replaced, so the ordinary 8 MiB log window would cover hours of
+# writes; this read budget covers far more of them.
 _HISTORY_SCAN_BYTES = 256 * 1024 * 1024
 _HISTORY_BODY_FIELDS = ("old_content", "new_content")
 _SELECTOR = re.compile(r"(?:[^.\[\]]+|\[(?:\d+|\*)\])(?:\.[^.\[\]]+|\[(?:\d+|\*)\])*")
@@ -61,6 +63,12 @@ class SelectorError(ValueError):
 
 def _canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def selected_bytes(value) -> int:
+    """The smallest ``max_bytes`` that returns ``value`` as a selection: the output check counts
+    its canonical JSON, whatever ``format`` is (a producer that advertises a budget uses this)."""
+    return len(_canonical(value))
 
 
 def _name(value):
@@ -350,13 +358,23 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
         raw = b"{}"  # no count yet: the removers below are read all the same
     if len(raw) > cap:  # the bounded read proves only a lower bound
         raise _over_input(subject, None, cap)
-    if kind == "storage":  # the saved counts beside each place's removers, read now (``storage_removers``)
+    if kind == "storage":  # the saved counts beside each place's removers, the Free receipt and the disk, read now
+        from ouroboros import maintenance_jobs
+        from ouroboros.context_runtime_facts import disk_view
         from ouroboros.storage_removers import place_removers
 
-        value = {**json.loads(raw), "removers": place_removers(root)}
+        value = {**json.loads(raw), "removers": place_removers(root),
+                 "storage_free": maintenance_jobs.job(root, "storage_free") or {}, "disk": disk_view(root)}
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
-    return raw, json.loads(raw), False, False, len(raw), False
+    value = json.loads(raw)
+    from ouroboros.queue_observation import SHARED_KEY, expand_shared
+
+    if kind == "queue_snapshot" and SHARED_KEY in value:  # replicated task values are published once; the agent reads whole rows
+        value = expand_shared(value)
+        raw = _canonical(value)
+        return raw, value, True, False, len(raw), False
+    return raw, value, False, False, len(raw), False
 
 
 def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", ids=None,
@@ -406,7 +424,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 hint = f"; {rows} bounds rows for op={op}" if rows and {"tail", "max_rows"} & {n for n, _ in named} else ""
                 raise ValueError(f"{', '.join(_arg(*item) for item in named)} {'applies' if len(named) == 1 else 'apply'} "
                                  f"only to {owner}; omit {'it' if len(named) == 1 else 'them'}{hint}")
-        if kind in {"storage", "update_letter"} and child_task_id:
+        if kind in {"storage", "update_letter", "update_material"} and child_task_id:
             raise ValueError(f"{kind} is installation-wide; it has no child selector")
         if kind == "knowledge_history" and child_task_id:
             raise ValueError("knowledge_history is the installation's global knowledge; it has no child selector")
@@ -487,7 +505,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 # The installation queue lives with its owner; child_task_id keeps child-local meaning.
                 root, plane = canonical, owner
                 _plane_path(ctx, plane, root, _FILES[kind], caller)
-            elif kind in {"storage", "knowledge_history", "update_letter"}:
+            elif kind in {"storage", "knowledge_history", "update_letter", "update_material"}:
                 root, plane = canonical, owner
                 _plane_path(ctx, plane, root, _FILES[kind], caller)
             values, remaining, retained = {}, sql.MAX_BYTES, 0
@@ -526,7 +544,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 if not isinstance(value, str):
                     raise ValueError("format=text requires exactly one selected string")
                 raw = value.encode("utf-8")
-            if (need := max(len(raw), len(_canonical(value)))) > max_bytes:
+            if (need := max(len(raw), selected_bytes(value))) > max_bytes:
                 # Both the exact bytes and their canonical JSON must fit; format=text strings differ.
                 sizes = f"{len(raw)} bytes" + (f" ({len(_canonical(value))} as canonical JSON)" if need != len(raw) else "")
                 raise_to = (f"raise max_bytes to at least {need} (at most {sql.MAX_BYTES})" if need <= sql.MAX_BYTES

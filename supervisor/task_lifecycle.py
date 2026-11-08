@@ -14,7 +14,6 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owner as _reconcile_dead_review_owner
 from ouroboros.utils import utc_now_iso
 
@@ -580,6 +579,8 @@ def cancel_task_custody(
     # landing meanwhile is re-read after the kill (completion wins) or on miss.
     prepared = reads.prepared(task_id)
     settled = settled_status_of(prepared)
+    from supervisor.cancel_publication import runner_takes_stop  # a witnessed Presence author's Stop is its runner's
+    runner_owned = not settled and runner_takes_stop(q, task_id, prepared)
 
     # Read the durable intent BEFORE claiming it. The pre-claim row is what the
     # reaping-takeover gate below judges: a slot already marked ``reaping`` is
@@ -621,6 +622,7 @@ def cancel_task_custody(
     # ---- phase 1: capture under the lock -----------------------------------
     captured_was_reaping = False
     captured_pending = None
+    captured_awaiting = None  # a conversation-lane turn no carrier holds yet: no process, held like PENDING
     captured_worker = None
     captured_meta = None
     captured_running = None
@@ -644,9 +646,13 @@ def cancel_task_custody(
                 if str(item.get("id")) == task_id:
                     captured_pending = q.PENDING.pop(index)
                     break
+            if captured_pending is None:
+                from supervisor.conversation_lane import take_awaiting_turn
+                captured_awaiting = take_awaiting_turn(task_id)
+                captured_pending = captured_awaiting["task"] if captured_awaiting else None
         if captured_pending is None:
             for worker in workers.WORKERS.values():
-                if worker.busy_task_id == task_id:
+                if worker.busy_task_id == task_id and not runner_owned:
                     from ouroboros.headless import terminal_task_files_ready
                     bound_task = (q.RUNNING.get(task_id) or {}).get("task") or {"id": task_id}
                     if (settled and not _worker_possibly_alive(worker)
@@ -700,10 +706,11 @@ def cancel_task_custody(
         # ownership wins over the settled fast path; the stored terminal
         # stays the answer either way.
         turn = workers.direct_chat_turn(task_id)
-        if turn is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
-            from supervisor.cancel_publication import _finish_captured_chat_turn
-
-            return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)
+        from supervisor.cancel_publication import finish_in_process_turn  # a live inline Presence turn too
+        in_process = finish_in_process_turn(q, task_id, turn, prepared, intent=intent, deliver=deliver,
+                                            runner_owned=runner_owned)
+        if in_process is not None:
+            return in_process
     if settled and captured_worker is None and not captured_was_reaping:
         # A slot stranded at ``reaping`` by a custody attempt that crashed is
         # recovered HERE too: the task settled on its own afterwards, so nothing
@@ -754,7 +761,7 @@ def cancel_task_custody(
         return CANCEL_FAILED
     try:
         if captured_pending is not None:
-            return _finish_captured_pending(task_id, captured_pending, intent=intent)
+            return _finish_captured_pending(task_id, captured_pending, intent=intent, awaiting=captured_awaiting)
         if captured_worker is not None:
             # ``settled_status`` (GR6-1b): a settled RESULT with a live WORKER
             # goes through the SAME kill/join path — the stored terminal truth
@@ -771,7 +778,8 @@ def cancel_task_custody(
         # shape). Give the custody back and reopen the intent so the watchdog
         # retries instead of skipping the slot for the rest of the process life.
         log.error("Cancellation custody for %s raised; releasing custody", task_id, exc_info=True)
-        _restore_custody(task_id, pending=captured_pending, worker=captured_worker)
+        _restore_custody(task_id, pending=None if captured_awaiting else captured_pending, worker=captured_worker,
+                         awaiting=captured_awaiting)
         _release_intent_claim(
             q, task_id, error="custody raised mid-teardown",
             expected_generation=generation, request_id=request_id,
@@ -1061,7 +1069,7 @@ def _release_intent_claim(
 
 def _restore_custody(
     task_id: str, *, pending: Any = None, worker: Any = None,
-    worker_reaping: bool = False,
+    worker_reaping: bool = False, awaiting: Any = None,
 ) -> None:
     """Release custody after a failed cancellation.
 
@@ -1080,14 +1088,16 @@ def _restore_custody(
     with q._queue_lock:
         if pending is not None and all(str(t.get("id")) != task_id for t in q.PENDING):
             q.PENDING.append(pending)
+        if awaiting is not None:  # a captured awaiting lane row returns to RUNNING, never PENDING
+            q.RUNNING.setdefault(task_id, awaiting)
         if worker is not None:
             worker.reaping = worker_reaping
 
 
 def _finish_captured_pending(
-    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None,
+    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None, awaiting: Any = None,
 ) -> str:
-    """A queued task has no process: persist first, publish second."""
+    """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second."""
     q = _queue_module()
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
@@ -1103,7 +1113,7 @@ def _finish_captured_pending(
         )
     except Exception:
         log.warning("Cancel persistence failed for pending task %s", task_id, exc_info=True)
-        _restore_custody(task_id, pending=task)
+        _restore_custody(task_id, pending=None if awaiting else task, awaiting=awaiting)
         _release_intent_claim(q, task_id, error="pending cancel persistence failed", intent=intent)
         return CANCEL_FAILED
     if str((stored or {}).get("status") or "") != STATUS_CANCELLED:

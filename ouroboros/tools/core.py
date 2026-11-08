@@ -55,7 +55,6 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _MEMORY_AT_DRIVE_MEMORY,
     _SKILL_OWNER_STATE_FILENAMES,
     _access_or_block,
-    _annotate_reread,
     _coerce_line_window,
     _coerce_start_char,
     _data_list,
@@ -233,13 +232,15 @@ def _str_match_replace(
 
 
 def _check_data_shrink_guard(
-    target: pathlib.Path, new_content: str, force: bool = False
+    target: pathlib.Path, new_content: str, force: bool = False, *, recovery: str = ""
 ) -> "str | None":
     """Block likely accidental truncation of an EXISTING data-plane file on OVERWRITE,
     unless force=True (deferral 5). Mirrors the repo shrink-guard
     (``git._check_shrink_guard``) but WITHOUT the ``git ls-files`` tracking check — the
     data plane is not a git tree. Skips a non-existent target (a fresh create is any
-    size) and appends (the caller only invokes this on overwrite). Never raises."""
+    size) and appends (the caller only invokes this on overwrite). ``recovery``
+    replaces the full-write next step; exact editors pass
+    ``edit_ops.EXACT_EDIT_SHRINK_RECOVERY``. Never raises."""
     from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
@@ -255,8 +256,8 @@ def _check_data_shrink_guard(
             return (
                 f"⚠️ WRITE_BLOCKED: new content for '{target.name}' is {pct}% of original "
                 f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
-                f"Use edit_text for surgical edits, or pass force=true to confirm an "
-                f"intentional rewrite."
+                + (recovery or "Use edit_text for surgical edits, or pass force=true to confirm an "
+                   "intentional rewrite.")
             )
     except Exception:
         return None
@@ -392,9 +393,9 @@ def _data_write(
             matches = True
     if matches and not cyber:
         return (
-            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited "
-            "file. Tool-level writes must route through /api/settings (which "
-            "applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
+            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited file. Tool-level writes must route "
+            "through /api/settings, declaring headers X-Ouroboros-Actor: ouroboros and X-Ouroboros-Task-Id: <your "
+            "task id> (it applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
             "and dropped on POST; other keys flow through normally). To change "
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."
@@ -1395,41 +1396,41 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_photo", {
             "name": "send_photo",
             "description": (
-                "Send an image to the owner's chat. "
+                "Send an image to this work's room (Presence-bound: local, not the place conversation). "
                 "Preferred: use file_path to send a local file. "
                 "Legacy: use image_base64 with raw base64 or __last_screenshot__. "
                 "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to image (preferred)"},
+                "file_path": {"type": "string", "description": "Local image path (preferred): relative to the active workspace, or absolute."},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data or __last_screenshot__"},
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
         }, _send_photo),
         ToolEntry("send_video", {
             "name": "send_video",
-            "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
+            "description": "Send a local video file to this work's room (Presence-bound: local, not the place conversation), with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the video."},
+                "file_path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
         ToolEntry("send_file", {
             "name": "send_file",
             "description": (
-                "Send an arbitrary document/file to the owner's chat (e.g. a report, .md/.csv/.html, "
+                "Send an arbitrary document/file to this work's room (Presence-bound: local, not the place conversation; e.g. a report, .md/.csv/.html, "
                 "PDF, archive, or code file — anything that is not an image or video). "
                 "Requires a local file_path; large files use a captured download reference. Deliver a finished file result "
                 "the owner can download, rather than only describing it or sending a screenshot."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the document/file"},
+                "file_path": {"type": "string", "description": "Local file path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the file"},
             }, "required": ["file_path"]},
         }, _send_file),
         ToolEntry("send_links", {
             "name": "send_links",
-            "description": "Send one or more HTTP(S) links as prominent clickable buttons in the owner's chat.",
+            "description": "Send one or more HTTP(S) links as prominent clickable buttons in this work's room (Presence-bound: local, not the place conversation).",
             "parameters": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Optional heading above the buttons"},
                 "links": {"type": "array", "minItems": 1, "maxItems": _MAX_LINK_ACTIONS, "items": {

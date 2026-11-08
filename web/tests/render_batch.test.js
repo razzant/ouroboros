@@ -79,6 +79,25 @@ test('gaps stay at the feed edge with a once-per-document notice while failure a
     assert.equal(note.textContent, 'Beginning of saved history');
 });
 
+test('a room tells its history gap at the edge it concerns, never as a notice over its newest rows (U021)', () => {
+    const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const announced = [];
+    const prior = globalThis.document;
+    // Any toast the default path raised would land in this document's body.
+    globalThis.document = { ...doc, getElementById: () => null, body: { appendChild: (node) => announced.push(node) } };
+    try {
+        const controls = createHistoryControls(messages, null, { isVisible: () => true });
+        controls.render({ initialized: true, canOlder: true }, { gaps: true });
+        controls.showNotice();
+        assert.deepEqual(announced, [], 'the room raises no notice of its own');
+        assert.equal(messages.children[0].classList.contains('chat-load-older'), true, 'the fact heads the loaded window');
+        assert.match(messages.querySelector('.chat-load-older-note').textContent, /may have gaps/);
+        controls.destroy();
+    } finally { globalThis.document = prior; }
+});
+
 test('a status moved into persistent chrome leaves no empty history control padding while gaps stay at the feed edge', () => {
     const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc), chrome = new ElementStub('div', doc);
@@ -361,7 +380,10 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // spent its timer on a window fetched before the arm) keeps the deadline alive.
     // It is gated on !destroyed: a joined sync that settles after teardown must not
     // install a fresh timer on a dead instance (the disposer invariant).
-    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 3);
+    // The fourth is a live terminal receipt landing on a card that already settled (an
+    // evolution cleanup a later campaign Stop ran): the card's stored line changed after
+    // its terminal, and a row replayed from history never asks.
+    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
         /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,

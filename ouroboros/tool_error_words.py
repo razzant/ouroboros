@@ -2,8 +2,8 @@
 
 ``residual_tool_errors_without_review`` read one sentence whatever had failed. The record already
 holds the failures (``outcome_axes.execution.unresolved_tool_errors`` first, else
-``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first in
-plain words: a noun for the step and what happened to it, never a tool name, its result text or a
+``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first that is not a
+failed read (owner 06.11, A: those stay in the details) in plain words: a noun for the step and what happened to it, never a tool name, its result text or a
 path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
 ``web/modules/task_reason_words.js`` (``residualToolErrorsPhrase``); the cases of
 ``web/tests/fixtures/outcome_phase_parity.json`` pin both.
@@ -40,9 +40,12 @@ def _int(value: Any) -> Any:
 
 
 def residual_tool_errors_phrase(execution: Any) -> str:
-    """The clause naming the first recorded tool error, or "" when the record names none."""
+    """The clause naming the first recorded tool error that is not a failed read, or "" when the record names none."""
     execution = execution if isinstance(execution, dict) else {}
-    unresolved, cosmetic = _errors(execution, "unresolved_tool_errors"), _errors(execution, "cosmetic_tool_errors")
+    listed_unresolved, listed_cosmetic = _errors(execution, "unresolved_tool_errors"), _errors(execution, "cosmetic_tool_errors")
+    # A failed read stays in the details (owner 06.11, A): the sentence names effects and commands.
+    unresolved = [error for error in listed_unresolved if not error.get("read_only")]
+    cosmetic = [error for error in listed_cosmetic if not error.get("read_only")]
     errors = unresolved or cosmetic
     if not errors:
         return ""
@@ -62,7 +65,7 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     else:
         subject = f"{noun} failed"
     more = len(unresolved) + len(cosmetic) - 1
-    capped = len(unresolved) >= _LISTED or len(cosmetic) >= _LISTED
+    capped = len(listed_unresolved) >= _LISTED or len(listed_cosmetic) >= _LISTED
     tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
-    return f"{subject}{tail}; the result has not been evaluated."
+    return f"{subject}{tail}."

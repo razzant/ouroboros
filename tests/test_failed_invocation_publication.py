@@ -8,7 +8,6 @@ from ouroboros import budget_pause, loop_tool_execution, owner_pause, tool_custo
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("real_hold", [False, True])

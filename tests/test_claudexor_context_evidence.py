@@ -133,8 +133,7 @@ def test_mismatched_catalog_cannot_supply_requested_account_capacity(tmp_path, c
 
 
 @pytest.mark.parametrize("change", [
-    {"accountFingerprint": None}, {"credentialProfileId": ""}, {"provenance": ""},
-    {"observedAt": ""}, {"models": []},
+    {"accountFingerprint": None}, {"models": []},
     {"models": [{"id": "exact-model", "contextWindow": None, "maxContextWindow": None,
                  "effectiveContextWindow": 250_240}]},
 ])

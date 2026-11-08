@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from hashlib import sha256
 import json
 import os
@@ -18,7 +19,11 @@ def _path(root, relative):
     if not relative or rel.is_absolute() or ".." in rel.parts or "\\" in relative:
         raise ValueError(f"invalid file-result path: {relative!r}")
     path = Path(root) / relative
-    if not path.parent.resolve().is_relative_to(Path(root).resolve()):
+    try:
+        inside = path.parent.resolve().is_relative_to(Path(root).resolve())
+    except RuntimeError as exc:  # a symlink loop above the name before Python 3.13
+        raise ValueError(f"file-result path cannot be resolved: {relative!r}: {exc}") from exc
+    if not inside:
         raise ValueError(f"file-result path escapes target: {relative!r}")
     return path
 
@@ -121,12 +126,18 @@ def _archive_files(records, cap_dir):
     return files
 
 
-def changed_file_inputs(root, file_baseline):
-    """Compare only materialized inputs, including files subsequently deleted."""
+def changed_file_inputs(root, file_baseline, *, base_ref=None, received=()):
+    """Compare selected inputs with their copied-file or original Git preimages."""
+    if not isinstance(file_baseline, dict):
+        raise ValueError("snapshot file baseline is not a path map")
+    if received and not base_ref:
+        raise ValueError("received file inputs require their original Git basis")
     changed = []
-    for relative, before in file_baseline.items():
+    for relative in [*file_baseline, *sorted(set(received) - file_baseline.keys())]:
+        copied = relative in file_baseline
+        before = file_baseline[relative] if copied else _git_side(root, base_ref, relative)
         _validate_side(before)
-        if not _matches(_side(_path(root, relative)), before, exact_mode=True):
+        if not _matches(_side(_path(root, relative)), before, exact_mode=copied):
             changed.append(relative)
     return changed
 
@@ -188,6 +199,30 @@ def file_output_changes(manifest, cap_dir):
 def verify_file_outputs(rows, target):
     """Verify already-applied shared-workspace results without preparing another apply."""
     return all(_matches(_side(_path(target, row["path"])), row["after"], exact_mode=True) for row in rows)
+
+
+def file_output_states(rows, target):
+    """Each file result's state now against its exact captured postimage (bytes, kind, mode).
+
+    ``unchanged``, ``changed`` (another kind now included: a directory, FIFO, socket or device),
+    ``removed`` (captured present, now absent), ``recreated`` (captured absent, now present) or
+    ``unknown`` when the path cannot be read; never a postimage taken from the live tree.
+    """
+    states = {}
+    for row in rows:
+        path = None
+        try:
+            path = _path(target, row["path"])
+            current = _side(path)
+        except ValueError:  # not a path in the target (unknown), or no file or symlink now (a type change)
+            states[row["path"]] = ("unknown" if path is None else "recreated" if row["after"] is None else "changed")
+            continue
+        except OSError:
+            states[row["path"]] = "unknown"
+            continue
+        states[row["path"]] = ("unchanged" if _matches(current, row["after"], exact_mode=True) else
+                               "recreated" if row["after"] is None else "removed" if current is None else "changed")
+    return states
 
 
 class PreparedFileOutputs:
@@ -274,19 +309,62 @@ def prepare_file_outputs(rows, target, *, baseline_sha="", file_baseline=None):
         yield PreparedFileOutputs(rows, target, temporary, baseline_sha, file_baseline)
 
 
+def _changed_before(path: Path, started_ns: int) -> bool:
+    """Did PATH last change (content or inode; on Windows creation stands for the inode) before ``started_ns``?"""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return max(info.st_ctime_ns, info.st_mtime_ns) < started_ns
+
+
+def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: dict | None) -> dict | None:
+    """The folder's ``.review-evidence/`` retained once by a copy capture's own rule
+    (``workspace_patch_capture._held_named_evidence``): with no Git baseline every path there is new except a
+    supplied ``file_baseline`` one, the folder's own product, and one that last changed before the task started
+    (an earlier task's on the same folder, retained by that task). It stays in place (nothing is held out of a
+    patch); None when nothing new is there."""
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+    from ouroboros.workspace_patch_capture import _held_named_evidence
+
+    declared, changed = root / EVIDENCE_DIRNAME, set()
+    if declared.is_symlink() or (declared.exists() and not declared.is_dir()):
+        changed.add(EVIDENCE_DIRNAME)  # retained as a named gap, never followed
+    elif declared.is_dir():  # a subtree that cannot be listed still asks retention, which then records why
+        for current, dirs, files in os.walk(declared, followlinks=False, onerror=lambda _e: changed.add(EVIDENCE_DIRNAME)):
+            changed.update((Path(current) / name).relative_to(root).as_posix()
+                           for name in [*files, *(d for d in dirs if (Path(current) / d).is_symlink())])
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    copy = meta.get("workspace_copy") or task.get("workspace_copy") or {}
+    baseline = set(meta.get("file_baseline") or copy.get("file_baseline") or {})
+    try:
+        started_ns = int(datetime.fromisoformat(str(task.get("started_at") or "").replace("Z", "+00:00")).timestamp() * 1e9)
+    except ValueError:  # no start recorded: every path there is this task's, as before
+        started_ns = 0
+    if started_ns:
+        baseline |= {rel for rel in changed if rel != EVIDENCE_DIRNAME and _changed_before(root / rel, started_ns)}
+    return _held_named_evidence(root, "", changed, baseline, retain_dir, previous)[1]
+
+
 def _directory_direct_artifacts(
-    root: Path, artifact_dir: Path, task: dict, existing: dict,
+    root: Path, artifact_dir: Path, task: dict, existing: dict, *,
+    retain_evidence_dir: Path | None = None, retained_evidence: dict | None = None,
 ) -> tuple[list[dict], dict] | None:
-    """Record direct folder effects without inventing a before-image or scanning the tree."""
-    from ouroboros.headless_status import ARTIFACT_STATUS_READY
+    """Record direct folder effects without inventing a before-image or scanning the tree; given
+    ``retain_evidence_dir``, its new ``.review-evidence/`` is retained once there (``_direct_named_evidence``)."""
+    from ouroboros.headless_status import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_READY
     from ouroboros.workspace_patch_capture import _acting_constraint_from_task, _preflight_head_from_task
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_admission import has_git_metadata
 
     root = root.resolve(strict=False)
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    # Admitted while missing (#1799) and still absent: no tree to diff, and nothing remains there.
+    absent = (not root.exists() and not root.is_symlink()
+              and (meta.get("workspace_availability") or {}).get("state") == "missing")
     constraint = _acting_constraint_from_task(task)
     surface = str((task.get("task_constraint") or {}).get("surface") or "")
-    if (not root.is_dir() or surface in {"self_worktree", "genesis"}
+    if (not (root.is_dir() or absent) or surface in {"self_worktree", "genesis"}
             or (constraint and constraint.base_sha) or _preflight_head_from_task(task)
             or has_git_metadata(root)):
         return None
@@ -313,6 +391,17 @@ def _directory_direct_artifacts(
                 "bytes; other shell, GUI or external effects and the full changed-file set are unknown. "
                 "No full rollback is available.",
     }
+    if absent:
+        manifest.update(status=ARTIFACT_STATUS_READY if outputs else ARTIFACT_STATUS_MISSING, before="absent",
+                        note="The selected folder was missing when this work was admitted and is still absent, "
+                             "so nothing remains there to capture. Registered outputs retain their captured "
+                             "bytes; other shell, GUI or external effects are unknown.")
+    elif retain_evidence_dir is not None:
+        from ouroboros.workspace_patch_capture import _evidence_summary
+
+        evidence = _direct_named_evidence(root, task, retain_evidence_dir, retained_evidence)
+        if evidence is not None:
+            manifest["named_evidence"] = _evidence_summary(evidence)
     path = artifact_dir / "workspace_patch.json"
     atomic_write_json(path, manifest, trailing_newline=True)
     return [*outputs, artifact_record(path, kind="workspace_patch_manifest")], manifest

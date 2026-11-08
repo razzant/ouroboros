@@ -15,6 +15,7 @@ import { apiClient, apiFetch, fetchJson } from './api_client.js';
 import { createCardPresses, mountCardComponents, setCardPinned } from './card_components.js';
 import { createInlineFit, mountCardApp } from './card_frames.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad, START_SETTLE_MS } from './holds.js';
+import { errorWords } from './ui_primitives.js';
 import { escapeHtmlText as escapeHtml } from './utils.js';
 import { widgetPublication } from './widget_list.js';
 import { frameHeight, mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
@@ -257,7 +258,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             const hooks = { fit: fit.fit, fault };
             Promise.resolve().then(() => (tab.render.kind === 'module'
                 ? mountModuleWidget(host, tab, tab.render, controller.signal, messageHandlers, hooks)
-                : mountRouteIframeWidget(host, tab, tab.render))).then((fn) => {
+                : mountRouteIframeWidget(host, tab, tab.render, controller.signal, hooks, messageHandlers))).then((fn) => {
                 if (tab.render.kind !== 'module') {
                     host.querySelector('iframe')?.style.removeProperty('--widget-frame-height');
                     fit.fit(frameHeight(tab.render));
@@ -283,7 +284,9 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         try {
             tab = (await liveWidgetTabs()).find((item) => item.skill === ref?.skill && item.tab_id === ref?.tab_id && !item.pinned_card) || null;
         } catch (error) {
-            if (current()) showFallback(record, `The widget list could not be read: ${error.message || error}`, 'danger', true);
+            if (!current()) return;
+            console.warn('widget list read failed', error);
+            showFallback(record, `The widget list could not be read. ${errorWords(error).text}`, 'danger', true);
             return;
         }
         if (!current()) return;
@@ -375,7 +378,11 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         }, (error) => {
             if (destroyed || records.get(record.id) !== record || (quiet && record.data)) return;
             if (error?.status === 404) showFallback(record, 'This card is no longer available.');
-            else showFallback(record, `The card could not be loaded: ${error?.message || error}`, 'danger', true);
+            // The shared failure words (U131); the raw text is the log's.
+            else {
+                console.warn('card read failed', error);
+                showFallback(record, `The card could not be loaded. ${errorWords(error).text}`, 'danger', true);
+            }
         });
     }
 

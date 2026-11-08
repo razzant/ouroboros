@@ -10,6 +10,7 @@ apart from the orchestration in ``run_live_lanes.py``.
 """
 from __future__ import annotations
 
+import colorsys
 import dataclasses
 import hashlib
 import json
@@ -21,6 +22,7 @@ import time
 from typing import Any, Callable
 
 from devtools.benchmarks.common.server_runner import _api, _api_status
+from devtools.e2e_live import adoption
 from devtools.e2e_live.ui_probe import GuardedUI
 from ouroboros.event_token_totals import event_token_totals
 
@@ -30,13 +32,26 @@ SM1_CSS_PATH = "web/ui.css"
 # One source, two real documents. Shared-source presence alone cannot detect a missing link
 # or a page-local override; the browser checks both documents after the reviewed restart.
 SM1_CSS_PATHS = (SM1_CSS_PATH,)
-SM1_REQUIRED_PALETTE = frozenset({"--accent", "--accent-light", "--accent-dim",
-                                "--accent-04", "--accent-55", "--focus-accent-border", "--focus-accent-ring"})
+SM1_SERVED_STYLESHEETS = ("/static/ui.css", "/onboarding/static/ui.css")   # the links of web/index.html and the wizard's template
+SM1_RESTART_REASON = "e2e_live SM1: adopt the reviewed accent release"
+SM1_STUB_FINAL = "SM1 done: the brand accent change landed as a reviewed release and its adoption is requested."
+SM1_SCRIPT_ERROR = "E2E_SCRIPT_ERROR"
+SM1_REQUIRED_PALETTE = frozenset({"--accent", "--accent-light", "--accent-55", "--focus-accent-border", "--focus-accent-ring"})
+SM1_THEMES = ("light", "dark")   # what web/theme.js paints: a client's Light or Dark, or System resolved to one of them
+# The fills real controls wear (the primary action, the chosen place, the current step); their inks may rightly stay neutral.
+SM1_CONTROL_FILLS = frozenset({"--tone-crimson", "--tone-crimson-hover", "--tone-crimson-soft"})
 # The stub's README Version History row (the release preflight requires one per VERSION).
 SM1_HISTORY_ROW = "Live E2E stand SM1 rehearsal: the shared brand accent changed for the app and setup wizard."
 _ACCENT_RE = re.compile(r"^(\s*--accent:\s*)([^;]+);", re.MULTILINE)
 _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CSS_TOKEN_RE = re.compile(r"(--[a-z0-9-]+)\s*:\s*([^;]+);")
+_CSS_DECLARATION_RE = re.compile(r"^(\s*)(--[a-z0-9-]+)(\s*:\s*)([^;]+);", re.MULTILINE)
+_CSS_VAR_RE = re.compile(r"var\((--[a-z0-9-]+)\)")
+_CSS_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+_CSS_RUNG_RE = re.compile(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)\s*\)")
+_CSS_LIGHT_ROOT = ':root[data-theme="light"] {'
+# docs/DESIGN.md §3: what a new accent rewrites beside ``--accent``. Owner, Project, status and voice roles are not its.
+_CSS_ACCENT_ROLES = ("--accent-", "--focus-accent-", "--tone-crimson")
 # ``release_sync.PRE_SUFFIX`` split into the parts the stub bump increments.
 _VERSION_PARTS_RE = re.compile(r"^(\d+\.\d+\.)(\d+)(-?(?:rc|alpha|beta|a|b)\.?)?(\d+)?$", re.IGNORECASE)
 # The runtime's typed refusal prefix on a blocked review tool result ("⚠️ CODE: ...").
@@ -173,8 +188,42 @@ def accent_value(css_text: str) -> str:
     return match.group(2).strip() if match else ""
 
 
+def _role_on_accent(value: str, accent: str) -> str:
+    """A role's literal moved onto ``accent``. A translucent rung becomes the accent at its own alpha; an opaque shade
+    takes the accent's hue at its own lightness and saturation, so each theme keeps its light or dark word and a neutral
+    ink stays itself. An alias keeps its theme's meaning, and so does any form this does not read."""
+    rgb = bytes.fromhex(accent[1:])
+    rung = _CSS_RUNG_RE.fullmatch(value)
+    if rung:
+        return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {rung.group(1)})"
+    if not _CSS_HEX_RE.fullmatch(value):
+        return value
+    hue = colorsys.rgb_to_hls(*(channel / 255 for channel in rgb))[0]
+    _, lightness, saturation = colorsys.rgb_to_hls(*(channel / 255 for channel in bytes.fromhex(value[1:])))
+    return "#" + bytes(round(channel * 255) for channel in colorsys.hls_to_rgb(hue, lightness, saturation)).hex()
+
+
 def css_with_accent(css_text: str, value: str) -> str:
-    return _ACCENT_RE.sub(lambda m: f"{m.group(1)}{value};", css_text, count=1)
+    """The accent change of docs/DESIGN.md §3 on the shared sheet's text: in the dark seed and in the light block
+    ``--accent`` is ``value`` and its named roles, alpha ladder and tones follow it. No other byte moves."""
+    def declaration(match: "re.Match[str]") -> str:
+        indent, name, colon, old = match.groups()
+        if name == "--accent":
+            return f"{indent}{name}{colon}{value};"
+        if name.startswith(_CSS_ACCENT_ROLES):
+            return f"{indent}{name}{colon}{_role_on_accent(old.strip(), value)};"
+        return match.group()
+
+    parts, at = [], 0
+    for opening in (":root {", _CSS_LIGHT_ROOT):
+        start = css_text.find(opening, at)
+        if start < 0:
+            continue
+        end = css_text.find("\n}", start)
+        end = len(css_text) if end < 0 else end
+        parts += [css_text[at:start], _CSS_DECLARATION_RE.sub(declaration, css_text[start:end])]
+        at = end
+    return "".join(parts) + css_text[at:]
 
 
 def css_root_tokens(css_text: str) -> dict[str, str]:
@@ -187,10 +236,26 @@ def css_root_tokens(css_text: str) -> dict[str, str]:
     return {name: " ".join(value.split()) for name, value in _CSS_TOKEN_RE.findall(root)}
 
 
+def css_theme_tokens(css_text: str) -> dict[str, dict[str, str]]:
+    """``{theme: {token: value}}`` as the source computes at ``:root``: the dark seed (the first block), and for light
+    that seed under its own block, every plain ``var()`` substituted the way a browser does."""
+    dark = css_root_tokens(css_text)
+    css = _CSS_COMMENT_RE.sub("", css_text)
+    start = css.find(_CSS_LIGHT_ROOT)
+    block = css[start:css.find("\n}", start)] if start >= 0 else ""
+    light = {**dark, **{name: " ".join(value.split()) for name, value in _CSS_TOKEN_RE.findall(block)}}
+
+    def computed(tokens: dict[str, str], value: str, depth: int = 8) -> str:
+        return _CSS_VAR_RE.sub(lambda m: computed(tokens, tokens.get(m.group(1), ""), depth - 1), value) if depth else value
+
+    return {theme: {name: computed(tokens, value) for name, value in tokens.items()}
+            for theme, tokens in (("light", light), ("dark", dark))}
+
+
 def sm1_palette_tokens(css_text: str) -> dict[str, str]:
-    """Accent roles and ladder from the actual shared source, not a second palette table."""
+    """Accent roles, ladder and control fills from the actual shared source, not a second palette table."""
     return {name: value for name, value in css_root_tokens(css_text).items()
-            if name == "--accent" or name.startswith(("--accent-", "--focus-accent-"))}
+            if name == "--accent" or name.startswith(("--accent-", "--focus-accent-")) or name in SM1_CONTROL_FILLS}
 
 
 def tool_result_rows(tools_rows: list) -> list:
@@ -206,7 +271,7 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
     Three durable sources, none of them model prose: the review state's attempt rows
     (``phase``/``status``/``block_reason``), the tools.jsonl rows of
     the two review tools (their typed ``status`` plus the runtime's own ``⚠️ CODE:`` refusal
-    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, SCOPE_REVIEW_BLOCKED, ...), and the
+    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, REVIEW_BLOCKED, ...), and the
     task's terminal ``reason_code`` (``budget_exhausted`` = BudgetExceeded, ``deadline_local``
     = the deadline). The first paid run's SM1 lanes failed on exactly this ladder and the
     result rows named none of it."""
@@ -306,7 +371,7 @@ class LaneContext:
     def __init__(self, *, server: Any, clone: pathlib.Path, data_root: pathlib.Path, oracle: Any,
                  harness: Any, ui_resolver: Callable[[str], tuple[Any, str]] | None, ui_reason: str,
                  shots: pathlib.Path, log: Callable[[str], None], task_timeout: float,
-                 restart: Callable[[], Any]) -> None:
+                 restart: Callable[[], Any], stub: bool = False, ready_timeout: float = 300.0) -> None:
         self.server = server
         self.clone = pathlib.Path(clone)
         self.data_root = pathlib.Path(data_root)
@@ -319,6 +384,8 @@ class LaneContext:
         self.shots = pathlib.Path(shots)
         self.log = log
         self.task_timeout = float(task_timeout)
+        self.ready_timeout = float(ready_timeout)   # also bounds an adoption's restart back to a ready, verified server
+        self.stub = bool(stub)                      # the author's steps are scripted (a stub answer is no model's answer)
         self._restart = restart
         self.checks: dict[str, bool] = {}
         self.facts: dict[str, Any] = {}
@@ -436,7 +503,7 @@ class LaneContext:
 # SM1 — the brand accent changes and lands as a reviewed RELEASE (the S2 set + UI)
 # --------------------------------------------------------------------------- #
 # The realistic design: an owner asks for a new brand accent, and the product's own policy
-# shapes the work — the design system (docs/DESIGN.md §3: one ``--accent`` value, its named roles
+# shapes the work — the design system (docs/DESIGN.md §3: ``--accent`` in each theme, its named roles
 # and the accent alpha ladder), the visible-UI evidence rule (a real consumer flow inspected in
 # the browser), and BIBLE P9 (every commit is a release: the synchronized carriers bump in the
 # same diff). The stand describes that task and pins only the observable contract; it never
@@ -451,13 +518,16 @@ def sm1_prompt() -> str:
         f"Change the product's brand accent to {SM1_NEW_ACCENT} (a blue) consistently with the design "
         "system (docs/DESIGN.md §3: the one --accent value, its named roles and the accent alpha "
         f"ladder) in the shared {SM1_CSS_PATH}, loaded by both the app and the setup wizard. "
-        "Keep the effective palette consistent on / and /onboarding, including their actual controls "
+        "Keep the effective palette consistent on / and /onboarding, in both the Light and Dark themes, including their actual controls "
         "(tests/test_web_typography_static.py pins the shared source); verify the visible result the way the "
         "review policy requires (exercise real consumers in both browser documents and inspect "
         "it); then land it as a reviewed release through commit_reviewed with "
         f"commit message '{SM1_COMMIT_MESSAGE}', following the release policy the review organs "
         "enforce (every commit is a release: the synchronized version carriers are bumped in the same "
-        "diff — a patch bump). Finish once the commit has landed."
+        "diff — a patch bump). The commit lands on your body candidate and the running body stays as it is until it is "
+        "adopted, so once it has landed call request_restart with adopt_commit set to that commit's full SHA (for example "
+        "git rev-parse HEAD in your candidate through run_command), then finish: the restart and the adoption happen "
+        "after your task ends, so do not wait for them."
     )
 
 
@@ -547,17 +617,24 @@ def run_sm1(ctx: LaneContext) -> None:
     task_id = ctx.submit(sm1_prompt())
     ctx.facts["task_id"] = task_id
     stored = ctx.wait_task(task_id)
-    # The commit LANDED in the lane clone: under blocking enforcement that is only reachable
-    # through PASS verdicts from both review organs. Located by its message (the post-task
-    # evolve cycle may commit after it), read from that commit, never from the worktree.
-    commit = next((sha for sha, _sep, subject in (line.partition("\x00") for line in _git(
-        ["log", "-n", "5", "--format=%H%x00%s"], ctx.clone).splitlines()) if SM1_COMMIT_MESSAGE in subject), "")
-    ctx.check("commit_landed", bool(commit), commit_sha=commit)
+    task_oracle = ctx.oracle.task_drive(task_id)
+    ledger = task_oracle.advisory_review()
+    tools_rows = task_oracle.tools_rows()
+    settled = tool_result_rows(tools_rows)
+    # The commit LANDED: under blocking enforcement that is only reachable through PASS verdicts from both review
+    # organs. Named by what the landing call's review record says it produced, read from that commit in the shared
+    # object store, never from a worktree: it reaches the serving checkout only through the adoption checked below.
+    gate = adoption.gate_identity(settled, ctx.data_root)
+    commit = str(gate.get("commit_sha") or "")
+    subject = _git(["log", "-1", "--format=%s", commit], ctx.clone) if commit else ""
+    ctx.check("commit_landed", bool(commit) and SM1_COMMIT_MESSAGE in subject, commit_sha=commit)
     rev = commit or "HEAD"
     committed = {path: _git_show(ctx.clone, rev, path) for path in SM1_CSS_PATHS}
+    accents = {path: {theme: tokens.get("--accent", "") for theme, tokens in css_theme_tokens(committed[path]).items()}
+               for path in SM1_CSS_PATHS}
     ctx.check("committed_css_carries_new_accent",
-              all(accent_value(committed[p]) == SM1_NEW_ACCENT and committed[p] != before[p] for p in SM1_CSS_PATHS),
-              accent_committed={p: accent_value(committed[p]) for p in SM1_CSS_PATHS})
+              all(set(accents[p].values()) == {SM1_NEW_ACCENT} and committed[p] != before[p] for p in SM1_CSS_PATHS),
+              accent_committed=accents)
     palette = sm1_palette_tokens(committed[SM1_CSS_PATH])
     ctx.check("committed_palette_roles_present",
               SM1_REQUIRED_PALETTE <= palette.keys() and all(palette.values()),
@@ -573,11 +650,10 @@ def run_sm1(ctx: LaneContext) -> None:
     # colour on the unlock page, the site stylesheet), and the reviewers own that judgment.
     ctx.check("committed_diff_includes_palette", all(path in files for path in SM1_CSS_PATHS),
               committed_files=files, committed_companions=sm1_out_of_scope(ctx.clone, rev, files))
-    clean, porcelain, transient = worktree_after_commit(ctx.clone)
+    # The author's own checkout: the commit was made there, and the serving tree is the adoption's business.
+    candidate = pathlib.Path(adoption.candidate_fact(ctx.data_root, task_id).get("path") or ctx.clone)
+    clean, porcelain, transient = worktree_after_commit(candidate if candidate.is_dir() else ctx.clone)
     ctx.check("worktree_clean_after_commit", clean, worktree_porcelain=porcelain, worktree_transient=transient)
-    task_oracle = ctx.oracle.task_drive(task_id)
-    ledger = task_oracle.advisory_review()
-    tools_rows = task_oracle.tools_rows()
     ctx.facts["commit_reviewed_refusals"] = commit_refusal_facts(ledger, tools_rows, stored)
     ctx.check("landed_without_skip_flags", ctx.checks["commit_landed"]
               and not ctx.facts["commit_reviewed_refusals"]["landing_skip_flags"])
@@ -592,29 +668,60 @@ def run_sm1(ctx: LaneContext) -> None:
     ctx.facts["commit_gate_wave"] = wave
     ctx.check("commit_gate_wave_record", bool(wave))
     ctx.check_paid_tokens([task_id])
+    if ctx.stub:   # an exhausted script also ends "completed"; only the scripted final says the script reached its end
+        final = str(stored.get("result") or "")
+        ctx.check("stub_scripted_final_reached", SM1_STUB_FINAL in final, task_final_head=final[:300])
+    # Adoption is this task's own contract, with or without --self-mod's later evolution cycle: observed after the
+    # terminal, because the restart request reaches the supervisor with the task's end.
+    observed = adoption.observe_direct_adoption(ctx, task_id, settled, gate, timeout=ctx.ready_timeout,
+                                                stylesheet=SM1_CSS_PATH, routes=SM1_SERVED_STYLESHEETS)
+    ctx.facts["direct_adoption"] = observed
+    verdicts = adoption.adoption_checks(observed)
+    for name, ok in verdicts.items():
+        ctx.check(name, ok)
     # Include the original names too: silently dropping a role cannot shrink the browser proof.
     names = SM1_REQUIRED_PALETTE | palette.keys() | sm1_palette_tokens(before[SM1_CSS_PATH]).keys()
-    check_sm1_rendered_palette(ctx, names)
+    check_sm1_rendered_palette(ctx, names, served=verdicts["adoption_serves_commit"], seed_css=before[SM1_CSS_PATH])
 
 
-def check_sm1_rendered_palette(ctx: LaneContext, names: set[str]) -> None:
-    """R12: both real documents consume the landed palette after restart. This proves delivery
+def _sm1_palette_problems(values: dict[str, str], painted: str, theme: str, seed: dict[str, str]) -> list[str]:
+    """Why one document in one theme is not the landed palette; empty when it is. A role still at this theme's seed value
+    is the mixed palette docs/DESIGN.md §3 rules out, whatever color the role should have become."""
+    problems = [] if painted == theme else [f"paints {painted or 'nothing'}"]
+    problems += [f"{name} empty" for name, value in values.items() if not value]
+    if values.get("--accent") != SM1_NEW_ACCENT:
+        problems.append(f"--accent is {values.get('--accent') or 'empty'}")
+    problems += [f"{name} keeps its seed value" for name, value in values.items() if value and value == seed.get(name)]
+    return problems
+
+
+def check_sm1_rendered_palette(ctx: LaneContext, names: set[str], *, served: bool, seed_css: str) -> None:
+    """R12: both real documents consume the landed palette in every theme, each opened fresh on the generation the adoption
+    restarted into. A theme is asked for as a new client gets it (System follows ``prefers-color-scheme``) and its paint
+    confirmed, because what a browser opens in decides nothing: the probe opens Light, the suite's browser lanes Dark.
+    ``served`` is the adoption's verdict: a seed already at this accent must not read as its proof. This proves delivery
     and consistency, not design quality; the existing reviewers still judge the derived colors."""
-    ctx.restart()
     if ctx.ui is None:
         ctx.check("ui_computed_style", False, ui_reason=ctx.ui_reason)
         return
-    observed = {}
+    seed = css_theme_tokens(seed_css)
+    observed: dict[str, dict] = {}
+    problems: dict[str, dict] = {}
     for label, path, ready in (("app", "/", "#chat-input"), ("onboarding", "/onboarding", ".wizard-shell")):
-        ctx.ui.goto(path, ready_selector=ready)
-        values = {name: str(ctx.ui.computed_property(":root", name) or "").strip() for name in sorted(names)}
-        observed[label] = values
-        ctx.check(f"ui_{label}_palette", bool(names) and all(values.values())
-                  and values.get("--accent") == SM1_NEW_ACCENT and ctx.checks["commit_landed"])
-        ctx.screenshot(f"sm1_{label}_after_restart")
-    # A correct / value alone must not hide an unavailable or differently styled wizard.
+        observed[label], problems[label] = {}, {}
+        for theme in SM1_THEMES:
+            ctx.ui.color_scheme(theme)
+            ctx.ui.goto(path, ready_selector=ready)
+            painted = str(ctx.ui.computed_property(":root", "--native-color-scheme") or "").strip()
+            values = {name: " ".join(str(ctx.ui.computed_property(":root", name) or "").split()) for name in sorted(names)}
+            observed[label][theme] = values
+            problems[label][theme] = _sm1_palette_problems(values, painted, theme, seed[theme])
+            ctx.screenshot(f"sm1_{label}_{theme}_after_restart")
+        ctx.check(f"ui_{label}_palette", bool(names) and not any(problems[label].values())
+                  and ctx.checks["commit_landed"] and served)
+    # A correct / value alone must not hide an unavailable or differently styled wizard, in either theme.
     ctx.check("ui_computed_style", ctx.checks["ui_app_palette"] and ctx.checks["ui_onboarding_palette"]
-              and observed["app"] == observed["onboarding"], palette_computed=observed)
+              and observed["app"] == observed["onboarding"], palette_computed=observed, palette_problems=problems)
 
 
 def sm1_next_version(version: str, taken: "frozenset[str] | set[str]" = frozenset()) -> str:
@@ -684,9 +791,29 @@ def sm1_release_writes(clone: pathlib.Path, version: str) -> list[dict]:
             for rel in before if after[rel] != before[rel]]
 
 
-def sm1_stub_script(clone: pathlib.Path) -> dict:
-    # The mock reviewers do not judge design, so the stub changes the one value; the paid
-    # model re-derives the roles and the ladder under the real reviewers.
+def sm1_adopt_step(data_root: pathlib.Path | None):
+    """The scripted author's next move after ``commit_reviewed``: adopt exactly what that call produced, which the
+    candidate record must agree on; a call that landed nothing ends the script with its reason in the final."""
+    def step(text: str) -> dict:
+        gate = adoption.conversation_gate_identity(text, data_root) if data_root else {}
+        sha = str(gate.get("commit_sha") or "")
+        if not sha:
+            return {"final": f"{SM1_SCRIPT_ERROR}: commit_reviewed produced no landed commit: {gate.get('error') or 'no landing'}"}
+        if sha not in adoption.candidate_reviewed_heads(data_root):
+            return {"final": f"{SM1_SCRIPT_ERROR}: {sha} is not a candidate's newest reviewed commit"}
+        return {"tool": "request_restart", "arguments": {"reason": SM1_RESTART_REASON, "adopt_commit": sha}}
+    return step
+
+
+def sm1_final_step(text: str) -> dict:
+    """The scripted final, only over an accepted request: the task ends here and the adoption follows that end."""
+    accepted, answer = adoption.restart_answer_in_conversation(text)
+    return {"final": SM1_STUB_FINAL if accepted else f"{SM1_SCRIPT_ERROR}: request_restart was not accepted: {answer}"}
+
+
+def sm1_stub_script(clone: pathlib.Path, data_root: pathlib.Path | None = None) -> dict:
+    # The accent change the paid prompt asks, derived mechanically: the mock reviewers judge
+    # no design, so this rehearses the path and says nothing about how the result looks.
     writes = [{"tool": "write_file", "arguments": {
         "root": "system_repo", "path": path,
         "content": css_with_accent((clone / path).read_text(encoding="utf-8"), SM1_NEW_ACCENT)}}
@@ -702,7 +829,8 @@ def sm1_stub_script(clone: pathlib.Path) -> dict:
             "commit_message": SM1_COMMIT_MESSAGE, "paths": [w["arguments"]["path"] for w in writes],
             "goal": "Change the brand accent for the live E2E stand and release it",
             "scope": f"{SM1_CSS_PATH} and the release version carriers."}},
-        {"final": "SM1 done: the brand accent change landed as a reviewed release."},
+        sm1_adopt_step(data_root),
+        sm1_final_step,
     ]}
 
 
@@ -788,7 +916,7 @@ def run_sw1(ctx: LaneContext) -> None:
     ctx.screenshot("sw1_done")
 
 
-def sw1_stub_script(_clone: pathlib.Path) -> dict:
+def sw1_stub_script(_clone: pathlib.Path, _data_root: pathlib.Path | None = None) -> dict:
     child_id_re = re.compile(r"Subagent request queued ([0-9a-f]{8})")
     # The wait_tasks projection pairs each child id with its exact result hash.
     child_result_re = re.compile(r'"task_id": "([0-9a-f]{8})".{0,400}?"child_result_sha256": "([0-9a-f]{64})"', re.DOTALL)
@@ -933,7 +1061,7 @@ def run_sk1(ctx: LaneContext) -> None:
               and not payload_dir.exists() and not (ctx.data_root / "state" / "skills" / SK1_SKILL).exists())
 
 
-def sk1_stub_script(_clone: pathlib.Path) -> dict:
+def sk1_stub_script(_clone: pathlib.Path, _data_root: pathlib.Path | None = None) -> dict:
     from ouroboros.extension_surface_names import extension_surface_name
 
     payload = {"root": "skill_payload", "bucket": "external", "skill_name": SK1_SKILL}
@@ -962,7 +1090,7 @@ class Scenario:
     settings_overrides: dict
     needs_ui: bool
     acceptance: Callable[[LaneContext], None]
-    stub_script: Callable[[pathlib.Path], dict]
+    stub_script: Callable[..., dict]   # (clone, data_root): a scripted step may read what the lane's server wrote
     # ROOT tasks the scenario mints: the runner's run-wide budget reserves
     # ``per_task_usd x root_tasks`` per attempt (the runtime fences each root task TREE at
     # OUROBOROS_PER_TASK_COST_USD, so SW1's scouts spend under their one root's ceiling).

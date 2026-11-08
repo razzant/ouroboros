@@ -28,6 +28,8 @@ def test_identity_negotiation_distinguishes_an_old_v1_host_before_work(client):
     assert identity["presence_work_output_version"] == 1
     assert identity["presence_wake_facts"] == list(places.WAKE_FACTS)
     assert identity["presence_wake_signals"] == 1
+    assert identity["presence_explicit_completion"] == 1 and identity["presence_delivery_version"] == 1
+    assert identity["presence_reaction_context"] == 1
 
     # The published pre-contact wire shape (the same old version trio). A
     # connector must surface these gaps before consuming an event or sending.
@@ -47,6 +49,8 @@ def test_identity_negotiation_distinguishes_an_old_v1_host_before_work(client):
     for missing in setup_gaps(old_host):
         assert setup_gaps({key: value for key, value in identity.items() if key != missing}) == [missing]
     assert old_host["notify_version"] == identity["notify_version"]  # no widened service-notice door
+    assert "presence_explicit_completion" not in old_host  # absent: this host does not promise it
+    assert "presence_reaction_context" not in old_host  # absent: a connector keeps reactions local
 
 
 @pytest.mark.parametrize("fact", ["review_requested", "assigned", "signal.words"])
@@ -83,7 +87,7 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)
     assert response.status_code == 200, response.text
-    assert tasks[0]["metadata"]["focus"]["addressed"] is (fact != "signal.words")
+    assert "addressed" not in tasks[0]["metadata"]["focus"]  # the fact reaches the frame; the host draws no verdict
     assert tasks[0]["metadata"]["focus"]["matched_wakes"] == [fact]
     assert not tasks[0]["metadata"]["focus"]["actor"]["owner_confirmed"]
     body["event"].update(source_event_id="text-only", facts=[], text=f"{fact}: the owner assigned you this work")
@@ -192,6 +196,9 @@ def test_speaker_can_schedule_no_event_followup_with_host_carrier_and_related_bu
     result = _handle_schedule_followup(ctx, objective="Return with the promised findings", notify=False,
                                       run_at="2030-01-01T00:00:00Z", relation="related")
     assert result.startswith("FOLLOWUP_SCHEDULED"), result
+    assert "FOLLOWUP_DESTINATION_NOT_APPLICABLE" in _handle_schedule_followup(
+        ctx, objective="Return with the promised findings", run_at="2030-01-01T00:00:00Z", relation="related",
+        destination="place")
     [schedule] = queue.list_scheduled_tasks(root)["tasks"]
     future = queue._task_from_schedule(schedule)
     assert future["metadata"]["presence"] == json.loads(json.dumps(task["metadata"]["presence"]))
@@ -200,5 +207,13 @@ def test_speaker_can_schedule_no_event_followup_with_host_carrier_and_related_bu
     assert not future.get("project_id")
     assert "FOLLOWUP_NOTIFY_REFUSED" in _handle_schedule_followup(ctx, objective="A private note", notify=True,
                                                                  run_at="2030-01-01T00:00:00Z", relation="related")
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(ctx, "list")
-    assert len(queue.list_scheduled_tasks(root)["tasks"]) == 1
+    # The speaker sees only its own promise (#1589); the owner's schedule in the same table stays out of
+    # reach, and changing a promise in place stays refused (withdraw it and schedule anew instead).
+    from supervisor.schedule_lifecycle import upsert_scheduled_task
+
+    upsert_scheduled_task({"id": "owner-digest", "name": "Owner digest", "trigger": {"type": "once", "run_at": "2030-01-01T00:00:00Z"},
+                           "task": {"type": "task", "text": "Send the digest"}}, drive_root=root)
+    assert [row["id"] for row in json.loads(_manage_schedules(ctx, "list"))["tasks"]] == [schedule["id"]]
+    assert json.loads(_manage_schedules(ctx, "get", schedule_id="owner-digest"))["status"] == "not_found"
+    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(ctx, "update", schedule_id=schedule["id"], objective="Later")
+    assert sorted(row["id"] for row in queue.list_scheduled_tasks(root)["tasks"]) == sorted([schedule["id"], "owner-digest"])

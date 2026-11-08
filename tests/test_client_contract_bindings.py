@@ -10,6 +10,7 @@ has exactly one field-identical JSDoc twin among the browser modules.
 from __future__ import annotations
 
 import importlib
+from datetime import datetime, timedelta, timezone
 import json
 import pathlib
 import re
@@ -102,6 +103,14 @@ def test_the_project_journey_answers_its_published_shapes(client):
     listed = client.get("/api/projects")
     assert assert_bound("GET /api/projects", listed) == "ProjectListResponse"
     assert [row["id"] for row in listed.json()["projects"]] == [project["id"]]
+    # The complete list and the exact id answer the same published rows.
+    complete = client.get("/api/projects?all=1")
+    assert assert_bound("GET /api/projects", complete) == "ProjectListResponse"
+    assert complete.json() == listed.json()
+    exact = client.get(f"/api/projects?id={project['id']}")
+    assert assert_bound("GET /api/projects", exact) == "ProjectListResponse"
+    assert [row["chat_id"] for row in exact.json()["projects"]] == [project["chat_id"]]
+    assert client.get("/api/projects?id=nope").json() == {"projects": []}
     renamed = client.post(f"/api/projects/{project['id']}/update", json={"name": "Trip"})
     assert assert_bound("POST /api/projects/{project_id}/update", renamed) == "ProjectUpdateResponse"
     missing = client.post("/api/projects/nope/update", json={"name": "x"})
@@ -178,6 +187,14 @@ def test_account_routes_refuse_malformed_input_in_their_published_shapes(client)
     assert set(status.json()["reads"]) == {"catalog", "accounts", "quota"}
     quota = client.get("/api/claudexor/status?view=quota")
     assert assert_bound("GET /api/claudexor/status", quota) == "ClaudexorQuotaResponse"
+    preview = client.get("/api/claudexor/restart")
+    assert assert_bound("GET /api/claudexor/restart", preview) == "ClaudexorRestartPreview"
+    assert preview.json()["engine"]["state"] == "not_started" and preview.json()["runs"]["total"] == 0
+    tokenless = client.post("/api/claudexor/restart", json={})
+    assert tokenless.status_code == 400 and assert_bound("POST /api/claudexor/restart", tokenless) == "ErrorResponse"
+    stale = client.post("/api/claudexor/restart", json={"token": "not this preview"})
+    assert stale.status_code == 409 and assert_bound("POST /api/claudexor/restart", stale) == "ClaudexorRestartProblem"
+    assert stale.json()["code"] == "restart_preview_stale" and stale.json()["preview"]["token"] == preview.json()["token"]
     refresh = client.post("/api/claudexor/quota/refresh", json={"target": {"harness": ""}})
     assert refresh.status_code == 400 and assert_bound("POST /api/claudexor/quota/refresh", refresh) == "ErrorResponse"
     keyless = client.post("/api/claudexor/account-resets",
@@ -212,6 +229,13 @@ def test_model_mcp_and_control_routes_answer_their_published_shapes(client, monk
     assert catalog.status_code == 400 and assert_bound("GET /api/model-catalog", catalog)
     queued = client.post("/api/command", json={"cmd": ""})
     assert assert_bound("POST /api/command", queued) == "CommandResponse" and queued.json() == {"status": "ok"}
+    # A refusal before enqueue says so on the shape its status is bound to (#1603); no queue exists here.
+    monkeypatch.setattr("supervisor.message_bus._BRIDGE", None)
+    for body, reason in (({"cmd": "/bg start", "if_boot": "an-earlier-boot"}, "boot_changed"), ({"cmd": "/bg start"}, None)):
+        refused = client.post("/api/command", json=body)
+        assert refused.status_code == 409 and assert_bound("POST /api/command", refused) == "CommandRefusal"
+        assert refused.json()["accepted"] is False and refused.json().get("reason_code") == reason
+    assert {"accepted", "reason_code"} <= _declared("CommandRefusal")
     resumed = client.post("/api/tasks/nothing-here/resume")
     assert resumed.status_code in {404, 409} and assert_bound("POST /api/tasks/{task_id}/resume", resumed)
     rollback = client.post("/api/git/rollback", json={})
@@ -245,7 +269,7 @@ def _owned_names() -> dict:
     return names
 
 
-@pytest.mark.parametrize("outcome", ["unlisted", "listed", "failed", "unpublished"])
+@pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
 def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, tmp_path, outcome):
     from ouroboros import config, mcp_catalog, mcp_client
     from ouroboros.gateway import mcp as api
@@ -359,7 +383,7 @@ def test_recent_wake_rows_match_the_typed_contract(client, monkeypatch, with_sum
     assert row["cost_presentation"] == document["cost_presentation"]
     assert row["note"] == document["result"]
     assert ("summary" in row) is with_summary and ("said_owner" in row) is with_summary
-    assert panel["recent_wakes_coverage"] == "wakes that reached a model call in the last 48 h"
+    assert panel["recent_wakes_coverage"] == "Wakes that reached a model call in the last 48 h"
     history = {key: panel[key] for key in _declared("RecentWakesView")}
     assert not validate_ingress(history, contract_typed_dict("RecentWakesView"))
     for field, invalid in (("live", "false"), ("phase", "completed"), ("cause", "own_clock"), ("ended_at", 7),
@@ -382,8 +406,9 @@ def test_recent_wake_read_unavailability_keeps_the_panel(client, monkeypatch, so
     document = seed_wake(root)
     clock = object.__new__(BackgroundConsciousness)
     clock._drive_root = root
+    next_wake = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     monkeypatch.setattr(clock, "status_snapshot", lambda: {
-        "enabled": True, "next_wake_at": "2027-01-15T12:30:00Z", "spent_24h_usd": 2.5, "places_brief": []})
+        "enabled": True, "next_wake_at": next_wake, "spent_24h_usd": 2.5, "places_brief": []})
     client.app.state.describe_consciousness = lambda: clock.details_snapshot(True)
     error = (usage_store.UsageLockUnavailable if source == "usage" else store.StoreBusy)("busy") if typed else ValueError("unexpected failure")
     calls = []

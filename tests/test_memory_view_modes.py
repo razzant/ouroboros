@@ -102,7 +102,10 @@ def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_it
     snapshot = mv.snapshot_from_json(core.memory_view_json)
     whole_memory = mf.view_tokens(mv.render_story(snapshot)) + mf.view_tokens(mv.render_room(snapshot))
     assert whole_memory > floor["physical_allowance_tokens"]
-    assert narrow.initial_mode == "nano" and floor["steps"]["F5"] == 1
+    assert narrow.initial_mode == "nano" and floor["steps"]["F5l"] == 1
+    # The start's Max room outlives the narrowing, in the view fact and in what a task trace keeps of it.
+    assert shown.memory_facts["max_room"] == plan.max_projection.memory_facts["max_room"]
+    assert mf.trace_facts(shown.memory_facts)["max_room"]["cause"] == "held"
     reserve = cb.context_mode_limits(narrow.initial_mode, narrow.preferred_mode, narrow.output_reserve_tokens)[1]
     assert shown.calibrated_tokens + reserve <= narrow.window_tokens
     enlarged = _on_route(narrow, 1_000_000)
@@ -114,14 +117,13 @@ def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_it
 
 def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, monkeypatch):
     _, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
-    walk = mf.fit_memory_view
-    calls = []
+    render, walks = mf.render_view_for_mode, []
     def measured(*args, **kwargs):
-        calls.append(1)
-        return walk(*args, **kwargs)
-    monkeypatch.setattr(mf, "fit_memory_view", measured)
-    assert build(360_000).initial_mode == "max"
-    assert len(calls) == 1
+        walks.append(bool(kwargs.get("shortest")))  # True: a host step's price of the walk's end, never a chosen view
+        return render(*args, **kwargs)
+    monkeypatch.setattr(mf, "render_view_for_mode", measured)
+    assert build(330_000).initial_mode == "max"
+    assert walks == [False]  # a start whose room holds its request prices nothing and walks once
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
-    assert build(360_000).initial_mode == "low"
-    assert len(calls) == 2
+    assert build(330_000).initial_mode == "low"
+    assert walks.count(False) == 2  # calibrated before the book choice: Low's one walk, never a Max walk first

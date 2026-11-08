@@ -12,9 +12,26 @@ def _heartbeat_ctx(tmp_path, task):
     pushed = []
     return types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
-        RUNNING={task["id"]: {"task": task, "started_at": time.time()}},
+        RUNNING={task["id"]: {"task": task, "started_at": time.time() - 1}},
         bridge=types.SimpleNamespace(push_log=pushed.append),
     ), pushed
+
+
+def _beat_flush_beat(handler, task_id, ctx, calls=None):
+    """A root's first heartbeat carries no figure and reads nothing; the turn's usage flush
+    reads it once (``LIVE_ROOT_COSTS``); the next heartbeat carries it, reading nothing."""
+    from ouroboros.server_liveness import flush_budget_projection
+
+    handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
+    assert calls is None or calls == [], "the heartbeat itself read the ledger"
+    flush_budget_projection(ctx)
+    handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
+
+
+def _now_iso():
+    import datetime as dt
+
+    return dt.datetime.now(tz=dt.timezone.utc).isoformat()
 
 
 def _ledger(monkeypatch, answer):
@@ -73,10 +90,10 @@ def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatc
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-hb", "type": "task", "root_task_id": "root-hb",
     })
-    _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-hb", ctx, calls)
 
     _live_read(calls, "root-hb")
-    frame = pushed[0]
+    frame = pushed[-1]
     assert frame["accounted_upper_bound_usd_with_children"] == 76.82
     assert frame["cost_final"] is False
     assert frame["cost_with_children_partial"] is True
@@ -92,8 +109,10 @@ def test_child_heartbeat_does_not_read_or_publish_live_cost(tmp_path, monkeypatc
         "id": "child-hb", "type": "task", "root_task_id": "root-hb",
         "parent_task_id": "root-hb", "delegation_role": "subagent",
     })
-    _handle_task_heartbeat({"task_id": "child-hb", "phase": "running"}, ctx)
+    _handle_task_heartbeat({"task_id": "child-hb", "phase": "running", "ts": _now_iso()}, ctx)
+    from ouroboros.server_liveness import flush_budget_projection
 
+    flush_budget_projection(ctx)  # a child marks no root: the flush reads nothing either
     assert calls == []
     assert "cost_accounting_status" not in pushed[0]
     assert "accounted_upper_bound_usd_with_children" not in pushed[0]
@@ -106,10 +125,10 @@ def test_root_heartbeat_keeps_ledger_failure_honest(tmp_path, monkeypatch):
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-hb", "type": "task", "root_task_id": "root-hb",
     })
-    _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-hb", ctx, calls)
 
     _live_read(calls, "root-hb")
-    frame = pushed[0]
+    frame = pushed[-1]
     assert frame["cost_accounting_status"] == "unavailable"
     assert frame["accounted_upper_bound_usd_with_children"] is None
     assert frame["cost_final"] is False
@@ -126,11 +145,11 @@ def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-empty", "type": "task", "root_task_id": "root-empty",
     })
-    _handle_task_heartbeat({"task_id": "root-empty", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-empty", ctx, calls)
 
     _live_read(calls, "root-empty")
-    assert "cost_accounting_status" not in pushed[0]
-    assert "accounted_upper_bound_usd_with_children" not in pushed[0]
+    assert "cost_accounting_status" not in pushed[-1]
+    assert "accounted_upper_bound_usd_with_children" not in pushed[-1]
 
 
 def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numeric(
@@ -147,9 +166,9 @@ def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numer
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-unknown", "type": "task", "root_task_id": "root-unknown",
     })
-    _handle_task_heartbeat({"task_id": "root-unknown", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-unknown", ctx, calls)
     _live_read(calls, "root-unknown")
-    unknown = pushed[0]
+    unknown = pushed[-1]
     assert unknown["cost_accounting_status"] == "available"
     assert unknown["accounted_upper_bound_usd_with_children"] is None
     assert unknown["unknown_unmetered"] == 1
@@ -158,9 +177,9 @@ def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numer
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-free", "type": "task", "root_task_id": "root-free",
     })
-    _handle_task_heartbeat({"task_id": "root-free", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-free", ctx, calls)
     _live_read(calls, "root-free")
-    assert pushed[0]["accounted_upper_bound_usd_with_children"] == 0.0
+    assert pushed[-1]["accounted_upper_bound_usd_with_children"] == 0.0
 
 
 def test_root_heartbeat_with_an_empty_ledger_and_an_open_run_is_unknown_not_absent(tmp_path):
@@ -175,9 +194,9 @@ def test_root_heartbeat_with_an_empty_ledger_and_an_open_run_is_unknown_not_abse
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-open", "type": "task", "root_task_id": "root-open",
     })
-    _handle_task_heartbeat({"task_id": "root-open", "phase": "running"}, ctx)
+    _beat_flush_beat(_handle_task_heartbeat, "root-open", ctx)
 
-    frame = pushed[0]
+    frame = pushed[-1]
     assert frame["cost_accounting_status"] == "available"
     assert frame["accounted_upper_bound_usd_with_children"] is None
     assert frame["cost_custody"]["open_run_ids"] == ["open-run"]

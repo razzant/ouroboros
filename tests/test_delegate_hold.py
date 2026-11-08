@@ -387,6 +387,26 @@ def test_refused_wait_takes_terminal_not_paid_resume(tmp_path, monkeypatch, _qui
     assert "wait_refused" in details
 
 
+def test_an_unreadable_tick_through_the_real_wait_takes_the_fault_terminal(tmp_path, monkeypatch, _quiet_probe):
+    """#947 through the real supervising wait: the host's unreadable tick is a typed failure that
+    still says ``fault``, so the hold buys no paid resume on it and ends with ``wait_fault``."""
+    from ouroboros.delegate_supervision import supervised_wait
+
+    monkeypatch.setattr(delegate_hold, "supervised_wait",
+                        lambda ctx, run: supervised_wait(ctx, run, wait_once=lambda *_a, **_k: "<html>proxy</html>"))
+    fake_call, calls = _unknown_then_check_call(lambda *_: pytest.fail("no dial on an unreadable tick"))
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path)
+    _start_leaf(tmp_path)
+    _r, _usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert calls["n"] == 1
+    assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
+    assert "wait_fault" in [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
+
+
 def test_ack_failure_fails_closed_without_dispatch(tmp_path, monkeypatch, _quiet_probe):
     """One wake = one dispatch (sol CRITICAL #1): a wake that cannot be durably
     acknowledged is never dispatched — the appended receipt is removed and the

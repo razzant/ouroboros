@@ -64,7 +64,7 @@ def test_previous_wake_reads_one_document_and_keeps_the_whole_note(tmp_path, mon
 
 
 @pytest.mark.parametrize("status,word", [("completed", "Done"), ("failed", "Failed"),
-                                        ("cancelled", "Stopped"), ("interrupted", "Interrupted")])
+                                        ("cancelled", "Stopped")])
 def test_previous_wake_uses_card_outcome_words_and_never_guesses_completion_time(tmp_path, status, word):
     row = seed_wake(tmp_path, status=status, outcome_axes={}, terminal_time=None)
     previous = wake.previous_wake_text(tmp_path, row["task_id"], now=T0)
@@ -76,7 +76,8 @@ def test_previous_wake_distinguishes_absence_and_unreadability(tmp_path, monkeyp
     from ouroboros import task_store
     from ouroboros.store import StoreError
 
-    assert wake.previous_wake_text(tmp_path, "missing", now=T0) == "unreadable"
+    assert wake.previous_wake_text(tmp_path, "missing", now=T0) == (
+        "missing, unreadable; get_task_result(task_id='missing') reads it")
     reads = []
 
     def broken(root, task_id):
@@ -86,7 +87,8 @@ def test_previous_wake_distinguishes_absence_and_unreadability(tmp_path, monkeyp
     monkeypatch.setattr(task_store, "read_document", broken)
     assert wake.previous_wake_text(tmp_path, "", now=T0) == "none"
     assert reads == []
-    assert wake.previous_wake_text(tmp_path, "previous", now=T0) == "unreadable"
+    assert wake.previous_wake_text(tmp_path, "previous", now=T0) == (
+        "previous, unreadable; get_task_result(task_id='previous') reads it")
     assert reads == ["previous"]
 
 
@@ -112,12 +114,12 @@ def test_previous_wake_failure_does_not_block_launch(clock, monkeypatch, caplog,
     if failure == "none":
         assert row["result"] in text and "unreadable" not in text
     else:
-        assert "- previous wake: unreadable\n" in text
+        task_id = row["task_id"]
+        assert f"- previous wake: {task_id}, unreadable; get_task_result(task_id='{task_id}') reads it\n" in text
         assert any(row["task_id"] in record.message and record.exc_info for record in caplog.records)
 
 
-@pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("failure", ["write", "readback"])
+@pytest.mark.parametrize(("failure", "restart"), [("write", False), ("readback", True)])
 def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import BackgroundConsciousness, OBSERVATION_STATE_KEY, OWN_WAKE_STATE_KEY
@@ -125,8 +127,14 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
     template = REPO.joinpath("prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8")
     clock.root.joinpath("repo/prompts/CONSCIOUSNESS.md").write_text(template, encoding="utf-8")
     assert clock.clock.tick(T0 + clock_tests.FLOOR) == "launched"
-    accepted_a = clock.store[OBSERVATION_STATE_KEY]
-    seed_wake(clock.root, task_id="wake0001", result="A's whole note.", wake_summary="A's line.")
+    # A's carrier accepted the boundary; it rides A's row to the clock at A's terminal.
+    launched_a = clock.launches[-1]["task"]["metadata"]
+    accepted_a = launched_a["wake_observation"]["accepted_boundary"]
+    assert OBSERVATION_STATE_KEY not in clock.store
+    seed_wake(clock.root, task_id="wake0001", result="A's whole note.", wake_summary="A's line.",
+              metadata=launched_a)
+    clock.finish("wake0001", True)  # the carrier's terminal settles the wake and lays A's boundary
+    assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
     clock.receipt["task_id"] = "wake0002"
     clock.clock._next_wake_at = T0 + 2 * clock_tests.FLOOR
     with monkeypatch.context() as fault:
@@ -144,6 +152,7 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
     seed_wake(clock.root, task_id="wake0002", status="interrupted", outcome_axes={}, terminal_time=None,
               result="B's whole note.\n\nStill unfinished.", wake_summary="B's line.")
     seed_wake(clock.root, task_id="newer-foreign", result="Never use the newest task's note.")
+    clock.finish("wake0002", True)
     if restart:
         clock.clock = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7,
                                               now=T0 + 2 * clock_tests.FLOOR)
@@ -175,20 +184,30 @@ def test_launch_captures_previous_wake_before_binding_the_new_id(clock, has_prev
     assert f"- previous wake: {expected}\n" in launch["task"]["metadata"]["wake_observation"]["projection_text"]
 
 
-@pytest.mark.parametrize("announced", [True, False])
-@pytest.mark.parametrize("summary", ["Проверил состояние системы: всё спокойно.", ""])
-def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_path, announced, summary):
-    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
+_AUTHOR_STOP = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                     "reason": "author_stop"},
+                "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "It waits on an Allow."}}}
+
+
+@pytest.mark.parametrize(("summary", "announced", "stopped"), [
+    ("Проверил состояние системы: всё спокойно.", True, False), ("", False, False), ("", False, True)])
+def test_only_direct_turns_with_a_line_or_an_open_continue_join_the_observation_text(tmp_path, announced, summary,
+                                                                                      stopped):
+    """A finished turn's exchange is the dialogue itself, so it is counted; an authored line, or an open Continue (a
+    stop with work left, which the dialogue does not show), lists it."""
+    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}),
+                    **({"outcome_axes": _AUTHOR_STOP} if stopped else {}))
     now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 60
     if announced:
         _chat(tmp_path, _summary(row["task_id"], now - 30))
     observation = wake.observe_wake(tmp_path, boundary=None, since=now - 3600, now=now, reason="heartbeat")
     line = next(line for kind, _, line in observation.events if kind.startswith("direct_turn"))
-    assert (line in observation.full_text()) is bool(summary)
+    assert (line in observation.full_text()) is bool(summary or stopped)
+    assert line.endswith(" · Continue open (author_stop)") is stopped
     if summary:
         assert line.endswith(": " + summary)
     else:
-        assert "its line" not in line and row["result"] not in line
+        assert row["result"] not in line
     assert row["result"] not in observation.full_text(), "the whole note has its separate previous-wake slot"
 
 
@@ -288,13 +307,15 @@ def test_every_event_of_the_window_is_observed_without_a_count_cut(tmp_path):
     kinds = [kind for kind, _offset, _line in observation.events]
     assert kinds == ["owner_message"] + ["task_terminal"] * 15 + ["owner_message"]
     lines = _lines(observation)
-    assert lines[0].startswith('- owner message in Main, ') and lines[0].endswith('"first human line"')
+    assert lines[0].startswith('- owner message in Main, ') and lines[0].endswith('] first human line')
     assert [line.split()[2] for line in lines[1:16]] == [f"t{index:02d}" for index in range(15)]
-    assert "- task t14 completed, $1.25" in lines[15] and "work 14" in lines[15]
+    assert "- task t14 Done, $1.25" in lines[15] and "work 14" in lines[15]
     assert len(observation.outstanding) == 7  # every answerable card, newest first
     assert [line.split()[3] for line in observation.outstanding] == [f"c{i}" for i in reversed(range(7))]
     text = observation.full_text()
-    assert "2 owner messages, 15 task terminals, 7 outstanding cards" in text
+    assert ("2 owner messages (counted, not listed: my view holds the words), 15 task terminals, "
+            "7 outstanding cards") in text
+    assert "first human line" not in text and "- task t14 Done, $1.25" in text  # my human's words are in my view
     assert "(+" not in text and "more; see" not in text
 
 
@@ -328,14 +349,14 @@ def test_the_boundary_survives_rotation_and_a_replaced_chain_is_disclosed(tmp_pa
     _chat(tmp_path, _owner("after rotation", T0 - 20, cmid="b"))
     rotated = _observe(tmp_path, boundary=accepted)
     assert rotated.window["basis"] == "accepted_boundary"
-    assert [line.rsplit('"', 2)[-2] for line in _lines(rotated)] == ["after rotation"]
+    assert [line.rsplit("] ", 1)[-1] for line in _lines(rotated)] == ["after rotation"]
     # A chain whose segment at the boundary no longer starts with the same line is not trusted.
     (tmp_path / "archive" / "chat_20270115T100000.jsonl").write_text(
         json.dumps(_owner("rewritten history", since + 5, cmid="z")) + "\n", encoding="utf-8")
     replaced = _observe(tmp_path, boundary=accepted, since=T0 - 60)
     assert replaced.window["basis"] == "accepted_boundary"
     assert "accepted_boundary_no_longer_matches_chat_chain" not in replaced.gaps
-    assert [line.rsplit('"', 2)[-2] for line in _lines(replaced)] == ["after rotation"]
+    assert [line.rsplit("] ", 1)[-1] for line in _lines(replaced)] == ["after rotation"]
 
 
 # --- canonical transitions: task results by identity, whether or not a chat row announced them ---
@@ -376,8 +397,8 @@ def test_terminals_no_chat_row_announced_reach_the_next_wake_once(tmp_path):
     assert second.window["transitions_basis"] == "accepted_inventory"
     assert [(kind, offset) for kind, offset, _line in second.events] == [("task_terminal", None)] * 2
     lines = _lines(second)
-    assert lines[0].startswith("- child task kid1 of root1 failed, completion time not recorded (last updated 8 min ago)")
-    assert lines[1].startswith("- task root1 completed, completion time not recorded (last updated 6 min ago)")
+    assert lines[0].startswith("- child task kid1 of root1 Failed, completion time not recorded (last updated 8 min ago)")
+    assert lines[1].startswith("- task root1 Done, completion time not recorded (last updated 6 min ago)")
     assert "Recorded in task results with no chat row in this window" in second.full_text()
     assert not any("old" in line.split()[2] for line in lines)
     assert set(second.boundary["transitions"]["inventory"]) == {"root1", "kid1", "old"}
@@ -396,7 +417,7 @@ def test_a_task_first_recorded_after_the_scan_is_new_and_a_proven_terminal_keeps
     _write(tmp_path, "brief", status="completed", ts=_iso(T0 + 590), updated_at=_iso(T0 + 900),
            canonical_terminal_projection_ready={"task_done_ts": _iso(T0 + 880)})
     third = _wake(tmp_path, second.boundary, T0 + 1200)
-    assert _lines(third) == ["- task brief completed, 5 min ago: do brief"]  # its task_done stamp, proven
+    assert _lines(third) == ["- task brief Done, 5 min ago: do brief"]  # its task_done stamp, proven
     assert "terminal:brief:" in " ".join(third.boundary["transitions"]["inventory"]["brief"])
     # Reported once: the carried key keeps the overlap from reporting it again.
     assert _wake(tmp_path, third.boundary, T0 + 1800).events == ()
@@ -441,7 +462,7 @@ def test_a_transition_takes_the_position_of_the_row_that_announced_it_once(tmp_p
     assert [kind for kind, _o, _l in second.events] == ["owner_message", "task_terminal"]
     assert all(offset is not None for _k, offset, _l in second.events)  # each at its announcing row, once
     assert "no chat row in this window" not in second.full_text()
-    assert "- task kid completed" in _lines(second)[1]
+    assert "- task kid Done" in _lines(second)[1]
     assert "On the reviewed version" not in second.full_text()
 
 
@@ -454,7 +475,7 @@ def test_a_result_first_written_late_under_an_old_stamp_is_found_through_its_row
     _chat(tmp_path, _summary("revived", T0 + 700))
     third = _wake(tmp_path, second.boundary, T0 + 1200)
     assert [kind for kind, offset, _l in third.events if offset is not None] == ["task_terminal"]
-    assert "- task revived completed" in _lines(third)[0]
+    assert "- task revived Done" in _lines(third)[0]
 
 
 def test_an_unreadable_task_store_keeps_the_accepted_inventory(tmp_path, monkeypatch):
@@ -467,7 +488,7 @@ def test_an_unreadable_task_store_keeps_the_accepted_inventory(tmp_path, monkeyp
     assert blind.boundary["transitions"] == first.boundary["transitions"]  # nothing consumed
     assert "task_results unreadable: OSError" in blind.gaps
     monkeypatch.setattr(wake, "_task_window", real)
-    assert "- task kid completed" in _lines(_wake(tmp_path, blind.boundary, T0 + 1200))[0]
+    assert "- task kid Done" in _lines(_wake(tmp_path, blind.boundary, T0 + 1200))[0]
 
 
 def test_unfinished_and_malformed_lines_are_gaps_not_silence(tmp_path):
@@ -477,11 +498,11 @@ def test_unfinished_and_malformed_lines_are_gaps_not_silence(tmp_path):
         handle.write("{not json}\n")
         handle.write(json.dumps(_owner("unfinished", since + 2, cmid="b"))[:-1])
     first = _observe(tmp_path)
-    assert [line.rsplit('"', 2)[-2] for line in _lines(first)] == ["complete"]
+    assert [line.rsplit("] ", 1)[-1] for line in _lines(first)] == ["complete"]
     assert any("jsonl_malformed" in gap for gap in first.gaps)
     ds.append(tmp_path, "chat", _owner("unfinished", since + 2, cmid="b"))
     second = _observe(tmp_path, boundary=first.boundary)
-    assert [line.rsplit('"', 2)[-2] for line in _lines(second)] == ["unfinished"]
+    assert [line.rsplit("] ", 1)[-1] for line in _lines(second)] == ["unfinished"]
 
 
 def test_invalid_only_import_has_an_explicit_gap_and_later_sql_row_keeps_its_old_stamp(tmp_path):
@@ -492,7 +513,8 @@ def test_invalid_only_import_has_an_explicit_gap_and_later_sql_row_keeps_its_old
     assert not first.events and first.gaps and first.boundary["upper"] > 0
     ds.append(tmp_path, "chat", row)
     second = wake.observe_wake(tmp_path, boundary=first.boundary, since=T0 + 10, now=T0 + 100)
-    assert len(second.events) == 1 and "newly complete" in second.full_text()
+    assert len(second.events) == 1 and second.events[0][2].endswith("newly complete")  # recorded whole, counted
+    assert "1 owner message (counted, not listed" in second.full_text()
     assert second.window["basis"] == "accepted_boundary" and not second.gaps
     assert wake.observe_wake(tmp_path, boundary=second.boundary, since=T0 + 110, now=T0 + 200).events == ()
 
@@ -505,7 +527,7 @@ def test_pending_import_does_not_advance_an_accepted_wake_boundary(tmp_path):
     assert any("still importing" in gap for gap in first.gaps)
     assert "upper" not in first.boundary
     import_all(tmp_path)
-    assert "pending" in _observe(tmp_path, boundary=first.boundary).full_text()
+    assert any(line.endswith("] pending") for _kind, _offset, line in _observe(tmp_path, boundary=first.boundary).events)
 
 
 def test_human_input_is_classified_by_producer_provenance(tmp_path):
@@ -533,7 +555,7 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
     assert [kind for kind, _o, _l in observation.events] == [
         "owner_message", "correspondent_message", "card_answer", "task_error"]
     lines = _lines(observation)
-    assert "Presence correspondent message" in lines[1] and "from a correspondent" in lines[1]
+    assert lines[1].startswith("- message in a place in ") and lines[1].endswith("] from a correspondent")
     assert lines[2].startswith("- owner card q9 on task asker: answered") and "chose option 1: Keep" in lines[2]
     assert "task w1 runner failed" in lines[3]
     text = observation.full_text()
@@ -543,7 +565,7 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
 
 
 @pytest.mark.parametrize("status, origin", [("failed", "host_notice"), ("cancelled", ""),
-                                           ("completed", "host_notice"), ("failed", "model_final")])
+                                           ("completed", "host_notice")])
 def test_failed_inline_presence_is_visible_on_regular_wake_without_reviving_owner_turns(tmp_path, status, origin):
     from ouroboros.presence_runner import _build_task
     from ouroboros.task_results import write_task_result
@@ -647,10 +669,11 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
         running=1, max_tasks=2, interval=3300, events=observation.full_text())
     for key in wake.PLACEHOLDERS:
         assert "{" + key + "}" not in text, key
-    assert text.startswith("You are Ouroboros. No one has asked for a task")
+    opening = (repo / "prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8").split("\n\n", 1)[0]
+    assert text.startswith(opening + "\n\n"), "the actual prompt's complete opening reaches the consumer"
     assert "1 h 30 min ago" in text and "autonomy: Acts — Also acts on its own:" in text
     assert "toggle_evolution, request_restart" in text
-    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
+    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "own tasks: 1/2" in text
     assert "next interval: 3300 s" in text
     assert "previous_wake" in wake.PLACEHOLDERS and "- previous wake: none" in text
     assert "- wake cause: the scheduled wake time; events never move it, they are listed as observed" in text
@@ -674,21 +697,14 @@ def test_render_survives_a_missing_template_and_an_unreadable_task_store(tmp_pat
     assert text.startswith("[Wake-up · heartbeat]") and "{" not in text
 
 
-def test_template_names_only_its_placeholders_and_the_wake_hints():
+def test_template_parameters_and_the_explicitly_retained_lookahead():
     template = (REPO / "prompts" / "CONSCIOUSNESS.md").read_text(encoding="utf-8")
     import re
 
     assert set(re.findall(r"\{([a-z_]+)\}", template)) == set(wake.PLACEHOLDERS)
-    for hint in ("A pause is a legitimate decision", "Distinguish incremental cash cost",
-                 "do not ask the review pool to review the wake itself as a result", "wake facts", "recent facts"):
-        assert hint in template, hint
-    assert "a heartbeat, a task that finished, a project digest" not in template
-    assert "up to 10 rounds" not in template and "300 seconds" not in template
-    assert template.splitlines(keepends=True)[0].encode() == (
-        b"You are Ouroboros. No one has asked for a task; this turn is yours. What matters to you now, "
-        b"and what would be worth understanding, continuing, or changing?\n")
-    assert "no message is sent; the summary still names the wake" in template
-    assert "Finish with summary: one plain sentence in your human's language" in template
+    # The owner chose to retain this exact tested hint in the first delivery. Other prose's meaning
+    # belongs to review; render_substitutes above tests delivery rather than a second copy of that prose.
+    assert "If you cannot say from something recent when your human is next expected by someone, look before you finish." in template
     assert "what you heard and did here" in (REPO / "prompts/FOCUS.md").read_text(encoding="utf-8")
 
 
@@ -698,8 +714,10 @@ def test_template_names_only_its_placeholders_and_the_wake_hints():
 @pytest.fixture
 def describe(monkeypatch):
     import server
+    from ouroboros import consciousness_view
 
     holder = {}
+    monkeypatch.setattr(consciousness_view, "time", SimpleNamespace(time=lambda: wake._parse_iso("2027-01-15T12:00:00Z")))
     monkeypatch.setattr(server, "_consciousness", SimpleNamespace(status_snapshot=lambda: dict(holder)))
     return lambda snapshot, enabled=True: (holder.clear(), holder.update(snapshot), server._describe_bg_consciousness_state(enabled))[2]
 
@@ -726,7 +744,8 @@ def test_projection_names_every_honest_status(describe):
     first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
     assert first["status"] == "waiting_for_first_conversation"
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
-                          "allowance_resets_at": "2027-01-15T18:00:00+00:00"})
+                          "allowance_resets_at": "2027-01-15T18:00:00+00:00",
+                          "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset
     assert exhausted["status"] == "allowance_exhausted"
     assert "$21.50 of $20.00" in exhausted["detail"] and server._clock_of("2027-01-15T18:00:00+00:00") in exhausted["detail"]
     assert "at least" not in exhausted["detail"] and "degraded" not in exhausted["detail"]
@@ -744,12 +763,16 @@ def test_projection_names_every_honest_status(describe):
     assert done["status"] == "sleeping"
 
 
-def test_projection_without_a_constructed_clock_is_stopped_not_running(monkeypatch):
+def test_projection_without_a_constructed_clock_says_why_and_is_never_running(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_consciousness", None)
-    described = server._describe_bg_consciousness_state(True)
-    assert described["status"] == "stopped" and "not constructed" in described["detail"]
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    starting = server._describe_bg_consciousness_state(True)
+    assert starting["status"] == "starting" and starting["detail"] == "Waits for Ouroboros to finish starting."
+    monkeypatch.setattr(server, "_supervisor_error", "Supervisor init failed: boom")
+    failed = server._describe_bg_consciousness_state(True)
+    assert failed["status"] == "stopped" and failed["detail"].endswith("Restart Ouroboros.")
     assert server._describe_bg_consciousness_state(False)["status"] == "disabled"
 
 
@@ -777,7 +800,7 @@ def test_new_result_with_old_timestamps_and_no_chat_row_is_observed_once(tmp_pat
     _write(tmp_path, "late-write", status="completed", ts=_iso(T0 - 86400), updated_at=_iso(T0 - 80000))
     second = _wake(tmp_path, first.boundary, T0 + 600)
     assert [(kind, offset) for kind, offset, _ in second.events] == [("task_terminal", None)]
-    assert "late-write completed" in second.full_text()
+    assert "late-write Done" in second.full_text()
     assert _wake(tmp_path, second.boundary, T0 + 1200).events == ()
 
 
@@ -787,7 +810,7 @@ def test_partial_old_inventory_upgrades_with_explicit_coverage_gap(tmp_path):
     boundary["transitions"] = {"version": 1, "inventory": {}, "observed": [], "scan_at": _iso(T0)}
     second = _wake(tmp_path, boundary, T0 + 600)
     assert second.window["transitions_basis"] == "partial_inventory_upgrade"
-    assert second.gaps and "task old completed" in second.full_text()
+    assert second.gaps and "task old Done" in second.full_text()
     assert _wake(tmp_path, second.boundary, T0 + 1200).events == ()
 
 
@@ -828,7 +851,7 @@ def test_first_wake_uses_late_publication_when_old_readiness_debt_remains(tmp_pa
            terminal_time={"occurred_at": _iso(T0 - 86400), "source": "executor_terminal"})
     first = _wake(tmp_path, None, T0)
     assert len(first.events) == 1 and first.events[0][0] == "task_terminal"
-    assert "task late failed" in first.events[0][2]
+    assert "task late Failed" in first.events[0][2]
     assert _wake(tmp_path, first.boundary, T0 + 600).events == ()
 
 

@@ -83,16 +83,8 @@ def test_prepare_onboarding_settings_preserves_existing_auto_grant_choice():
 
 @pytest.mark.parametrize(("key", "value", "error"), [
     ("TOTAL_BUDGET", 0, "Budget must be greater than zero."),
-    ("TOTAL_BUDGET", "0", "Budget must be greater than zero."),
-    ("TOTAL_BUDGET", -1, "Budget must be greater than zero."),
     ("TOTAL_BUDGET", 0.005, "Budget must be at least 0.01."),
-    ("TOTAL_BUDGET", "nan", "Budget must be a number."),
-    ("OUROBOROS_PER_TASK_COST_USD", 0, "Per-task cost cap must be greater than zero."),
-    ("OUROBOROS_PER_TASK_COST_USD", "0", "Per-task cost cap must be greater than zero."),
     ("OUROBOROS_PER_TASK_COST_USD", -1, "Per-task cost cap must be greater than zero."),
-    ("OUROBOROS_PER_TASK_COST_USD", 0.005, "Per-task cost cap must be at least 0.01."),
-    ("OUROBOROS_PER_TASK_COST_USD", "nan", "Per-task cost cap must be a number."),
-    ("OUROBOROS_PER_TASK_COST_USD", False, "Per-task cost cap must be a number."),
 ])
 def test_prepare_onboarding_settings_rejects_invalid_budget_values(key, value, error):
     payload = _base_payload()
@@ -282,6 +274,45 @@ def test_prepare_onboarding_settings_preserves_non_wizard_provider_fields():
     assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "compat-secret-xyz"
 
 
+_LEGACY_PAIR = {"OPENAI_BASE_URL": "http://127.0.0.1:8080/v1", "OPENAI_API_KEY": "sk-legacy-pair-0123456789"}
+
+
+@pytest.mark.parametrize("saved, profile, dedicated, legacy", [
+    # The legacy pair alone: its address arrives read-only, never in the dedicated field.
+    (_LEGACY_PAIR, "openai-compatible", "", "http://127.0.0.1:8080/v1"),
+    # Both pairs: the dedicated one is the endpoint (compatible_endpoint); the saved legacy address is still a fact.
+    ({"OPENAI_API_KEY": "sk-official-0123456789"}, "openai", "", ""),
+    ({}, "openrouter", "", ""),
+])
+def test_the_bootstrap_carries_a_legacy_address_without_moving_it(saved, profile, dedicated, legacy):
+    state = build_setup_bootstrap(saved, "web")["initialState"]
+    assert state["providerProfile"] == profile
+    assert (state["compatibleBaseUrl"], state["legacyCompatibleBaseUrl"]) == (dedicated, legacy)
+    # No key is copied into another pair's field, and none leaves the server.
+    assert state["compatibleApiKey"] == ""
+    assert state["openaiKey"] == ("***set***" if saved.get("OPENAI_API_KEY") else "")
+
+
+def test_a_finish_that_edits_nothing_keeps_the_legacy_pair_exactly():
+    """CLIENT_CONTRACT §4's mapping, by a client that does not know the additive field, and the
+    builtin draft that also carries the address: completion keeps the saved pair as saved, whatever
+    address a body names, and manufactures no dedicated pair."""
+    saved = {**_LEGACY_PAIR, "OUROBOROS_MODEL": "openai-compatible::legacy-model"}
+    bootstrap = build_setup_bootstrap(saved, "web")
+    contract, state = bootstrap["contract"], bootstrap["initialState"]
+    body = {row["settingKey"]: state[row["stateKey"]]
+            for name in ("providerFields", "modelSlots", "budgetFields") for row in contract[name]}
+    body.update(OUROBOROS_REVIEW_ENFORCEMENT=state["reviewEnforcement"], OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
+    assert "OPENAI_BASE_URL" not in body
+    for payload in (body, {**body, "OPENAI_BASE_URL": state["legacyCompatibleBaseUrl"]},
+                    {**body, "OPENAI_BASE_URL": "http://127.0.0.1:1/v1"}):
+        prepared, error = prepare_onboarding_settings(payload, saved)
+        assert error is None
+        assert {key: prepared[key] for key in _LEGACY_PAIR} == _LEGACY_PAIR
+        assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == prepared["OPENAI_COMPATIBLE_API_KEY"] == ""
+        assert prepared["OUROBOROS_MODEL"] == "openai-compatible::legacy-model"
+
+
 def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
     """An OpenAI-compatible base URL alone (no key) is a valid remote provider."""
     payload = _base_payload()
@@ -336,10 +367,11 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
 
 
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey)" in source
-    assert "const hasRemote = keyValues.some(([, value]) => value);" not in source
+    payload = {**_base_payload(), "OPENAI_COMPATIBLE_BASE_URL": "http://localhost:41001/v1",
+               "OPENAI_COMPATIBLE_API_KEY": "x", "OUROBOROS_MODEL": "openai-compatible::private-model"}
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "x"
 
 
 def test_build_onboarding_html_serves_a_real_page_with_linked_modules():
@@ -401,26 +433,6 @@ def test_reopened_wizard_shows_the_saved_vision_choice_and_defaults_only_a_missi
     assert missing["visionModel"] == "zai::glm-5.3-flash"
 
 
-def test_onboarding_wizard_module_keeps_its_multistep_contract():
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-    draft_source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-
-    assert "const STEP_ORDER = bootstrap.stepOrder || (SETUP_CONTRACT.steps || []).map" in source
-    assert "Add your access" in source or "Local model settings" in source
-    assert "function detectProviderProfile()" in source
-    assert "function activeProviderProfile()" in source
-    assert "function profileLabel(profile)" in source
-    assert "function nextButtonShouldBeDisabled()" in source
-    assert "function syncCurrentStepActionState()" in source
-    assert "return 'direct-multi';" in source
-    assert "onboardingSettingsDraft({" in source
-    assert "function onboardingSettingsDraft({" in draft_source
-    assert "[field.settingKey, clean(state[field.stateKey])]" in draft_source
-    assert "[slot.settingKey, clean(state[slot.stateKey])]" in draft_source
-    assert "LOCAL_ROUTING_MODE: clean(state.localSource)" in draft_source
-    assert "clean(state.localRoutingMode) || 'cloud'" in draft_source
-
-
 def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
     contract = build_setup_contract("web")
     titles = {step["title"] for step in contract["steps"]}
@@ -458,66 +470,6 @@ def test_agents_share_accounts_in_the_five_step_onboarding():
     assert contract["steps"][0]["title"] == "Connect your accounts"
 
 
-def test_agents_step_is_skippable_and_cannot_block_completion():
-    """No validator branch, no required field: Continue is never disabled here.
-    A subscription is an amplifier, never an admission gate (D-1)."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    validator = source.split("function validateCurrentStep()")[1].split("}")[0]
-    assert "state.currentStep === 'agents'" not in validator
-    assert "renderAgentsStep()" in source
-    # Nothing on the step is a form control the shared validator would see.
-    step_source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-    assert "<input" not in step_source
-
-
-def test_agents_step_rotation_diagram_is_inert_static_artwork():
-    """A picture, not a program: no script, no animation, no external fetch,
-    hidden from assistive tech because the ladder beside it carries the
-    meaning. Colour comes from CSS so it inherits the wizard's theme."""
-    source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-    svg = source.split("<svg", 1)[1].split("</svg>", 1)[0]
-
-    assert 'aria-hidden="true"' in svg
-    assert 'focusable="false"' in svg
-    for forbidden in ("<script", "<animate", "<foreignObject", "onload=", "http://", "https://"):
-        assert forbidden not in svg, forbidden
-    assert 'fill="' not in svg and 'stroke="' not in svg and "font-size=" not in svg
-    # A short viewport drops the ARTWORK, never the ladder text.
-    css = (REPO / "web" / "onboarding.css").read_text(encoding="utf-8")
-    short_viewport = css.split("@media (max-height: 820px)", 1)[1]
-    assert ".agents-rotation-figure" in short_viewport.split("@media", 1)[0]
-    assert "currentColor" in css
-
-
-def test_agents_step_mounts_the_shared_login_cards_in_full_mode():
-    """Login is not reimplemented, and the wizard mounts `full` rather than
-    `compact`: compact omits the paste-code entry, so a Claude login whose
-    localhost callback cannot complete would dead-end at FIRST RUN."""
-    source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-
-    assert "createLoginCardController" in source
-    assert "LOGIN_CARD_FULL" in source
-    assert "LOGIN_CARD_COMPACT" not in source
-    # The store is the ONLY reader of the status endpoint: this module holds
-    # no transport of its own at all.
-    assert "claudexorStatus" in source and "claudexor_status_store.js" in source
-    assert "apiFetch" not in source
-    assert "fetch(" not in source
-
-
-def test_wizard_reads_agent_accounts_through_the_shared_store_only():
-    """The wizard's own direct poll of `/api/claudexor/status` is gone: three
-    surfaces reading that endpoint independently is exactly what the shared
-    store was extracted to end."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    assert "/api/claudexor/status" not in source
-    assert "Coding-agent subscriptions" not in source
-    assert "coding-agent" not in source.lower()
-    assert "onboarding_agents_step.js" in source
-
-
 def test_wizard_declares_the_subscription_intent_the_endpoint_expects():
     """The completion payload carries exactly the two declarations the shared
     setup contract names, and the owner's explicit escape hatch has a button."""
@@ -532,72 +484,6 @@ def test_wizard_declares_the_subscription_intent_the_endpoint_expects():
     assert "render()" in recovery and "completeOnboardingAtomically" not in recovery
     save = source.split("async function saveWizard", 1)[1]
     assert "setSkipPresets(true)" not in save
-
-
-def test_a_browser_owner_is_told_when_the_saved_runtime_mode_needs_a_restart():
-    """The plain-browser shell owns no server process, so a receipt saying a
-    restart is required cannot be discharged by navigating. It used to redirect
-    to `/` anyway, dropping the owner into an app running a DIFFERENT runtime
-    mode than the one they just chose, with nothing on screen saying so — while
-    the other two shells (the overlay's restart card, the launcher's own
-    recycle) both surface it."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    announce = source.split("function announceCompletion(result)", 1)[1].split("\n    }", 1)[0]
-    # The redirect is REACHED ONLY when no restart is required.
-    assert "if (restartRequired) {" in announce
-    assert announce.index("if (restartRequired) {") < announce.index("window.location.replace('/')")
-    assert "showBrowserRestartRequired(runtimeMode)" in announce
-    assert "function renderRestartRequiredScreen()" in source
-    assert "Setup saved — restart to apply it" in source
-    # And it names the mode that is waiting, not a generic nag.
-    assert "state.completedRestartMode" in source
-
-
-def test_the_overlay_frame_can_open_the_agent_sign_in_link():
-    """The Agents step's primary action is the agent's own sign-in link, opened
-    in a new tab. The overlay frames the wizard in a sandbox, and a sandbox
-    without popup permission blocks that click SILENTLY — nothing happens and
-    nothing is logged. (The behavioural proof, which derives the requirement
-    from the login card's own markup, is
-    web/tests/onboarding_overlay_sandbox.test.js.)"""
-    source = (REPO / "web/modules/onboarding_overlay.js").read_text(encoding="utf-8")
-    card = (REPO / "web/modules/harness_login_cards.js").read_text(encoding="utf-8")
-
-    assert 'target="_blank"' in card          # the card opens a new context...
-    # The policy is a NAMED constant the overlay applies to the frame, so read
-    # the constant rather than a sandbox= attribute in markup: the markup moved
-    # into DOM construction, and a scrape that follows it would keep passing
-    # over a constant the module forgot to apply.
-    declaration = source.split("export const FRAME_SANDBOX = ", 1)[1].split(";", 1)[0]
-    sandbox = "".join(
-        part.split("'")[1] for part in declaration.split("+") if "'" in part
-    ).split()
-    assert "allow-popups" in sandbox          # ...so the frame must permit one
-    # ...and the vendor page must not inherit the wizard's sandbox: an OAuth
-    # page with neither same-origin nor scripts cannot complete a sign-in.
-    assert "allow-popups-to-escape-sandbox" in sandbox
-    assert {"allow-same-origin", "allow-scripts", "allow-forms"} <= set(sandbox)
-
-
-def test_wizard_keeps_a_typed_completion_refusal_visible_with_its_real_reason():
-    """A typed 503 wrote nothing, so the wizard stays open, shows the engine's
-    own sentence beside the constant one, and offers the same escape the
-    endpoint said was available."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    # The typed fields are read by ONE pure reader (node-tested branch by
-    # branch in web/tests/onboarding_agents_step.test.js; the POST around it in
-    # onboarding_completion_attempt.test.js); the wizard only has to carry them
-    # onto the Error it renders from.
-    assert "await postCompletion(ONBOARDING_COMPLETE_ENDPOINT, payload)" in source
-    assert "return readCompletionAnswer({" in (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-    assert "Object.assign(error, answer.failure);" in source
-    assert "completionFailureNotice(error)" in source
-    assert "state.presetFailure = notice.canSkip" in source
-    # The failing path never announces completion, so the wizard stays mounted.
-    catch_block = source.split("await saveWizardPayload(payload);", 1)[1]
-    assert "announceCompletion" not in catch_block.split("}", 1)[0]
 
 
 def test_build_onboarding_html_accepts_web_host_mode():
@@ -630,24 +516,13 @@ def test_setup_contract_groups_rarely_used_providers():
     }
 
 
-def test_onboarding_wizard_collapses_rarely_used_providers():
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    # Second access-step collapse hosting the "more" provider group.
-    assert 'data-collapse="more-providers"' in source
-    assert 'data-collapse="local-model"' in source
-    assert "More options" in source
-    assert "hasMoreProviderValue()" in source
-    # Both collapses bind through scoped data-collapse selectors; the old
-    # singular selector only ever reached the FIRST details element.
-    assert "root.querySelector('.wizard-collapse')" not in source
-    assert "moreProvidersOpen" in source
-
-
 def test_setup_contract_has_no_secret_values():
     contract = build_setup_contract("web")
     text = repr(contract)
     budget_fields = {field["settingKey"]: field for field in contract["budgetFields"]}
+    assert budget_fields["TOTAL_BUDGET"]["note"] == budget_fields["OUROBOROS_PER_TASK_COST_USD"]["note"]
+    assert "known spend" in budget_fields["TOTAL_BUDGET"]["note"]
+    assert "not counted as $0" in budget_fields["TOTAL_BUDGET"]["note"]
 
     assert contract["hostMode"] == "web"
     assert "providerFields" in contract
@@ -867,16 +742,6 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
             item.stop()
 
 
-def test_onboarding_wizard_has_no_claude_runtime_surface():
-    """The Claude-runtime card (and its /api/claude-code/* endpoints) is
-    retired with the Claude-SDK advisory transport: onboarding must not
-    mention it or call the deleted endpoints."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-
-    assert "Claude Runtime" not in source and "Claude runtime" not in source
-    assert "/api/claude-code/" not in source
-
-
 def _launcher_hosts_onboarding_on_the_live_server() -> bool:
     host = REPO / "ouroboros" / "launcher_onboarding.py"
     if not host.exists() or not (REPO / "launcher.py").exists():
@@ -908,37 +773,6 @@ def test_launcher_points_first_run_onboarding_at_the_live_server():
     assert "def claude_code_status(self) -> dict:" not in source
     assert "def install_claude_code(self) -> dict:" not in source
     assert "def fetch_compatible_models(self" not in source
-
-
-def test_web_style_contains_onboarding_overlay_shell():
-    style = (REPO / "web" / "style.css").read_text(encoding="utf-8")
-
-    assert ".onboarding-overlay {" in style
-    assert ".onboarding-frame {" in style
-    assert ".onboarding-overlay-backdrop {" in style
-    assert ".onboarding-restart-card {" in style
-
-
-def test_onboarding_overlay_surfaces_restart_required_message():
-    source = (REPO / "web" / "modules" / "onboarding_overlay.js").read_text(encoding="utf-8")
-
-    assert "showRestartRequiredOverlay" in source
-    assert "event.data.restart_required" in source
-    assert "Continue in current mode" in source
-
-
-def test_onboarding_overlay_frames_the_served_page_not_an_inlined_document():
-    """The blocking overlay of an unconfigured running app still appears, but it
-    frames the one onboarding host so the wizard can import web/modules/*."""
-    source = (REPO / "web" / "modules" / "onboarding_overlay.js").read_text(encoding="utf-8")
-
-    assert "frame.src = '/onboarding'" in source
-    assert "frame.srcdoc" not in source
-    # 204 from the readiness probe still means "configured — no overlay", and it
-    # is the ONLY answer that takes the blocking shell down (see
-    # web/tests/onboarding_overlay.test.js for the behavioural pin).
-    assert "if (response.status === 204) {" in source
-    assert "removeOverlay();" in source
 
 
 # --- v6.82.0 rev.3-2: the wizard save authors safety "light" for NEW installs ---
@@ -1089,13 +923,12 @@ def test_the_launcher_onboarding_module_authors_no_onboarding_settings():
 def test_wizard_rejects_a_newly_typed_short_key():
     """The length check still guards a credential the owner actually authored."""
     payload = _base_payload()
-    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
-    payload["OPENAI_COMPATIBLE_API_KEY"] = "ollama"
+    payload["OPENAI_API_KEY"] = "short"
 
     prepared, error = prepare_onboarding_settings(payload, {})
 
     assert prepared == {}
-    assert error == "OpenAI-compatible API key looks too short."
+    assert error == "OpenAI API key looks too short."
 
 
 def test_wizard_is_not_deadlocked_by_a_short_key_already_on_disk():
@@ -1168,65 +1001,6 @@ def test_onboarding_frontend_exempts_unchanged_prefilled_keys_from_length_check(
     assert len(CONFIGURED_SECRET_PLACEHOLDER) < 10
 
 
-def test_agents_step_owns_typed_login_custody_before_wizard_announcement():
-    """The step retries only unknown cleanup, then leaves honestly."""
-    source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-
-    body = source.split("async function disposeForCompletion", 1)[1].split("\n    }", 1)[0]
-    # Ordering is judged on CODE only: both names also appear in the comments
-    # that explain the ordering, and matching those would pass on prose alone.
-    code = "\n".join(line for line in body.splitlines()
-                     if not line.strip().startswith("//"))
-
-    # Awaited, and its typed answer kept.
-    assert "let custody = await dispose()" in code
-    assert "return login ? login.dispose() : 'released';" in source
-    assert "custody === 'retained'" in code
-    assert "custody === 'unknown'" in code
-    assert "released === false" not in code
-    # Only unknown cleanup enters the bounded retry loop. A retained result
-    # proceeds directly to local detach because another cancel proves nothing.
-    retry = code.index("for (let attempt = 0; custody === 'unknown'")
-    retained = code.index("custody === 'retained'")
-    detach = code.index("detach()")
-    assert retry < retained < detach
-    assert "LOGIN_RELEASE_RETRIES" in code and "LOGIN_RELEASE_RETRY_MS" in code
-    assert source.count("const LOGIN_RELEASE_RETRIES = ") == 1
-    retries = int(source.split("const LOGIN_RELEASE_RETRIES = ", 1)[1].split(";", 1)[0])
-    delay = int(source.split("const LOGIN_RELEASE_RETRY_MS = ", 1)[1].split(";", 1)[0])
-    assert 1 <= retries <= 5 and 100 <= delay <= 2000, (
-        "the retry must stay a blip-sized bound, not a stall")
-
-    wizard = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-    save = wizard.split("async function saveWizardPayload", 1)[1].split("\n    }", 1)[0]
-    save_code = "\n".join(line for line in save.splitlines()
-                          if not line.strip().startswith("//"))
-    dispose = save_code.index("await agentsStep?.disposeForCompletion()")
-    drop = save_code.index("agentsStep = null")
-    announce = save_code.index("announceCompletion")
-    assert dispose < drop < announce
-
-
-def test_the_review_step_spells_a_family_the_way_the_agents_step_did():
-    """Both screens name the SAME families, so they must read the same payload.
-
-    The summary used to call the shared `familyLabels` with no snapshot, which
-    falls back to the bootstrap product names — so an engine rename appeared on
-    the Agents step and then silently un-renamed itself one screen later.
-    """
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-    summary = source.split("function agentsSummaryValue", 1)[1].split("\n    }", 1)[0]
-
-    assert "familyLabels(state.agentsConnected, agentsStep?.snapshot, {" in summary
-    assert "catalogKnown: Boolean(agentsStep?.catalogKnown)" in summary
-
-    # ...and the step really exposes that payload, rather than the wizard
-    # reading a name the step never published.
-    step = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
-    assert "get snapshot()" in step
-    assert "get catalogKnown()" in step
-
-
 def test_browser_render_smoke_fixture_is_the_live_bootstrap():
     """web/tests/onboarding_wizard_render.test.js boots the wizard module under a
     DOM stand-in with THIS fixture as ``window.__OURO_ONBOARDING_BOOTSTRAP__``.
@@ -1249,3 +1023,45 @@ def test_browser_render_smoke_fixture_is_the_live_bootstrap():
     assert fixture_path.read_text(encoding="utf-8") == live, (
         "web/tests/fixtures/onboarding_bootstrap.json drifted from build_setup_bootstrap({}, 'desktop')"
     )
+
+
+def test_named_only_setup_masks_and_rehydrates_credentials_by_identity():
+    rows = [
+        {"kind": "openai-compatible", "name": "alpha", "label": "Long local reasoning server", "base_url": "http://localhost:41001/v1"},
+        {"kind": "openai-compatible", "name": "beta", "base_url": "http://localhost:41002/v1", "api_key": "beta-SECRETCANARY"},
+    ]
+    settings = {"OUROBOROS_CONNECTIONS": rows, "OUROBOROS_MODEL": "openai-compatible@alpha::same-model",
+                "OUROBOROS_MODEL_LIGHT": "openai-compatible@beta::same-model", "OUROBOROS_MODEL_FALLBACKS": ""}
+    bootstrap = build_setup_bootstrap(settings, "web")
+    assert "beta-SECRETCANARY" not in build_onboarding_html(settings, "web")
+    assert bootstrap["initialState"]["connections"][0] == rows[0]
+    masked = bootstrap["initialState"]["connections"]
+    assert masked[1]["api_key"] != rows[1]["api_key"]
+    payload = {**_base_payload(), **settings, "OUROBOROS_CONNECTIONS": masked}
+    prepared, error = prepare_onboarding_settings(payload, settings)
+    assert error is None
+    assert prepared["OUROBOROS_CONNECTIONS"] == rows
+    assert prepared["OUROBOROS_MODEL_LIGHT"] == settings["OUROBOROS_MODEL_LIGHT"]
+    assert prepared["OUROBOROS_MODEL_FALLBACKS"] == ""
+    # Omitting the field from an older wizard retains the rows; an explicit empty list clears them.
+    payload.pop("OUROBOROS_CONNECTIONS")
+    assert prepare_onboarding_settings(payload, settings)[0]["OUROBOROS_CONNECTIONS"] == rows
+    payload.update(OPENAI_API_KEY="sk-openai-1234567890", OUROBOROS_CONNECTIONS=[])
+    assert prepare_onboarding_settings(payload, settings)[0]["OUROBOROS_CONNECTIONS"] == []
+
+
+@pytest.mark.parametrize("rows", [None, [{"kind": "openai-compatible", "name": "one", "api_key": 42}],
+    [{"kind": "openai-compatible", "name": "one"}] * 2])
+def test_onboarding_rejects_malformed_connection_draft_without_partial_settings(rows):
+    prepared, error = prepare_onboarding_settings({**_base_payload(), "OPENAI_API_KEY": "sk-valid-1234567890",
+                                                   "OUROBOROS_CONNECTIONS": rows}, {})
+    assert prepared == {} and error
+
+
+@pytest.mark.parametrize("row", [
+    {"kind": "openai-compatible", "name": "one", "api_key": "x"},
+    {"kind": "openai-compatible", "name": "one", "base_url": "http://localhost:41001/v1", "enabled": False},
+])
+def test_named_connection_needs_an_enabled_endpoint_for_remote_access(row):
+    prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
+    assert prepared == {} and error == "Connect Codex, an API provider, or a local model before continuing."

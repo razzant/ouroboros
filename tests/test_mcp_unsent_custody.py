@@ -10,16 +10,32 @@ from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 from tests.test_mcp_client import _settings
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("phase", ["open", "sdk_error", "pause", "cleanup_unknown", "after_send",
-                                  "init_error", "init_timeout", "init_cleanup_error",
-                                  "store_preparation", "store_admission", "store_cleanup_error", "store_after_send"])
+@pytest.mark.parametrize(("phase", "bound"), [
+    ("open", False),
+    ("sdk_error", True),
+    ("pause", False),
+    ("cleanup_unknown", True),
+    ("after_send", False),
+    ("init_error", True),
+    ("init_timeout", False),
+    ("init_cleanup_error", True),
+    ("store_preparation", False),
+    ("store_admission", True),
+    ("store_cleanup_error", False),
+    ("store_after_send", True),
+    ("end_before_preparation", False),
+    ("end_after_init", True),
+    ("stop_after_init", False),
+    ("end_after_send", True),
+    ("end_cleanup_unknown", False),
+])
 def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, bound, phase):
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     registry, _, _ = _registry(tmp_path, monkeypatch)
     observed = []
+    ended = ['owner_end' if phase == 'end_before_preparation' else None]
 
     @asynccontextmanager
     async def transport(_cfg):
@@ -28,7 +44,7 @@ def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, boun
             yield None, None
         finally:
             observed.append("transport_close")
-            if phase in {"cleanup_unknown", "init_cleanup_error", "store_cleanup_error"}:
+            if phase in {"cleanup_unknown", "init_cleanup_error", "store_cleanup_error", "end_cleanup_unknown"}:
                 raise RuntimeError("transport cleanup is unconfirmed")
 
     class Session:
@@ -46,8 +62,12 @@ def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, boun
                 await asyncio.Event().wait()
             if phase in {"pause", "cleanup_unknown"}:
                 owner_pause.install_fence(tmp_path, "root", request_id="mcp-before-call")
+            if phase in {"end_after_init", "end_cleanup_unknown", "stop_after_init"}:
+                ended[0] = 'finalize_requested' if phase == 'stop_after_init' else 'owner_end'
         async def call_tool(self, *_args):
             observed.append("call")
+            if phase == 'end_after_send':
+                ended[0] = 'owner_end'  # the started call still returns and closes its own custody
             if phase == "after_send":
                 raise owner_pause.OwnerPauseRefused("a typed error after real send is not unsent proof")
             if phase == "store_after_send":
@@ -74,25 +94,37 @@ def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, boun
         manager._tool_timeout_sec = 0.02
     monkeypatch.setattr(registry, "_mcp_name_miss", lambda _name: None)
     monkeypatch.setattr(mcp_client, "_call_mcp_tool_result", manager._call_tool_result)
-    if bound:
-        with owner(registry):
-            result = run(registry, name="mcp_demo__effect", args={}, timeout=5)["tool_result"]
-    else:
-        async def in_loop():
-            return registry.execute_result("mcp_demo__effect", {})
-        result = asyncio.run(in_loop())  # real copied-context MCP runner thread
+    def invoke():
+        with owner_pause.call_end_reader(registry._ctx, lambda: ended[0]):  # as a live call's batch binds it
+            if bound:
+                with owner(registry):
+                    return run(registry, name="mcp_demo__effect", args={}, timeout=5)["tool_result"]
+            async def in_loop():
+                return registry.execute_result("mcp_demo__effect", {})
+            return asyncio.run(in_loop())  # real copied-context MCP runner thread
+
+    if phase in {'end_before_preparation', 'end_after_init', 'stop_after_init'}:
+        with pytest.raises(PhysicalDispatchInterrupted) as stopped:
+            invoke()
+        assert stopped.value.control_reason == ended[0]
+        assert stopped.value.invocation_not_started is (phase == 'end_before_preparation')
+        assert observed == ([] if phase == 'end_before_preparation' else
+                            ['transport_open', 'initialized', 'session_close', 'transport_close'])
+        assert not claims(tmp_path), 'a proven unsent method joined its preparation before propagating control'
+        return
+    result = invoke()
     assert observed.count("call") == (0 if phase in {
         "pause", "cleanup_unknown", "init_error", "init_timeout", "init_cleanup_error",
-        "store_preparation", "store_admission", "store_cleanup_error"} else 1)
+        "store_preparation", "store_admission", "store_cleanup_error", "end_cleanup_unknown"} else 1)
     assert observed == [] if phase == "store_preparation" else observed[-2:] == ["session_close", "transport_close"]
     remaining = claims(tmp_path)
-    if phase in {"cleanup_unknown", "after_send", "init_cleanup_error", "store_cleanup_error", "store_after_send"}:
+    if phase in {"cleanup_unknown", "after_send", "init_cleanup_error", "store_cleanup_error", "store_after_send", "end_cleanup_unknown"}:
         assert result.status == "error" and len(remaining) == 1
         assert next(iter(remaining.values()))["external_pending"]
         assert result.meta.get("mcp_call_not_sent") is not True
     else:
         assert not remaining
-        assert result.status == {"open": "ok", "pause": "blocked", "init_timeout": "timeout",
+        assert result.status == {"open": "ok", "end_after_send": "ok", "pause": "blocked", "init_timeout": "timeout",
                                  "store_preparation": "unavailable", "store_admission": "unavailable"}.get(phase, "error")
         if phase in {"store_preparation", "store_admission"}:
             assert result.code == "TOOL_ADMISSION_UNAVAILABLE"

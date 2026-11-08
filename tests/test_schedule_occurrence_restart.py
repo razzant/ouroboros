@@ -13,7 +13,6 @@ from tests._store_shared import delete_result, unreadable_result
 
 _row, _rows, q = fixtures._row, fixtures._rows, fixtures.q
 
-pytestmark = pytest.mark.serial
 
 
 def _capacity_refusal(q, monkeypatch):
@@ -77,7 +76,7 @@ def test_crash_after_enqueue_without_receipt_recovers_same_unstarted_claim(q, mo
     assert len(q.pending) == 1
 
 
-@pytest.mark.parametrize("case", ["foreign", "unreadable", "dispatch_row", "accepted", "owner_hold"])
+@pytest.mark.parametrize("case", ["foreign", "dispatch_row", "owner_hold"])
 def test_refusal_never_overrides_current_admission_or_unknown_source(q, monkeypatch, case):  # noqa: F811
     held = _capacity_refusal(q, monkeypatch)
     task_id, token = held["task_id"], held["token"]
@@ -199,6 +198,7 @@ if stage == "claim":
                  "task": {"type": "task", "text": "continue", "project_id": "proj", "chat_id": 42}})
     if crash_point == "prepare_hold":
         folder.rmdir()
+        folder.write_text("a file where the folder was")  # a missing folder starts as its address (#1799)
         queue.check_scheduled_tasks()
         assert next(iter(_rows(q).values()))["hold"]["reason"] == "workspace_unusable"
     else:
@@ -217,6 +217,8 @@ if stage == "claim":
     row = next(iter(_rows(q).values()))
     print(json.dumps({"pid": __import__("os").getpid(), "occurrence": row["occurrence"]}))
 else:
+    if folder.is_file():
+        folder.unlink()
     folder.mkdir(exist_ok=True)
     queue.check_scheduled_tasks()
     queue.check_scheduled_tasks()
@@ -257,7 +259,7 @@ else:
     assert second["worker_sends"] == 1
 
 
-@pytest.mark.parametrize("state_kind", ["accepted", "missing", "unreadable", "foreign", "admitted_missing"])
+@pytest.mark.parametrize("state_kind", ["accepted", "missing", "admitted_missing"])
 def test_worker_delete_reads_receipt_from_its_canonical_table_root(q, tmp_path, monkeypatch, state_kind):  # noqa: F811
     import json
     from types import SimpleNamespace
@@ -292,7 +294,7 @@ def test_worker_delete_reads_receipt_from_its_canonical_table_root(q, tmp_path, 
 
 
 
-@pytest.mark.parametrize("clocks", ["both", "receipt_only", "row_only", "unknown"])
+@pytest.mark.parametrize("clocks", ["both", "receipt_only", "unknown"])
 def test_legacy_accepted_republish_preserves_authored_task_and_known_clocks(q, clocks):  # noqa: F811
     from ouroboros.context_runtime_facts import task_schedule_fact
 

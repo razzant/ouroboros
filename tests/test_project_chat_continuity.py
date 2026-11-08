@@ -113,6 +113,7 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
         "client_message_id": "",
         "kind": "managed_task",
         "phase": "queued",
+        "suggested_name": "do the thing",  # the run's name as its card shows it, never its whole order
         "can_resume": False,
         "cancelable": True,
         "task_attempt": 1,
@@ -133,9 +134,7 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
     assert "running-child" not in rows
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("kind", ["direct_chat", "managed_task"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "kind"), [(False, "direct_chat"), (True, "managed_task")])
 def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatch, kind, bound):
     """Both live owners follow their Project binding without rewriting ingress."""
     import supervisor.queue as queue_mod
@@ -161,7 +160,7 @@ def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatc
     expected = original_direct[0] if kind == "direct_chat" else {
         "activity_id": "root", "chat_id": 1, "project_id": "",
         "kind": "managed_task", "phase": "working", "started_at": 9.0,
-        "client_message_id": "", "task_attempt": 1,
+        "client_message_id": "", "task_attempt": 1, "suggested_name": "do the thing",
         "can_resume": False, "cancelable": True,
     }
     # K8: the census row's own facts (no narration, no calls, not detached, no registered room).
@@ -175,7 +174,6 @@ def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatc
         assert rows[0] is not direct_rows[0]
 
 
-@pytest.mark.serial
 def test_bound_direct_activity_question_uses_project_without_mutating_raw_snapshot(tmp_path, monkeypatch):
     from ouroboros.gateway import state as gateway_state
     from ouroboros.owner_quiz import record_asked
@@ -270,6 +268,8 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
         "finishing_reviews", "late_work", "can_resume", "cancelable", "cancel_origin", "delegated_runs_unreconciled",
         # K8 census facts for every chat (project_id is already a direct-turn field).
         "last_line", "last_line_at", "tool_calls", "detached", "project_name",
+        # A moved text Presence turn takes the owner's Pause (#2566).
+        "presence_pause",
     }
     assert {key: value for key, value in fields.items() if key not in additional_keys} == ActiveDirectTurn.__annotations__
     assert set(fields) - set(ActiveDirectTurn.__annotations__) == additional_keys

@@ -97,15 +97,24 @@ def mind_tool_entries() -> list:
         ToolEntry("pause_task", _control_schema("pause_task",
              "Request Pause of a listed work through the owner's tree-pause control. "
              "The owner reads your reason under the work's name: say plainly, in one short sentence without ids, "
-             "why you paused it and whose decision it was. Started reviews may finish while the task pauses. "
+             "why you paused it, whose decision it was and what returns it: a time, an event, or only the word of "
+             "whoever decided it. Later foci that list live work, consciousness included, see that sentence "
+             "beside it; a press on work already paused keeps its first sentence. Started reviews may finish while "
+             "the task pauses. "
              "Self-pause is refused: sleep with await_messages or escalate. The outcome arrives in your task mailbox."),
              _pause_task),
         ToolEntry("resume_task", _accepting_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
+             "Nothing returns a Pause by itself: Resume it when the return its sentence names has come, or on the "
+             "word of whoever decided it; a sleep wakes by itself on what it chose. Your human's general word to "
+             "continue returns what their general request paused; work they paused by name waits for their word "
+             "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
              "Only the owner can release a Panic hold. The outcome arrives in your task mailbox.")), _resume_task),
         ToolEntry("continue_task", _control_schema("continue_task",
-             "Request one successor episode of listed interrupted work through "
-             "the same Continue action as the owner's button. Author-finished work, owner Stop/Panic and "
-             "hard money/deadline stops refuse. Repeated delivery of this call reuses its one successor. "
-             "The outcome arrives in your task mailbox."), _continue_task)]
+             "Request one successor episode of listed work that was interrupted or that its author stopped "
+             "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "
+             "An ordinary finished answer, owner Stop/Panic and hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
+             "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
+             "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
+             "successor. The outcome arrives in your task mailbox."), _continue_task)]

@@ -19,7 +19,7 @@ from tests._skills_page_harness import (
     skills_browser as _skills_browser,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 skills_browser = _skills_browser
 
 LISTING = fixture("extensions_v4.json")["skills"]
@@ -55,7 +55,7 @@ def _card(page, item_id):
     return page.locator(f'[data-browse-board] .marketplace-card[data-item="{item_id}"]').first
 
 
-@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("webkit", 390)])
 def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
@@ -102,6 +102,16 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         page.wait_for_function("document.querySelector('[data-item=\"ouroboros-community/scholion\"].marketplace-card').textContent.includes('Reviewing · started just now')")
         assert scholion.locator('[data-browse-action="skip"]').is_visible()
         assert "you can leave this page" in scholion.inner_text()
+        if width == 1280:
+            # A short result must not reserve the long-message measure and push
+            # a small action below it when both fit in the actual card.
+            short_row = scholion.locator(".settings-action-row")
+            text_box = short_row.locator(":scope > :first-child").bounding_box()
+            action_box = short_row.locator(".skills-card-actions-end").bounding_box()
+            short_row.evaluate("e => e.scrollIntoView({block: 'center'})")
+            capture(page, browser_name, width, "browse-short-status")
+            assert action_box["y"] < text_box["y"] + text_box["height"]
+            assert short_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
 
         # A typed refusal of this install: the card says it and that nothing was installed.
         skills.answers["/api/skill-catalog/install"] = (409, {"ok": False, "code": "withdrawn",
@@ -112,6 +122,15 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         page.wait_for_function("document.querySelector('[data-item=\"ouroboros-community/happy_farm\"].marketplace-card').textContent.includes('Nothing was installed')")
         assert "Couldn’t install happy_farm from Ouroboros Community" in farm.inner_text()
         assert farm.locator('[data-browse-action="install"]').inner_text() == "Try again"
+        result_row = farm.locator(".settings-action-row")
+        result_row.evaluate("e => { e.style.width = '280px'; e.style.maxWidth = '100%'; }")
+        text_box = result_row.locator(":scope > :first-child").bounding_box()
+        action_box = result_row.locator(".skills-card-actions-end").bounding_box()
+        assert text_box["width"] >= result_row.bounding_box()["width"] - 2
+        assert action_box["y"] >= text_box["y"] + text_box["height"] - 1
+        assert result_row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+        result_row.evaluate("e => e.scrollIntoView({block: 'center'})")
+        capture(page, browser_name, width, "browse-failure-container-reflow")
 
         # A refusal about what is already installed is said once; the card is not a failed install.
         skills.answers["/api/skill-catalog/install"] = (409, {"ok": False, "code": "name_taken",
@@ -133,6 +152,33 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         _tab(page, "browse")
         _card(page, "ouroboros/pdf_tools").wait_for()
         assert page.locator('[data-browse-grid="recommended"]').count() == 0
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_withdrawn_browse_result_uses_the_row_without_an_empty_action(skills_browser, browser_name):
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        catalog = copy.deepcopy(CATALOG)
+        item = next(item for item in catalog["items"] if item["id"] == "ouroboros-community/happy_farm")
+        item["withdrawn"] = {"reason": "No longer maintained"}
+        skills = _open(page, catalog=catalog)
+        _tab(page, "browse")
+        row = _card(page, item["id"]).locator(".settings-action-row")
+        expect(row).to_contain_text("Withdrawn by")
+        row.evaluate("e => { e.style.width = '280px'; e.style.maxWidth = '100%'; }")
+        expect(row.locator(".skills-card-actions-end")).to_be_empty()
+        expect(row.locator(".skills-card-actions-end")).not_to_be_visible()
+        assert row.locator(":scope > :first-child").bounding_box()["width"] >= row.bounding_box()["width"] - 2
+        assert row.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
+        row.evaluate("e => e.scrollIntoView({block: 'center'})")
+        capture(page, browser_name, 1100, "browse-no-action")
     finally:
         if skills:
             skills.close(browser)
@@ -231,6 +277,52 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
+def test_a_source_change_reads_the_installed_listing_again(skills_browser, browser_name, width):
+    """The listing's source facts follow the sources (a name added again for another view no longer names its id):
+    after a change on Sources the page reads the listing again, and Browse shows what the host now says."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        skills = _open(page)
+        _tab(page, "browse")
+        card = _card(page, "ouroboros/weather")
+        card.wait_for()
+        assert "available" in card.inner_text() and card.locator('[data-browse-action="update"]').count() == 1
+        listing = copy.deepcopy(LISTING)
+        next(skill for skill in listing if skill["name"] == "weather")["install"]["source"].pop("id")
+        skills.set_skills(listing)
+        reads = skills.requests.count(("GET", "/api/extensions"))
+        _tab(page, "sources")
+        page.locator('[data-source-menu="my-folder"]').click()
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving]) [data-menu-action="remove"]').click()
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources/my-folder/remove"), 1)
+        skills.wait_for_count(("GET", "/api/extensions"), reads + 1)
+        _tab(page, "browse")
+        page.wait_for_function("""(document.querySelector('[data-browse-board] .marketplace-card[data-item="ouroboros/weather"]')
+                                   ?.textContent || '').includes('You have another')""")
+        assert "You have another “weather” (from Ouroboros)" in card.inner_text()
+        assert card.locator('[data-browse-action="compare"]').count() == 1
+        # The sheet describes this catalog entry, not the review, version or Places of the other installed copy.
+        skills.answers["/api/skill-catalog/item/ouroboros/weather"] = {"about": "Weather from the new source."}
+        card.locator(".skills-card-name").click()
+        sheet = page.locator(".skills-detail-sheet")
+        sheet.locator(".skills-sheet-about", has_text="Weather from the new source.").wait_for()
+        text = sheet.inner_text()
+        assert "Installs without review:" in text or "Ouroboros will review it" in text
+        assert "Installed without review" not in text and "You have v" not in text
+        assert "Installed folder" not in text and sheet.locator('[data-sheet-places]:not([hidden])').count() == 0
+        assert sheet.locator('[data-sheet-action="compare"]').count() == 1
+        capture(page, browser_name, width, "other-view-detail")
+        page.locator("[data-sheet-close]").click()
+        assert no_overflow(page)
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
 def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
@@ -279,6 +371,11 @@ def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, w
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
         sources = _sources()
+        sources["suggestions"] = [
+            {"name": "Team skills", "url": "https://git.example.invalid/team/skills.git", "ref": "stable",
+             "path": "skills", "about": "Our curated skills", "connected": False},
+            {"name": "Ouroboros", "url": "https://github.com/razzant/OuroborosHub", "ref": "main", "about": "",
+             "connected": True}]
         skills = _open(page, sources=sources)
         _tab(page, "sources")
         rows = page.locator(".skills-source-row")
@@ -351,6 +448,50 @@ def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, w
             {"url": "https://github.com/kuznetsoffandrey/ru-skills", "name": "Russian services", "trust": "review"}]
         assert skills.posted("/api/skill-sources/probe") == [
             {"url": "https://github.com/someone/missing"}, {"url": "https://github.com/kuznetsoffandrey/ru-skills"}]
+
+        # A revision and a folder go with the check. While it runs its fields are read-only and another Enter
+        # starts nothing, so step two confirms, and Add sends, exactly what was checked.
+        page.locator('[data-source-action="add"]').click()
+        page.locator("[data-source-address]").fill("https://github.com/team/skills")
+        page.locator(".skills-add-more > summary").click()
+        page.locator("[data-source-revision]").fill("next")
+        page.locator("[data-source-subfolder]").fill("skills/team")
+        capture(page, browser_name, width, "add-source-revision-folder")
+        skills.hold.add("/api/skill-sources/probe")
+        page.locator("[data-add-check]").click()
+        skills.wait_for_request("/api/skill-sources/probe")
+        fields = ("[data-source-address]", "[data-source-revision]", "[data-source-subfolder]")
+        assert [page.locator(field).evaluate("element => element.readOnly") for field in fields] == [True] * 3
+        revision = page.locator("[data-source-revision]")
+        revision.evaluate("element => { element.value = 'other'; }")  # whatever reaches the field meanwhile
+        revision.press("Enter")
+        skills.hold.discard("/api/skill-sources/probe")
+        skills.release("/api/skill-sources/probe", {"kind": "git", "suggested_name": "skills", "owner": "team",
+                                                     "found": ["alpha", "beta"], "commit": "a" * 40, "problems": []})
+        page.locator("[data-source-name]").wait_for()
+        assert page.locator("[data-source-view]").inner_text() == \
+            "Follows next (now at aaaaaaa), reading the folder skills/team."
+        page.locator("[data-add-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources"), 2)
+        checked = {"url": "https://github.com/team/skills", "revision": "next", "subfolder": "skills/team"}
+        assert skills.posted("/api/skill-sources/probe")[2:] == [checked]
+        assert skills.posted("/api/skill-sources")[1] == {**checked, "name": "skills", "trust": "review"}
+
+        # A build's suggestion fills the address, revision and folder, checks them and names the source; a
+        # connected one is not offered.
+        page.locator('[data-source-action="add"]').click()
+        suggested = page.locator("[data-source-suggestion]")
+        suggested.first.wait_for()
+        assert suggested.count() == 1 and "git.example.invalid/team/skills.git at stable · folder skills" in \
+            suggested.inner_text()
+        suggested.click()
+        page.locator("[data-source-name]").wait_for()
+        assert page.locator("[data-source-name]").input_value() == "Team skills"
+        page.locator("[data-add-ok]").click()
+        skills.wait_for_count(("POST", "/api/skill-sources"), 3)
+        offered = {"url": "https://git.example.invalid/team/skills.git", "revision": "stable", "subfolder": "skills"}
+        assert skills.posted("/api/skill-sources/probe")[3:] == [offered]
+        assert skills.posted("/api/skill-sources")[2] == {**offered, "name": "Team skills", "trust": "review"}
         assert no_overflow(page)
     finally:
         if skills:

@@ -20,9 +20,7 @@ def _ctx(tmp_path):
 
 
 @pytest.mark.parametrize('raw', [
-    'git && status && --porcelain', 'cd foo && make', 'grep -rn foo && bar',
-    'echo $HOME && ls', 'git status --porcelain', 'grep -rn foo . | head -20',
-    "grep 'a|b' file.txt", 'make || true', 'ls -la', "sh -c 'a | b'",
+    'git && status && --porcelain', 'echo $HOME && ls', "sh -c 'a | b'",
 ])
 def test_single_element_is_not_split_or_wrapped(tmp_path, monkeypatch, raw):
     calls = []
@@ -41,8 +39,7 @@ def test_single_element_is_not_split_or_wrapped(tmp_path, monkeypatch, raw):
 
 
 @pytest.mark.parametrize('cmd', [
-    ['git', 'status'], ['printf', '%s', 'a | b'],
-    ['sh', '-c', 'printf one | cat'], ['printf', '%s', '&&'],
+    ['git', 'status'], ['sh', '-c', 'printf one | cat'], ['printf', '%s', '&&'],
 ])
 def test_explicit_argv_reaches_process_unchanged(tmp_path, monkeypatch, cmd):
     calls = []

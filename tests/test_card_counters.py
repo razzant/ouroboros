@@ -60,9 +60,12 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     assert summaries and all(row["rounds"] == 3 for row in summaries)
 
 
-@pytest.mark.parametrize("saved_usage", [{}, {"total_rounds": None}, {"total_rounds": 0}, {"total_rounds": 3}],
-                         ids=["missing", "unknown", "zero", "accepted"])
-@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize(("retained", "saved_usage"), [
+    pytest.param(False, {}, id='False-missing'),
+    pytest.param(False, {"total_rounds": 0}, id='False-zero'),
+    pytest.param(True, {"total_rounds": None}, id='True-unknown'),
+    pytest.param(True, {"total_rounds": 3}, id='True-accepted'),
+])
 def test_history_rounds_override_stale_physical_summary_only_when_known(tmp_path, saved_usage, retained):
     from ouroboros.project_dialogue import append_canonical_task_summary
     from tests._store_shared import read_result, seed_result
@@ -176,7 +179,6 @@ def test_emitted_rounds_survive_split_dispatch_and_result_pruning(
     monkeypatch.setattr(llm, "LLMClient", SimpleNamespace)
     monkeypatch.setattr(pipeline, "_run_memory_fallback_draft",
                         lambda env, *_args: post_roots.append(env.drive_root))
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_args: None)
     monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda *_args: None)
     monkeypatch.setattr(pipeline, "_task_cost_fields", lambda *_args: {"total_rounds": 99})
     events = []

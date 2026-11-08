@@ -9,6 +9,22 @@
   --muted: var(--text-meta);
   --ghost: rgba(var(--neutral-rgb), 0.28);
   --shadow: 0 28px 64px rgba(0, 0, 0, 0.45);
+  --wizard-shell-pad: 14px;
+  --wizard-content-pad: 14px;
+  --wizard-footer-height: 0px; /* measured by onboarding_wizard.js::observeFooter */
+  --wizard-footer-clearance: calc(var(--wizard-footer-height) + 8px);
+}
+
+/* A control reached with Tab or revealed by a script never stops under the pinned footer, however many lines
+   its reason wraps to: the page's scroll padding is the footer's measured height. What is pinned is already in
+   view, so revealing a footer control (scroll-margin) never moves the page. */
+html {
+  scroll-padding-bottom: var(--wizard-footer-clearance);
+}
+
+.wizard-footer,
+.wizard-footer * {
+  scroll-margin-bottom: calc(-1 * var(--wizard-footer-clearance));
 }
 
 * {
@@ -25,8 +41,12 @@ body {
    `100vh - padding` floor overflowed every onboarding page by exactly the
    control's height. A body column lets the shell take the space that is really
    left: `flex: 1 0 auto` fills a short page and still grows past the viewport
-   when a step is genuinely taller — the only scroll onboarding should have. */
+   when a step is genuinely taller — the only scroll onboarding should have.
+   style.css, linked for the shared provider cards, makes the app shell's body
+   one fixed viewport that never scrolls; this page's body stays a document. */
 body {
+  height: auto;
+  overflow: visible;
   min-height: 100vh;
   padding: 16px;
   display: flex;
@@ -37,9 +57,31 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+/* One top bar on the room: the product name and the page's one Appearance control. The wizard below starts with
+   its step rail, which already says which step this is. The bar's text lines up with the shell's content. */
+.onboarding-top {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-inline: calc(var(--wizard-shell-pad) + 1px);
+}
+
+.onboarding-brand {
+  min-width: 0;
+}
+
+/* A window too narrow for the bar's one row wraps Appearance under the name; capped at the bar's width, its label
+   and choices then wrap inside it instead of widening the page. */
 .onboarding-appearance {
   display: flex;
   flex: 0 0 auto;
+  max-width: 100%;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
@@ -71,24 +113,15 @@ textarea::placeholder {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 14px;
-  border: 1px solid var(--border);
+  padding: var(--wizard-shell-pad);
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(var(--neutral-rgb), 0.035), rgba(var(--neutral-rgb), 0.02));
-  backdrop-filter: blur(18px);
-  box-shadow: var(--shadow);
-}
-
-.wizard-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 20px;
-  align-items: start;
+  background: transparent;
 }
 
 /* Was a one-off 32px (plus a 28px compact variant); joins the scale. */
 .wizard-title {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: var(--type-page);
   line-height: var(--line-title);
   font-weight: 700;
@@ -103,17 +136,6 @@ textarea::placeholder {
   line-height: var(--line-body);
 }
 
-.wizard-badge {
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: var(--type-meta);
-  line-height: var(--line-meta);
-  white-space: nowrap;
-}
-
 /* One row of equal columns for HOWEVER many steps the setup contract declares.
    A hardcoded column count wrapped the moment a step was added (the Agents step
    pushed "Review before launch" onto a second row of its own). */
@@ -124,27 +146,21 @@ textarea::placeholder {
   gap: 10px;
 }
 
+/* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
   min-width: 0;
   padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
+  border-radius: var(--radius-inner);
+  border: 1px solid transparent;
+  background: var(--surface-tray);
   transition: border-color 120ms ease, background 120ms ease;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+.wizard-step.active { background: var(--tone-crimson-soft); }
 
-.wizard-step.active {
-  border-color: var(--border-strong);
-  background: var(--accent-08);
-  box-shadow: inset 0 0 0 1px var(--accent-12);
-}
 
-.wizard-step.done {
-  border-color: rgba(34, 197, 94, 0.22);
-}
 
 .wizard-step-index {
   display: inline-flex;
@@ -162,9 +178,10 @@ textarea::placeholder {
 }
 
 .wizard-step.active .wizard-step-index {
-  background: var(--accent-18);
-  color: var(--text);
+  background: transparent;
+  color: var(--tone-crimson-soft-ink);
 }
+.wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
 
 .wizard-step-title {
   margin: 0;
@@ -180,31 +197,17 @@ textarea::placeholder {
   line-height: var(--line-meta);
 }
 
-@media (max-width: 1100px) {
-  .wizard-steps {
-    display: flex;
-    gap: 10px;
-    overflow-x: auto;
-    padding: 0 2px 4px;
-    scroll-snap-type: x proximity;
-  }
-
-  .wizard-step {
-    flex: 0 0 min(180px, calc(45vw - 18px));
-    scroll-snap-align: start;
-  }
-}
-
 .wizard-content {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  background: var(--panel);
+  padding: var(--wizard-content-pad);
+  border-radius: var(--radius-object);
+  border: 1px solid transparent;
+  background: var(--surface-object);
+  box-shadow: var(--elev-rest);
 }
 
 .step-header {
@@ -230,14 +233,25 @@ textarea::placeholder {
   line-height: var(--line-body);
 }
 
+/* Cards, the collapse and the summary inside the step's body are trays; a tray inside a tray drops its fill. A choice
+   is a neutral capsule standing on the rest shadow (a card, since it carries a paragraph). */
 .panel-card,
 .summary-card,
-.wizard-choice,
 .wizard-collapse,
 .wizard-runtime-strip {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
+}
+:is(.panel-card, .summary-card, .wizard-collapse) :is(.agent-family-row, .panel-card, .summary-card) {
+  border-color: transparent;
+  background: transparent;
+}
+.wizard-choice {
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-capsule);
+  box-shadow: var(--elev-rest);
 }
 
 .panel-card,
@@ -370,24 +384,17 @@ textarea::placeholder {
 }
 
 .selection-pill {
-  border: 1px solid var(--border);
-  background: rgba(var(--neutral-rgb), 0.03);
+  border: 1px solid transparent;
+  background: var(--surface-capsule);
   color: var(--text);
+  box-shadow: var(--elev-rest);
   padding: 10px 14px;
   border-radius: 999px;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  transition: var(--motion-tone);
 }
 
-.selection-pill:hover {
-  border-color: rgba(var(--neutral-rgb), 0.24);
-  transform: translateY(-1px);
-}
 
-.selection-pill.active {
-  background: var(--accent-dim);
-  border-color: var(--border-strong);
-}
 
 .wizard-collapse {
   overflow: hidden;
@@ -436,17 +443,16 @@ textarea::placeholder {
 
 .wizard-choice {
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  transition: var(--motion-tone);
 }
 
-.wizard-choice:hover {
-  transform: translateY(-1px);
-}
+.wizard-choice:hover,
+.selection-pill:hover { background: var(--surface-capsule-hover); }
+.wizard-choice.active,
+.selection-pill.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.wizard-choice:active,
+.selection-pill:active { filter: var(--press); }
 
-.wizard-choice.active {
-  border-color: var(--border-strong);
-  background: var(--accent-08);
-}
 
 /* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
    amber, so Advisory keeps the neutral chip; only Blocking declares a pair. */
@@ -543,27 +549,66 @@ textarea::placeholder {
   font-weight: 600;
 }
 
+/* The footer is the step's way forward. A step taller than the window scrolls under it while it stays on the
+   bottom edge, so Continue, Back and the reason Continue is unavailable remain in view without a promise that
+   every state fits. It reaches through the content card's padding and repaints the card's own opaque surface,
+   so nothing scrolled under it shows through. While pinned over moving content it takes an upward shadow; where
+   the page does not scroll (or the engine has no scroll timeline) it is the card's plain last row. A step shorter
+   than the window keeps it on the card's bottom edge (margin-top: auto): one place on every step and state. */
 .wizard-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  margin: auto calc(-1 * var(--wizard-content-pad)) calc(-1 * var(--wizard-content-pad));
+  padding: 10px var(--wizard-content-pad) var(--wizard-content-pad);
+  border-radius: 0 0 var(--radius-object) var(--radius-object);
+  background: linear-gradient(var(--surface-object), var(--surface-object)), var(--bg);
+}
+
+@supports (animation-timeline: scroll()) {
+  .wizard-footer {
+    animation: wizard-footer-pinned linear both;
+    animation-timeline: scroll(root block);
+  }
+}
+
+@keyframes wizard-footer-pinned {
+  0%, 99% { box-shadow: 0 -1px 0 rgba(var(--neutral-rgb), 0.07), 0 -10px 24px rgba(0, 0, 0, 0.07); }
+  100% { box-shadow: none; }
 }
 
 .footer-copy {
+  flex: 1 1 240px;
   max-width: 640px;
   color: var(--muted);
   font-size: var(--type-meta);
   line-height: var(--line-meta);
 }
 
-
+/* The reason Continue is unavailable takes the footer copy's slot; a short window hides that copy, never the
+   reason. A very long one scrolls in place, so it never pushes the actions off the page. Empty, it leaves the flow
+   but stays rendered: a screen reader hears a reason arriving. */
 .wizard-error {
-  min-height: 22px;
+  flex: 1 1 240px;
+  min-width: 0;
+  max-height: 40vh;
+  overflow-y: auto;
   color: var(--status-error-fg);
   font-size: var(--type-meta);
   line-height: var(--line-meta);
+}
+
+.wizard-error:empty {
+  position: absolute;
+}
+
+.wizard-error:not(:empty) + .footer-copy {
+  display: none;
 }
 
 /* ---------------------------------------------------------------------------
@@ -619,7 +664,6 @@ textarea::placeholder {
 .agent-rung-text,
 .agent-rung-title,
 .agent-rung-body,
-.agent-family-identity,
 .agent-family-name,
 .agent-family-status {
   display: block;
@@ -700,25 +744,38 @@ textarea::placeholder {
   opacity: 0.95;
 }
 
-/* One equivalent row per agent family: name + status on the left, its own
-   Connect on the right. No family is laid out differently for being first. */
+/* One equivalent row per agent family (docs/DESIGN.md §6): name, purpose and status on the left, its own action
+   docked right, never wrapped under the text; no family is laid out differently for being first. The list's own
+   width picks the columns: two equal ones where two rows fit side by side, else one (the card never fits three). */
 .agent-family-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
   gap: 6px;
   margin-top: 10px;
 }
 
 .agent-family-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
   padding: 7px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel-3);
+}
+
+.agent-family-identity {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-family-row > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .agent-family-name {
@@ -729,7 +786,6 @@ textarea::placeholder {
 }
 
 .agent-family-status {
-  margin-top: 2px;
   font-size: var(--type-meta);
   line-height: var(--line-meta);
   color: var(--status-neutral-fg);
@@ -808,6 +864,37 @@ textarea::placeholder {
   margin-top: 10px;
 }
 
+.agent-outcome:empty {
+  display: none;
+}
+
+.agent-limits-note {
+  margin-top: 8px;
+}
+
+/* A discovery note beside its Retry, on the row the two share. */
+.wizard-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.wizard-access-row[hidden],
+.wizard-access-row > [hidden] {
+  display: none;
+}
+
+.wizard-access-row > .wizard-inline-note {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.wizard-access-row > .btn {
+  margin-left: auto;
+}
+
 /* Mirror of the settings.css open card (docs/DESIGN.md §6 row anatomy): the
    wizard loads only this sheet. Same anatomy and rhythm tokens, the wizard's
    own surface tokens. */
@@ -855,9 +942,9 @@ textarea::placeholder {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
   container: subagentcard / inline-size;
 }
 
@@ -992,11 +1079,6 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
-.available-subagent-actions .btn-default {
-  min-height: 34px;
-  padding: 0 11px;
-}
-
 .available-subagent-reviewer {
   display: inline-flex;
   align-items: center;
@@ -1057,9 +1139,7 @@ textarea::placeholder {
   align-items: flex-start;
   gap: 10px;
   padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
+  border: 1px solid transparent;
 }
 
 .harness-login-card h4 {
@@ -1182,14 +1262,13 @@ textarea::placeholder {
 .settings-inline-status[data-tone="error"] { color: var(--status-error-fg); }
 
 @media (max-height: 820px), (max-width: 900px) {
-  .wizard-shell {
-    gap: 10px;
-    padding: 12px;
+  :root {
+    --wizard-shell-pad: 12px;
+    --wizard-content-pad: 12px;
   }
 
-  .wizard-header {
-    gap: 12px;
-    align-items: center;
+  .wizard-shell {
+    gap: 10px;
   }
 
   /* Title shrinks dropped with the one-off sizes they adjusted; hiding the
@@ -1198,7 +1277,7 @@ textarea::placeholder {
   .wizard-step-copy,
   .step-copy,
   .panel-card p,
-  .field-note,
+  .field-note:not(.compatible-load-status):not(.budget-shared-note),
   .footer-copy {
     display: none;
   }
@@ -1215,20 +1294,6 @@ textarea::placeholder {
   .agent-ladder-layout {
     grid-template-columns: 1fr;
     gap: 0;
-  }
-
-  /* Compact row anatomy: name and status share one line instead of stacking.
-     Three rows at two lines each was the single largest block of reclaimable
-     height on this step, and nothing is dropped — only re-flowed. */
-  .agent-family-identity {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 10px;
-  }
-
-  .agent-family-status {
-    margin-top: 0;
   }
 
   .agent-family-row {
@@ -1264,7 +1329,6 @@ textarea::placeholder {
 
   .wizard-content {
     gap: 12px;
-    padding: 12px;
   }
 
   .step-title {
@@ -1282,19 +1346,40 @@ textarea::placeholder {
   .wizard-footer {
     justify-content: flex-end;
   }
+}
 
-  .wizard-error {
-    min-height: 16px;
+/* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
+@media (max-height: 820px) {
+  .wizard-steps {
+    display: flex;
+  }
+
+  .wizard-step {
+    flex: 1 1 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .wizard-step-index {
+    flex: 0 0 auto;
+    min-width: 22px;
+    padding: 4px 7px;
+    letter-spacing: 0;
+  }
+
+  .wizard-step-word {
+    display: none;
   }
 }
 
 @media (max-width: 760px) {
-  body {
-    padding: 16px;
+  :root {
+    --wizard-shell-pad: 14px;
   }
 
-  .wizard-shell {
-    padding: 14px;
+  body {
+    padding: 16px;
   }
 
   .field-grid,
@@ -1307,7 +1392,6 @@ textarea::placeholder {
   }
 
   .wizard-step {
-    flex-basis: 138px;
     padding: 10px 12px;
   }
 
@@ -1324,11 +1408,20 @@ textarea::placeholder {
   }
 }
 
+/* A rail too narrow for five titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
 @media (max-width: 720px) {
+  .wizard-steps {
+    display: flex;
+    overflow-x: auto;
+    padding: 0 2px 4px;
+    scroll-snap-type: x proximity;
+  }
+
   .wizard-step {
-    flex-basis: 92px;
+    flex: 0 0 92px;
     align-items: center;
     text-align: center;
+    scroll-snap-align: start;
   }
 
   .wizard-step-title {
@@ -1362,77 +1455,17 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 }
 /* track-migration:end */
 
-/* ---- Airy dopamine (DESIGN.md design bible) -------------------------------------------------------------------
-   The setup page maps onto the bible's roles in both themes: the shell is the plain room (no wash, no outline, no
-   heavy shadow); the step's body is the object on the rest shadow; cards, the collapse and the summary inside it are
-   trays, and a tray inside a tray drops its fill; the step rail is trays with the current step in the soft crimson (a
-   chosen card) and a done step's chip in green; choices and pills are neutral capsules standing on the rest shadow,
-   the chosen one in the soft crimson and still standing. Fields keep their hairline. States change colour, never
-   height. */
-:root[data-theme] .wizard-shell {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-:root[data-theme] .wizard-content {
-  border-color: transparent;
-  border-radius: var(--radius-object);
-  background: var(--surface-object);
-  box-shadow: var(--elev-rest);
-}
-:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse, .wizard-runtime-strip) {
-  border-color: transparent;
-  border-radius: var(--radius-inner);
-  background: var(--surface-tray);
-}
-:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse) :is(.agent-family-row, .panel-card, .summary-card) {
-  border-color: transparent;
-  background: transparent;
-}
-:root[data-theme] .wizard-step {
-  border-color: transparent;
-  border-radius: var(--radius-inner);
-  background: var(--surface-tray);
-  box-shadow: none;
-}
-:root[data-theme] .wizard-step.active { background: var(--tone-crimson-soft); }
-:root[data-theme] .wizard-step.done { border-color: transparent; }
-:root[data-theme] .wizard-step.active .wizard-step-index { background: transparent; color: var(--tone-crimson-soft-ink); }
-:root[data-theme] .wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
-:root[data-theme] .wizard-badge { border-color: transparent; }
-:root[data-theme] :is(.wizard-choice, .selection-pill) {
-  border-color: transparent;
-  background: var(--surface-capsule);
-  box-shadow: var(--elev-rest);
-  transition: var(--motion-tone);
-}
-:root[data-theme] .wizard-choice { border-radius: var(--radius-inner); }
-:root[data-theme] :is(.wizard-choice, .selection-pill):hover {
-  border-color: transparent;
-  background: var(--surface-capsule-hover);
-  box-shadow: var(--elev-rest);
-  transform: none;
-}
-:root[data-theme] :is(.wizard-choice, .selection-pill).active {
-  border-color: transparent;
-  background: var(--tone-crimson-soft);
-  color: var(--tone-crimson-soft-ink);
-  box-shadow: var(--elev-rest);
-}
-:root[data-theme] :is(.wizard-choice, .selection-pill):active { transform: none; filter: var(--press); }
-/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
-:root[data-theme] .wizard-choice.active .skills-mark { color: inherit; }
-
 /* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
    cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
-   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here because this page does not
-   load style.css. */
+   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
+   depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
+.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
+[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;
@@ -1470,7 +1503,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-starter-scroll[data-scroll-below] { --starter-fade-bottom: 32px; }
 .skills-starter-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .skills-starter-scroll::-webkit-scrollbar-track { background: transparent; }
-.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--radius-xs); }
+.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--pill-radius); }
 .skills-starter-group + .skills-starter-group { margin-top: var(--space-4); }
 .skills-starter-group h4 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
 .skills-starter-group h4 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }
@@ -1502,6 +1535,8 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   font-weight: 500;
   white-space: nowrap;
 }
+/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
+.wizard-choice.active .skills-mark { color: inherit; }
 .skills-mark-glyph { display: inline-flex; }
 .skills-mark svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .ui-chip.skills-chip { padding: 3px 10px; font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 500; }

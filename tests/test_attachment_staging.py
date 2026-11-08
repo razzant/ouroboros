@@ -514,7 +514,7 @@ class TestCollectArtifactRecordsExcludesAttachments:
 
 
 class _FakeChatAgent:
-    """Captures the task dict _run_chat_task builds, without running the LLM."""
+    """Captures the task dict the carrier's first step lays onto the admitted seed, without running the LLM."""
 
     def __init__(self):
         self.task = None
@@ -524,24 +524,46 @@ class _FakeChatAgent:
         return []
 
 
+def carried_turn(monkeypatch, drive, agent, chat_id, text, image_data=None, *, task_constraint=None,
+                 task_metadata=None, refusals=None):
+    """The owner's message through the real door and the real carrier body, here.
+
+    ``handle_chat_direct`` admits it to the conversation lane (its RUNNING row under Q, the ready lane
+    spare's queue; nothing of the body runs in the server), then ``carry`` runs the dispatched task
+    through ``worker_process.run_worker_task`` with ``agent``: the carrier's first step
+    (``prepare_conversation_task``: late answer or card press, attachments, Project binding, contract)
+    and then ``agent.handle_task``. A first step that refuses the turn (``ConversationRefusal``) is the
+    turn's own terminal (``refusal_terminal``); ``refusals`` collects those refusals instead of running
+    the terminal pipeline. Returns the dispatched task the carrier ran.
+    """
+    from types import SimpleNamespace
+
+    from supervisor import message_bus, worker_chat_lane, workers
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
+
+    [spare] = isolate_lane_pool(monkeypatch, drive, event_q=queue.Queue())
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
+        send_chat_action=lambda *_a, **_k: None, broadcast=lambda *_a, **_k: None, push_log=lambda *_a, **_k: None))
+    if refusals is not None:
+        monkeypatch.setattr(worker_chat_lane, "refusal_terminal",
+                            lambda _agent, task, refusal, _queue: refusals.append((task, refusal)) or [])
+    assert workers.open_repo_writer_admission()
+    worker_chat_lane.handle_chat_direct(chat_id, text, image_data, task_constraint=task_constraint,
+                                        task_metadata=task_metadata)
+    rows = [tid for tid, meta in workers.RUNNING.items() if meta.get("lane") == "conversation"]
+    assert len(rows) == 1 and spare.busy_task_id == rows[0], "the server admitted the turn to the lane spare"
+    [ran] = carry(workers, spare, agent)
+    return ran
+
+
 class TestDesktopChatFullSetStaging:
     """v6.52.0 (P1, full desktop unify): the WHOLE desktop attachment set routes
-    through the shared substrate via task['metadata']['chat_attachment_uploads']."""
+    through the shared substrate via task['metadata']['chat_attachment_uploads'],
+    staged by the carrier's first step (``carried_turn``: a local event bus stands
+    in for the process-lifetime one, so a latched shutdown never aborts the turn)."""
 
     def test_image_plus_pdf_both_staged_and_manifest_rendered(self, tmp_path, monkeypatch):
-        import supervisor.workers as workers
-
         drive = _drive(tmp_path)
-        monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
-        # This test pins the attachment-staging seam, not the process-lifetime
-        # event bus. Use a local queue so the turn never touches get_event_q():
-        # a prior TestClient lifespan in the same xdist worker leaves
-        # _EVENT_Q_SHUTDOWN latched (server shutdown calls shutdown_event_q()),
-        # and the real get_event_q() then raises before agent.handle_task ever
-        # runs, leaving agent.task None (seen on the ubuntu CI shard; same
-        # isolation precedent as tests/test_inflight_indicator_seams.py::
-        # _patch_workers).
-        monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
 
         # Two uploads on disk: an image and a non-image PDF.
         img_src = tmp_path / "photo.png"
@@ -550,11 +572,8 @@ class TestDesktopChatFullSetStaging:
         pdf_src.write_bytes(b"%PDF-1.4\n%fake\n")
 
         agent = _FakeChatAgent()
-        workers._run_chat_task(
-            agent,
-            1,
-            "look at these",
-            None,
+        carried_turn(
+            monkeypatch, drive, agent, 1, "look at these", None,
             task_metadata={
                 "chat_attachment_uploads": [
                     {"path": str(img_src), "label": "photo.png", "mime": "image/png"},
@@ -584,34 +603,33 @@ class TestDesktopChatFullSetStaging:
         assert task["text"].count("read_file(root='artifact_store'") == 2
 
     def test_no_uploads_keeps_legacy_inline_image(self, tmp_path, monkeypatch):
-        """Backward-compat: with no chat_attachment_uploads, the single-image base64
-        seam is untouched (image_base64 stays, nothing is staged)."""
-        import supervisor.workers as workers
+        """Backward-compat: with no chat_attachment_uploads, the single-image seam is untouched: the
+        admission keeps the pixels as the turn's actor source (the row stays small) and the carrier
+        stages nothing."""
+        from ouroboros.artifacts import read_actor_source_bytes
 
         drive = _drive(tmp_path)
-        monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
-        # Same event-bus isolation as test_image_plus_pdf_both_staged_and_
-        # manifest_rendered: a latched _EVENT_Q_SHUTDOWN from a prior TestClient
-        # lifespan in this xdist worker must not abort the turn before
-        # handle_task.
-        monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
-
         b64 = base64.b64encode(_PNG_BYTES).decode("ascii")
         agent = _FakeChatAgent()
-        workers._run_chat_task(agent, 1, "hi", (b64, "image/png", "a shot"))
+        carried_turn(monkeypatch, drive, agent, 1, "hi", (b64, "image/png", "a shot"))
 
         task = agent.task
         assert task is not None
-        assert task.get("image_base64") == b64
-        assert task.get("image_mime") == "image/png"
+        assert "image_base64" not in task and task["image_source_ref"]
+        assert read_actor_source_bytes(drive, task["id"], task["image_source_ref"]) == _PNG_BYTES
+        assert task.get("image_mime") == "image/png" and task.get("image_caption") == "a shot"
+        assert task["text"] == "hi"
         assert "attachment_images" not in task
         assert "[ATTACHMENTS]" not in task["text"]
+        assert not _attach_dir(drive, task["id"]).exists()
 
     def test_initial_ui_turn_is_atomic_on_staging_rejection(self, tmp_path, monkeypatch):
+        """A fully rejected set refuses the turn in the carrier's first step, before any model work or
+        Project binding: the refusal's owner words are the turn's own terminal (``refusal_terminal``),
+        one short typed mark; the host sends no sentence of its own."""
         import supervisor.workers as workers
 
         drive = _drive(tmp_path)
-        monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
         notices = []
         monkeypatch.setattr(
             workers, "send_with_budget", lambda _chat_id, text, **kwargs: notices.append((text, kwargs)),
@@ -625,25 +643,28 @@ class TestDesktopChatFullSetStaging:
             lambda *args, **kwargs: bindings.append((args, kwargs)),
         )
         agent = _FakeChatAgent()
+        refusals = []
 
-        workers._run_chat_task(
-            agent,
-            1,
-            "must have the file",
+        carried_turn(
+            monkeypatch, drive, agent, 1, "must have the file",
             task_metadata={
                 "project_id": "project-one",
                 "chat_attachment_uploads": [
                     {"path": str(tmp_path / "missing.txt"), "label": "missing.txt"},
                 ],
             },
+            refusals=refusals,
         )
 
         assert agent.task is None
         assert bindings == []
         # One short typed mark in owner words (no mind will read this message); the
         # model's block, its paths and reason codes never reach the chat.
-        assert notices == [("Not started: the attachments could not be staged (1 file)",
-                            {"role": "system", "system_type": "task_not_started"})]
+        [(refused_task, refusal)] = refusals
+        assert refusal.code == "attachment_admission_rejected"
+        assert refusal.owner_text == "Not started: the attachments could not be staged (1 file)"
+        assert refused_task["project_id"] == "project-one" and "_project_admission" not in refused_task
+        assert notices == []
         assert not (drive / "task_results" / "artifacts").exists()
         rows = [json.loads(line) for line in (drive / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
         diagnostic = [row for row in rows if row.get("type") == "attachments_rejected"]
@@ -654,15 +675,13 @@ class TestDesktopChatFullSetStaging:
         import supervisor.workers as workers
 
         drive = _drive(tmp_path)
-        monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
-        monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
         notices = []
         monkeypatch.setattr(workers, "send_with_budget", lambda _chat_id, text, **_kwargs: notices.append(text))
         good = tmp_path / "good.txt"
         good.write_text("ok", encoding="utf-8")
         agent = _FakeChatAgent()
 
-        workers._run_chat_task(agent, 1, "use both", task_metadata={"chat_attachment_uploads": [
+        carried_turn(monkeypatch, drive, agent, 1, "use both", task_metadata={"chat_attachment_uploads": [
             {"path": str(good), "label": "good.txt"},
             {"path": str(tmp_path / "missing.txt"), "label": "missing.txt"},
         ]})
@@ -727,3 +746,39 @@ class TestChatAttachmentUploads:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_a_turn_saved_across_restart_still_stages_its_attachments_in_the_worker(tmp_path, monkeypatch):
+    """Astra C3: a message admitted while a Restart drains is saved on the durable queue before the lane adds
+    its first-step facts. The saved seed keeps the preparation obligation in the saved queue's own row shape
+    (``_PENDING_FIELDS``), so the worker that runs it after Restart stages its uploads as a carrier would."""
+    from types import SimpleNamespace
+
+    from supervisor import message_bus, queue as supervisor_queue, worker_chat_lane, workers
+    from supervisor.queue_snapshot import _PENDING_FIELDS
+    from supervisor.worker_process import _run_task_body
+    from tests.conversation_carrier_support import isolate_lane_pool
+
+    drive = _drive(tmp_path)
+    isolate_lane_pool(monkeypatch, drive, event_q=queue.Queue())
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
+        send_chat_action=lambda *_a, **_k: None, broadcast=lambda *_a, **_k: None, push_log=lambda *_a, **_k: None))
+    monkeypatch.setattr(workers, "send_with_budget", lambda *_a, **_k: None)
+    monkeypatch.setattr("ouroboros.server_restart.agent_restart_pending", lambda: True)  # intake still open
+    monkeypatch.setattr("ouroboros.server_restart.agent_restart_draining", lambda: True)  # the drain saves the turn
+    monkeypatch.setattr(supervisor_queue, "RETURNS_NAMED", False)
+    saved = []
+    monkeypatch.setattr(supervisor_queue, "enqueue_with_admission_receipt",
+                        lambda task, **_k: saved.append(dict(task)) or task)
+    assert workers.open_repo_writer_admission()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF-1.4\n%fake\n")
+    worker_chat_lane.handle_chat_direct(1, "read the attached report", None, task_metadata={
+        "client_message_id": "cm-c3",
+        "chat_attachment_uploads": [{"path": str(report), "label": "report.pdf", "mime": "application/pdf"}]})
+    [seed] = saved
+    restored = {key: seed[key] for key in _PENDING_FIELDS if seed.get(key) is not None}  # what Restart restores
+    agent = _FakeChatAgent()
+    _run_task_body(agent, restored, str(drive), queue.Queue(), str(drive))
+    assert agent.task["attachment_manifest"] and "[ATTACHMENTS]" in agent.task["text"]
+    assert any(path.name.endswith(".pdf") for path in _attach_dir(drive, seed["id"]).iterdir())

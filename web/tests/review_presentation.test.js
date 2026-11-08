@@ -22,6 +22,15 @@ import { reconcileReviewElementTree } from '../modules/review_dom_patch.js';
 import { getLogTaskGroupId, isGroupedTaskEvent } from '../modules/log_events.js';
 import { formatMsgTime } from '../modules/utils.js';
 
+// The Reviews door is an element: its words are its one text node, before the chevron its card draws.
+function doorStub() {
+    const door = { hidden: true, dataset: {}, firstChild: null,
+        ownerDocument: { createTextNode: (data) => ({ nodeType: 3, data }) },
+        insertBefore(node) { door.firstChild = node; return node; },
+        get textContent() { return door.firstChild?.data || ''; } };
+    return door;
+}
+
 const groupedSkillRow = (overrides = {}) => ({
     system_type: 'skill_review',
     skill: 'alpha',
@@ -1200,9 +1209,33 @@ test('initiator detail is omitted when it is the owner', () => {
     }), /Initiated by task/);
 });
 
+test('the Reviews door keeps its chevron: its words are its one text node, rewritten in place', () => {
+    // The card draws the door's chevron as an element after its words (chat.js), so the door's ::after stays the
+    // touch hit area of ui.css; a render must never wipe that element.
+    const chevron = { nodeType: 1, tagName: 'svg' };
+    const nodes = [chevron];
+    const door = { hidden: true, dataset: {}, ownerDocument: { createTextNode: (data) => ({ nodeType: 3, data }) },
+        get firstChild() { return nodes[0] || null; },
+        insertBefore(node, before) { nodes.splice(before ? nodes.indexOf(before) : nodes.length, 0, node); return node; },
+        setAttribute() {} };
+    const controller = createReviewPresentationController({ host: { innerHTML: '', addEventListener() {} }, summary: door,
+        disclosure: { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() } });
+    controller.update(reviewGroupFromHistoryRow(groupedSkillRow()));
+    const [words] = nodes;
+    assert.deepEqual([words.nodeType, words.data, nodes[1]], [3, 'Reviews 1', chevron]);
+    controller.update(reviewGroupFromLifecycle({ lifecycle: {
+        kind: 'review', status: 'running', target: 'beta', job_id: 'job-9',
+        group_id: 'task:root:beta', presentation_owner_task_id: 'root',
+    } }));
+    assert.deepEqual(nodes.map((node) => node.nodeType), [3, 1], 'one text node, then the chevron');
+    assert.equal(nodes[0], words, 'the same text node, rewritten in place');
+    assert.match(words.data, /^Reviews 2/);
+    assert.equal(door.hidden, false);
+});
+
 test('review updates never change owner disclosure state', () => {
     const host = { innerHTML: '', addEventListener() {} };
-    const summary = { hidden: true, textContent: '', dataset: {} };
+    const summary = doorStub();
     const disclosure = { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() };
     let domWrites = 0;
     const controller = createReviewPresentationController({
@@ -1223,7 +1256,7 @@ test('review updates never change owner disclosure state', () => {
 test('an opened saved Skill reader keeps its exact job when review content updates', async () => {
     let click;
     const host = { innerHTML: '', addEventListener(_type, callback) { click = callback; } };
-    const summary = { hidden: true, textContent: '', dataset: {} };
+    const summary = doorStub();
     const reads = [];
     const controller = createReviewPresentationController({ host, summary,
         disclosure: { sectionExpanded: true, expandedGroups: new Set(['task:root:alpha']), expandedAttempts: new Set() },
@@ -1387,7 +1420,7 @@ test('a re-render that replaces a focused control hands focus to the same group 
         },
         get innerHTML() { return this._html || ''; },
     };
-    const summary = { hidden: true, textContent: '', dataset: {} };
+    const summary = doorStub();
     const disclosure = { sectionExpanded: true, expandedGroups: new Set() };
     const controller = createReviewPresentationController({ host, summary, disclosure });
     controller.update(reviewGroupFromHistoryRow(groupedSkillRow()));

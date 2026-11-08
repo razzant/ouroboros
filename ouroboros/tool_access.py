@@ -155,6 +155,24 @@ def lineage_read_base(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> pat
                  if path_is_relative_to(candidate, base)), None)
 
 
+def _lineage_source_target(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> pathlib.Path:
+    """A READ, through artifact_store or runtime_data, of a lineage task's SHA-named source handle with no
+    entry at the asked placement opens that task's own verified source (#2645: the writer kept it in the
+    canonical store while an execution-drive artifact_store was advertised). An existing entry, a denied
+    lookup and every other path stay as asked; dispatch then judges the opened target as for any read."""
+    from ouroboros.source_retention import retained_actor_source_read_target, source_handle_digest
+
+    base = lineage_read_base(ctx, "artifact_store", target) if root in {"artifact_store", "runtime_data"} else None
+    relative = target.relative_to(base).as_posix() if base is not None and base.name in lineage_task_ids(ctx) else ""
+    if not source_handle_digest(relative):
+        return target
+    try:
+        os.lstat(target)
+        return target
+    except FileNotFoundError:
+        return retained_actor_source_read_target(canonical_data_root(ctx), base.name, relative) or target
+
+
 def _effective_policy_profile(profile: ToolProfile) -> ToolProfile:
     """Map an acting child to the existing full matrix only in Cyber Pro."""
     if profile != "acting_subagent":
@@ -264,9 +282,12 @@ def _process_root_candidates(
         ])
 
     if hasattr(ctx, "drive_root"):
+        from ouroboros.tool_access_user_files import deliverables_process_roots
+
         for drive in _task_root_drives(ctx):
             _add_task_roots(drive)
         candidates.append(("user_files", resource_root_path(ctx, "user_files"), "user_files", ""))
+        candidates += [("user_files", root, "user_files", "") for root in deliverables_process_roots(ctx)]
     if include_skill:
         base, source, selected_name = _skill_payload_base(
             ctx,
@@ -350,9 +371,9 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         "invisible_roots": sorted(_ALL_ROOTS - set(policy)),
         "root_paths": root_paths,
         "default_shell_cwd": shell_roots[0][0] if shell_roots else "",
-        "allowed_shell_cwd_roots": [label for label, _root in shell_roots],
+        "allowed_shell_cwd_roots": list(dict.fromkeys(label for label, _root in shell_roots)),
         "default_service_cwd": service_roots[0][0] if service_roots else "",
-        "allowed_service_cwd_roots": [label for label, _root in service_roots],
+        "allowed_service_cwd_roots": list(dict.fromkeys(label for label, _root in service_roots)),
         "git_readonly_subcommands": git_readonly_subcommands,
         "light_gated_roots": sorted(light_gated_roots),
     }
@@ -636,8 +657,10 @@ def _resolve_target_in_selected_base(
     base_path: pathlib.Path,
     path: str,
     operation: Operation,
+    alias: bool = True,
 ) -> pathlib.Path:
-    """Resolve one target inside an already-selected physical base."""
+    """Resolve one target inside an already-selected physical base; ``alias=False`` returns the address a READ
+    asked for, without the re-anchors that open a capture or source where its writer kept it."""
 
     if root == "user_files":
         return resolve_user_file_path(
@@ -674,20 +697,20 @@ def _resolve_target_in_selected_base(
                     from ouroboros.tool_access_reads import inherited_read_base
                     if (lineage_read_base(ctx, root, candidate) is not None
                             or inherited_read_base(ctx, root, candidate) is not None):
-                        return candidate
+                        return _lineage_source_target(ctx, root, candidate) if alias else candidate
                     if root == "artifact_store":
                         from ouroboros.delegate_shared import orphan_capture_read_target
 
                         anchored = orphan_capture_read_target(ctx, candidate)
                         if anchored is not None:
-                            return anchored
+                            return anchored if alias else candidate
         if is_absolute_path_text(path_text):
             raise ValueError(
                 f"absolute path {path!r} is outside selected root={root} ({resolved_base}). "
                 f"Roots your profile can {operation}: "
                 f"{operation_roots(active_tool_profile(ctx), operation)}."
             )
-    if root == "artifact_store" and operation in _READ_OPS:
+    if root == "artifact_store" and operation in _READ_OPS and alias:
         # Delegated captures and activity: written on the CANONICAL drive, read from
         # a CHILD drive_root — re-anchor (see `delegated_capture_read_target`).
         anchored = delegated_capture_read_target(
@@ -709,7 +732,7 @@ def _resolve_target_in_selected_base(
         resolved.relative_to(resolved_base)
     except ValueError as exc:
         raise ValueError(f"path escapes {resolved_base}") from exc
-    return resolved
+    return _lineage_source_target(ctx, root, resolved) if alias and root == "runtime_data" and operation in _READ_OPS else resolved
 
 
 def build_resolved_resource_binding(
@@ -854,6 +877,9 @@ def build_resolved_resource_binding(
         path=path,
         operation=operation,
     )
+    asked = (_resolve_target_in_selected_base(ctx, root=normalized, base_path=base, path=path, operation=operation,
+                                              alias=False)
+             if operation in _READ_OPS and normalized in {"artifact_store", "runtime_data"} else target)
     # The physical base follows the containing root; retain the selected default
     # separately so policy sees the same exact file even across inherited roots.
     logical_base_path = None
@@ -882,6 +908,7 @@ def build_resolved_resource_binding(
         skill_name=selected_name,
         state_drive_root=canonical_data_root(ctx),
         logical_base_path=logical_base_path,
+        requested_path=asked if asked != target else None,
     )
 def resolve_resource_path(
     ctx: Any,

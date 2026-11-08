@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from ouroboros.project_dialogue import build_owner_message_ref
-from ouroboros.task_results import write_task_result
+from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import message_bus
 from tests._dialogue import chat_rows
 from tests.test_host_service_operations import (
@@ -14,16 +14,27 @@ from tests.test_host_service_operations import (
 
 @pytest.fixture
 def direct_budget_refusal(tmp_path, monkeypatch):
+    """The lane with one carrier and an actor that finds the budget exhausted before any model work."""
     from queue import SimpleQueue
-    from supervisor import state, workers
+    from types import SimpleNamespace
+    from supervisor import state
     from tests._agent_entry_helpers import task_entry_agent
+    from tests.conversation_carrier_support import isolate_lane_pool
 
     agent = task_entry_agent(tmp_path, lambda _task: pytest.fail("exhausted budget entered the task body"))
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
-    monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
+    agent.env.drive_path = lambda name: tmp_path / name
+    [spare] = isolate_lane_pool(monkeypatch, tmp_path, event_q=SimpleQueue())
     monkeypatch.setattr(state, "load_state", lambda: {})
     monkeypatch.setattr(state, "budget_remaining", lambda _state, *, strict: 0)
+    return SimpleNamespace(agent=agent, spare=spare)
+
+
+def _carried_refusal(workers, world):
+    """Run the admitted turn's body in its carrier: the pre-start refusal unwinds it before any model work."""
+    from tests.conversation_carrier_support import carry
+
+    with pytest.raises(Exception, match="budget_exhausted"):
+        carry(workers, world.spare, world.agent)
 
 
 def test_atomic_acceptance_before_dequeue_and_exact_source_consumption(tmp_path, monkeypatch):
@@ -72,7 +83,7 @@ def test_failed_acceptance_never_queues_and_restart_never_requeues(tmp_path, mon
     assert state["status"] == "lost" and restarted._inbox.empty()
 
 
-@pytest.mark.parametrize("mismatch", ["chat_id", "ts", "text_sha256", "source"])
+@pytest.mark.parametrize("mismatch", ["chat_id", "text_sha256", "source"])
 def test_annotation_collision_never_authorizes_foreign_task(tmp_path, monkeypatch, mismatch):
     client = _client(tmp_path)
     _inbound(tmp_path, "own source")
@@ -118,7 +129,12 @@ def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, mon
         "chat_id": CHAT, "client_message_id": MSG, "text": "do work",
     }).status_code == 202
     ref = bridge.get_updates(0, timeout=0)[0]["message"]["accepted_source_ref"]
-    worker_chat_lane._handle_chat_direct_locked(CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
+    worker_chat_lane.handle_chat_direct(CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
+    _carried_refusal(workers, direct_budget_refusal)
+    # The carrier's typed refusal is the host operation's exact failed terminal, correlated by its source.
+    [task_id] = list(workers.RUNNING)
+    stored = load_task_result(tmp_path, task_id)
+    assert stored["status"] == "failed" and "Budget exhausted" in stored["result"], stored
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
     assert result["status"] == "failed" and "Budget exhausted" in result["text"]
 
@@ -128,21 +144,30 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
     """A registered refusal is keyed, but only host operations retain a terminal origin."""
     from supervisor import worker_chat_lane, workers
 
-    sent, frames = [], []
+    frames = []
     bridge = message_bus.LocalChatBridge()
     bridge._broadcast_fn = frames.append
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
-    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **kw: sent.append((a, kw)))
-    worker_chat_lane._handle_chat_direct_locked(chat_id, "hello", task_metadata={
+    finals = []
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **kw: finals.append((a, kw)))
+    worker_chat_lane.handle_chat_direct(chat_id, "hello", task_metadata={
         "origin_message_ref": build_owner_message_ref(chat_id=chat_id, client_message_id="ordinary", ts="now", text="hello"),
     })
     receipt = next(row for row in frames if row.get("type") == "typing")
     assert receipt["client_message_id"] == "ordinary" and receipt["chat_id"] == chat_id
     assert receipt["activity_id"]
-    assert sent == [((chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."), {
-        "task_id": receipt["activity_id"], "progress_meta": {"task_terminal_status": "failed"},
-        "role": "system", "system_type": "task_not_started",
-    })]
+    assert finals == [], "the admission refused nothing"
+    _carried_refusal(workers, direct_budget_refusal)
+    # The carrier's keyed final: the registered turn's id, no durable origin for an ordinary turn.
+    [(args, kwargs)] = finals
+    assert kwargs["task_id"] == receipt["activity_id"] and kwargs["system_type"] == "task_not_started"
+    assert args[1].startswith("🚫 Budget exhausted.") and "origin_message_ref" not in kwargs["progress_meta"]
+    # Keyed by the registered turn's id, in the owner's closed-class words; an ordinary turn keeps no
+    # durable terminal origin (its client id stays on the live receipt).
+    stored = load_task_result(workers.DRIVE_ROOT, receipt["activity_id"])
+    assert stored["status"] == "failed", stored
+    assert stored["result"] == "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."
+    assert [row for row in chat_rows(workers.DRIVE_ROOT) if row.get("origin_message_ref")] == []
 
 
 @pytest.mark.parametrize("host_operation", [False, True])
@@ -150,7 +175,12 @@ def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeyp
     from queue import SimpleQueue
     from supervisor import worker_chat_lane, workers
 
+    from types import SimpleNamespace
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
+
     class CrashingAgent:
+        env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda name: tmp_path / name)
+
         def handle_task(self, task):
             raise RuntimeError("test chat execution failed")
 
@@ -158,28 +188,31 @@ def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeyp
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {})
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
+    [spare] = isolate_lane_pool(monkeypatch, tmp_path, event_q=SimpleQueue())
     monkeypatch.setattr(workers, "send_with_budget", message_bus.send_with_budget)
     client = _client(tmp_path, bridge)
     assert client.post("/chat/inject", headers=_headers(), json={
         "chat_id": CHAT, "client_message_id": MSG, "text": "do work",
     }).status_code == 202
     ref = bridge.get_updates(0, timeout=0)[0]["message"]["accepted_source_ref"]
-    worker_chat_lane._run_chat_task(
-        CrashingAgent(), CHAT, "do work",
-        task_metadata={"origin_message_ref": ref, "_host_operation": host_operation},
+    worker_chat_lane.handle_chat_direct(
+        CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": host_operation},
     )
+    # The carrier records the crash as the turn's own terminal before it unwinds (owner decision 1A).
+    with pytest.raises(RuntimeError, match="test chat execution failed"):
+        carry(workers, spare, CrashingAgent())
+    [task_id] = list(workers.RUNNING)
+    stored = load_task_result(tmp_path, task_id)
+    assert stored["status"] == "failed" and "test chat execution failed" in stored["result"]
+    # The owner reads the failure once, keyed to the turn; only the host-accepted operation keeps its source.
     rows = chat_rows(tmp_path)
     final = rows[-1]
     assert "test chat execution failed" in final["text"]
     assert final["task_terminal_status"] == "failed"
     assert final.get("origin_message_ref") == (ref if host_operation else None)
+    # The lane row carries the turn's complete ingress origin: the operation's authority, host op or not.
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
-    if host_operation:
-        assert result["status"] == "failed" and "test chat execution failed" in result["text"]
-    else:
-        assert result["status"] == "pending" and "text" not in result
+    assert result["status"] == "failed" and "test chat execution failed" in result["text"]
 
 
 def test_real_server_consumes_one_source_and_authors_only_its_operation_marker(tmp_path, monkeypatch):

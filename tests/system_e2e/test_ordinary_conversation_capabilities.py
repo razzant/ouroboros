@@ -19,7 +19,7 @@ import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from tests.system_e2e.harness import (
-    LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text,
+    LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text, conversation_turn_row,
     keyless_settings, message_text, require_lane, start_server, wait_durable_result, wait_until, ws_url,
 )
 from tests.system_e2e.test_system_scenarios_w6 import _WsFrames, _direct_activities
@@ -55,7 +55,6 @@ def _received_turn(oracle: ArtifactOracle, client_message_id: str) -> dict | Non
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone, tmp_path):
     require_lane(LANE_MOCK)
     room, mcp_dir = tmp_path / "attached room", tmp_path / "mcp fixture"
@@ -123,12 +122,19 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                 held = wait_until(lambda: (_direct_activities(server, held_message) or [None])[0], 30)
                 assert held, "the held Main turn is not addressable"
                 held_id = held["activity_id"]
-                assert held_id not in oracle.running_ids(), "native turn acquired a pool worker"
+                # #2654: the native turn is the conversation lane's (a carrier process outside
+                # MAX_WORKERS, its RUNNING row never PENDING), not an in-process actor.
+                held_row = conversation_turn_row(oracle, held_id)
                 main_id = finish(send("Read input.txt with the fixture, write main.txt, then answer here."),
                                  "S27_MAIN_COMPLETE")
                 assert (mcp_dir / "main.txt").read_text() == "S27_MAIN_WRITE"
                 assert not gate.release.is_set() and not gate.timed_out
                 assert oracle.task_result(held_id).get("status") == "running"
+                # The held turn's carrier stayed bound to it, blocked in its model call, while the
+                # other Main turn completed: that turn ran concurrently on ANOTHER carrier.
+                still = conversation_turn_row(oracle, held_id)
+                assert (still["worker_id"], still["carrier_pid"]) == (held_row["worker_id"], held_row["carrier_pid"]), (
+                    held_row, still)
                 gate.release.set()
                 assert finish(held_message, "S27_HELD_COMPLETE") == held_id
                 project_id = finish(send("Read input.txt and write project.txt with the fixture; "

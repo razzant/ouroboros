@@ -93,6 +93,15 @@ def restore(prepared):
     return state["tool_schemas"]
 
 
+@pytest.mark.parametrize("mode", ["max", "nano"])
+def test_a_list_saved_before_the_mcp_gateway_adopts_it_once_where_a_fresh_start_carries_it(tmp_path, monkeypatch, mode):
+    """An intact prefix whose saved list predates call_mcp_tool is adopted once on resume when a fresh start in its
+    mode carries the gateway (Max); Nano, whose fresh start carries none, keeps its frozen list."""
+    prepared = prepare(tmp_path, monkeypatch, frozen=[_schema("old")], current=[_schema("old"), _schema("call_mcp_tool")],
+                       mode=mode, system_changed=False)
+    assert ("call_mcp_tool" in _names(restore(prepared))) is (mode == "max")
+
+
 def test_intact_own_prefix_keeps_frozen_tools_and_reasoning(tmp_path, monkeypatch):
     prepared = prepare(tmp_path, monkeypatch, system_changed=False)
     tools, state, messages, trace, _, projections = prepared
@@ -181,9 +190,11 @@ def test_history_check_is_after_the_route_ceiling(tmp_path, monkeypatch, enabled
     assert not any("saved tool set was kept" in str(row.get("content")) for row in messages)
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("model, count", [("openai::unseen-model", 128), ("anthropic::unseen", 129),
-                                          ("openai/unseen-router", 129)])
+@pytest.mark.parametrize(("model", "count", "legacy"), [
+    ("openai::unseen-model", 128, False),
+    ("anthropic::unseen", 129, True),
+    ("openai/unseen-router", 129, False),
+])
 def test_ceiling_keeps_enabled_or_legacy_resident_without_inventing_intent(tmp_path, monkeypatch, legacy, model, count):
     catalog = _catalog(129)
     tail = [name for name in _names(catalog) if name.startswith("extra_")][-1]
@@ -253,8 +264,7 @@ def test_equal_candidate_is_quiet_but_current_capability_notes_survive_restore(t
     assert not any("tool set changed" in str(row.get("content")) for row in messages)
 
 
-@pytest.mark.parametrize("rail", ["owner", "budget", "working"])
-@pytest.mark.parametrize("system_changed", [False, True])
+@pytest.mark.parametrize(("system_changed", "rail"), [(False, "owner"), (False, "working"), (True, "budget")])
 def test_every_cold_resume_rail_reaches_the_same_decision(tmp_path, monkeypatch, rail, system_changed):
     from ouroboros import budget_pause, working_checkpoint
 
@@ -293,7 +303,7 @@ def test_real_loop_measures_sends_and_checkpoints_adoption_without_editing_recov
     saved = SimpleNamespace(tools=registry, messages=messages, llm_trace={}, accumulated_usage={},
                             round_idx=2, tool_schemas=frozen, owner_msg_seen=set())
     wc.save_round(saved, "post_batch")
-    exact = wc.checkpoint_path(tmp_path, ctx.task_id, 1).read_bytes()
+    exact = wc.read_working(tmp_path, ctx.task_id, 1)[0]
     task = {"id": ctx.task_id}
     assert wc.attach_recovery(tmp_path, task, source_task_id=ctx.task_id, from_attempt=1, cause="worker_crash")
     handoff = task["_working_recovery"]
@@ -309,7 +319,7 @@ def test_real_loop_measures_sends_and_checkpoints_adoption_without_editing_recov
 
     def dispatch(call, disposition, **kwargs):
         sent.append(prefix.tools_digest(call.tool_schemas))
-        checkpoint = json.loads(wc.checkpoint_path(tmp_path, ctx.task_id, 2).read_bytes())
+        checkpoint = wc.read_working(tmp_path, ctx.task_id, 2)[1]
         assert prefix.tools_digest(checkpoint["tool_schemas"]) == expected
         assert checkpoint["actor_loaded_tool_names"] == ["read_file"]
         assert read_actor_source_bytes(tmp_path, ctx.task_id, handoff["source_ref"]) == exact

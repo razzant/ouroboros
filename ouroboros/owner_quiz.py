@@ -20,8 +20,14 @@ like the hurry projection):
             "answered_after_terminal"?, "host_facts"?, "materials"?,
             "publication_chat_id"?, "publication_bound_at"?,
             "closed_reason"?, "closed_at"?, "closed_by_task_id"?, "discharged_at"?,
+            "secret_request"?, "secret_save"?, "secret_outcome"?,
         }, ...
     }
+
+``secret_*`` are an integration-secret request's typed metadata (``ouroboros/secret_requests.py``):
+its answer is the host's ``secret_outcome``, written only by the protected form's endpoint, never an
+option or comment; while ``secret_save`` says ``writing`` no other path may close the question. A
+save after the task ended is recorded like a late answer, but never forwarded as the owner's message.
 
 Expiry stays STRUCTURAL: ``reconcile_terminal`` runs on the task-done seam and
 flips every still-open block to ``expired_terminal``; there is no host TTL. What
@@ -57,6 +63,8 @@ _QUIZ_CAP = 16
 
 # The explicit closure facts every card view copies beside the answer facts.
 CLOSURE_FIELDS = ("closed_reason", "closed_at", "closed_by_task_id", "closed_actor", "closed_request_id")
+# A secret request's typed metadata, copied by every card view beside its lifecycle (``secret_requests.py``).
+SECRET_FIELDS = ("secret_request", "secret_outcome", "secret_save")
 # The owner closes in one tap; a closure without the owner's words records this sentence.
 OWNER_CLOSE_REASON = "Closed by the owner without an answer."
 
@@ -107,6 +115,13 @@ def question_delivery_projection(block: Any) -> Dict[str, str]:
     if delivery.get("dismissed_at"):
         view["dismissed"] = True
     return view
+
+
+def question_delivery_now(block: Any) -> Dict[str, Dict[str, str]]:
+    """``{"question_delivery": ...}`` of a question's current record, ``{}`` when it states none: what an
+    answer or closure row's snapshot (frozen when it was written) shows in its place, as its question row does."""
+    delivery = question_delivery_projection(block)
+    return {"question_delivery": delivery} if delivery else {}
 
 
 def record_answer_delivery_after_terminal(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, Any]:
@@ -327,6 +342,7 @@ def record_asked(
     reply_to: Optional[Dict[str, Any]] = None,
     presence_contact: Optional[Dict[str, Any]] = None,
     request_fingerprint: str = "",
+    secret_request: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Worker-side projection write at ask time.
 
@@ -341,7 +357,8 @@ def record_asked(
     waiting asker chose, so replay can say what the task waited for.
     ``host_facts`` is the host-written sentence the card shows under the
     question (asking task, how its run started, the owner's last message in
-    the chat); stored only when non-empty."""
+    the chat); stored only when non-empty. ``secret_request`` (metadata only) makes the
+    question an integration-secret request answered through its protected form alone."""
     if option_details is not None and (
         not isinstance(option_details, list) or len(option_details) != len(options)
         or not all(isinstance(value, str) for value in option_details)
@@ -368,6 +385,7 @@ def record_asked(
         **({"reply_to": reply_to} if reply_to else {}),
         **({"presence_contact": dict(presence_contact)} if presence_contact else {}),
         **({"request_fingerprint": request_fingerprint} if request_fingerprint else {}),
+        **({"secret_request": dict(secret_request)} if secret_request else {}),
     }
 
     refused: Dict[str, str] = {}
@@ -475,7 +493,7 @@ def mark_discharged(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, An
 
 def record_closed(
     drive_root: Any, task_id: str, *, quiz_id: str, reason: str, actor_task_id: str = "",
-    actor: str = "model", request_id: str = "",
+    actor: str = "model", request_id: str = "", secret_outcome: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The owner closes any unanswered question; a model closes its own, a recorded Continue/retry
     predecessor's, or a question whose task already finished (``expired_terminal``), always with
@@ -483,6 +501,9 @@ def record_closed(
 
     Same Project membership, shared folders and prose never grant this authority.
     Closure is not an owner answer and never carries an answer index or approval.
+
+    A secret request's save claim (``secret_save.state == writing``) refuses every closure but the
+    owner's cancel, which passes its typed ``secret_outcome`` from under the settings lock.
     """
     reason = str(reason or "")
     if actor == "owner" and not reason.strip():
@@ -514,6 +535,9 @@ def record_closed(
         if not own_line and block.get("state") != STATE_EXPIRED_TERMINAL:
             outcome.update(ok=False, error="question_not_owned", state=block.get("state"), block=dict(block))
             return _KEEP
+        if (block.get("secret_save") or {}).get("state") == "writing" and secret_outcome is None:
+            outcome.update(ok=False, error="secret_save_in_progress", state=block.get("state"), block=dict(block))
+            return _KEEP
         delivery = block.get("delivery") or {}
         pending_publication = delivery.get("kind") == "publication" and delivery.get("state") == "owed"
         block.update(state=STATE_CLOSED, closed_at=utc_now_iso(), closed_reason=reason,
@@ -523,6 +547,8 @@ def record_closed(
             block["delivery"]["publication_pending"] = True
         if actor == "model":
             block["closed_by_task_id"] = str(actor_task_id)
+        if secret_outcome is not None:
+            block["secret_outcome"] = dict(secret_outcome)
         outcome.update(ok=True, state=STATE_CLOSED, duplicate=False, block=dict(block))
         return True
 
@@ -601,6 +627,11 @@ def record_answered(
         state = str(block.get("state") or STATE_OPEN)
         if str(block.get("request_id") or "") and str(block.get("request_id")) == str(request_id or ""):
             outcome.update({"ok": True, "state": state, "duplicate": True, "block": dict(block)})
+            return _KEEP
+        if block.get("secret_request"):
+            # Values reach Settings only through the protected form; an option or comment here
+            # would be the owner's words framed as an answer, or a forged ``secret_filled``.
+            outcome.update({"ok": False, "error": "secret_request_form_only", "state": state})
             return _KEEP
         late = allow_expired and state == STATE_EXPIRED_TERMINAL
         if state != STATE_OPEN and not late:
@@ -740,7 +771,12 @@ def quiz_answer_frame(
     ``option_index`` the owner took none of the offered options and wrote
     their own answer — say exactly that, without calling it a rejection the
     owner never stated, so the model never reads the free answer as a gloss on
-    a chosen option."""
+    a chosen option. A saved secret request has no owner words at all: its frame is the
+    host's metadata-only ``secret_filled``/``secret_replaced`` message."""
+    if secret_outcome_block(block) is block:
+        from ouroboros.secret_requests import answer_frame
+
+        return answer_frame(block)
     options = block.get("options") if isinstance(block.get("options"), list) else []
     lines = [
         f"[Owner quiz answer] quiz {block.get('quiz_id')} — asked {block.get('asked_at')}, "
@@ -783,12 +819,45 @@ def recorded_answer_frame(block: Dict[str, Any]) -> str:
     )
 
 
+# A secret request's outcome reaches the model as a typed host row, never as owner words.
+SECRET_OUTCOME_ROW_KIND = "secret_request_outcome"
+
+
+def secret_outcome_block(value: Any) -> Optional[Dict[str, Any]]:
+    """The block of an integration-secret request whose host outcome is recorded, as carried by
+    the block itself, a dialogue row's ``quiz`` or a mailbox entry's existing ``quiz_delivery``
+    snapshot; else ``None``. Its frames and rows are host metadata (``secret_requests``)."""
+    if not isinstance(value, dict):
+        return None
+    delivery = value.get("quiz_delivery") if isinstance(value.get("quiz_delivery"), dict) else {}
+    for block in (value, value.get("quiz"), delivery.get("answer_snapshot")):
+        if isinstance(block, dict) and block.get("secret_request") and isinstance(block.get("secret_outcome"), dict):
+            return block
+    return None
+
+
+def secret_outcome_summary(block: Dict[str, Any]) -> str:
+    """``{event}: {plugin}, {field ids}``: how a reader that lists rows names a recorded secret outcome."""
+    outcome = block.get("secret_outcome") if isinstance(block.get("secret_outcome"), dict) else {}
+    return f"{outcome.get('event')}: {outcome.get('pluginName')}, {', '.join(outcome.get('fields') or [])}"
+
+
+def secret_facts(*views: Any) -> Dict[str, Dict[str, Any]]:
+    """A secret request's typed metadata (``SECRET_FIELDS``) from views of one question, a later view
+    winning per field: what a mirror of the card copies so it keeps the protected form."""
+    return {key: dict(view[key]) for view in views if isinstance(view, dict)
+            for key in SECRET_FIELDS if isinstance(view.get(key), dict)}
+
+
 def late_answer_owner_text(block: Dict[str, Any]) -> str:
     """What the HUMAN said on the card, for the owner's own chat row and bubble.
 
     The verbatim comment when the owner wrote one; otherwise the pressed option
     exactly as the button showed it, ``{n}. {label}``. Never the host frame:
-    the bubble is the owner's words, the frame is for the model."""
+    the bubble is the owner's words, the frame is for the model. A secret request's outcome
+    is host metadata, never speakable as the owner's message."""
+    if block.get("secret_request"):
+        return ""
     comment = str(block.get("comment") or "")
     if comment.strip():
         return comment
@@ -858,3 +927,15 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
         f"[Host note] This owner message answers quiz {ref['quiz_id']}; that card "
         "could not be read, so only the owner's own words are shown."
     )
+
+
+def late_answer_name(late_answer: Any) -> Optional[str]:
+    """What names the head a LATE answer starts: the question it answers, as the accepted
+    message's host-written snapshot holds it (never the frame above, whose first line is host
+    wording around a task id). ``""`` for a message an older intake accepted without that
+    snapshot: the name is never re-read from the block. ``None`` without valid provenance."""
+    ref = late_answer_ref(late_answer)
+    if ref is None:
+        return None
+    snapshot = ref.get("answer_snapshot")
+    return str(snapshot["quiz"].get("question") or "") if isinstance(snapshot, dict) else ""

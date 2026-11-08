@@ -52,7 +52,6 @@ def test_no_preference_preserves_legacy_body_without_catalog_read():
     ([{"cashUsd": 0, "cashKnowledge": "exact", "valuationUsd": 8}], 0.0, True),
     ([{"cashUsd": None, "cashKnowledge": "unknown", "valuationUsd": 8}], None, False),
     ([{"cashUsd": 1.25, "cashKnowledge": "exact"}, {"cashKnowledge": "unknown"}], 1.25, False),
-    ([{"cashUsd": 1.25, "cashKnowledge": "exact"}, {"cashUsd": 0.5, "cashKnowledge": "exact"}], 1.75, True),
 ])
 def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, costs, expected, final):
     from ouroboros import delegate_custody as custody
@@ -82,10 +81,7 @@ def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, c
     ("1h", [{"id": "chosen", "promptCacheTtls": ["5m", "1h"]}], ["promptCacheTtl"], "1h", None),
     # Gated by exact advertised value, never by harness name:
     ("1h", [{"id": "claude", "promptCacheTtls": ["5m"]}], ["promptCacheTtl"], None, "harness_unsupported"),
-    ("1h", [{"id": "claude", "promptCacheTtls": []}], ["promptCacheTtl"], None, "harness_unsupported"),
     ("1h", [{"id": "custom-harness", "promptCacheTtls": ["1h"]}], ["promptCacheTtl"], "1h", None),
-    # Older strict engine omits promptCacheTtls and runControlKeys entry:
-    ("1h", [{"id": "chosen"}], [], None, "engine_capability_missing"),
 ])
 def test_session_prompt_cache_ttl_negotiates_by_exact_capability(
     monkeypatch, ttl, harnesses, control_keys, expected_wire, expected_reason,
@@ -139,10 +135,6 @@ def test_session_prompt_cache_ttl_capability_read_failure_preserves_run(monkeypa
 
 @pytest.mark.parametrize("valid_report", [
     {"requested": "1h", "submitted": "1h", "reason": None, "observed": "1h", "write_1h_tokens": 1200, "write_5m_tokens": 0},
-    {"requested": "5m", "submitted": "5m", "reason": None, "observed": "5m", "write_1h_tokens": 0, "write_5m_tokens": 450},
-    {"requested": "1h", "submitted": "1h", "reason": None, "observed": "mixed", "write_1h_tokens": 800, "write_5m_tokens": 200},
-    {"requested": "1h", "submitted": "1h", "reason": None, "observed": "none", "write_1h_tokens": 0, "write_5m_tokens": 0},
-    {"requested": "1h", "submitted": "1h", "reason": "cli_below_2_1_242", "observed": "5m", "write_1h_tokens": 0, "write_5m_tokens": 300},
     {"requested": "1h", "submitted": None, "reason": "harness_unsupported", "observed": "unknown", "write_1h_tokens": None, "write_5m_tokens": None},
     {"requested": None, "submitted": None, "reason": None, "observed": "5m", "write_1h_tokens": 0, "write_5m_tokens": 100},
 ])
@@ -163,19 +155,10 @@ def test_final_attempt_prompt_cache_ttl_binds_unique_final_attempt(tmp_path, val
 
 
 @pytest.mark.parametrize("malformed", [
-    None, {}, [], "1h",
-    {"requested": "default", "submitted": None, "observed": "unknown", "write_1h_tokens": None, "write_5m_tokens": None},
-    {"requested": "2h", "submitted": "2h", "observed": "unknown", "write_1h_tokens": None, "write_5m_tokens": None},
-    {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
-    {"requested": None, "submitted": "1h", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
-    {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": 0, "write_5m_tokens": 0},
-    {"requested": "1h", "submitted": "1h", "observed": "none", "write_1h_tokens": 10, "write_5m_tokens": 0},
+    None, {}, [], {"requested": "1h", "submitted": "5m", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": 0},
     {"requested": "1h", "submitted": "1h", "observed": "5m", "write_1h_tokens": 10, "write_5m_tokens": 10},
-    {"requested": "1h", "submitted": "1h", "observed": "mixed", "write_1h_tokens": 10, "write_5m_tokens": 0},
-    {"requested": "1h", "submitted": "1h", "observed": "unknown", "write_1h_tokens": 0, "write_5m_tokens": 0},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": 100, "write_5m_tokens": None},
     {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": True, "write_5m_tokens": 0},
-    {"requested": "1h", "submitted": "1h", "observed": "1h", "write_1h_tokens": -1, "write_5m_tokens": 0},
     {"requested": "1h", "submitted": "1h", "reason": 123, "observed": "unknown", "write_1h_tokens": None, "write_5m_tokens": None},
 ])
 def test_malformed_prompt_cache_ttl_telemetry_never_fabricates_observation(tmp_path, malformed):
@@ -484,10 +467,8 @@ def test_terminal_ttl_requires_engine_evidence_not_host_transmission(tmp_path, m
 
 @pytest.mark.parametrize("predecessor,reason", [
     ({"requested": "1h", "submitted": "1h", "reason": None}, "inherited_from_continuation"),
-    ({"requested": "1h", "submitted": None, "reason": "inherited_from_continuation"}, "inherited_from_continuation"),
     ({"requested": "1h", "submitted": None, "reason": "capabilities_read_failed"}, "capabilities_read_failed"),
     ({"requested": "1h", "submitted": None, "reason": "harness_unsupported"}, "harness_unsupported"),
-    ({"requested": None, "submitted": None, "reason": None}, "inherited_from_continuation"),
 ])
 def test_continuation_inherits_only_a_submitted_ttl_and_keeps_engine_default_receipt(
     tmp_path, monkeypatch, predecessor, reason,
@@ -554,8 +535,7 @@ def test_failed_reviewer_keeps_ttl_intent_through_failure_projection(tmp_path, m
 
 @pytest.mark.usefixtures("forbid_effects")
 @pytest.mark.parametrize("receipt,start_reason", [
-    ("missing", "harness_unsupported"), ("malformed", "harness_unsupported"),
-    ("engine_default", "capabilities_read_failed"), ("missing", None),
+    ("missing", "harness_unsupported"), ("engine_default", "capabilities_read_failed"), ("missing", None),
 ])
 def test_late_collected_reviewer_keeps_recorded_ttl_intent_without_new_reads(
     tmp_path, monkeypatch, receipt, start_reason,

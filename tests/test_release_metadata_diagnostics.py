@@ -11,7 +11,6 @@ from ouroboros import commit_admission as admission
 from ouroboros.tools import preflight_review, review
 from ouroboros.tools.release_sync import release_metadata_findings
 
-pytestmark = pytest.mark.serial  # real Git processes and isolated runtime globals
 
 
 def _git(repo, *args):
@@ -756,6 +755,36 @@ def test_actual_commit_consumers_require_release_unless_bound(candidate, monkeyp
     _write(repo, _release("1.2.4"))
     _git(repo, "add", "-A")
     assert not preflight(), "A coherent numbered release remains admitted in either checkout."
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_the_commit_gate_admits_a_development_marker_only_in_a_bound_candidate(candidate, monkeypatch, bound):
+    from ouroboros.tools import commit_gate
+
+    repo = candidate.repo_dir
+    if bound:
+        linked = repo.parent / "linked"
+        _git(repo, "worktree", "add", "-qb", "candidate/task", str(linked), "HEAD")
+        candidate.serving_repo_dir, candidate.repo_dir = repo, linked
+        candidate.task_metadata = {"body_candidate": {"path": str(linked)}}
+        repo = linked
+    monkeypatch.setattr("ouroboros.tools.review_helpers.check_worktree_readiness", lambda *a, **kw: [])
+    marker = _release("1.3.0-alpha.0")
+    marker["README.md"] = marker["README.md"].replace("| 1.3.0-alpha.0 |", "| 1.2.3 |").replace(
+        "version-1.3.0-alpha.0-", "version-1.3.0--alpha.0-")
+    for path in ("pyproject.toml", "uv.lock"):
+        marker[path] = marker[path].replace('version = "1.3.0-alpha.0"', 'version = "1.3.0a0"')
+    _write(repo, marker)
+    _git(repo, "add", "-A")
+    error = commit_gate.deterministic_preflight(candidate, "open the cycle", None)
+    report = admission.release_metadata_diagnostics(repo, source="index", neutral_allowed=bound)
+    if bound:
+        assert not error and (report["form"], report["status"]) == ("development_marker", "clean")
+    else:
+        assert "PREFLIGHT_BLOCKED" in error and "development marker 1.3.0-alpha.0" in error
+        assert (report["form"], report["status"]) == ("numbered", "blocked")
+    # A standalone review of the prepared index reviews the contribution form either way.
+    assert not commit_gate.deterministic_preflight(candidate, "open the cycle", None, review_only=True)
 
 
 @pytest.mark.parametrize("source", ["worktree", "index"])

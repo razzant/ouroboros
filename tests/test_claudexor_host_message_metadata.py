@@ -60,16 +60,17 @@ _WIRE_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", [case for case in _CASES if case["id"] in _WIRE_CASES], ids=lambda case: case["id"])
-def test_host_feedback_preserves_exact_provider_wire_and_accounting(case):
+def test_host_feedback_preserves_exact_provider_wire_and_accounting(subtests):
     """Real provider dispatch/builders, golden transports only: no network."""
-    spec = deepcopy(case["spec"])
-    args = spec["call"].get("kwargs") or spec["call"]["args"]
-    for message in args["messages"]:
-        message["review_feedback"] = [{"task_id": "host-task", "run_index": 0, "binding_hash": "critic"}]
-    before = deepcopy(spec)
-    assert _observe(spec) == case["expected"]
-    assert spec == before
+    for case in [case for case in _CASES if case["id"] in _WIRE_CASES]:
+        with subtests.test(case=case):
+            spec = deepcopy(case["spec"])
+            args = spec["call"].get("kwargs") or spec["call"]["args"]
+            for message in args["messages"]:
+                message["review_feedback"] = [{"task_id": "host-task", "run_index": 0, "binding_hash": "critic"}]
+            before = deepcopy(spec)
+            assert _observe(spec) == case["expected"]
+            assert spec == before
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

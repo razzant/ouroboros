@@ -1,31 +1,18 @@
 """The dialogue in ``state/dialog.sqlite``: exact chat/progress JSON and one writer seam.
 
-Each row keeps typed stream/chat/task/lineage/direction/kind/client/origin facts beside
-its original JSON body. ``seq`` is its byte offset in the former rotated JSONL chain;
-streams have separate coordinate spaces, so existing history ids, cursors, wake
-boundaries and exports retain their meaning. ``length`` includes the exact physical
-newline, including imported CRLF; ``seq + length`` is the next boundary.
-
-``ordinal`` counts stored objects, ``pos`` counts chat objects outside A2A (the counts task-events
-v1 ``line``, the logs tail ``_line``, ``chat_chain._stream_rows``, the consolidation cursor and
-chronicle ``raw_range`` keep). Both are relative to their import segment or live unit. ``import_ledger`` settles absolute
-bases after the newest-first archive import completes; earlier answers are importing,
-never guessed. Skipped intervals and every legacy (gen, line) alias remain indexed.
-Room revision continues the project's visible_revision at cutover.
-
-``append`` owns one BEGIN IMMEDIATE transaction: row, named inbound dedup, room
-revision/last row/activity and optional dispatch obligation. A partial UNIQUE index
-protects (chat_id, client_message_id). Dispatch is NULL for unnamed/imported rows,
-none for named acceptance without handoff, else pending/dispatched/completed/abandoned.
-``message_ingress`` claims pending once and records handoff completion. Required inbound
-acceptance retains WAIT_SEC; best-effort writes try zero wait and use dialogue_retry.
-Content-addressed retries dedup inside the write transaction and suppress live replay.
-
-Reads union bounded indexed probes for the room's chat/tasks/bound owner inputs;
-Main probes chats no Project owns. Coverage below the import boundary is explicitly
-unknown. The separate file avoids current.sqlite body/import/export waits and uses
-store's typed errors, lazy per-thread handles and header lock tier (PERSIST+FULL or
-gated WAL). ``dialogue_import`` owns cutover, frozen archive import and rollback export.
+Stream/chat/task/lineage/direction/kind/client/origin facts index JSON. ``seq``/``length`` retain original
+byte spans (newline/CRLF included), even after revision: history ids/cursors/wake boundaries stay ordered.
+``ordinal`` counts objects; ``pos`` counts non-A2A chat for task-events/logs/chronicle, relative to import
+segments. Newest-first ``import_ledger`` settles absolute bases; earlier answers say importing. Skips and
+legacy (gen, line) aliases stay indexed; room revisions inherit the project's visible_revision at cutover.
+``append`` atomically writes rows, room revision/last row/activity and named inbound dispatch (UNIQUE
+chat_id/client_message_id). Dispatch: NULL for unnamed/imported, none for named acceptance without handoff,
+else pending/dispatched/completed/abandoned. ``message_ingress`` claims once. Required writers use WAIT_SEC;
+best-effort uses zero wait and content-addressed dialogue_retry, transactionally deduped without live replay.
+Reads union bounded room/task/owner probes; Main excludes Project rooms; below-import coverage is unknown.
+Separate from current.sqlite waits: store errors, thread handles and header lock tier (PERSIST+FULL/gated WAL).
+``dialogue_import`` owns cutover, frozen archives and rollback export; text revisions retain all other facts.
+A row's provider thread keeps each element once (``shared``); a reader that consumes it reads it whole.
 """
 
 from __future__ import annotations
@@ -36,11 +23,12 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sqlite3
 import uuid
-from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from ouroboros import store, store_empty
+from ouroboros import shared_values, store, store_empty
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.utils import utc_now_iso
 
@@ -49,7 +37,8 @@ log = logging.getLogger(__name__)
 STORE_REL = pathlib.Path("state/dialog.sqlite")
 LOCK_NAME = "dialog.lock"  # the name tier's one lock around every access
 IMPORT_LOCK_NAME = "dialog_import.lock"  # creation, cutover, tier changes
-SCHEMA_VERSION = 2  # the file's ``user_version``; a file of another version is refused, never replaced
+SCHEMA_VERSION = 2  # the file's ``user_version``; a file of any version but these two is refused, never replaced
+SHARED_VERSION = 3  # the same file while a row holds its provider thread by reference: a body that reads none refuses it
 STREAMS = ("chat", "progress")
 LIVE_REL = {"chat": pathlib.Path("logs/chat.jsonl"), "progress": pathlib.Path("logs/progress.jsonl")}  # the frozen chains
 WAIT_SEC = store.STORE_WAIT_SEC
@@ -60,7 +49,8 @@ DISPATCH_STATES = ("none", "pending", "dispatched", "completed", "abandoned")
 # estimate -- without statistics SQLite walks the primary key (every newer row of every room) instead.
 _PROBE_INDEX = {"chat_id": "dialogue_room", "task_id": "dialogue_task", "parent_task_id": "dialogue_parent",
                 "root_task_id": "dialogue_root", "subagent_task_id": "dialogue_subagent", "origin": "dialogue_origin",
-                "client_message_id": "dialogue_named", "kind": "dialogue_kind"}
+                "client_message_id": "dialogue_named", "kind": "dialogue_kind",
+                "appearance": "room_appearances"}  # the derived index (``APPEARANCES_DDL``), not a dialogue column
 _TASK_KEYS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id")  # every identifier a task's row may carry
 SKIPPED_KINDS = ("invalid", "non_object")  # a line that is not JSON; valid JSON that is not an object
 _SCHEMA = """
@@ -105,8 +95,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 class Row(NamedTuple):
-    """One stored row: its coordinate, the decoded body, its dispatch fact and its exact physical
-    length (``end`` is the coordinate right after it: its newline included, nothing re-encoded)."""
+    """Coordinate, decoded body, dispatch and allocated span; ``end`` is the next boundary."""
 
     stream: str
     seq: int
@@ -124,8 +113,7 @@ class Row(NamedTuple):
 
 
 class Receipt(NamedTuple):
-    """What ``append`` returns: the row's coordinate, the row as stored, whether an existing row
-    answered (a duplicate named message), the dispatch fact after the transaction and the length."""
+    """Append's coordinate, stored row, duplicate flag, dispatch and allocated span."""
 
     stream: str
     seq: int
@@ -194,17 +182,18 @@ def _tier(root: pathlib.Path, identity: Optional[tuple] = None) -> str:
 
 def _open(path: pathlib.Path, tier: str, **kwargs: Any) -> sqlite3.Connection:
     """``store.connect`` plus the schema gate: the header's ``user_version`` is this body's
-    ``SCHEMA_VERSION`` or the file is refused typed (``StoreLost``) -- there is no migration of a
-    dialogue store; it is never replaced either."""
+    ``SCHEMA_VERSION`` or ``SHARED_VERSION`` or the file is refused typed (``StoreLost``) -- there is
+    no migration of a dialogue store; it is never replaced either."""
     conn = store.connect(path, tier, **kwargs)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.Error:
         conn.close()
         raise
-    if version != SCHEMA_VERSION:
+    if version not in (SCHEMA_VERSION, SHARED_VERSION):
         conn.close()
-        raise StoreLost(f"dialogue store schema {version}, this body needs {SCHEMA_VERSION}, never replaced: {path}")
+        raise StoreLost(f"dialogue store schema {version}, this body reads {SCHEMA_VERSION} and {SHARED_VERSION}, "
+                        f"never replaced: {path}")
     return conn
 
 
@@ -255,7 +244,11 @@ def create(root: Any, *, tier: Optional[str] = None) -> pathlib.Path:
                     live = conn.execute("INSERT INTO import_ledger (stream, name, base, size, state) VALUES (?, ?, 0, 0, 'live')",
                                         (stream, LIVE_REL[stream].name)).lastrowid
                     conn.execute("INSERT INTO streams (stream, next_seq, live) VALUES (?, 0, ?)", (stream, live))
-                for key, value in (("schema_version", SCHEMA_VERSION), ("lock_tier", tier), ("created_at", utc_now_iso())):
+                # An empty store has nothing to derive: its appearance mark starts at the first row's start.
+                conn.execute(APPEARANCES_DDL)
+                for key, value in (("schema_version", SCHEMA_VERSION), ("lock_tier", tier), ("created_at", utc_now_iso()),
+                                   (APPEARANCES_MARK, 0), (APPEARANCES_CONTACT_REPLIES, {"next": 0, "upper": 0}),
+                                   (APPEARANCES_COVERED, 0)):
                     conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
                 store.commit(conn)
             os.replace(tmp, target)
@@ -390,17 +383,23 @@ def facts(row: Dict[str, Any]) -> Dict[str, Any]:
         value = row.get(key)
         return "" if value is None or isinstance(value, (dict, list)) else str(value)
 
-    origin = None
-    ref = row.get("origin_message_ref")
-    if isinstance(ref, dict) and ref.get("client_message_id"):
-        try:
-            origin = f"{int(ref.get('chat_id') or 0)}:{ref['client_message_id']}"
-        except (TypeError, ValueError):
-            origin = None
     return {"ts": text("ts"), "chat_id": chat_id, "task_id": text("task_id") or None,
             "parent_task_id": text("parent_task_id") or None, "root_task_id": text("root_task_id") or None,
             "subagent_task_id": text("subagent_task_id") or None, "direction": text("direction"),
-            "kind": text("type") or None, "client_message_id": text("client_message_id") or None, "origin": origin}
+            "kind": text("type") or None, "client_message_id": text("client_message_id") or None,
+            "origin": origin_key(row.get("origin_message_ref")) or None}
+
+
+def origin_key(ref: Any) -> str:
+    """The owner message an ``origin_message_ref`` names, ``<chat_id>:<client_message_id>`` (a Host
+    Service ``operation_ref``): the discovery key of the dialogue's ``origin`` column and of a task's
+    own top-level origin (``store_hot_facts.task_columns``); "" for none. Authority stays with the ref."""
+    if not isinstance(ref, dict) or not ref.get("client_message_id"):
+        return ""
+    try:
+        return f"{int(ref.get('chat_id') or 0)}:{ref['client_message_id']}"
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
 def stream_row(stream: str, columns: Dict[str, Any]) -> bool:
@@ -460,19 +459,201 @@ def _existing_named(conn: sqlite3.Connection, chat_id: Optional[int], client_mes
         "AND direction='in' ORDER BY seq DESC LIMIT 1", (client_message_id, chat_id)).fetchone()
 
 
+# The derived appearance index: a chat row some room shows outside its written chat, by the key
+# ``room_membership.appearance_keys`` names (``room:<chat>``, ``task:<id>``). A candidate superset
+# the room readers probe (``_probe``'s ``appearance`` column); ``room_membership.row_rooms`` decides.
+# Created on first use; an older body ignores it. ``room_appearances`` (a maintenance job) derives
+# the rows below its mark, which an append moves only from exactly its own start: rows an older
+# body appended (it never moves the mark) stay below it for the job.
+APPEARANCES_DDL = ("CREATE TABLE IF NOT EXISTS room_appearances (key TEXT NOT NULL, stream TEXT NOT NULL, "
+                   "seq INTEGER NOT NULL, PRIMARY KEY (key, stream, seq)) WITHOUT ROWID")
+APPEARANCES_MARK = "room_appearances_mark"
+# Chat import segments this body planned and has not derived yet (``dialogue_import``): one an older
+# body imports turns ``done`` while still listed, and the job derives exactly its rows.
+APPEARANCES_AWAITING = "room_appearances_awaiting"
+# The job's one-time pass over Main's rows below the mark it began under that an older rule kept there
+# alone, private contact and the owner's Replies (``room_appearances._contact_replies``): ``{"next",
+# "upper"}``; a new store has none to pass. Absent, every row below the mark is unknown to a reader.
+APPEARANCES_CONTACT_REPLIES = "room_appearances_contact_replies"
+# Below it every chat row took this body's rule or is owed to that pass: this body's appends, import planning and
+# job move it with the mark, from exactly the same start, and a plan owes the pass its rows until this body's own
+# import derives them. An older body that moves the mark leaves it behind, and the job owes the pass exactly the
+# rows between (``room_appearances._owe_uncovered``).
+APPEARANCES_COVERED = "room_appearances_covered"
+
+
+# A stored row whose provider thread is held by reference names the identity of its whole row under this
+# key, its last (``chat_chain.source_row_id`` answers it unexpanded); no caller's row carries it.
+ROW_SHA_KEY = "$row_sha256"
+
+
+def _unstamped(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A row's content identity without its in-transaction revision stamp (``room_revisions``) and without a
+    stored row's own identity (``ROW_SHA_KEY``)."""
+    return {key: value for key, value in row.items() if key not in ("room_revisions", ROW_SHA_KEY)}
+
+
+# --- provider threads held once ----------------------------------------------------------------
+# A connector copies the thread an event belongs to into ``transport.conversation`` (Slack
+# ``thread_history.data.messages``, GitHub ``history.rows``, a ``transport_queue``'s ``events``), so a thread
+# of a hundred messages stored its first one a hundred times. ``append`` applies the ``shared_values`` rule
+# with ``transport.conversation`` as its scope root: every dict that is an element of a list reached there
+# through dicts is kept once in ``shared``, as its exact ``encode`` text under that text's sha256, and the
+# stored row holds the token in its place and its whole row's identity last (``ROW_SHA_KEY``). Nothing else
+# in the row changes, so every SQL path and every reader of other fields reads it as before; a reader that
+# consumes the thread expands it (``whole_body``, ``whole_rows``, ``whole_line``), and a reference the
+# table does not answer is an unreadable row (``StoreLost``), never a shorter thread. Created on first use.
+# Rows are biography and so are their elements: nothing removes one. Rows written before stay whole.
+# A body reads such rows only when its copy of this module names ``THREAD_FORMAT`` (``store_switch.switch_needs``
+# looks for it): before a body that does not takes the file, every row held by reference is written whole again,
+# from its stream's first one (``SHARED_FROM``, set by ``append``; ``dialogue_import.expand_for_older_body``).
+# Until then the header says ``SHARED_VERSION``, set with the first such row, which a body that reads none refuses
+# typed: an expansion that failed or never ran leaves a refusal, never a thread of references.
+SHARED_DDL = "CREATE TABLE IF NOT EXISTS shared (sha256 TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+THREAD_FORMAT = "dialogue_shared_v2"  # v2: the header says SHARED_VERSION while such a row remains
+SHARED_FROM = "shared_from:"  # + stream: the meta key of the coordinate of the stream's first row held by reference
+_MARKER = re.compile(rb', "\$row_sha256": "[0-9a-f]{64}"\}\Z')
+
+
+def _thread(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    transport = row.get("transport")
+    conversation = transport.get("conversation") if isinstance(transport, dict) else None
+    return conversation if isinstance(conversation, dict) else None
+
+
+def _encoded(value: Any) -> bytes:
+    return encode(value).encode("utf-8")
+
+
+def thread_references(conversation: Any) -> List[str]:
+    """The digests a conversation names where a stored thread keeps its elements (empty when it is whole)."""
+    found: List[str] = []
+    shared_values.expand(conversation, lambda digest: found.append(digest) or shared_values.token(digest))
+    return found
+
+
+def _by_reference(row: Dict[str, Any], body: str) -> Tuple[str, Dict[str, str]]:
+    """The text ``append`` stores for ``row`` (its line is ``body``) and the elements it names: ``body`` and none
+    when the thread shares nothing, or when the row's own content reads as a reference so that the references
+    would not give ``body`` back byte for byte (that row stays whole, as every row was)."""
+    conversation = _thread(row)
+    thread = shared_values.tokenize(conversation, _encoded) if conversation is not None else None
+    if thread is None:
+        return body, {}
+    skeleton = {**row, "transport": {**row["transport"], "conversation": json.loads(thread.skeleton)}}
+    try:
+        exact = shared_values.splice(_encoded(skeleton), thread.parts) == body.encode("utf-8")
+    except shared_values.SharedValueMissing:  # a value shaped as a reference elsewhere in the row
+        exact = False
+    if not exact:
+        return body, {}
+    from ouroboros.chat_chain import source_row_id
+
+    return encode({**skeleton, ROW_SHA_KEY: source_row_id(row)}), {
+        digest: part.decode("utf-8") for digest, part in thread.parts.items()}
+
+
+def _parts(conn: sqlite3.Connection, digests: Iterable[str]) -> Callable[[str], bytes]:
+    """The resolver of ``digests``, read in one step: a digest the table does not hold is an unreadable row."""
+    wanted = sorted(set(digests))
+    held = {record[0]: record[1].encode("utf-8") for record in conn.execute(
+        "SELECT sha256, value FROM shared WHERE sha256 IN (SELECT value FROM json_each(?))",
+        (json.dumps(wanted),))} if wanted else {}
+
+    def resolve(digest: str) -> bytes:
+        if digest not in held:
+            raise StoreLost(f"dialogue row names a thread element the store does not hold: {digest!r}")
+        return held[digest]
+
+    return resolve
+
+
+def _whole_row(row: Dict[str, Any], resolve: Callable[[str], bytes]) -> Dict[str, Any]:
+    """A decoded stored row as it was written (``place_arrivals.SourceProjection`` keeps its projection)."""
+    from ouroboros.place_arrivals import SourceProjection
+
+    if ROW_SHA_KEY not in row:
+        return row
+    if isinstance(row, SourceProjection):
+        return SourceProjection(_whole_row(row.source_body, resolve), row["context_source_ref"])
+    whole = {key: value for key, value in row.items() if key != ROW_SHA_KEY}
+    whole["transport"] = {**row["transport"], "conversation": shared_values.expand(
+        _thread(row), lambda digest: json.loads(resolve(digest)))}
+    return whole
+
+
+def whole_body(conn: sqlite3.Connection, body: str) -> Dict[str, Any]:
+    """A stored body decoded as its row was written, inside the caller's transaction: what a reader that hands
+    the thread on (a rebuilt event, a receipt, the idempotent comparison) reads."""
+    row = decode(body)
+    return _whole_row(row, _parts(conn, thread_references(_thread(row)))) if ROW_SHA_KEY in row else row
+
+
+def whole_line(conn: sqlite3.Connection, body: str) -> str:
+    """A stored body as the exact line its row was written as (the rollback export's bytes)."""
+    raw = body.encode("utf-8")
+    marker = _MARKER.search(raw)
+    if marker is None:
+        return body
+    skeleton = raw[:marker.start()] + b"}"
+    return shared_values.splice(skeleton, _parts(conn, shared_values.token_digests(skeleton))).decode("utf-8")
+
+
+def whole_row(root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+    """One decoded row a reader returned (``resolve_row``'s), as it was written."""
+    if ROW_SHA_KEY not in row:
+        return row
+    with transaction(root, write=False) as conn:
+        resolve = _parts(conn, thread_references(_thread(row)))
+    return _whole_row(row, resolve)
+
+
+def whole_rows(root: Any, rows: Iterable["Row"]) -> List["Row"]:
+    """Rows any reader returned, each as it was written, from one read: for a reader that hands rows on whole."""
+    rows = list(rows)
+    held = [digest for entry in rows if ROW_SHA_KEY in entry.row for digest in thread_references(_thread(entry.row))]
+    if not held:
+        return rows
+    with transaction(root, write=False) as conn:
+        resolve = _parts(conn, held)
+    return [entry._replace(row=_whole_row(entry.row, resolve)) for entry in rows]
+
+
+def release_shared_version(root: Any) -> int:
+    """The header back to ``SCHEMA_VERSION`` once no stream marks a row held by reference (``SHARED_FROM``: the
+    rollback expansion removes a stream's mark with its last such row written whole), so a body that reads no
+    reference opens the file again; a mark still held keeps ``SHARED_VERSION``. Returns the version."""
+    with transaction(root, write=True) as conn:
+        held = conn.execute(f"SELECT 1 FROM meta WHERE key IN ({','.join('?' * len(STREAMS))}) LIMIT 1",
+                            [SHARED_FROM + stream for stream in STREAMS]).fetchone()
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if held is None and version != SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            version = SCHEMA_VERSION
+        return version
+
+
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
            feed: bool = False, wait_sec: float = WAIT_SEC, idempotent: bool = False,
-           emit_live: bool = True) -> Receipt:
+           emit_live: bool = True, also_feed: Iterable[int] = (), room_revisions: bool = False,
+           appearances: Optional[Iterable[str]] = ()) -> Receipt:
     """Store exact JSON, room facts and named dispatch in one transaction.
 
     Named inbound duplicates return the existing receipt (the UNIQUE index also
     settles concurrent writers). Dispatch input is JSON without bytes; presence
-    means pending, absence means none. Feed advances the unread revision. Optional
-    idempotence compares content identity under the existing room/time index.
+    means pending, absence means none. Feed advances the unread revision; ``also_feed``
+    advances the revision of each other room that shows the row (one message, unread
+    where it is shown), and ``room_revisions`` stamps the row with the revision it took in
+    every fed room, so one read can be recorded wherever it counted. ``appearances`` are
+    its derived index keys (``None``: unknown, left to the job). Optional idempotence
+    compares content identity, stamp aside, under the existing room/time index. A provider
+    thread in ``transport.conversation`` is stored once (``_by_reference``); ``length``, the
+    identity and the receipt's row stay the whole row's.
     Store failures propagate; append_quietly owns best-effort retry and live fallback.
     """
     if stream not in STREAMS:
         raise ValueError(f"unknown dialogue stream: {stream!r}")
+    row = _unstamped(row)
     body = encode(row)
     columns = facts(row)
     named = columns["direction"] == "in" and bool(columns["client_message_id"])
@@ -488,25 +669,51 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             digest = source_row_id(row)
             candidates = conn.execute(
                 f"{_SELECT} INDEXED BY dialogue_room_ts WHERE stream=? AND chat_id IS ? AND ts=?",
-                (stream, columns["chat_id"], columns["ts"]))
+                (stream, columns["chat_id"], columns["ts"])).fetchall()
             for existing in candidates:
-                if source_row_id(decode(existing["body"])) == digest:
-                    return _receipt(existing)
+                if source_row_id(_unstamped(whole_body(conn, existing["body"]))) == digest:
+                    return _receipt(conn, existing)
         if named:
             existing = _existing_named(conn, columns["chat_id"], columns["client_message_id"])
             if existing is not None:
-                return _receipt(existing)
+                return _receipt(conn, existing)
         marks = conn.execute("SELECT next_seq, live, next_ordinal, next_pos FROM streams WHERE stream=?", (stream,)).fetchone()
         seq = int(marks["next_seq"])
+        others = [int(chat) for chat in dict.fromkeys(also_feed) if feed and int(chat) != columns["chat_id"]]
+        if room_revisions and feed and columns["chat_id"] is not None:
+            fed = [columns["chat_id"], *others]
+            held = {record["chat_id"]: int(record["revision"]) for record in conn.execute(
+                f"SELECT chat_id, revision FROM rooms WHERE chat_id IN ({','.join('?' * len(fed))})", fed)}
+            row = {**row, "room_revisions": {str(chat): held.get(chat, 0) + 1 for chat in fed}}
+            body = encode(row)
+            length = len(body.encode("utf-8")) + 1
+        stored, parts = _by_reference(row, body)
         try:
-            insert_row(conn, stream, seq, row, body, length=length, segment=int(marks["live"]), ordinal=int(marks["next_ordinal"]),
+            insert_row(conn, stream, seq, row, stored, length=length, segment=int(marks["live"]), ordinal=int(marks["next_ordinal"]),
                        pos=int(marks["next_pos"]) if counted else None, dispatch=state, dispatch_input=dispatch,
                        revision=int(bool(feed)))
         except sqlite3.IntegrityError:
             existing = _existing_named(conn, columns["chat_id"], columns["client_message_id"]) if named else None
             if existing is None:
                 raise
-            return _receipt(existing)
+            return _receipt(conn, existing)
+        if parts:
+            conn.execute(SHARED_DDL)
+            conn.executemany("INSERT OR IGNORE INTO shared (sha256, value) VALUES (?, ?)", sorted(parts.items()))
+            conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (SHARED_FROM + stream, json.dumps(seq)))
+            if conn.execute("PRAGMA user_version").fetchone()[0] != SHARED_VERSION:
+                conn.execute(f"PRAGMA user_version = {SHARED_VERSION}")
+        for chat in others:
+            touch_room(conn, chat, None, columns["ts"], 1)
+        keys = sorted(set(appearances)) if appearances is not None else []
+        if keys:
+            conn.execute(APPEARANCES_DDL)
+            conn.executemany("INSERT OR IGNORE INTO room_appearances (key, stream, seq) VALUES (?, ?, ?)",
+                             [(key, stream, seq) for key in keys])
+        if stream == "chat" and appearances is not None:
+            for key in (APPEARANCES_MARK, APPEARANCES_COVERED):
+                conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                             (json.dumps(seq + length), key, json.dumps(seq)))
         conn.execute("UPDATE streams SET next_seq=?, next_ordinal=next_ordinal+1, next_pos=next_pos+? WHERE stream=?",
                      (seq + length, int(counted), stream))
     if stream == "progress" and emit_live:
@@ -514,8 +721,34 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     return Receipt(stream, seq, row, False, state, length)
 
 
-def _receipt(existing: sqlite3.Row) -> Receipt:
-    return Receipt(existing["stream"], existing["seq"], decode(existing["body"]), True, existing["dispatch"], existing["length"])
+def revise_text(root: Any, stream: str, seq: int, text: str) -> Dict[str, Any]:
+    """Revise a row's text atomically; retain its allocated span (mapped on export) and all other facts.
+    A thread held by reference stays so; the stored identity becomes the revised whole row's. Returns the row."""
+    with transaction(root, write=True) as conn:
+        existing = conn.execute(f"{_SELECT} WHERE stream=? AND seq=?", (stream, seq)).fetchone()
+        if existing is None:
+            raise ValueError("dialogue row missing for text revision")
+        row = decode(existing["body"])
+        resolve = _parts(conn, thread_references(_thread(row))) if ROW_SHA_KEY in row else None
+        if row.get("text") != text:
+            row["text"] = text
+            if resolve is not None:
+                from ouroboros.chat_chain import source_row_id
+
+                row[ROW_SHA_KEY] = source_row_id(_whole_row(row, resolve))
+            conn.execute("UPDATE dialogue SET body=? WHERE stream=? AND seq=?", (encode(row), stream, seq))
+            if stream == "chat":
+                _set_meta(conn, "chat_text_revision", int(_meta(conn, "chat_text_revision") or 0) + 1)
+            columns = facts(row)
+            if columns["chat_id"] is not None:
+                touch_room(conn, columns["chat_id"], None, columns["ts"], 1)
+        return row if resolve is None else _whole_row(row, resolve)
+
+
+def _receipt(conn: sqlite3.Connection, existing: sqlite3.Row) -> Receipt:
+    """The receipt of a row already stored: its row as written (``whole_body``), as a fresh receipt's is."""
+    return Receipt(existing["stream"], existing["seq"], whole_body(conn, existing["body"]), True, existing["dispatch"],
+                   existing["length"])
 
 
 def append_quietly(root: Any, stream: str, row: Dict[str, Any], **kwargs: Any) -> Optional[Receipt]:
@@ -533,7 +766,9 @@ def append_quietly(root: Any, stream: str, row: Dict[str, Any], **kwargs: Any) -
     except (StoreError, OSError, ValueError):
         if stream == "progress":
             _stream_live(row)
-        dialogue_retry.retain(root, stream, row, feed=kwargs.get("feed", False))
+        dialogue_retry.retain(root, stream, row, feed=kwargs.get("feed", False), **{
+            key: list(kwargs[key]) if key != "room_revisions" and kwargs[key] is not None else kwargs[key]
+            for key in ("also_feed", "room_revisions", "appearances") if key in kwargs})
         return None
 
 
@@ -711,6 +946,20 @@ def last_inbound(root: Any, chat_id: Optional[int], *, before: Optional[int] = N
     return None if record is None else _row(record)
 
 
+def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
+    """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
+    only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""
+    wanted = json.dumps(sorted({int(chat) for chat in chat_ids}))
+    with transaction(root, write=False) as conn:
+        page = conn.execute(
+            "SELECT json_group_array(json_array(chat_id, json_extract(body, '$.transport'))) FROM dialogue "
+            "WHERE stream='chat' AND seq IN (SELECT (SELECT seq FROM dialogue INDEXED BY dialogue_inbound "
+            "WHERE stream='chat' AND chat_id=+value AND direction='in' ORDER BY seq DESC LIMIT 1) FROM json_each(?))",
+            (wanted,)).fetchone()[0] or "[]"
+    return {int(chat): transport for chat, transport in json.loads(page)
+            if chat is not None and isinstance(transport, dict)}
+
+
 def newest(root: Any, stream: str, *, limit: int, before: Optional[int] = None) -> List[Row]:
     """The stream's newest rows below ``before`` (its end when None), oldest first."""
     with transaction(root, write=False) as conn:
@@ -760,6 +1009,12 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
         select = (f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {_PROBE_INDEX[column]} "
                   f"WHERE stream=? AND {column} ")
         tail = f" AND seq<? AND seq>=? ORDER BY seq {order} LIMIT ?)"
+        if column == "appearance":  # one seek per key of the derived index; absent before its first row
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_appearances'").fetchone():
+                found.update(json.loads(conn.execute(
+                    "SELECT json_group_array(seq) FROM (SELECT seq FROM room_appearances WHERE stream=? AND key IN "
+                    "(SELECT value FROM json_each(?))" + tail, (stream, json.dumps(listed), *bounds)).fetchone()[0]))
+            continue
         if None in listed:  # the chat-less rows, through the full room index
             found.update(json.loads(conn.execute(select + "IS NULL" + tail, (stream, *bounds)).fetchone()[0]))
         if any(value is not None for value in listed):

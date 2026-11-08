@@ -35,7 +35,7 @@ LOCK_NAME = "current.lock"  # the name-tier lock around every access
 IMPORT_LOCK_NAME = "current_import.lock"
 GENERATION = 8  # the lifecycle generation that owns the store
 GENERATION_KEY = "current_store_generation"  # in state/migrations.json
-SCHEMA_VERSION = 9  # 6: hot facts; 7: task cards; 8: root windows, terminal_seq; 9: filtered-list selection
+SCHEMA_VERSION = 11  # 6: hot facts; 7: task cards; 8: root windows, terminal_seq; 9: list selection; 10: task origin; 11: task chat
 STORE_WAIT_SEC = 10.0
 JOURNAL_SIZE_LIMIT = 64 << 20  # retain at most 64 MiB of an idle rollback journal (PERSISTENCE.md: what it bounds)
 TIER_ENFORCED, TIER_NAME = "enforced", "name"
@@ -1368,8 +1368,7 @@ class Txn:
         # schema step's addition runs once, with the version, never on a passive read.
         if key == "schema_version":
             held = int(self.meta(key) or 1)
-            if (int(value) >= store_hot_facts.VERSION > held
-                    or int(value) >= store_hot_facts.LIST_VERSION > held):
+            if any(int(value) >= version > held for version in store_hot_facts.VERSIONS):
                 store_hot_facts.upgrade(self)
             if int(value) >= store_task_cards.VERSION > held:
                 store_task_cards.upgrade(self)

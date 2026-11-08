@@ -18,13 +18,18 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     dispatch evidence stay, and children still need explicit selection (Q9).
     Reopen both durable fence and queue latch or refuse: reopening only the
     latch would fail every launch. The latch names the LOGICAL root; task may
-    be its current retry (#1730). Queue lock held.
+    be its current retry (#1730). A Continue whose earlier attempt's writers
+    all still run leaves the Pause for its own writer hold, which starts it
+    once they settle (owner, 1 Nov); an unknown outcome still refuses. Queue lock held.
     """
     from ouroboros.owner_pause import FENCE_RELEASED, launch_lock, read_fence, set_fence_state
     import copy
-    from supervisor.events_budget import BUDGET_HOLD_KEY, hold_root_resume_descendants
+    from supervisor.events_budget import (
+        BUDGET_HOLD_KEY, hold_continuation_writers, hold_root_resume_descendants, project_writer_wait,
+    )
 
     task_id, root_id = str(task.get("id") or ""), str(fence.get("root_task_id") or task.get("id") or "")
+    predecessor = str(((task.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id") or "")
     admitted = "owner_pause_blockers" in observation
     safe, error = observation["safe"], observation["unsafe_error"]
     if not safe and not admitted:
@@ -33,10 +38,12 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     if refusal := release_refusal(current_stop(task, {
             "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
         return refusal
-    if observation.get("blockers"):
-        from supervisor.continuation_admission import writers_unsettled_refusal
+    writers = list(observation.get("blockers") or ())
+    if writers:
+        from supervisor.continuation_admission import only_running_writers, writers_unsettled_refusal
 
-        return writers_unsettled_refusal(observation["blockers"])
+        if not only_running_writers(writers):
+            return writers_unsettled_refusal(writers)
     if observation.get("owner_pause_blockers"):
         return {"ok": False, "error": "owner_pause_effects_unsettled", "action": "wait_for_effect_settlement",
                 "blockers": observation["owner_pause_blockers"]}
@@ -60,23 +67,34 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         task.pop("_budget_pause", None)
         task.pop(BUDGET_HOLD_KEY, None)
         clear_refusal(task)
+        wait = hold_continuation_writers(task, predecessor, writers) if writers else None
         if members:
             # No root grant exists to bind: only the owner selects these members.
             hold_root_resume_descendants(q, root_id, fence, {"grant_id": "", "generation": 0}, actor_id=task_id)
-        if not q.persist_queue_snapshot(reason="owner_pause_root_resumed"):
+        if not q.publish_queue_snapshot(reason="owner_pause_root_resumed"):  # durable while launch authority is closed
             rollback()
             return {"ok": False, "error": "snapshot_not_persisted"}
+        from ouroboros.presence_carrier import lift_allowance, lifted_record, owner_resume_decision
+
         try:
+            # The owner's own Resume of a moved Presence turn (#2566) is decided in the one write that releases it:
+            # neither stands without the other. The row takes it below, before any dispatch; a restore reads that write.
+            lift = owner_resume_decision(task, root)
             set_fence_state(root, root_id, fence_id=str(fence.get("fence_id") or ""),
                             state=FENCE_RELEASED, release_reason="owner_resume_unstarted_root",
-                            resume_actor=control_actor())
+                            resume_actor=control_actor(),
+                            row_update=(lambda row: lifted_record(row, lift)) if lift else None)
         except Exception as exc:
             rollback()
-            q.persist_queue_snapshot(reason="owner_pause_root_resume_held")
+            q.publish_queue_snapshot(reason="owner_pause_root_resume_held")
             return {"ok": False, "error": "owner_pause_fence_unwritable", "detail": str(exc)[:200]}
+        lift_allowance(task, lift)
+    held = {"held": True, "blockers": wait["blockers"]} if wait else {}
+    if wait:
+        project_writer_wait(root, task_id, wait)
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
                    {"ts": utc_now_iso(), "type": "owner_pause_resumed", "task_id": task_id,
                     "root_task_id": root_id, "fence_id": str(fence.get("fence_id") or ""),
-                    "same_generation": True, "never_started": not admitted})
+                    "same_generation": True, "never_started": not admitted, **held})
     return {"ok": True, "task_id": task_id, "root_task_id": root_id, "same_generation": True,
-            "owner_pause_released": True, "never_started": not admitted}
+            "owner_pause_released": True, "never_started": not admitted, **held}

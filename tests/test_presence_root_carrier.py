@@ -52,25 +52,30 @@ def test_one_carrier_is_produced_for_new_roots_and_read_back_everywhere(tmp_path
 
 
 def test_only_a_matching_host_late_answer_snapshot_attributes_new_roots():
+    """Work a late answer starts is the owner's own, related to the asking binding (#2482), never its authority."""
     from copy import deepcopy
     from ouroboros.dialogue_provenance import (
-        presence_binding_authority_metadata, presence_metadata_binding, presence_root_carrier,
+        presence_binding_authority_metadata, presence_metadata_binding, presence_metadata_relation,
+        presence_root_carrier, presence_root_relation,
     )
 
     block = {"quiz_id": "question", "state": "answered", "answered_after_terminal": True,
              "presence_contact": {"task_id": "source", "binding_id": BINDING, "source_event_id": "event"}}
     owner = {"late_answer": {"task_id": "source", "quiz_id": "question",
                             "answer_snapshot": {"task_id": "source", "quiz": block}}}
-    assert presence_metadata_binding(owner) is None
+    relation = {"presence_binding_relation": {"binding_id": BINDING}}
+    # The answering turn itself is the owner's, neither related nor narrowed.
+    assert presence_metadata_binding(owner) is None and presence_metadata_relation(owner) is None
     assert presence_binding_authority_metadata(owner) == {}, "the owner's delegates retain owner authority"
-    assert presence_root_carrier(owner) == {"presence_binding_authority": {"binding_id": BINDING}}
+    assert presence_root_carrier(owner) == {} and presence_root_relation(owner) == relation
     for path, value in [("quiz_id", "other"), ("state", "open"), ("answered_after_terminal", False)]:
         changed = deepcopy(owner)
         changed["late_answer"]["answer_snapshot"]["quiz"][path] = value
-        assert presence_root_carrier(changed) == {}
+        assert presence_root_carrier(changed) == presence_root_relation(changed) == {}
     lost = deepcopy(owner)
     lost["late_answer"]["answer_snapshot"]["quiz"]["presence_contact"]["task_id"] = "other"
-    assert presence_root_carrier(lost) == {}
+    assert presence_root_carrier(lost) == presence_root_relation(lost) == {}
+    # A legacy ceiling keeps narrowing whatever the answer relates.
     assert presence_root_carrier(owner, task_contract={"capability_ceiling": {}}) == {
         "presence_binding_authority": {"binding_id": ""}}
 
@@ -127,7 +132,7 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     )
 
     out = _start_task(child_ctx, "Compile the full audit", title="Full audit", project_name="Widened",
-                                workspace_root=str(tmp_path / "elsewhere"), source="api")
+                                workspace_root=str(tmp_path / "elsewhere"), source="api", destination="place")
 
     authority = {"binding_id": BINDING}
     [evt], [root] = emitted, pending
@@ -168,10 +173,19 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     assert followup["metadata"]["presence_binding_authority"] == authority and "presence" not in followup["metadata"]
     assert followup["task_contract"]["capability_ceiling"] == ceiling
     assert not followup.get("project_id") and presence_related_work(BINDING, followup)
-    # Work acting for a binding reads no owner schedule table, exactly as its speaker cannot.
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(root_ctx, "list")
-    child_tools = types.SimpleNamespace(task_metadata=_worker_metadata(child), task_contract=child["task_contract"])
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(child_tools, "list")
+    # Work acting for a binding reads that binding's own follow-ups and never the owner's table,
+    # exactly as its speaker (#1589); changing an owner row stays refused before any read.
+    from supervisor.schedule_lifecycle import upsert_scheduled_task
+    upsert_scheduled_task({"id": "owner-row", "name": "Owner's own", "timezone": "UTC",
+                           "trigger": {"type": "cron", "expr": "0 * * * *"},
+                           "task": {"type": "task", "text": "Owner work"}}, drive_root=tmp_path)
+    listed = json.loads(_manage_schedules(root_ctx, "list"))
+    assert [row["id"] for row in listed["tasks"]] == [record["id"]] and listed["total"] == 1
+    child_tools = types.SimpleNamespace(task_metadata=_worker_metadata(child), task_contract=child["task_contract"],
+                                        drive_root=tmp_path)
+    assert [row["id"] for row in json.loads(_manage_schedules(child_tools, "list"))["tasks"]] == [record["id"]]
+    assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(root_ctx, "disable", schedule_id="owner-row",
+                                                              reason="not mine")
 
     # An ordinary child's promote is unchanged: no carrier, and its project request stands.
     _plain_evt, plain = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {}, task_id="owner-root", ceiling=False))

@@ -206,6 +206,40 @@ export function seatAnswersText(seat) {
     }).join(' · ');
 }
 
+// How THIS ledger record relates to the code that landed under it (owner 29.10, A: one sentence inside the
+// opened row). The gate types each landed commit against the record's reviewed tree (`commit_landings`); a
+// different tree says only that this review does not cover the code, never that nobody reviewed it. `Adopted`
+// needs the task's recorded adoption of that commit, exactly or within its adopted range; `Committed` says only
+// that it landed (an adoption the task could not record leaves it so), and a range whose list was cut says it
+// cannot tell. Each landing speaks with the decision that governed it, never a later one on the same record.
+// No landing (an older record, a failed commit) says nothing.
+export function landingWords(panel, adoptions) {
+    const none = { line: '', reason: '', earlier: false };
+    const landings = (Array.isArray(panel?.commit_landings) ? panel.commit_landings : []).filter((row) => text(row?.commit_sha));
+    if (!landings.length) return none;
+    const settled = (Array.isArray(adoptions) ? adoptions : []).filter((row) => text(row?.outcome) === 'adopted' && text(row?.commit_sha));
+    const range = (row) => (Array.isArray(row.commits) ? row.commits.map(text) : []);
+    const adoptedBy = (sha) => settled.find((row) => text(row.commit_sha) === sha) || settled.find((row) => range(row).includes(sha));
+    const landing = [...landings].reverse().find((row) => adoptedBy(text(row.commit_sha))) || landings.at(-1);
+    const sha = text(landing.commit_sha).slice(0, 12);
+    const adoption = adoptedBy(text(landing.commit_sha));
+    const head = text(adoption?.commit_sha).slice(0, 12);
+    const within = Boolean(adoption) && text(adoption.commit_sha) !== text(landing.commit_sha);
+    const open = adoption ? null : settled.find((row) => row.commits_complete !== true);  // its list may lack this commit
+    const lead = !adoption ? `Committed ${sha}` : within ? `Adopted ${sha} as part of ${head}` : `Adopted ${sha}`;
+    const own = text(landing.author_subject) ? ", by Ouroboros's own decision" : '';
+    const verdict = text(panel.aggregate_signal).toUpperCase();
+    const relation = text(landing.reviewed_subject);
+    const covered = !adoption ? `committed ${sha}` : within ? `${sha}, adopted as part of ${head}` : `adopted ${sha}`;
+    const line = relation === 'different' ? `This review was for earlier code; it does not cover ${covered}.`
+        : relation !== 'same' ? `${lead}; whether this review saw these bytes is not recorded.`
+            : verdict === 'PASS' ? `${lead}: the exact bytes this review passed.`
+                : verdict === 'FAIL' ? `${lead} despite this rejection${own}.`
+                    : `${lead}${within ? ',' : ''} with no verdict from this review${own}.`;
+    const unsure = open ? ` Whether the adoption of ${text(open.commit_sha).slice(0, 12)} included it is not recorded.` : '';
+    return { line: line + unsure, reason: text(landing.author_reason), earlier: relation === 'different' };
+}
+
 export function authorDoctrineLines(decision) {
     if (!decision || typeof decision !== 'object') return [];
     const fact = decision.review_replaced_by_subagents;
@@ -252,6 +286,10 @@ export function formatReviewProjection(projection) {
             `Review panel ${panelId}: ${String(panel.surface || 'review')} · authority=${String(panel.authority || 'unspecified')} · verdict=${verdictText} · transport=${String(panel.transport_status || 'unknown')} · parse=${String(panel.parse_status || 'unknown')} · quorum=${String(quorum.contributed ?? 0)}/${String(quorum.configured ?? 0)} (required ${String(quorum.required ?? 0)}) · enforcement=${String(panel.enforcement_impact || 'unknown')}${panel.single_reviewer_no_diversity ? ' · single-reviewer (no diversity)' : ''}${panel.dialogue && panel.dialogue.status ? ` · dialogue=${String(panel.dialogue.status)}` : ''}${panel.superseded ? ' · superseded' : ''}`,
         );
         if (panel.reason) lines.push(`Panel reason: ${String(panel.reason)}`);
+        // A wave Ouroboros itself stopped keeps its producer's reason code and words (masked, bounded) here.
+        for (const note of Array.isArray(panel.wave_failures) ? panel.wave_failures : []) {
+            if (note && typeof note === 'object') lines.push(`Wave failure: ${[text(note.block_reason), text(note.reported_cause)].filter(Boolean).join(' · ')}`);
+        }
         // A preflight seats one named row, ticked or not, and owes no reason: never a pool panel.
         const pooled = text(panel.surface) !== 'preflight' && panelPoolRecorded(panel.panel_facts);
         if (pooled) lines.push(...panelPoolLines(panel));

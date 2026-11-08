@@ -131,13 +131,17 @@ jobs:
         timeout-minutes: 45
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -m playwright install --with-deps chromium webkit
+        run: |
+          python -m playwright install --with-deps chromium webkit
+          python -m ouroboros.chromium_runtime install
       # `--session-timeout` stops the session BETWEEN tests, so a slow shard still
       # ends through its session finish: the guard names the nodes it did not run
       # and the evidence is exported. The per-test timeout (SIGALRM on this Linux
       # runner) fails only a test that hangs. scripts/ci_retry.py retries each failed
       # test once outside the lane guard and records FLAKY tests in verdict.json; the
       # `ui-smoke` reconciliation reads that verdict, never a hidden red.
+      # Native tab-visibility cases need a display even though most tests are headless.
+      # Playwright's --with-deps above installs Xvfb; keep it around both retry rounds.
       - name: Run complete host UI lane with collection and availability guards
         id: ui_tests
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
@@ -149,11 +153,21 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
           SEPARATE_UI_CADDY: ${{ steps.install_caddy.outputs.path }}
         run: >-
-          python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
+          xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
           python -I -S scripts/safe_test.py -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
           --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
+      # Ubuntu 23.10+ runners restrict unprivileged user namespaces through AppArmor, so the pinned
+      # Chrome for Testing shell cannot start its sandbox there ("No usable sandbox!"). Allow them for
+      # this host so the smoke proves Chromium with its sandbox on (#2735); a host that keeps the
+      # restriction gets the typed refusal the product discloses, as the Docker lane checks.
+      - name: Let Chromium's sandbox start on this runner
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && matrix.shard == 1 }}
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run browser tools Chromium/WebKit smoke
         id: browser_tools
         timeout-minutes: 20

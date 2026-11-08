@@ -15,10 +15,9 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # carries it — the main chat, a project room, and an admitted presence
 # conversation, whose ceiling compiles this set in
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
-# Reading the chronicle and marking what matters belong here; sealing chronicle
-# pages (chronicle_write) is the integrating mind's and stays in the core set,
-# so a presence writes knowledge about people and marks, not pages (a delegated
-# child's sets below carry it for the child's own drafts only).
+# Reading the chronicle and marking what matters belong here; sealing
+# (chronicle_write) is in the core set of every integrating focus, a presence
+# turn included; a delegated child publishes drafts only (its sets below).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "update_scratchpad", "update_identity", "update_world", "chat_history",
@@ -26,7 +25,7 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness",
+    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -45,7 +44,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "integrate_delegated_patch",
     "wait_task", "wait_tasks", "get_task_result",
     # Serial addressed turns: wait for an unread mailbox entry without spending
-    # model rounds (slot held, clamped to the per-call ceiling, delivers nothing).
+    # model rounds (slot held for the requested window, delivers nothing).
     "await_messages", "continue_in_background", "pause_task", "resume_task", "continue_task",
     # D#7 soft-join child controls (siblings of tell_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
@@ -63,7 +62,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
     "list_projects", "start_task", "tell_task",
-    "move_to_project",
+    "move_to_project", "close_project",
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
@@ -87,6 +86,17 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
+# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
+
+# An actor's own working form: which model thinks (switch_model) and how its own
+# transcript is folded under its own note, exact sources kept (compact_context).
+# Both change cognitive power or the view of what the actor already holds, never
+# authority over anything else, so every restricted actor profile below carries
+# them in every context mode: a child that finds the work harder raises itself
+# instead of failing, and one whose window fills folds instead of dying of
+# overflow (BIBLE P1, P5).
+OWN_FORM_TOOL_NAMES: frozenset[str] = frozenset({"switch_model", "compact_context"})
 
 LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 
@@ -97,10 +107,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
     "finish_task",
-    # switch_model changes COGNITIVE POWER, not authority: a child that started on
-    # the cheap lane and finds the work harder raises itself instead of failing or
-    # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
-    "switch_model",
+    *OWN_FORM_TOOL_NAMES,
     "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_read", "github_read",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
@@ -108,7 +115,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
     # refuses its note, correction and decision); the integrating mind accepts or rejects the drafts,
     # keeps identity and scratchpad, and receives the child's result as a report.
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "await_messages",
     "escalate",
@@ -149,9 +156,9 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
     "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
-    "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
+    "tree_read", "knowledge_read", "knowledge_list", "journal_read", "workpad_read", "memory_read", "wait_task", "wait_tasks",
     "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
-    "finish_task", "list_available_tools", "switch_model",
+    "finish_task", "list_available_tools", *OWN_FORM_TOOL_NAMES,
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -173,10 +180,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
     "finish_task",
-    # switch_model changes COGNITIVE POWER, not authority: a child that started on
-    # the cheap lane and finds the work harder raises itself instead of failing or
-    # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
-    "switch_model",
+    *OWN_FORM_TOOL_NAMES,
     "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_read", "github_read",
     "write_file", "edit_text",
@@ -193,7 +197,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # An independent look at the assigned work, never child approval or commit.
     # review_change admits the physical subject before freezing or dispatching.
     "review_change",
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history",
     "tree_note", "tree_read", "override_delegation_constraint",
     # Same nanny verbs, same host-derived profile — an acting child hosts a
@@ -208,11 +212,11 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
-    """Existing Nano view controls select schemas without granting capabilities."""
+    """Nano's schema selectors, for an actor whose set lacks them; they load schemas and grant nothing."""
     from ouroboros.config import get_context_mode
 
     mode = str(getattr(ctx, "active_context_mode", "") or get_context_mode())
-    return META_TOOL_NAMES | {"compact_context"} if mode == "nano" else frozenset()
+    return META_TOOL_NAMES if mode == "nano" else frozenset()
 
 
 def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) -> frozenset[str]:
@@ -233,6 +237,13 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read", "search_ui_translations",
+})
+
+# The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
+# (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
+# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -401,6 +412,24 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     return None
 
 
+def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
+    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    if name == "enable_tools":
+        return (None, None)
+    if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
+        inner = tool_args.get("arguments")
+        if isinstance(inner, str):
+            import json
+
+            try:
+                inner = json.loads(inner or "{}")
+            except ValueError:
+                inner = {}
+        tool_args = inner if isinstance(inner, dict) else {}
+    return requested_result_view(tool_args)
+
+
 def _view_chars(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -461,11 +490,12 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness",
+    "maintain_harness", "free_storage",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
-    "move_to_project", "delegate_start", "initiate_presence",
+    "move_to_project", "close_project", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
+    "set_task_retention",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "generate_image", "recover_image",
@@ -482,10 +512,12 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # writes a local task artifact; Observe does not grant general file writes
     "generate_evolution_stats",
     # the world beyond the repository: forms, skills, project notes, the owner's interface wording
+    # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",
     "skill_install", "skill_update",
-    "journal_write", "workpad_write", "pin_ui_translation",
+    "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
     "github_write", "pr_merge",
+    "remote_mcp_sign_in",  # stores or revokes the owner's sign-in to a remote MCP server
 })
 
 

@@ -8,8 +8,10 @@ posted with ``BeginInvoke`` and repaints the shown frame, whatever was written
 before; out-of-order bridge calls cannot let an older palette or an older page
 win, even a replaced page's first call arriving after its successor's; High
 Contrast clears the attribute and its change re-applies; the window's close
-releases the subscription; the Win32 signatures are typed. None of this is a
-Windows pixel or a native Windows run.
+releases the subscription; the Win32 signatures are typed; the app mode reads
+as Chromium reads it, and each window opens in its room with the caption to
+match whatever the attach order, the windows shown before the server included.
+None of this is a Windows pixel or a native Windows run.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import types
 
 import pytest
 
+import launcher  # before per-test root rebinding, as tests/test_launcher_background.py does
 from ouroboros import launcher_appearance as la
 from ouroboros import launcher_window_chrome
 
@@ -61,10 +64,40 @@ class Form:
 
 
 class Window:
-    def __init__(self, background_color="#FFFFFF"):
-        self.background_color = background_color
+    def __init__(self, background_color="#FFFFFF", html=None):
+        self.background_color, self.html = background_color, html
         self.events = types.SimpleNamespace(before_show=Hook(), closed=Hook())
         self.native = Form()
+
+
+REG_SZ, REG_DWORD = 1, 4
+
+
+def _registry(state):
+    """``winreg`` as ``host_palette`` uses it, answering from ``state.app_mode`` and recording each read."""
+    winreg = types.ModuleType("winreg")
+    winreg.HKEY_CURRENT_USER, winreg.REG_SZ, winreg.REG_DWORD = "HKCU", REG_SZ, REG_DWORD
+
+    class Key:
+        def __init__(self, root, path):
+            if state.app_mode == "no key":
+                raise FileNotFoundError(path)
+            self.path = (root, path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def query(key, name):
+        state.read.append((*key.path, name))
+        if state.app_mode is None:
+            raise FileNotFoundError(name)
+        return state.app_mode
+
+    winreg.OpenKey, winreg.QueryValueEx = Key, query
+    return winreg
 
 
 @pytest.fixture
@@ -72,7 +105,10 @@ def windows(monkeypatch):
     """The Windows path with its native seams replaced by recorders (the macOS title bar: test_launcher_window_chrome)."""
     monkeypatch.setattr(la, "_WINDOWS", True)
     monkeypatch.setattr(launcher_window_chrome, "_MACOS", False)
-    state = types.SimpleNamespace(writes=[], refreshes=[], high_contrast=False, hresult=0)
+    monkeypatch.setattr(launcher_window_chrome, "_LINUX", False)
+    # app_mode: AppsUseLightTheme as (value, type); None = no value, "no key" = no Personalize key.
+    state = types.SimpleNamespace(writes=[], refreshes=[], high_contrast=False, hresult=0, app_mode=None, read=[])
+    monkeypatch.setitem(sys.modules, "winreg", _registry(state))
 
     def write(hwnd, dark):
         state.writes.append((hwnd, dark))
@@ -228,10 +264,112 @@ def test_unknown_palettes_and_other_platforms_are_refused_typed(monkeypatch):
     assert appearance.request("dark", PAGE_A, 1) == {"ok": False, "state": "unsupported"}
 
 
-@pytest.mark.parametrize("color,palette", [("#0d0b0f", "dark"), ("#FFFFFF", "light"), ("fff", "light"),
-                                           ("#1a1a2e", "dark"), ("", ""), ("#12", ""), ("#zzzzzz", "")])
+@pytest.mark.parametrize("color,palette", [("fff", "light"),
+                                           ("", ""), ("#12", ""), ("#zzzzzz", "")])
 def test_the_starting_palette_reads_the_windows_background(color, palette):
     assert la.palette_of_background(color) == palette
+
+
+@pytest.mark.parametrize("app_mode,palette", [((0, REG_DWORD), "dark"), ((1, REG_DWORD), "light"),
+                                              (None, "light")])
+def test_the_app_mode_reads_as_chromium_reads_it_for_a_system_page(windows, app_mode, palette):
+    """WebView2's System page is dark only for a DWORD 0; anything missing or mistyped there is light."""
+    windows.app_mode = app_mode
+    assert la.host_palette() == palette
+    if app_mode != "no key":
+        assert windows.read == [("HKCU", la._APP_MODE_KEY, "AppsUseLightTheme")]
+    assert la._APP_MODE_KEY == r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+
+def test_a_contrast_theme_or_another_os_leaves_the_host_palette_unknown(windows, monkeypatch):
+    windows.app_mode, windows.high_contrast = (0, REG_DWORD), True
+    assert la.host_palette() == "" and windows.read == []  # its own colours: no room matches them
+    monkeypatch.setattr(la, "_WINDOWS", False)
+    windows.high_contrast = False
+    assert la.host_palette() == "" and windows.read == []
+
+
+def _desktop_windows(monkeypatch, create=None):
+    """The main window as ``Background`` attaches it and the setup window as ``launcher_onboarding`` makes it."""
+    import threading
+
+    from ouroboros import launcher_background as lb
+    from ouroboros import launcher_onboarding
+
+    monkeypatch.setattr(lb, "indicator_class", lambda: None)
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+    main = Window("#0f0f11")  # launcher.py's colour for the main window
+    main.events.closing, main.events.shown = Hook(), Hook()
+    background.attach(main)
+    created = {}
+    fake = types.ModuleType("webview")
+    fake.windows = []
+
+    def create_window(title, url=None, js_api=None, **kwargs):
+        # pywebview's own white unless the call names a colour
+        created.update(window=Window(kwargs.get("background_color", "#FFFFFF")))
+        return created["window"]
+
+    fake.create_window, fake.start = create_window, lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    launcher_onboarding.present_first_run_onboarding({}, 1, open_external_url=lambda url: {"ok": False})
+    return main, created["window"]
+
+
+def test_each_desktop_window_opens_in_the_room_of_the_app_mode_and_its_caption_starts_there(windows, monkeypatch):
+    """Both windows read the colour pywebview was given when their form exists, so the caption starts on
+    the app mode's room although the setup window attaches its caption before ``paint_room`` runs."""
+    windows.app_mode = (0, REG_DWORD)
+    main, setup = _desktop_windows(monkeypatch)
+    assert (main.background_color, setup.background_color) == ("#0f0f11", "#0f0f11")
+    main.events.before_show.fire()
+    setup.events.before_show.fire()
+    assert windows.writes == [(FULL_WIDTH_HWND, True)] * 2  # dark before either window is first shown
+    assert len(setup.events.before_show.handlers) == 1  # its bridge's appearance alone: no second owner
+    windows.writes.clear()
+    windows.app_mode = (1, REG_DWORD)
+    main, setup = _desktop_windows(monkeypatch)
+    assert (main.background_color, setup.background_color) == ("#ffffff", "#ffffff")
+    main.events.before_show.fire()
+    setup.events.before_show.fire()
+    assert windows.writes == []  # light is the untouched frame: the main window no longer starts dark
+
+
+@pytest.mark.parametrize("app_mode,high_contrast,colour,writes", [
+    ((0, REG_DWORD), False, "#0f0f11", [(FULL_WIDTH_HWND, True)]),
+    ((1, REG_DWORD), False, "#ffffff", []),  # light is the untouched frame
+    ((0, REG_DWORD), True, "#FFFFFF", []),  # a contrast theme keeps pywebview's white and owns its caption
+])
+def test_a_window_shown_before_the_server_wears_its_hosts_caption_over_its_hosts_room(
+        windows, monkeypatch, app_mode, high_contrast, colour, writes):
+    """``launcher._already_running_window`` as it runs. No page choice or bridge can reach this window, so
+    only its host can tint the frame: without this a dark app mode opens a dark body under a light caption."""
+    windows.app_mode, windows.high_contrast = app_mode, high_contrast
+    made = []
+    webview = types.ModuleType("webview")
+
+    def create_window(title, html=None, **kwargs):
+        made.append(Window(html=html))
+        return made[-1]
+
+    webview.create_window, webview.start = create_window, lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "webview", webview)
+    launcher._already_running_window("Ouroboros is already running from elsewhere. Quit it, then open this copy.")
+    (window,) = made
+    assert window.background_color == colour
+    window.events.before_show.fire()
+    assert windows.writes == writes and windows.refreshes == []  # before the first paint: nothing to repaint
+    assert len(windows.preferences.handlers) == 1  # a contrast theme switched on later still clears the tint
+    window.events.closed.fire()
+    assert windows.preferences.handlers == []
+
+
+def test_an_unknown_host_palette_keeps_each_windows_own_colour(windows, monkeypatch):
+    windows.app_mode, windows.high_contrast = (1, REG_DWORD), True
+    main, setup = _desktop_windows(monkeypatch)
+    assert (main.background_color, setup.background_color) == ("#0f0f11", "#FFFFFF")
+    main.events.before_show.fire()
+    assert windows.writes == []  # High Contrast keeps the caption its own as well
 
 
 class _Function:

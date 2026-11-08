@@ -59,7 +59,9 @@
           "state": "silent",
           "unanswered": 0
         }
-      ]
+      ],
+      "appointment_at": "2026-10-24T09:30:00+00:00",
+      "live_wake_held": false
     }
   },
   "places": {
@@ -330,6 +332,8 @@
         "unanswered": 0
       }
     ],
+    "appointment_at": "2026-10-24T09:30:00+00:00",
+    "live_wake_held": false,
     "recent_wakes": [
       {
         "task_id": "w-unknown",
@@ -736,7 +740,7 @@
         "ledger_integrity_degraded": false
       }
     ],
-    "recent_wakes_coverage": "wakes that reached a model call in the last 48 h"
+    "recent_wakes_coverage": "Wakes that reached a model call in the last 48 h"
   },
   "history": {
     "messages": [
@@ -752,7 +756,7 @@
         "sender_session_id": "",
         "client_message_id": "",
         "task_id": "214a31b6",
-        "row_address": "row:1@2026-10-24T07:49:00+00:00#0e845df99d67",
+        "row_address": "row:1@2026-10-24T07:49:00+00:00#d483d1f6517e",
         "history_id": "chat:0",
         "history_position": {
           "source": "chat",
@@ -781,6 +785,7 @@
             "metadata_task_attempt": null
           }
         },
+        "target_label": "Ouroboros Autonomous Exploration",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -892,11 +897,11 @@
         "sender_session_id": "",
         "client_message_id": "",
         "task_id": "w-summary",
-        "row_address": "row:1@2026-10-24T07:49:00+00:00#c444fd905b66",
-        "history_id": "chat:3776",
+        "row_address": "row:1@2026-10-24T07:49:00+00:00#a4bbe8d05be9",
+        "history_id": "chat:3880",
         "history_position": {
           "source": "chat",
-          "offset": 3776
+          "offset": 3880
         },
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
@@ -921,6 +926,7 @@
             "metadata_task_attempt": null
           }
         },
+        "target_label": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не тре…",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -1034,11 +1040,11 @@
         "sender_session_id": "",
         "client_message_id": "",
         "task_id": "w-spoke",
-        "row_address": "row:1@2026-10-24T07:49:00+00:00#0aa976f82fb2",
-        "history_id": "chat:7866",
+        "row_address": "row:1@2026-10-24T07:49:00+00:00#609021d8bff6",
+        "history_id": "chat:8308",
         "history_position": {
           "source": "chat",
-          "offset": 7866
+          "offset": 8308
         },
         "model_execution": {
           "requested_model": "claudexor::codex=gpt-6-astra",
@@ -1063,6 +1069,7 @@
             "metadata_task_attempt": null
           }
         },
+        "target_label": "Ouroboros Autonomous Exploration",
         "outcome_axes": {
           "schema_version": 1,
           "lifecycle": {
@@ -1189,11 +1196,11 @@
           "wake_silent": true,
           "quiet_effective": true
         },
-        "row_address": "row:1@2026-10-24T07:50:00+00:00#62a83b4506ef",
-        "history_id": "chat:1780",
+        "row_address": "row:1@2026-10-24T07:50:00+00:00#3b0b6a314f8a",
+        "history_id": "chat:1832",
         "history_position": {
           "source": "chat",
-          "offset": 1780
+          "offset": 1832
         },
         "wake_silent": true,
         "quiet_effective": true,
@@ -1226,11 +1233,11 @@
           "wake_silent": true,
           "quiet_effective": true
         },
-        "row_address": "row:1@2026-10-24T07:50:00+00:00#e4e2a0bdb624",
-        "history_id": "chat:5560",
+        "row_address": "row:1@2026-10-24T07:50:00+00:00#1692acb40d1a",
+        "history_id": "chat:5833",
         "history_position": {
           "source": "chat",
-          "offset": 5560
+          "offset": 5833
         },
         "wake_silent": true,
         "quiet_effective": true,
@@ -1264,11 +1271,11 @@
           "wake_silent": true,
           "quiet_effective": false
         },
-        "row_address": "row:1@2026-10-24T07:50:00+00:00#698d25cc74a2",
-        "history_id": "chat:9648",
+        "row_address": "row:1@2026-10-24T07:50:00+00:00#cd25fb0aea74",
+        "history_id": "chat:10142",
         "history_position": {
           "source": "chat",
-          "offset": 9648
+          "offset": 10142
         },
         "wake_silent": true,
         "quiet_effective": false,
@@ -1283,13 +1290,13 @@
       "v": 1,
       "view": "7cb1b390c16a71fc9cbee8510e3c5f5b0640e09f7ce368cfe41f3f2a3b93e4a6",
       "upper": {
-        "chat": 11647,
+        "chat": 12193,
         "progress": 0
       },
       "spans": {
         "chat": {
           "from": 0,
-          "to": 11647,
+          "to": 12193,
           "chain": "dialog",
           "gaps": []
         },
@@ -1303,8 +1310,8 @@
     },
     "has_more": false,
     "next_cursor": null,
-    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjExNjQ3LCJwcm9ncmVzcyI6MH0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjUwLCJwcm9ncmVzcyI6MjAwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6MTE2NDcsInByb2dyZXNzIjowfSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
-    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjExNjQ3LCJwcm9ncmVzcyI6MH0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjUwLCJwcm9ncmVzcyI6MjAwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjExNjQ3LCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyIyMTRhMzFiNiI6MSwidy1zcG9rZSI6MSwidy1zdW1tYXJ5IjoxfSwibmV3ZXN0IjoiIiwibGlmZWN5Y2xlIjpmYWxzZX0"
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjEyMTkzLCJwcm9ncmVzcyI6MH0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjUwLCJwcm9ncmVzcyI6MjAwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6MTIxOTMsInByb2dyZXNzIjowfSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjEyMTkzLCJwcm9ncmVzcyI6MH0sInVuZmluaXNoZWQiOltdLCJxdW90YXMiOnsiaHVtYW4iOjUwLCJwcm9ncmVzcyI6MjAwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjEyMTkzLCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyIyMTRhMzFiNiI6MSwidy1zcG9rZSI6MSwidy1zdW1tYXJ5IjoxfSwibmV3ZXN0IjoiIiwibGlmZWN5Y2xlIjpmYWxzZX0"
   },
   "running_history": {
     "messages": [
@@ -1383,13 +1390,13 @@
       "v": 1,
       "view": "7cb1b390c16a71fc9cbee8510e3c5f5b0640e09f7ce368cfe41f3f2a3b93e4a6",
       "upper": {
-        "chat": 11647,
+        "chat": 12193,
         "progress": 233
       },
       "spans": {
         "chat": {
           "from": 0,
-          "to": 11647,
+          "to": 12193,
           "chain": "dialog",
           "gaps": []
         },
@@ -1403,8 +1410,8 @@
     },
     "has_more": false,
     "next_cursor": null,
-    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjExNjQ3LCJwcm9ncmVzcyI6MjMzfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjoxMTY0NywicHJvZ3Jlc3MiOjIzM30sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
-    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjExNjQ3LCJwcm9ncmVzcyI6MjMzfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6MTE2NDcsInByb2dyZXNzIjoyMzN9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjEsInctcnVubmluZyI6MSwidy1zcG9rZSI6MSwidy1zdW1tYXJ5IjoxfSwibmV3ZXN0IjoiIiwibGlmZWN5Y2xlIjpmYWxzZX0"
+    "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjEyMTkzLCJwcm9ncmVzcyI6MjMzfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjoxMjE5MywicHJvZ3Jlc3MiOjIzM30sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
+    "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjEyMTkzLCJwcm9ncmVzcyI6MjMzfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6MTIxOTMsInByb2dyZXNzIjoyMzN9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjEsInctcnVubmluZyI6MSwidy1zcG9rZSI6MSwidy1zdW1tYXJ5IjoxfSwibmV3ZXN0IjoiIiwibGlmZWN5Y2xlIjpmYWxzZX0"
   },
   "terminal_only_history": [
     {
@@ -1421,7 +1428,7 @@
           "sender_session_id": "",
           "client_message_id": "",
           "task_id": "214a31b6",
-          "row_address": "row:1@2026-10-24T07:49:00+00:00#0e845df99d67",
+          "row_address": "row:1@2026-10-24T07:49:00+00:00#d483d1f6517e",
           "history_id": "chat:0",
           "history_position": {
             "source": "chat",
@@ -1450,6 +1457,7 @@
               "metadata_task_attempt": null
             }
           },
+          "target_label": "Ouroboros Autonomous Exploration",
           "outcome_axes": {
             "schema_version": 1,
             "lifecycle": {
@@ -1576,11 +1584,11 @@
             "wake_silent": true,
             "quiet_effective": true
           },
-          "row_address": "row:1@2026-10-24T07:50:00+00:00#62a83b4506ef",
-          "history_id": "chat:1780",
+          "row_address": "row:1@2026-10-24T07:50:00+00:00#3b0b6a314f8a",
+          "history_id": "chat:1832",
           "history_position": {
             "source": "chat",
-            "offset": 1780
+            "offset": 1832
           },
           "wake_silent": true,
           "quiet_effective": true,
@@ -1595,13 +1603,13 @@
         "v": 1,
         "view": "7cb1b390c16a71fc9cbee8510e3c5f5b0640e09f7ce368cfe41f3f2a3b93e4a6",
         "upper": {
-          "chat": 3776,
+          "chat": 3880,
           "progress": 0
         },
         "spans": {
           "chat": {
             "from": 0,
-            "to": 3776,
+            "to": 3880,
             "chain": "dialog",
             "gaps": []
           },
@@ -1615,8 +1623,8 @@
       },
       "has_more": false,
       "next_cursor": null,
-      "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM3NzYsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjozNzc2LCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
-      "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM3NzYsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6Mzc3NiwicHJvZ3Jlc3MiOjB9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjF9LCJuZXdlc3QiOiIiLCJsaWZlY3ljbGUiOmZhbHNlfQ"
+      "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM4ODAsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjozODgwLCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
+      "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM4ODAsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6Mzg4MCwicHJvZ3Jlc3MiOjB9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjF9LCJuZXdlc3QiOiIiLCJsaWZlY3ljbGUiOmZhbHNlfQ"
     },
     {
       "messages": [
@@ -1632,7 +1640,7 @@
           "sender_session_id": "",
           "client_message_id": "",
           "task_id": "214a31b6",
-          "row_address": "row:1@2026-10-24T07:49:00+00:00#01d271f838a1",
+          "row_address": "row:1@2026-10-24T07:49:00+00:00#165d0c951a32",
           "history_id": "chat:0",
           "history_position": {
             "source": "chat",
@@ -1661,6 +1669,7 @@
               "metadata_task_attempt": null
             }
           },
+          "target_label": "Ouroboros Autonomous Exploration",
           "outcome_axes": {
             "schema_version": 1,
             "lifecycle": {
@@ -1787,11 +1796,11 @@
             "wake_silent": true,
             "quiet_effective": false
           },
-          "row_address": "row:1@2026-10-24T07:50:00+00:00#a487edd61d49",
-          "history_id": "chat:1787",
+          "row_address": "row:1@2026-10-24T07:50:00+00:00#71867522b837",
+          "history_id": "chat:1839",
           "history_position": {
             "source": "chat",
-            "offset": 1787
+            "offset": 1839
           },
           "wake_silent": true,
           "quiet_effective": false,
@@ -1806,13 +1815,13 @@
         "v": 1,
         "view": "7cb1b390c16a71fc9cbee8510e3c5f5b0640e09f7ce368cfe41f3f2a3b93e4a6",
         "upper": {
-          "chat": 3791,
+          "chat": 3895,
           "progress": 0
         },
         "spans": {
           "chat": {
             "from": 0,
-            "to": 3791,
+            "to": 3895,
             "chain": "dialog",
             "gaps": []
           },
@@ -1826,8 +1835,8 @@
       },
       "has_more": false,
       "next_cursor": null,
-      "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM3OTEsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjozNzkxLCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
-      "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM3OTEsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6Mzc5MSwicHJvZ3Jlc3MiOjB9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjF9LCJuZXdlc3QiOiIiLCJsaWZlY3ljbGUiOmZhbHNlfQ"
+      "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM4OTUsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoicGFnZSIsImJlZm9yZSI6eyJjaGF0IjozODk1LCJwcm9ncmVzcyI6MH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
+      "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjM4OTUsInByb2dyZXNzIjowfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjoyMDB9LCJraW5kIjoiYWZ0ZXIiLCJiZWZvcmUiOnsiY2hhdCI6Mzg5NSwicHJvZ3Jlc3MiOjB9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiMjE0YTMxYjYiOjF9LCJuZXdlc3QiOiIiLCJsaWZlY3ljbGUiOmZhbHNlfQ"
     }
   ]
 }

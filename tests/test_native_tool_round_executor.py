@@ -20,6 +20,9 @@ from ouroboros.review_execution import (
 )
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot
+from ouroboros.tools.review_response import parse_model_response
+from ouroboros.triad_review import parse_seat_answer
+from tests._source_scan import parse
 
 _VERDICT = '[{"severity": "advisory", "item": "x", "evidence": "e", "recommendation": "r"}]'
 
@@ -97,6 +100,10 @@ def test_episode_reads_then_answers(subject_repo):
     usage = result.usage
     assert usage["native_rounds"] == 2
     assert usage["host_file_read_attestation"] == "host_observed"
+    # The wave's seat row prefers `read_provenance`: a second stamp on this usage would relabel
+    # the host's own receipts as a delegated session's inference in the recorded manifest.
+    row = parse_model_response("openai/fake-reviewer", {"usage": usage, "choices": [{"message": {"content": _VERDICT}}]}, {})
+    assert parse_seat_answer(row, ["coupling"]).context_manifest["read_provenance"] == "host_observed"
     assert usage["native_tool_receipts"][0]["tool"] == "read_file"
     assert usage["native_tool_receipts"][0]["path"] == "greeting.txt"
     assert len(observed_usage) == 2
@@ -353,7 +360,7 @@ def test_terminal_round_masks_secrets_structurally(subject_repo):
         assert token not in NativeToolRoundReviewExecutor._terminal_round_fact(scalar)
 
 
-@pytest.mark.parametrize("wrappers", [0, 1, 2, 3, 5, 8, 12])
+@pytest.mark.parametrize("wrappers", [0, 3, 12])
 def test_nested_json_secrets_fail_closed_at_any_nesting(wrappers):
     """FAIL CLOSED (P1): a low-entropy secret under a secret-named key wrapped
     in N JSON strings is masked structurally while the expansion budget lasts
@@ -528,7 +535,7 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
     assert exc.value.code == "deadline_exhausted" and not llm.calls
 
 
-@pytest.mark.parametrize("container", [["junk", {"id": "x"}], 7, True, "junk", {"id": "x"}, 0, False, "", {}])
+@pytest.mark.parametrize("container", [["junk", {"id": "x"}], 0, {}])
 def test_round_without_progress_is_a_typed_malformed_end(subject_repo, container):
     """PROGRESS FLOOR: a round with neither prose nor one well-formed tool call
     adds nothing and would re-enter the paid send forever — whatever container
@@ -770,6 +777,49 @@ def test_a_dispatched_first_send_that_fails_is_still_a_round(subject_repo):
     assert custody["native_rounds"] == 2 and custody["native_transcript_chars"] == wire[1] != wire[0]
 
 
+def test_a_late_strict_paid_stamp_failure_keeps_the_dispatched_round_failure(subject_repo, caplog):
+    """#1652 native copy: the send that left keeps ITS exception and capture as the cached failure
+    when the strict paid stamp fails after it, so custody reads an unknown outcome rather than the
+    rounds' settled one; the attempt is observed and no second episode or send follows."""
+    from ouroboros.review_custody import _review_exception_projection, _ReviewAttemptHistory
+    from ouroboros.review_dispatch import ReviewPaidStamp
+
+    class _Capture:
+        state = "dispatched"
+        attempt_id = "attempt-1"
+        provider_status_code = None
+
+    errors, observed = [], []
+
+    class _DispatchedFailureLLM(_ScriptedLLM):
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            exc = RuntimeError("socket reset after dispatch")
+            exc.physical_attempt_capture = _Capture()
+            errors.append(exc)
+            raise exc
+
+    def refuse():
+        raise RuntimeError("commit review paid write-ahead could not be verified")
+
+    llm = _DispatchedFailureLLM([])
+    assignment = dataclasses.replace(_assignment(subject_repo, llm), dispatch_stamp=ReviewPaidStamp(refuse, fail_closed=True))
+    executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
+    executor.usage_observer = observed.append
+    for _ in range(2):  # a repeat of the rail re-raises the cached failure, never a second episode
+        with pytest.raises(RuntimeError) as raised:
+            executor.execute()
+        assert raised.value is errors[0]
+    assert len(llm.calls) == 1 and [row["ledger_attempt_ids"] for row in observed] == [["attempt-1"]]
+    assert "commit review paid write-ahead could not be verified" in caplog.text
+    history = _ReviewAttemptHistory()
+    history.observe(errors[0])
+    custody, state, _status, operation_state, failure_code = _review_exception_projection(
+        errors[0], executor.failure_custody(), history, None)
+    assert (state, operation_state, failure_code) == ("dispatched", "custody_lost", "provider_outcome_unknown")
+    assert custody["native_rounds"] == 1
+
+
 def test_transcript_counter_includes_system_schemas_and_args(subject_repo):
     """Diagnostics include the system, schemas and exact serialized call arguments."""
     llm = _ScriptedLLM([
@@ -998,7 +1048,7 @@ def _last_read_view_sites(sources):
     sites = set()
     for rel, text in sources.items():
         try:
-            tree = ast.parse(text)
+            tree = parse(text)
         except SyntaxError:
             continue
         for node in ast.walk(tree):

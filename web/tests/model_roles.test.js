@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
+import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
 
@@ -118,8 +118,18 @@ test('an unloaded editor authors nothing and an API-only save does not create ro
 });
 
 test('context note uses the server projection, never catalogue arithmetic', () => {
-    const text = 'window 400,000 total: set in Settings; server metadata says 272,000';
-    assert.equal(modelContextNote({ window: { text } }), text);
+    // The projection's typed fields become owner words; its own sentence (for Main) is not copied.
+    const window = { tokens: 872000, kind: 'total', source: 'provider_metadata', observed_at: '2026-11-05T16:33:00Z',
+        reserve: 65536, usable: 806464, text: 'window 872,000 total: server metadata 2026-11-05 16:33; usable input 806,464; reply reserve 65,536' };
+    assert.equal(modelContextNote({ window }), 'Window 872k tokens (from the server) · 806k usable for input');
+    assert.equal(modelContextNote({ window: { ...window, source: 'user_setting', usable: undefined,
+        contradiction: { source: 'provider_metadata', tokens: 272000, kind: 'total' } } }),
+    'Window 872k tokens (set in Settings) · 806k usable for input · the server says 272k');
+    assert.equal(modelContextNote({ window: { ...window, retired_ack: { window_tokens: 1000000, ts: '2026-11-01T10:00:00Z' } } }),
+        'Window 872k tokens (from the server) · 806k usable for input · old confirmation 1M not used');
+    assert.doesNotMatch(modelContextNote({ window }), /2026|65,536|reserve|metadata/);
+    assert.equal(modelContextNote({ window: { tokens: 1050000, source: 'user_setting', usable: 984464 } }),
+        'Window 1.1M tokens (set in Settings) · 984k usable for input');
     assert.match(modelContextNote({ context_window: 272000, max_context_window: 872000 }), /not known/);
     assert.match(modelContextNote(null), /not known/);
 });
@@ -135,17 +145,12 @@ test('the same role sheets are loaded by both actual UI hosts', () => {
     }
 });
 
-test('role disclosures draw a visible open/closed marker on their own line', () => {
+test('role disclosures wear the one shared disclosure look on their own line', () => {
     const css = readFileSync(new URL('../model_roles.css', import.meta.url), 'utf8');
     const block = (selector) => css.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
-    // `display` other than list-item drops the native ::marker, so the sheet
-    // must hide it explicitly and draw the house glyph pair itself.
-    const summary = block('\\.model-role-details\\s*>\\s*summary');
-    assert.match(summary, /list-style:\s*none/);
-    assert.match(summary, /color:\s*var\(--text-primary\)/);
-    assert.match(block('\\.model-role-details\\s*>\\s*summary::-webkit-details-marker'), /display:\s*none/);
-    assert.match(block('\\.model-role-details\\s*>\\s*summary::before'), /content:\s*"▸ "/);
-    assert.match(block('\\.model-role-details\\[open\\]\\s*>\\s*summary::before'), /content:\s*"▾ "/);
+    // The caret and the quiet summary are ui.css details.ui-disclosure's; the role sheet draws no marker of its own.
+    assert.doesNotMatch(css, /summary::before|summary::-webkit-details-marker/);
+    assert.match(readFileSync(new URL('../modules/model_roles.js', import.meta.url), 'utf8'), /<details class="model-role-details ui-disclosure">/);
     // The disclosure owns a full row under the status text instead of sharing its baseline.
     assert.match(block('\\.model-role-notes'), /flex-wrap:\s*wrap/);
     assert.match(block('\\.model-role-notes\\s*>\\s*\\.model-role-details'), /flex-basis:\s*100%/);
@@ -161,4 +166,40 @@ test('an empty role names the slot it uses: Main, and the Light model for the Sa
     const source = readFileSync(new URL('../modules/model_roles.js', import.meta.url), 'utf8');
     assert.match(source, /`Empty uses the \$\{inheritName\(row\)\} model`/);
     assert.match(source, /`Uses \$\{inheritName\(row\)\}\.`/);
+});
+
+/** An element stub that accepts every property, call and query (the house idiom: no jsdom). */
+function inertNode() {
+    return new Proxy(function () {}, {
+        get: (target, key) => (key === Symbol.iterator ? function* () {} : key === Symbol.toPrimitive ? () => ''
+            : key === 'then' ? undefined : key in target ? target[key] : inertNode()),
+        set: (target, key, value) => { target[key] = value; return true; },
+        apply: () => inertNode(),
+    });
+}
+
+test('Settings says under Main, before Save, what a new Main does to running work; no other host does', () => {
+    // Its fact, not its words (DESIGN principle 7): work that follows Main switches at its next call, and work with
+    // its own model is not said to switch. The note forecasts no tokens or cost (DESIGN §7).
+    assert.match(MAIN_FOLLOW_NOTE, /\bfollow(?:s|ing)? Main\b/);
+    assert.match(MAIN_FOLLOW_NOTE, /\bnext (?:call|request|step|turn)\b/);
+    assert.match(MAIN_FOLLOW_NOTE, /\bswitch(?:es)?\b|\buses this model\b/i);
+    assert.doesNotMatch(MAIN_FOLLOW_NOTE, /\b(?:not|never|no longer)\b|n't/i);
+    assert.doesNotMatch(MAIN_FOLLOW_NOTE, /\bown model\b[^.]*\bswitch/i);
+    assert.doesNotMatch(MAIN_FOLLOW_NOTE, /token|cost|\$|\d/i);
+    const rendered = (mainNote) => {
+        const host = inertNode();
+        const editor = createModelRolesEditor({ hostId: 'roles', doc: { getElementById: () => host }, showContext: false, mainNote });
+        editor.load({ OUROBOROS_MODEL: 'openai::main', OUROBOROS_MODEL_FALLBACKS: 'openai::reserve' }, contract);
+        editor.destroy();
+        return String(host.innerHTML);
+    };
+    const html = rendered(true);
+    const main = html.slice(html.indexOf('data-model-role-group="main"'), html.indexOf('data-model-role-group="light"'));
+    assert.ok(main.includes(`<p class="model-role-copy" id="roles-main-note" data-main-follow-note>${MAIN_FOLLOW_NOTE}</p>`));
+    assert.match(main, /data-model-role-model aria-label="Main Model" aria-describedby="roles-main-note"/);
+    assert.equal(html.split('data-main-follow-note').length, 2, 'one note, under Main and not under Fallback');
+    assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
+    const settings = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
+    assert.match(settings, /createModelRolesEditor\(\{ hostId: 'settings-model-roles', mainNote: true,/);
 });

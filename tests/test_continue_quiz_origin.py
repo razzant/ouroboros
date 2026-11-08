@@ -194,13 +194,19 @@ def test_a_wake_started_root_continues_with_the_cards_it_started_from(tmp_path, 
     assert text.index(QUESTION) < text.index("Yes, start it")
     metadata = successor["metadata"]
     corpus = metadata["owner_corpus"]
-    # The owner corpus keeps the owner's exact words with the card identity; questions never enter it.
+    # The owner corpus keeps the owner's exact words with the card identity; each card's question rides beside
+    # its answer as the message it replies to (the asking task's words), never inside the owner's words.
     assert [(row["source"], row["content"]) for row in corpus] == [
         ("owner_quiz_answer", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia"),
         ("owner_quiz_answer", "2. 2026")]
     assert [(row["source_task_id"], row["quiz_id"]) for row in corpus] == [
         (WAKE, "q-start"), (WAKE, "q-scope"), (rid, "q-root")]
-    assert not any(QUESTION in json.dumps(row) or ROOT_QUESTION in json.dumps(row) for row in corpus)
+    assert not any(QUESTION in json.dumps(row["content"]) or ROOT_QUESTION in json.dumps(row["content"])
+                   for row in corpus)
+    assert [row["reply_to"]["text"].splitlines()[0] for row in corpus] == [QUESTION, SCOPE_QUESTION, ROOT_QUESTION]
+    assert all("Stake: The Q4 plan" in row["reply_to"]["text"] and "If unanswered: Wait for the owner"
+               in row["reply_to"]["text"] for row in corpus)  # the whole subject the card showed, through Continue
+    assert [row["reply_to"]["author"] for row in corpus] == [f"Ouroboros, task {WAKE}"] * 2 + [f"Ouroboros, task {rid}"]
     start = metadata["continuation"]["owner_sources"]["start"]
     assert start["objective"].startswith(OBJECTIVE) and start["author"] == {"kind": "task", "task_id": WAKE}
     assert [answer["card"]["question"] for answer in start["answers"]] == [QUESTION, SCOPE_QUESTION]
@@ -222,11 +228,20 @@ def test_the_producer_records_its_start_sources_where_every_writer_persists_them
 
     queue, workers, bridge, root, wake = _wake_started_root(tmp_path, monkeypatch)
     rid = root["id"]
-    expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": f"quiz_answer:{WAKE}:q-start",
-                 "source_task_id": WAKE, "quiz_id": "q-start"},
-                {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia",
-                 "msg_id": f"quiz_answer:{WAKE}:q-scope", "source_task_id": WAKE, "quiz_id": "q-scope"}]
-    assert [row for row in wake._owner_directives if row["source"] == "owner_quiz_answer"] == expected
+    answered = [row for row in wake._owner_directives if row["source"] == "owner_quiz_answer"]
+    # Each answer is read with its card, the asking task's words beside the owner's.
+    assert [(row["reply_to"]["author"], row["reply_to"]["text"].splitlines()[0]) for row in answered] == [
+        (f"Ouroboros, task {WAKE}", QUESTION), (f"Ouroboros, task {WAKE}", SCOPE_QUESTION)]
+    # Each row names the answer's own chat row (the row the wake holds): its room, client id and accept time.
+    held = {row["client_message_id"]: row for row in wake._held_owner_messages.values()}
+    start_id, scope_id = f"quiz_answer:{WAKE}:q-start", f"quiz_answer:{WAKE}:q-scope"
+    expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": start_id,
+                 "source_task_id": WAKE, "quiz_id": "q-start", "chat_id": "1", "client_message_id": start_id,
+                 "ts": held[start_id]["ts"], "reply_to": answered[0]["reply_to"]},
+                {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia", "msg_id": scope_id,
+                 "source_task_id": WAKE, "quiz_id": "q-scope", "chat_id": "1", "client_message_id": scope_id,
+                 "ts": held[scope_id]["ts"], "reply_to": answered[1]["reply_to"]}]
+    assert answered == expected and all(row["ts"] for row in expected)
     receipt = load_task_result(tmp_path, rid)
     assert receipt["status"] == "scheduled"
     for carrier in (root["metadata"], receipt["metadata"]):
@@ -332,16 +347,8 @@ def test_a_lost_or_legacy_opening_stays_a_named_gap(tmp_path, monkeypatch):
     _refused(tmp_path, workers, root["id"], "original_owner_message_text")
 
 
-def test_a_wake_started_root_without_an_answered_card_is_not_continued(tmp_path, monkeypatch):
-    """The producer's fact alone does not admit a source-less autonomous root."""
-    workers, root = _interrupted_wake_root(tmp_path, monkeypatch, answers=False)
-    assert root["metadata"]["origin_message_absent"] is True and root["metadata"]["owner_corpus"] == []
-    _refused(tmp_path, workers, root["id"], "start_quiz_answer_absent")
-
-
 @pytest.mark.parametrize("damage", [
-    "card_missing", "card_unanswered", "words_changed", "identity_removed", "identity_malformed", "own_card",
-    "foreign_card",
+    "card_missing", "identity_removed", "foreign_card",
 ])
 def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatch, damage):
     from ouroboros.owner_quiz import _mutate_projection, quiz_states, record_answered, record_asked
@@ -413,7 +420,10 @@ def test_a_card_rerouted_after_the_drafter_read_it_still_resolves(tmp_path, monk
 
 
 def test_peer_words_carrying_a_card_identity_stay_peer_context(tmp_path, monkeypatch):
-    """Metadata cannot relabel a task's words as the owner's answer."""
+    """Metadata cannot relabel a task's words as the owner's answer: the start opens on its
+    drafted objective alone (#1376) and the task's words stay peer context."""
+    from supervisor.continuation_admission import admit_continuation
+
     workers, root = _interrupted_wake_root(tmp_path, monkeypatch, answers=False)
 
     def peer_row(row):
@@ -421,7 +431,13 @@ def test_peer_words_carrying_a_card_identity_stay_peer_context(tmp_path, monkeyp
                                             "source_task_id": WAKE, "quiz_id": "q-start"}]
 
     _edit_result(tmp_path, root["id"], peer_row)
-    _refused(tmp_path, workers, root["id"], "start_quiz_answer_absent")
+    ack = admit_continuation(root["id"], action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    row = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+    assert row["metadata"]["owner_corpus"] == []
+    assert row["metadata"]["continuation"]["owner_sources"]["start"]["answers"] == []
+    assert [(p["provenance"], p["text"]) for p in row["metadata"]["continuation"]["peer_context"]] == [
+        ("principal_task_message", "1. Yes, start it")]
 
 
 def test_a_recorded_absence_beside_an_owner_stamp_is_a_conflict(tmp_path, monkeypatch):
@@ -542,7 +558,10 @@ def test_an_owner_screenshot_sent_while_main_runs_survives_the_start_the_restart
             events.append(copy.deepcopy(evt)), _handle_promote_chat_to_task(evt, sup))))
     assert _start_task(tool, "Research the market", title="Market research", workspace="none").startswith("OK")
     [root] = workers.PENDING
-    expected = [{"source": "origin_message", "content": words}, {"source": "direct_incoming", "content": projection}]
+    expected = [{"client_message_id": "owner-msg-1", "chat_id": "7", "source": "origin_message", "content": words},
+                # the origin by its id and that id's room; the in-memory delivery by when the drain read it
+                {"source": "direct_incoming", "content": projection, "received": recorded["received"]}]
+    assert recorded["received"] and "ts" not in recorded, "no chat row: a received time, never an invented date"
     receipt = load_task_result(tmp_path, root["id"])
     assert receipt["status"] == "scheduled"
     assert queue.persist_queue_snapshot(reason="test_owner_screenshot") is True
@@ -589,7 +608,8 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     assert original.read_bytes() == shot
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803"}
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",  # no chat row is held for
+           "client_message_id": "owner-shot", "received": recorded["received"]}  # it: when its mail was written
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])
@@ -625,7 +645,8 @@ def test_the_producer_records_owner_images_by_reference_in_each_opening_state():
             ({}, "initial_text", []),
             ({"origin_suppressed": True}, "initial_user", [{"source": "initial_user", "content": projection}]),
             ({"origin_message_ref": {"chat_id": 1, "client_message_id": "m"}, "origin_message_text": "words"},
-             "initial_user", [{"source": "origin_message", "content": "words"}])):
+             "initial_user", [{"client_message_id": "m", "chat_id": "1", "source": "origin_message",
+                               "content": "words"}])):
         # The run's first row is labelled as ``_initialize_owner_directives`` labels it for this opening.
         directives = [{"source": first, "content": copy.deepcopy(pixels)},
                       {"source": "owner_mailbox", "content": copy.deepcopy(pixels), "msg_id": "m-2"}, dict(answer),

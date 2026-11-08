@@ -1,4 +1,8 @@
-"""Main/Project composer clearance and wizard checkbox geometry in real UI flows."""
+"""Main/Project composer clearance and wizard checkbox geometry in real UI flows.
+
+Playwright's WebKit did not reproduce the system WKWebView defect behind the transcript's spacer; that engine has its
+own optional check on macOS (devtools/macos_wkwebview/README.md).
+"""
 from __future__ import annotations
 
 import json
@@ -193,7 +197,6 @@ def test_a_reply_strip_opens_and_closes_like_the_capsule_rows_fold(direct_server
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_wizard_enabled_checkbox_stays_inline(subscription_ui):
     """The real wizard keeps its already-fixed checkbox width at phone scale."""
     from tests.test_ui_smoke_agents_panel import _wizard_step_until, _WIZARD_ON_AGENTS_JS

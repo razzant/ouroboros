@@ -6,9 +6,12 @@ Run before producers on every startup door: ``ensure_current_store`` opens or cr
 boot admissions no document derives (drives present on disk, the one-time upgrade
 receipts) join the owner-held rows, and legacy questions bind their publication
 address once. ``state/migrations.json`` keeps the watermarks: the store, the
-cancel-latch and the question-publication generations.
+cancel-latch, the question-publication and the retired-set generations.
 ``python -m ouroboros.startup_migrations`` is the explicit rebuild job, including
-its historical seal audit (no audit watermark).
+its historical seal audit (no audit watermark). An owner-held obligation set whose producer
+this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its
+generation deletes the rows an older body kept there. Its unsent outbox lines become exhausted
+with ``producer_retired`` through the shared storage owner; payloads remain, no delivery is invented.
 """
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, ut
 log = logging.getLogger(__name__)
 SCHEMA_GENERATION = 7
 QUESTION_PUBLICATIONS_GENERATION = 1
+RETIRED_SETS = ("memory_max",)  # the lost-Max episode's one row, retired 29.10 with its producer
+RETIRED_SETS_GENERATION = 2  # also retire the old episode's unsent outbox lines; generation 1 removed only its set
 
 
 def watermarks(root) -> dict:
@@ -145,6 +150,25 @@ def migrate_question_publications(root, *, rebuild=False, legacy=False):
     return {"bound": len(publications), "unknown": len(unknowns)}
 
 
+def retire_sets(root, *, rebuild=False) -> int:
+    """Delete the rows an older body kept in ``RETIRED_SETS``: the remover their gone producer was.
+    Once per generation, stamped after success; a current stamp reads no row (the explicit rebuild
+    repeats it, as after a return from an older body that kept such a row again). Returns the rows removed."""
+    from ouroboros import obligations
+    from ouroboros.terminal_outbox import retire_producer
+
+    if not rebuild and watermarks(root).get("retired_sets_generation") == RETIRED_SETS_GENERATION:
+        return 0
+    retire_producer(root, delivery_prefix="memory_max:", system_type="memory_max_notice")
+    removed = 0
+    for name in RETIRED_SETS:
+        for identity in obligations.members(root, name):
+            obligations.remove(root, name, identity)
+            removed += 1
+    stamp(root, retired_sets_generation=RETIRED_SETS_GENERATION)
+    return removed
+
+
 def boot_admissions(root) -> dict:
     """Owner-held rows no document derives: a drive directory present on disk owes its terminal
     files (a terminal result can land in the drive before the canonical start/result did), and
@@ -211,6 +235,11 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
         except Exception as exc:
             log.warning("Legacy question publication import failed; it reruns at the next start", exc_info=True)
             report["question_publications"] = {"error": type(exc).__name__}
+        try:  # unstamped on failure: the next boot repeats it
+            if removed := retire_sets(root, rebuild=rebuild):
+                report["retired_rows"] = removed
+        except Exception:
+            log.warning("Retired obligation rows not removed; the next start repeats it", exc_info=True)
     append_jsonl(root / "logs/supervisor.jsonl", {"ts": utc_now_iso(), "type": "startup_migration",
         "phase": "completed", "job": "current_store", "counts": {key: value for key, value in report.items()
                                                                   if key != "drives"},

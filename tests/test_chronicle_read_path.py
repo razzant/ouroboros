@@ -262,7 +262,7 @@ def _readers(store, nested):
     return ([store.get(record_id) for record_id in ids], store.records(), store.records("r"),
             store.records(kinds=("page", "part")), store.records("r", kinds=("note", "mark"), after_seq=3),
             store.room_records("r"), store.room_records("r", after_seq=8), store.room_records("s"),
-            store.pages_of_room("r"), store.pending_candidates(), store.pending_candidates("r"), store.accounts(),
+            store.pages_of_room("r"), store.interpreted(kinds=("page",), author_kind="helper"), store.interpreted("r", kinds=("page",), author_kind="helper"), store.accounts(),
             store.folded_members(nested), store.sealed_row_refs("r"), store.sealed_row_refs("x"),
             store.legacy_pointer_rows(), store.active_marks(None), store.active_marks("r"),
             store.active_marks("r", include_global=False), store.active_marks("x"), store.scan_state(),
@@ -345,3 +345,96 @@ def test_a_capture_reads_one_state_and_holds_no_read_transaction_while_its_reade
         assert [r["id"] for r in store.room_records("r")] == [first["id"]] and store.get(second["id"]) is None
         assert store.room_head("r") == first["sequence"]  # every reader of the capture: the one state it read
     assert [r["id"] for r in store.room_records("r")] == [first["id"], second["id"]]
+
+
+# --- the stored tail facts in pages: one state of the index, no answer the size of the tail --------------------
+
+_ONE_SHOT = "SELECT json_group_array(json_array(pos,seq,row_sha256,json(legacy),json(meta),terminal)) FROM tail_rows"
+
+
+def _tail_store(root, rows=10):
+    """A chronicle whose stored tail holds ``rows`` rows, every third with a terminal status, one with an astral
+    character (a whole-tail answer string would be four bytes a character for it)."""
+    store = ChronicleStore(root)
+    assert store.publish([], scan_state={"probe": 1}).ok
+    facts = [[n, 100 + n, f"{n:064x}", ["gen", n] if n % 2 else None,
+              {"chat_id": 1, "text_chars": n, **({"sender_label": "Ann \U0001F600"} if n == 4 else {})},
+              "completed" if n % 3 == 0 else None] for n in range(rows)]
+    state = {"source": SOURCE, "upper": 100 + rows, "anchor": [99 + rows, facts[-1][2]], "complete": True}
+    assert store.extend_tail(None, facts, state, replace=True)
+    return store
+
+
+def _one_shot(store, terminal_only=False):
+    """The rows the whole-tail read gave: one statement, one string."""
+    import sqlite3
+
+    with contextlib.closing(sqlite3.connect(f"{store.index_path.as_uri()}?mode=ro", uri=True)) as db:
+        sql = _ONE_SHOT + (" WHERE terminal IS NOT NULL" if terminal_only else "")
+        return sorted(json.loads(db.execute(sql).fetchone()[0]))
+
+
+def _pages(monkeypatch, between=None):
+    """The rows of each tail page, as the index connection a reader is given answers it; ``between`` runs before
+    every page after the first, inside the reader's open read transaction."""
+    answers, real = [], ChronicleStore._index
+
+    class Connection:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, sql, *args):
+            if "max(pos)" not in sql:
+                return self.db.execute(sql, *args)
+            if answers and between is not None:
+                between()
+            row = self.db.execute(sql, *args).fetchone()
+            answers.append(len(json.loads(row[0])))
+            return SimpleNamespace(fetchone=lambda: row)
+
+    @contextlib.contextmanager
+    def index(self):
+        with real(self) as db:
+            yield Connection(db)
+
+    monkeypatch.setattr(ChronicleStore, "_index", index)
+    return answers
+
+
+@pytest.mark.parametrize("page", [1, 3, 2_000])
+def test_the_stored_tail_is_read_in_pages_into_the_rows_one_whole_read_gave(tmp_path, monkeypatch, page):
+    store = _tail_store(tmp_path)
+    whole, terminal = _one_shot(store), _one_shot(store, terminal_only=True)
+    assert [row[0] for row in whole] == list(range(10)) and [row[0] for row in terminal] == [0, 3, 6, 9]
+    monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", page)
+    answers = _pages(monkeypatch)
+    for scope, rows in (("all", whole), ("terminal", terminal)):
+        answers.clear()
+        with chronicle_store.capture(tmp_path, tail=scope):
+            assert store._pinned().tail_rows == rows and store.tail_facts(SOURCE, terminal_only=True)[1] == terminal
+        # A statement a page, never more rows than a page in one answer, and the empty page that ends the read.
+        assert answers == [min(page, len(rows) - done) for done in range(0, len(rows), page)] + [0]
+    answers.clear()
+    assert store.tail_facts(SOURCE) == (store.tail_state(), whole)  # outside a capture the index reads pages too
+    assert answers == [min(page, 10 - done) for done in range(0, 10, page)] + [0]
+
+
+@pytest.mark.parametrize("locks", ["kernel", "name"])
+def test_a_writer_between_two_pages_waits_for_the_read_and_the_next_capture_holds_its_rows(tmp_path, monkeypatch, locks):
+    """A capture's pages share its one read transaction (on the name tier, the publication lock): a commit between
+    two of them would change what the later pages read, so a zero-wait writer is told busy and stores nothing.
+    Once the capture closed it stores, and the next capture holds its row."""
+    store = _tail_store(tmp_path)
+    whole, state = _one_shot(store), store.tail_state()
+    extra, later = [[10, 110, "e" * 64, None, {"chat_id": 1}, None]], {**state, "upper": 111, "anchor": [110, "e" * 64]}
+    if locks == "name":
+        monkeypatch.setattr(chronicle_store, "kernel_file_locks_enforced", lambda *_a, **_k: False)
+    monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", 3)
+    tried = []
+    answers = _pages(monkeypatch, lambda: tried.append(ChronicleStore(tmp_path).extend_tail(state, extra, later)))
+    with chronicle_store.capture(tmp_path):
+        assert store._pinned().tail_rows == whole
+    assert answers == [3, 3, 3, 1, 0] and tried == [False] * 4  # refused before each page after the first
+    assert ChronicleStore(tmp_path).extend_tail(state, extra, later)
+    with chronicle_store.capture(tmp_path):
+        assert store._pinned().tail_rows == whole + extra

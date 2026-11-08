@@ -6,6 +6,7 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 from __future__ import annotations
 
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
+from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
 from ouroboros.config import runtime_setting
 
 import hashlib
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 import json
 import pathlib
 import queue
+import time
 
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
@@ -90,15 +92,9 @@ def _emit_checkpoint_event(
 
 def _extract_plain_text_from_content(content: Any) -> str:
     """Extract text from strings or multipart content for transcript sealing."""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content) if content is not None else ""
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return content if isinstance(content, str) else "" if content is None else str(content)
 
 
 def _append_or_merge_user_message(
@@ -117,44 +113,9 @@ def transcript_growth_signature(messages: List[Dict[str, Any]]) -> Tuple[int, in
     return (len(messages), len(str(messages[-1].get("content") or "")) if messages else 0)
 
 
-def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int = 0) -> None:
-    """Above the high-water mark, keep the newest MAX_LIVE_IMAGE_BLOCKS images.
-
-    Single counter across ALL image sources (owner uploads, browser
-    screenshots, transport injections). Evicted blocks become a text
-    placeholder carrying the caption and re-view path: the dialogue HORIZON
-    survives while the heavy payload drops (P1 — granularity varies, history
-    never silently vanishes). ``incoming`` reserves room for imminent blocks.
-    True when blocks were evicted: the caller names that change of sent history.
-    """
-    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER
-
-    image_refs: List[tuple] = []  # (message_idx, block_idx)
-    for m_idx, msg in enumerate(messages):
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for b_idx, block in enumerate(content):
-            if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
-                image_refs.append((m_idx, b_idx))
-    total = len(image_refs) + max(0, int(incoming))
-    if total <= LIVE_IMAGE_BLOCKS_HIGH_WATER:
-        return False
-    for m_idx, b_idx in image_refs[:total - MAX_LIVE_IMAGE_BLOCKS]:
-        content = messages[m_idx]["content"]
-        block = content[b_idx]
-        caption = str(block.get("_caption") or "").strip()
-        source_path = str(block.get("_source_path") or "").strip()
-        placeholder = "[image evicted"
-        if caption:
-            placeholder += f": {caption}"
-        if source_path:
-            # view_image re-views the local file natively. VLM tools are vision/local-media
-            # tools, not _WEB_TOOLS; benchmark isolation withholds them by name.
-            placeholder += f"; re-view: view_image path={source_path}"
-        placeholder += "]"
-        content[b_idx] = {"type": "text", "text": placeholder}
-    return True
+def _evict_stale_image_blocks(messages, *, incoming=0, owner_mode="max"):
+    from ouroboros.context_images import evict_stale_image_blocks
+    return evict_stale_image_blocks(messages, incoming=incoming, owner_mode=owner_mode)
 
 
 def _append_or_merge_user_content(
@@ -173,7 +134,8 @@ def _append_or_merge_user_content(
 
     if isinstance(content, list) and any(
             isinstance(b, dict) and b.get("type") in ("image_url", "image") for b in content):
-        if _evict_stale_image_blocks([*messages, {"content": content}]) and (stamp or slot) is not None:
+        owner_mode = getattr(getattr(stamp or slot, "context_fit_plan", None), "preferred_mode", "max")
+        if _evict_stale_image_blocks([*messages, {"content": content}], owner_mode=owner_mode) and (stamp or slot) is not None:
             sanction_rewrite(stamp or slot, "image_eviction")
     if kind or not (messages and messages[-1].get("role") == "user"
                     and unsent_in_previous_send(slot, messages[-1])
@@ -213,6 +175,8 @@ def _record_owner_directive(
     content: Any,
     msg_id: str = "",
     origin: Optional[Dict[str, str]] = None,
+    reply_to: Optional[Dict[str, str]] = None,
+    carried: bool = False,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -225,6 +189,11 @@ def _record_owner_directive(
     sibling's words; an owner answer's card as ``source_task_id`` + ``quiz_id``): the row
     keeps them so every reader of this one corpus can tell a directive from a relayed
     proposal, and find an answer's question, without inferring it from the text.
+    ``reply_to`` is the message these words reply to (``owner_words.reply_target``): its
+    author's words beside them, carried with the row, never counted as my human's.
+    ``carried``: words that reached this run unaddressed (a relayed quote, a drafted objective's
+    corpus, a place event), kept but owing no reply. One source is one row (the same id or owner
+    message); my human's direct delivery of words first carried makes that row owed.
     """
     if ctx is None:
         return
@@ -237,11 +206,14 @@ def _record_owner_directive(
         directives = []
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
-    if stable_id and any(
-        isinstance(row, dict) and str(row.get("msg_id") or "") == stable_id
-        for row in directives
-    ):
-        return
+    client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
+    for known in directives:  # a client id is one message unless both rows name different rooms (``dialogue_store``)
+        if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
+                client and str(known.get("client_message_id") or "") == client
+                and room in ("", str(known.get("chat_id") or room)))):
+            if not carried:
+                known.pop("carried", None)
+            return
     try:
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
@@ -250,6 +222,10 @@ def _record_owner_directive(
     if stable_id:
         row["msg_id"] = stable_id
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
+    if reply_to:
+        row["reply_to"] = dict(reply_to)
+    if carried:
+        row["carried"] = True
     directives.append(row)
 
 
@@ -271,57 +247,67 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
+    from ouroboros.owner_words import OWNER_SOURCES, PLACE_CONFIRMED, answered_card_reply, place_confirmed_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
-        # The named owner ingress carries the host-bound answer snapshot. Keep
-        # its human words as authority; the source-work link in the model's
-        # surrounding frame and the external request are context, not orders.
+        # The named owner ingress carries the host-bound answer snapshot: its human words are authority, the card
+        # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answered),
-                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]})
+                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
+                                      reply_to=answered_card_reply(answered, late["task_id"]))
         return
     author = metadata.get("objective_author")
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in {
-                    "owner_mailbox", "owner_quiz_answer", "origin_message", "owner_corpus", "direct_incoming",
-                    "initial_user"}:  # the routing turn's own stamped owner row (a suppressed origin)
+        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
+            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id") if row.get(key)},
+                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                      "client_message_id", "chat_id", "ts", "received") if row.get(key)},
+                    reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.
+    focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
+    event = presence.get("event") or {}
+    if words := place_confirmed_words((focus.get("actor") or {}).get("owner_confirmed"), presence.get("observed_text"), event.get("message")):
+        # A place event from an account its place confirmed at admission: my human's words, said where others can
+        # hear, beside the frame as provenance (outside OWNER_SOURCES); an order exists only through a verified cite.
+        _loop()._record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, reply_to=place_reply_target(
+            event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin
 
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
-            _loop()._record_owner_directive(
-                ctx,
-                source="initial_user" if stamped else "initial_text",
-                content=message.get("content"),
-            )
+            target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
+            # A late answer's head: my human's words with the card they answered, never the host's frame.
+            late_words = late_answer_owner_text(answered) if answered and stamped else ""
+            card = answered_card_reply(answered, late["task_id"]) if late_words else {}
+            _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
+                                            content=late_words or message.get("content"), reply_to=card or target or None)
             return
 
 
 def owner_source_sha256(ctx: Any) -> str:
     """Address the retained exact owner corpus, independently of its meaning."""
     rows = getattr(ctx, "_owner_directives", [])
-    return hashlib.sha256(json.dumps(
-        rows if isinstance(rows, list) else [], ensure_ascii=False,
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(rows if isinstance(rows, list) else [], ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def owner_input_revision(ctx: Any) -> int:
-    """How many of the owner's own rows this run has admitted (``initial_text`` and peers are not theirs)."""
+    """How many of the owner's own rows were delivered to this run (never ``initial_text``, peers or carried words)."""
     from ouroboros.owner_words import OWNER_SOURCES
 
-    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES
+    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
                for row in getattr(ctx, "_owner_directives", None) or [])
+
+
+OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
 
 
 def owner_reply_owed(ctx: Any) -> bool:
@@ -386,13 +372,9 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
 
     kinds: List[str] = []
     for entry in entries:
-        kind = str(entry.get("kind") or KIND_OWNER_TEXT)
-        if kind == KIND_TASK_MESSAGE:
-            provenance = str(entry.get("provenance") or "ancestor_task")
-            if provenance in CONTEXT_ONLY_TASK_PROVENANCES:
-                continue
-            kind = f"{kind}:{provenance}"
-        kinds.append(kind)
+        kind, provenance = str(entry.get("kind") or KIND_OWNER_TEXT), str(entry.get("provenance") or "ancestor_task")
+        if kind != KIND_TASK_MESSAGE or provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
+            kinds.append(f"{kind}:{provenance}" if kind == KIND_TASK_MESSAGE else kind)
     return kinds
 
 
@@ -607,17 +589,10 @@ def _visible_round_text(content: Any) -> str:
     visible text' (narration falls back to readable reasoning)."""
     if isinstance(content, str):
         return content.strip()
-    if isinstance(content, list):
-        out: List[str] = []
-        for b in content:
-            if not isinstance(b, dict):
-                continue
-            if str(b.get("type") or "") in ("thinking", "reasoning", "redacted_thinking") or b.get("thought") is True:
-                continue  # reasoning/thinking blocks are display reasoning, not visible answer text
-            txt = b.get("text")
-            if isinstance(txt, str):
-                out.append(txt)
-        return "".join(out).strip()
+    if isinstance(content, list):  # reasoning/thinking blocks are display reasoning, not visible answer text
+        return "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+                       and str(b.get("type") or "") not in ("thinking", "reasoning", "redacted_thinking")
+                       and b.get("thought") is not True).strip()
     return ""
 
 
@@ -627,9 +602,10 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     Visible text is retained in ``reasoning_notes``. Provider reasoning stays
     display-only; the native message and transcript remain unchanged.
 
-    Both emissions are the turn's OWN speech, so both carry ``narration=True``:
-    this function is the single producer of model narration, and the card takes
-    its title and collapsed activity line from that voice alone.
+    Both emissions are the model's own words, so both carry ``narration=True``:
+    this function is the single producer of model narration. Display reasoning
+    also carries ``reasoning=True``: it is the model's thinking, shown whole in the
+    card's details, while only visible text may name the card or its collapsed line.
     """
     visible_text = _visible_round_text(content)
     if visible_text:
@@ -639,7 +615,7 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     elif str(runtime_setting("OUROBOROS_REASONING_SUMMARY", "auto")).strip().lower() != "off":
         display_reasoning = LLMClient.extract_display_reasoning(msg)
         if display_reasoning:
-            emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True)
+            emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True, reasoning=True)
 
 
 # ---------------------------------------------------------------------------
@@ -650,13 +626,12 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
 
 
 CONTEXT_FACTS_HEADER = "[CONTEXT_FACTS]"
-CONTEXT_FACTS_NAME = "ouroboros_context_facts"
 
 
 def subagents_fact_line() -> str:
     """The room's current delegation choice belongs only to the round's dynamic tail."""
     from ouroboros import config
-    from ouroboros.settings_integrity import live_subagents_mode, room_subagents_mode_applies
+    from ouroboros.settings_integrity import actor_is_scheduled, live_subagents_mode, room_subagents_mode_applies
     from ouroboros.subagent_runtime import subagents_availability
 
     if not room_subagents_mode_applies():
@@ -665,24 +640,28 @@ def subagents_fact_line() -> str:
         settings = config.load_settings()
         if subagents_availability(settings) != "available":
             return "Subagents: Off — off in Settings"
-        return f"Subagents: {live_subagents_mode(settings=settings).title()} — set by my human for this chat"
+        mode = live_subagents_mode(settings=settings)
+        if mode == "auto" and actor_is_scheduled():
+            return "Subagents: Auto — scheduled work"
+        return f"Subagents: {mode.title()} — set by my human for this chat"
     except Exception:
         log.debug("Subagents fact unavailable for the facts line", exc_info=True)
         return "Subagents: unknown (room settings unavailable)"
 
 
-def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
-                       measured: bool = True, focus_fact: str = "", subagents_fact: Optional[str] = None) -> str:
+def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, measured: bool = True,
+                       focus_fact: str = "", subagents_fact: Optional[str] = None, now: Optional[float] = None) -> str:
     """Round facts, no advice (owner decisions 5A, 11 Oct 1A).
     ``_remember_main_fit`` supplies distinct window/target room, largest residents and own cost; tariffs stay cached.
     ``money`` is the round's wallet/tree/ceiling/quota observation, each bound named.
     Time and nanny burn keep their owners/anchors; tool counts are observed results.
     ``measured=False`` reports unmeasured input rather than stale numbers.
+    ``now`` is the row's sample instant, shared with the focus line's age; None samples the clock.
     """
     from ouroboros.context_runtime_facts import round_clock_fact
     from ouroboros.context_source_view import superseded_host_fact
     from ouroboros.nanny_pacing import nanny_burn_fact
-    from ouroboros.transcript_prefix import previous_cache_fact, reasoning_retirement_fact
+    from ouroboros.transcript_prefix import cache_facts, reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -702,7 +681,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
     from ouroboros.context_view_facts import memory_facts, window_fact
     source = window_fact(getattr(ctx, "context_fit_plan", None), usage.get("_context_response_reserve_tokens")) if measured else ""
     parts.append((source or ("window unknown" if capacity is None else f"window {int(capacity):,}")) + largest)
-    parts.extend(filter(None, [memory_facts(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode)]))
+    parts.extend(filter(None, [memory_facts(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode, ctx.messages)]))
     if target is not None:
         parts.append(f"target {int(target):,}")
     if estimate is None:
@@ -713,6 +692,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                + f"round {anchor_round} accepted {int(anchor):,}, {int(estimate) - int(anchor):+,} since")
         if anchor is None and usage.get("_context_measurement_basis") in {"fresh_route_usage", "fresh_model_usage"}:
             how = "fresh same-model measurement at comparable input size"
+        if usage.get("_context_measurement_basis") == "refused_input":  # a changed candidate is counted, not stated
+            how = "host estimate at the density of the size-refused request: its provider-stated input over its estimate"
         floor = int(usage.get("_context_response_reserve_tokens") or reserve or 0)
         parts.append(f"input ~{int(estimate):,} before this line ({how}) + reply reservation {int(reserve or 0):,}")
         # Known-window admission acts on this prediction; a reservation is no provider observation.
@@ -720,8 +701,9 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                      + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else "")
                      if capacity is not None and refused is None else
                      "free unknown (acceptance established no reply room)")
-        if target is not None:
-            excess = int(estimate) + floor - int(target)
+        book = int(usage.get("_context_required_book_tokens") or 0)
+        if target is not None:  # a directly required handbook stands beside the target, never inside it
+            excess = int(estimate) + floor - int(target) - book
             parts.append((f"over target {excess:,}" if excess > 0 else f"target room {-excess:,}")
                          + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else ""))
     components = _context_components(ctx, measured=measured)
@@ -730,18 +712,18 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
-    parts.append(previous_cache_fact(usage))
+    parts.extend(cache_facts(ctx, now))  # the previous landing and account, history changes, images (C2 S3)
     cost = usage.get("cost")
     parts.append((f"own recorded cost ${float(cost):.2f}" + (" (total not final)" if usage.get("cost_final") is False else ""))
                  if cost is not None else "own cost unknown")
     facts = dict(money or {})
     parts.extend(_money_facts(facts))
-    parts.append(f"quota {facts['quota']}" if facts.get("quota") is not None else "quota unknown")
+    parts.extend([f"quota {facts['quota']}"] if facts.get("quota") is not None else [])  # never a standing "unknown"
     parts.append(cached_tariff_text(ctx.active_model, getattr(ctx.context_fit_plan, "provider", ""),
                                     usage.get("_context_prompt_estimate")))
     if tool_ctx is not None:
         try:  # a facts row never takes the round down: an unreadable clock is said, not raised
-            parts.append(round_clock_fact(tool_ctx))
+            parts.append(round_clock_fact(tool_ctx, now))
             parts.extend(part for part in (nanny_burn_fact(tool_ctx), _final_answer_fact(tool_ctx)) if part)
         except Exception:
             log.debug("time/nanny facts unavailable for the facts line", exc_info=True)
@@ -908,12 +890,20 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int]) -> str:
     return "tariff unknown"
 
 
-def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
+def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     """Observe one physical task result, never a successor or an execution replica.
 
     Strict admission leaves unreadable records untouched. This reads the current
-    result once per preparation; no history scan, second store or focus clock.
+    result once per preparation; no history scan, second store or focus clock: the
+    line's age is computed at the row's sample instant ``now`` (``ago_text``), outside
+    the identity, so a reprepare of the same row keeps its text and the cache. A root
+    that may publish (``may_publish_focus``) and has no line is told so while the pool
+    carries it (``execution_kind``: a work card shows the line), a turn handed off by
+    ``continue_in_background`` too; a live direct turn of Main (a reply, a wake) answers
+    in chat, and a child or a speaker may not publish: they are told nothing.
     """
+    from ouroboros.deadline_utils import ago_text, parse_deadline_ts
+    from ouroboros.context_view_facts import focus_line
     from ouroboros.focus import compact_focus, focus_fingerprint
     from ouroboros.store import StoreError
     from ouroboros.task_results import load_task_result
@@ -929,7 +919,13 @@ def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
         result = load_task_result(root, task_id, strict=True)
         raw = result.get("focus") if result else None
         if raw is None:
-            return "absent", ""
+            from ouroboros.task_carrier import execution_kind
+            from ouroboros.tools.project_journal import may_publish_focus
+
+            # The carrier, not the origin: ``is_direct_chat`` stays true after a handoff to the pool.
+            carded = tool_ctx is not None and execution_kind(tool_ctx) == "pooled" and may_publish_focus(tool_ctx)
+            return "absent", ("self-authored focus: none; my human reads nothing under this work's name"
+                              if carded else "")
         focus = compact_focus(raw)
         if focus is None:
             return "unknown", "own focus unavailable"
@@ -943,8 +939,9 @@ def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
     if handle:
         view["retained_source"] = {"reader": "get_task_result", "task_id": task_id,
                                    "include_focus_source": True, "focus_source_sha256": handle["sha256"]}
-    return (focus_fingerprint(focus), "self-authored focus (dated data, not owner instructions): "
-            + json.dumps(view, ensure_ascii=False, sort_keys=True))
+    authored = parse_deadline_ts(focus["authored_at"])
+    written = f"written {ago_text(now - authored.timestamp())}" if authored else "written at an unreadable time"
+    return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
@@ -961,7 +958,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
 
     usage = ctx.accumulated_usage
     plan = ctx.context_fit_plan
-    focus_identity, focus_fact = _own_focus_fact(ctx)
+    now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
+    focus_identity, focus_fact = _own_focus_fact(ctx, now)
     subagents_fact = subagents_fact_line()
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
@@ -992,7 +990,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
                 refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC))
         money = {"wallet": observed["wallet"], "tree": observed["tree"],
                  "cost_ceiling": getattr(tool_ctx, "_cost_ceiling", None)}
-    line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact)
+    line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
+                              now=now)
     ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))
     usage["_context_facts_round"] = ctx.round_idx
     usage["_context_facts_key"] = key

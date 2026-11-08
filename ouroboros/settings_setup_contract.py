@@ -26,7 +26,9 @@ from ouroboros.model_slots import (
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
     PROCESSING_PREFERENCE_KEY, normalize_model_role_options, normalize_processing_preference,
 )
-from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
+from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
+from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
 
 
 
@@ -152,7 +154,7 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts. Subscription limits and optional provider credits still apply."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose review mode", "Advisory vs blocking", "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
-    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", "When subscription quota is exhausted, work waits for renewal or your choice of another account or model. This integration does not enable paid provider credits."),
+    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
@@ -221,6 +223,19 @@ _ACTIVE_LOCAL_KEYS = (
     "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
 )
 
+_BUDGET_NOTE = (
+    "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; "
+    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price "
+    "and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. "
+    "Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once "
+    "known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 "
+    "calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap "
+    "covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call "
+    "of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; "
+    "without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the "
+    "limit. Raising the cap does not resume a paused task; it must be resumed explicitly."
+)
+
 _BUDGET_FIELDS = [
     {
         "stateKey": "totalBudget",
@@ -229,7 +244,9 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-total-budget",
         "title": "Total budget",
         "label": "Total Budget (USD)",
-        "note": "Global spend budget across the runtime. Keep this editable even after onboarding.",
+        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself,
+        # decided on known spend; no default share of the wallet or margin.
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
         "min": "0.01",
         "step": "any",
@@ -241,16 +258,7 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
-        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself, decided
-        # on known spend; no default share of the wallet or margin before it.
-        "note": (
-            "Hard cap over one task's WHOLE tree, subagents included: new model calls are "
-            "refused once the tree's known spend (confirmed and estimated) reaches it. A resumable "
-            "task then pauses with its work saved; a run that cannot be resumed ends as "
-            "budget-exhausted instead. Calls already in flight settle normally and can take the "
-            "total past the cap. Reservations and unresolved charges are shown separately, not "
-            "counted as spending. Raising the cap does not resume a paused task."
-        ),
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS.get("OUROBOROS_PER_TASK_COST_USD", 50.0)),
         "min": "0.01",
         "step": "any",
@@ -359,7 +367,8 @@ def derive_provider_profile(settings: dict) -> str:
     flags = {field["settingKey"]: bool(_string(settings.get(field["settingKey"]))) for field in _PROVIDER_FIELDS}
     if flags["OPENROUTER_API_KEY"]:
         return "openrouter"
-    if flags["OPENAI_COMPATIBLE_BASE_URL"]:
+    # The legacy OPENAI_BASE_URL pair counts too: its OPENAI_API_KEY then belongs to that endpoint.
+    if compatible_endpoint_configured(lambda key: _string(settings.get(key))):
         return "openai-compatible"
     direct = [
         ("OPENAI_API_KEY", "openai"),
@@ -460,6 +469,10 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
         value, error = parse_budget_setting(field["settingKey"], settings.get(field["settingKey"]), use_default_for_blank=True)
         budget_state[field["stateKey"]] = float(field["default"] if error or value is None else value)
     state = {
+        "connections": mask_connections(list(connection_rows(settings.get("OUROBOROS_CONNECTIONS")))),
+        # Read-only here: an older install's endpoint, paired with OPENAI_API_KEY while the dedicated
+        # address is empty (``compatible_endpoint``). No provider field: completion keeps it as saved.
+        "legacyCompatibleBaseUrl": _string(settings.get("OPENAI_BASE_URL")),
         "providerProfile": profile,
         "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT")) or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
         "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
@@ -500,7 +513,24 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     return state
 
 
-def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False) -> dict:
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> dict:
+    """The Summary's optional Consciousness row. It is offered while setup has never completed here
+    (an unticked choice the owner makes now; a completed setup neither shows nor repeats one), with
+    the limits consciousness runs under now, as the runtime's own readers report them. ``enabled``
+    is the control as the state shows it (``None``: unknown). Nothing here is saved or started:
+    a ticked row sends the ordinary Start after the save, from the wizard."""
+    from ouroboros.runtime_limits import (
+        get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
+    )
+
+    return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
+            "enabled": enabled if isinstance(enabled, bool) else None,
+            "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
+            "maxTasks": get_consciousness_max_tasks()}
+
+
+def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
+                          consciousness_enabled: Optional[bool] = None) -> dict:
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -517,6 +547,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
         "initialState": build_initial_setup_state(settings, normalized_host),
+        "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
     }
 
 
@@ -559,6 +590,15 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             return {}, str(exc)
     secret_keys = secret_provider_setting_keys()
     keys: Dict[str, str] = {}
+    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
+    if "OUROBOROS_CONNECTIONS" in data:
+        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
+        if error:
+            return {}, error
+        try:
+            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
+        except ValueError as exc:
+            return {}, str(exc)
     for field in _PROVIDER_FIELDS:
         setting_key = field["settingKey"]
         raw_value = data.get(setting_key)
@@ -599,6 +639,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             continue
         if (
             value
+            and setting_key != "OPENAI_COMPATIBLE_API_KEY"
             and (field.get("inputType") or "password") == "password"
             and len(value) < 10
         ):
@@ -609,6 +650,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         for setting_key, value in keys.items()
         if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
     )
+    has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
     if not has_remote and not has_local and not (pending_subscription or selected_subscription):
         return {}, "Connect Codex, an API provider, or a local model before continuing."
@@ -650,6 +692,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         return {}, "Local-only setups must route at least one model to the local runtime."
 
     prepared = dict(current_settings)
+    if "OUROBOROS_CONNECTIONS" in data:
+        prepared["OUROBOROS_CONNECTIONS"] = connections
     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
         if key in data:
             try:

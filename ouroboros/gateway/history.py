@@ -38,6 +38,7 @@ from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS, historical_terminal_projection
+from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, initiator_meta, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
@@ -112,9 +113,9 @@ _PROGRESS_META_FIELDS = (
     # the pointer on reload while its outer task_id stays empty.
     "lifecycle_pointer",
     "initiator",  # the turn's origin label (a consciousness wake-up)
-    # The frame's voice: a replayed host note must stay a host note, or a reload
-    # would hand the card title back to the very line live rendering refused it.
-    "narration",
+    # The frame's voice: a replayed host note (or the model's display reasoning) must
+    # stay what it was, or a reload would hand the card title back to a line live refused it.
+    "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )
@@ -304,7 +305,7 @@ def _chat_quota_predicate(row_matches_thread):
 def _history_identity(entry):
     from ouroboros.chat_references import projection_fields
     return {**({"row_address": entry["row_address"]} if entry.get("row_address") else projection_fields(entry)),
-            **{key: entry[key] for key in ("history_id", "history_position", "reply_to", "relay", "reply_to_relay") if key in entry}}
+            **{key: entry[key] for key in ("history_id", "history_position", "reply_to", "relay", "reply_to_relay", "room_revisions") if key in entry}}
 
 
 def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> None:
@@ -315,7 +316,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     for key in ("model_execution", "review_projection", "history_retention", "terminal_time", "cancel_origin"):
         if isinstance(entry.get(key), dict):
             rec[key] = dict(entry[key])
-    for key in ("suggested_name", "wake_summary", "schedule_name"):
+    for key in ("suggested_name", "wake_summary", "schedule_name", "target_label"):
         if entry.get(key): rec[key] = str(entry[key])
     for key in ("tool_calls", "rounds", "tool_errors", "routing_tool_calls", "completion_tool_calls"):
         if key in entry:
@@ -482,6 +483,8 @@ def _annotate_terminal_task_truth(
                 for key in ("model_execution", "cancel_origin", "review_projection"):
                     if isinstance(result.get(key), dict):
                         terminal_truth[key] = dict(result[key])
+                if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews
+                    terminal_truth["body_adoptions"] = [dict(row) for row in result["body_adoptions"] if isinstance(row, dict)]
                 terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name") if result.get(key)})
                 if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
                     terminal_truth["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
@@ -545,19 +548,19 @@ def _annotate_terminal_task_truth(
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
-                # Legacy rows reuse this request's result read, never split the prose label.
-                message["task_name"] = task_presentation_name(cache.get(task_id))
+                message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
+                    cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_text
+                from ouroboros.merge_receipts import card_row_projection
                 try:
                     receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
                                    if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
                     revision = receipt.get("revision", 0)
                     if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
                         raise ValueError("canonical receipt revision unavailable")
-                    message.update(text=card_row_text(receipt), card_row_revision=revision)
+                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
                 except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
                     message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
@@ -701,7 +704,6 @@ def _collect_chat_rows(
     # Quiz lifecycle merge (#Q-2b): the chat row froze the card at ask time ("open"); the durable
     # truth is the owner_quiz task-result projection, read once per asking task in this call.
     quiz_projection_cache: Dict[str, Dict[str, Any]] = {}
-    question_projects = None
     question_keys = set()
 
     def _quiz_source(task_id):
@@ -737,8 +739,11 @@ def _collect_chat_rows(
             if entry.get("type") in {"quiz_answer", "quiz_closed"}:
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
                         and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
+                    from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
+                    quiz, live = dict(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
+                    quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
                     replay_evidence.append({"text": "", "role": "system", "is_progress": False,
-                                            "system_type": entry["type"], "quiz": dict(entry["quiz"]),
+                                            "system_type": entry["type"], "quiz": quiz,
                                             "task_id": str(entry.get("task_id") or ""),
                                             "ts": str(entry.get("ts") or ""), **_history_identity(entry)})
                 continue
@@ -769,21 +774,18 @@ def _collect_chat_rows(
             pointer_chat = getattr(row_matches_thread, "question_project_chat", lambda row: 0)(entry)
             if pointer_chat:
                 from ouroboros.project_dialogue import project_question_pointer
-                from ouroboros.projects_registry import list_reserved_projects
 
-                if question_projects is None:
-                    question_projects = {row["chat_id"]: row for row in list_reserved_projects(chat_path.parent.parent)}
                 tid, qid = str(entry.get("task_id") or ""), str(entry["quiz"].get("quiz_id") or "")
                 source = _quiz_source(tid)
                 pointer = project_question_pointer(entry, source["quizzes"].get(qid) or answered.get((tid, qid)),
-                                                   question_projects.get(pointer_chat), source["wait"])
+                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), source["wait"])
                 if pointer and (tid, qid) not in question_keys:
                     question_keys.add((tid, qid))
                     pointer.update(_history_identity(entry))
                     combined.append(pointer)
                 continue
             direction = str(entry.get("direction", "")).lower()
-            role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
+            role = "system" if entry.get("role") == "system" else {"in": "user", "out": "assistant", "system": "system"}.get(direction)
             if role is None:
                 continue
             rec = {
@@ -791,7 +793,7 @@ def _collect_chat_rows(
                 "role": role,
                 "ts": str(entry.get("ts", "")),
                 "is_progress": False,
-                "system_type": str(entry.get("type", "")),
+                "system_type": str(entry.get("system_type") or entry.get("type", "")),
                 "markdown": str(entry.get("format", "")).lower() == "markdown",
                 "source": str(entry.get("source", "")),
                 "sender_label": str(entry.get("sender_label", "")),
@@ -823,9 +825,10 @@ def _collect_chat_rows(
                     if isinstance(entry.get(key), dict):
                         rec[key] = dict(entry[key])
                 for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer",
-                            "completion_reason", "delivery_id", "handoff_id"):
+                            "completion_reason", "delivery_id", "handoff_id", "wake_summary"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
+            rec.update(frame_project(chat_path.parent.parent, entry))
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin
@@ -860,11 +863,11 @@ def _collect_chat_rows(
                     _qid = str(quiz.get("quiz_id") or "")
                     _live = _quiz_source(_qtid)["quizzes"].get(_qid) or answered.get((_qtid, _qid))
                     if isinstance(_live, dict):
-                        from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_projection
                         if delivery := question_delivery_projection(_live):
                             quiz["question_delivery"] = delivery
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
-                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials"):
+                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
                         if _live.get("host_facts") and not quiz.get("host_facts"):
@@ -1464,8 +1467,9 @@ def _assemble_history_response(
     if lifecycle_row is not None:
         combined.append(lifecycle_row)
     result_cache[_READS].prefetch(row.get("task_id") for row in combined)
+    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # an unreadable registry: Main reads on
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
-        _load_terminal_result(data_dir, task_id, result_cache))) if thread_id in project_chat_ids else (
+        _load_terminal_result(data_dir, task_id, result_cache))) if named else (
         {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,

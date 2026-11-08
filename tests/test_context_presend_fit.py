@@ -86,7 +86,7 @@ def test_irreducible_prediction_exhausts_passes_without_a_paid_blind_round(main_
 def test_a_claimed_change_still_needs_the_existing_strict_shrink_check(main_call, monkeypatch):
     ctx, gateway, *_ = main_call
     _large(ctx)
-    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", lambda *a: True)
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", lambda *a, **_kw: True)
     assert loop._call_round_model(ctx)[0] is None
     assert not gateway.creates
     skipped = [event.get("data", {}) for event in list(ctx.event_queue.queue)]
@@ -133,6 +133,66 @@ def test_caption_admission_measures_the_final_candidate(main_call, monkeypatch, 
     assert REFUSED_INPUTS_KEY not in ctx.accumulated_usage
 
 
+def _counted_provider(gateway, monkeypatch, admitted):
+    """The fixture provider counts the bytes it received with the fit estimator (density 1.0); ``admitted``
+    collects each final candidate's own estimator count as the real admission measured it."""
+    from ouroboros import llm_attempt
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+
+    read, admission = gateway.get_model_result, llm_attempt.main_context_fit_refusal
+
+    def counted(operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False):
+        value = read(operation_id, expected_ref=expected_ref, timeout_sec=timeout_sec)
+        value["usage"] = {"input_tokens": bounded_prompt_tokens_for_payload(gateway.uploads[-1][0], 0), "output_tokens": 7,
+                          "cached_input_tokens": 0, "cache_write_tokens": None, "reasoning_tokens": 3}
+        return json.dumps(value, ensure_ascii=False).encode() if raw_bytes else value
+
+    def measured(request):
+        admitted.append(request.prompt_tokens_bounded_estimate)
+        return admission(request)
+
+    monkeypatch.setattr(gateway, "get_model_result", counted)
+    monkeypatch.setattr(llm_attempt, "main_context_fit_refusal", measured)
+
+
+@pytest.mark.parametrize("captioned", [False, True])
+def test_an_answer_teaches_the_density_of_the_bytes_it_was_sent(main_call, monkeypatch, captioned):
+    """Two rounds on one 200K window (3 Nov 2026 witness): the anchor learned on the pre-caption estimate
+    (density 1.285) and refused a second final candidate that fits beside the whole 65,536 reserve. The
+    plain-text control has no preparation change and is sent either way."""
+    from ouroboros import vision_routing
+    from ouroboros.context_anchor import main_input_anchor
+    from ouroboros.context_window import observed_plan
+    from tests.test_llm_claudexor import ROUTE, result
+
+    ctx, gateway, *_ = main_call
+    monkeypatch.setattr(vision_routing, "get_image_input_mode", lambda: "caption")
+    monkeypatch.setattr(vision_routing, "resolve_vision_caption_model", lambda *a, **kw: "fixture/vision")
+    caption = "caption " * 15_000
+    monkeypatch.setattr(ctx.llm, "vision_query",
+                        lambda *a, **kw: (caption, {"prompt_tokens": 2, "completion_tokens": 30_000, "cost": 0.0}))
+    plan = observed_plan(replace(ctx.context_fit_plan, window_tokens=200_000), {"_model_route": ROUTE})
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan  # the account the answers name
+    image = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]
+    ctx.messages[:] = [*plan.messages_for("max"), {"role": "user", "content": "base" * 100_000},
+                       {"role": "user", "content": image if captioned else caption}]
+    admitted = []
+    _counted_provider(gateway, monkeypatch, admitted)
+    first, _ = loop._dispatch_round_model(ctx, loop._measure_round_main_fit(ctx, automatic_pass_used=False), attempt_cap=1)
+    assert first and len(gateway.creates) == 1
+    anchor, _floor = main_input_anchor(ctx.accumulated_usage, ctx.context_fit_plan)
+    assert anchor.density == pytest.approx(1.0, abs=1e-3)  # the provider's own density, caption included
+    ctx.round_idx = 2
+    gateway.results.append(result())
+    gateway.dispatch.append("response_received")
+    second, _ = loop._dispatch_round_model(ctx, loop._measure_round_main_fit(ctx, automatic_pass_used=False), attempt_cap=1)
+    assert len(admitted) == 2 and admitted[1] + 65_536 <= 200_000  # the second final candidate itself fits
+    assert second and len(gateway.creates) == 2
+    assert loop_model_call.REFUSED_CANDIDATE_KEY not in ctx.accumulated_usage
+    # The round's own estimate (facts line, result delivery) carries the provider's count: no caption-sized room.
+    assert abs(ctx.accumulated_usage["_context_prompt_estimate"] - admitted[1]) < 100
+
+
 @pytest.mark.parametrize("large,known", [(True, True), (False, True), (True, False)])
 def test_physical_fit_survives_transient_retry_and_account_reprepare(main_call, monkeypatch, large, known):
     from ouroboros import context, loop_llm_call
@@ -162,6 +222,41 @@ def test_physical_fit_survives_transient_retry_and_account_reprepare(main_call, 
         assert answer and len(gateway.creates) == 3
         assert not loop._context_overflow_retries(ctx.tools._ctx)
     assert REFUSED_INPUTS_KEY not in ctx.accumulated_usage
+
+
+@pytest.mark.parametrize("receipt", ["answered", "absent", "foreign"])
+def test_the_anchor_binds_the_answered_attempt_across_retry_and_reprepare(main_call, monkeypatch, receipt):
+    """A transient retry and an account reprepare each admit their own final candidate; the answer's ledger
+    receipt names the one the provider counted. A receipt naming no admitted candidate leaves the size unknown."""
+    from ouroboros import loop_llm_call
+    from ouroboros.context_anchor import main_input_anchor
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_window import observed_plan
+    from tests.test_llm_claudexor import result
+    from tests.test_subscription_main_wait import ROUTE_B, _failed
+
+    ctx, gateway, *_ = main_call
+    ctx.messages.append({"role": "user", "content": "Read this exact evidence. " * 100})
+    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda *a, **kw: True)
+    gateway.results = [result(outcome="failed", problem={
+        "code": "provider_failed", "message": "fixture transient", "retryable": True,
+        "context": {"httpStatus": 429, "vendorCode": "rate_limit_exceeded"}}),
+        _failed("invalid_continuation", ROUTE_B), result(route=ROUTE_B)]
+    gateway.dispatch = ["not_started", "not_started", "response_received"]
+    admitted = []
+    _counted_provider(gateway, monkeypatch, admitted)
+    if receipt != "answered":
+        real = loop.last_physical_attempt_capture
+        monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: None if receipt == "absent" else replace(
+            real(), candidate_raw_sha256="a" * 64))
+    answer, _, _ = loop._call_round_model(ctx)
+    assert answer and len(gateway.creates) == 3 and len(admitted) == 3
+    anchor, floor = main_input_anchor(ctx.accumulated_usage, observed_plan(ctx.context_fit_plan, ctx.accumulated_usage))
+    if receipt == "answered":  # the account-B answer's own bytes, never the earlier attempts' or the plan's estimate
+        assert anchor.input_tokens == floor == bounded_prompt_tokens_for_payload(gateway.uploads[-1][0], 0)
+        assert anchor.estimate_tokens == admitted[-1] != ctx.accumulated_usage["_context_raw_input_tokens"]
+    else:
+        assert (anchor, floor) == (None, None)
 
 
 @pytest.mark.parametrize("predecessor", ["none", "memo", "persisted"])

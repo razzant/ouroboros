@@ -5,7 +5,6 @@ import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
-import { showToast } from './toast.js';
 import { tr } from './i18n.js';
 
 const nodePosition = node => node?.dataset?.historySource
@@ -20,13 +19,6 @@ export const feedIsEmpty = messages => Array.from(messages.children).every(node 
 
 const GAP_NOTE = 'Some saved history is not loaded. Shown messages may have gaps.';
 const gapNoticeDocs = new WeakSet();
-const defaultGapNotice = (text, messages) => {
-    if (typeof globalThis.document?.getElementById === 'function' && typeof globalThis.document?.createElement === 'function'
-        && globalThis.document?.body?.appendChild) {
-        return showToast(text, 'info', { haptic: false, dismissLabel: 'Dismiss history notice',
-            host: messages.closest('.page, .chat-instance-panel') });
-    }
-};
 
 /**
  * History chrome only; the chat instance retains navigation and reading state.
@@ -40,7 +32,9 @@ const defaultGapNotice = (text, messages) => {
  * button remains the only return-to-present control.
  */
 export function createHistoryControls(messagesDiv, statusHost = null, {
-    onGapNotice = defaultGapNotice, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
+    // over its newest rows (U021). A caller with a place for a one-time announcement passes it here.
+    onGapNotice = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -327,6 +321,7 @@ export function captureLiveCardProjection(record) {
         record.phaseEl?.hidden, record.phaseEl?.className, record.phaseEl?.textContent,
         record.titleEl?.textContent, record.activityEl?.textContent,
         record.metaEl?.innerHTML, record.countEl?.hidden, record.countEl?.textContent,
+        record.summaryButtonEl?.querySelector?.('[data-live-when]')?.textContent,
         record.phaseEl?.dataset?.chipTone, record.toggleEl?.textContent,
         record.disclosureEl?.getAttribute?.('aria-expanded'),
         root.querySelector?.('.chat-live-actions')?.innerHTML || '',
@@ -851,6 +846,20 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
     return { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady };
 }
 
+/** The row a child's live note lands in, given the frame's source occurrence. A frame a row already holds keeps that row.
+ * Otherwise the newest unsaved note is the line it replaces in place, but never across a thought: a thought is its own
+ * row, so a note that came after one stands after it, the order replay shows. A saved row is never a line, and rows loaded
+ * before the note change nothing: identity is the occurrence alone. */
+export function childProgressKey(record, occurrence) {
+    if (record.items.some((item) => item.occurrenceKey === occurrence)) return occurrence;
+    for (let index = record.items.length - 1; index >= 0; index -= 1) {
+        const { dedupeKey, occurrenceKey } = record.items[index];
+        if (dedupeKey?.startsWith('subagent-progress:')) return dedupeKey;
+        if ([dedupeKey, occurrenceKey].some((key) => key?.startsWith('reasoning:'))) break;
+    }
+    return `subagent-progress:${occurrence}`;
+}
+
 /** Update one live timeline item using the same keys the card's producer owns.
  * Historical source-addressed insertions use mergeHistoricalTimelineItem; live
  * lifecycle notes keep their existing in-place semantics and disclosure key.
@@ -889,6 +898,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             // Replay compares the child's current status with older pages.
             // Its source time advances with the live status, not with narration.
             ...(syntheticKey.startsWith('subagent-lifecycle:') && rawTs ? { sourceTs: rawTs } : {}),
+            // A replaced note's row now holds this frame; the saved copy of the one it replaced stands as its own row.
+            ...(summary.occurrenceKey ? { occurrenceKey: summary.occurrenceKey, sourceTs: rawTs } : {}),
         };
         if (Object.entries(patch).some(([key, value]) => it[key] !== value)) {
             Object.assign(it, patch);
@@ -936,6 +947,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             sourceTs: rawTs,
             count: 1,
             dedupeKey: syntheticKey,
+            occurrenceKey: summary.occurrenceKey,
             lineKey,
         });
         timelineUpdate = 'append';

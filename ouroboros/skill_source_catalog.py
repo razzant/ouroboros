@@ -1,11 +1,17 @@
 """Catalogs of the connected skill sources, normalized into one item shape.
 
-A git-hosted source is read from its cache clone (``skill_source_git``): a repository with ``hub.json``
-at its root is a hub (``entries/<name>.json``, the maintainer's ``official.json``, ``categories.json``
-and an optional ``signals`` branch); any other repository is a plain skills repository whose folders
-with ``SKILL.md`` or ``skill.json`` are its skills. A refresh parses the commit it fetched into a
-snapshot beside the clone, so every reader sees one commit and no reader ever waits for the network;
-it dates each entry by the newest fetched commit touching its release (``updated_at``).
+A git-hosted source is read from its cache clone (``skill_source_git``) at the row's folder (``path``;
+'' is the top one): a folder with ``hub.json`` is a hub (``entries/<name>.json`` and hosted payloads
+inside that folder, the maintainer's ``official.json``, ``categories.json`` and, for a top-level hub,
+an optional ``signals`` branch); any other folder holds plain skills, the folders with ``SKILL.md`` or
+``skill.json`` up to two levels down and in ``.agents/skills``. A name found twice keeps the first
+folder and the other is a ``problem`` naming both paths, as is an unreadable ``.agents/skills``; source
+states carry the problems. A refresh
+parses the commit it fetched into a
+snapshot beside the clone, so every reader sees one commit and no catalog reader ever waits for the network;
+it dates each entry by the newest fetched commit touching its release (``updated_at``). An entry's files use
+an immutable ``checkout_at_commit`` of the snapshot's commit, fetched locally from the shared clone so a
+later refresh cannot change a folder already handed to a reader.
 The built-in source is the bundled ``skills/`` folder with ``skills/builtin.json``; a local folder is
 scanned in place; a registry (ClawHub) answers searches only.
 
@@ -26,6 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ouroboros.skill_identity import is_release_digest
 from ouroboros.skill_source_git import (
+    checkout_at_commit,
     clone_dir,
     fetch_signals,
     last_changed,
@@ -217,24 +224,24 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
     return entry
 
 
-def parse_hub_tree(clone: pathlib.Path) -> Dict[str, Any]:
-    """Snapshot of a hub repository tree (``hub.json`` present)."""
-    hub = _read_json(clone / "hub.json")
+def parse_hub_tree(root: pathlib.Path) -> Dict[str, Any]:
+    """Snapshot of a hub folder (``hub.json`` present); hosted payload paths are relative to it."""
+    hub = _read_json(root / "hub.json")
     hub = hub if isinstance(hub, dict) else {}
     entries: List[Dict[str, Any]] = []
     problems: List[str] = []
-    entries_dir = clone / "entries"
+    entries_dir = root / "entries"
     for path in sorted(entries_dir.glob("*.json")) if entries_dir.is_dir() else []:
         try:
-            entries.append(_hub_entry(_read_json(path), path.stem, clone))
+            entries.append(_hub_entry(_read_json(path), path.stem, root))
         except ValueError as exc:
-            problems.append(f"{path.name}: {exc}")
+            problems.append(f"entries/{path.name}: {exc}")
     official: Dict[str, Dict[str, Any]] = {}
-    curation = _read_json(clone / "official.json")
+    curation = _read_json(root / "official.json")
     for item in (curation.get("endorsements") if isinstance(curation, dict) else None) or []:
         if isinstance(item, dict) and item.get("name") and is_release_digest(item.get("digest")):
             official[str(item["name"])] = {"digest": str(item["digest"]), "recommended": item.get("recommended") is True}
-    categories = _read_json(clone / "categories.json")
+    categories = _read_json(root / "categories.json")
     category_rows = [
         {"id": str(item.get("id")), "label": str(item.get("label") or item.get("id"))}
         for item in ((categories.get("categories") if isinstance(categories, dict) else None) or [])
@@ -244,9 +251,18 @@ def parse_hub_tree(clone: pathlib.Path) -> Dict[str, Any]:
             "entries": entries, "official": official, "categories": category_rows, "problems": problems}
 
 
-def _skill_folders(root: pathlib.Path) -> Iterable[pathlib.Path]:
+def _skill_folders(root: pathlib.Path, problems: List[str]) -> Iterable[pathlib.Path]:
+    from ouroboros.skill_sources import standard_skill_dirs
+
     def has_manifest(path: pathlib.Path) -> bool:
         return (path / "SKILL.md").is_file() or (path / "skill.json").is_file()
+
+    def listed(folder: pathlib.Path) -> List[pathlib.Path]:  # unreadable: a named problem, never an empty folder
+        try:
+            return sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith("."))
+        except OSError as exc:
+            problems.append(f"{folder.relative_to(root).as_posix()}: could not be read ({exc.strerror or exc})")
+            return []
 
     if has_manifest(root):
         yield root
@@ -257,35 +273,37 @@ def _skill_folders(root: pathlib.Path) -> Iterable[pathlib.Path]:
         nested = [child] if has_manifest(child) else sorted(
             p for p in child.iterdir() if p.is_dir() and not p.name.startswith(".") and has_manifest(p))
         yield from nested
+    yield from standard_skill_dirs(root, listdir=listed)
 
 
 def parse_plain_tree(root: pathlib.Path, *, repo_name: str = "") -> Dict[str, Any]:
-    """Snapshot of a plain skills repository or folder: every folder with a manifest is a skill."""
+    """Snapshot of a plain skills repository or folder: every folder with a manifest is a skill, the first
+    folder of a name wins and a later one is a problem naming both paths."""
     from ouroboros.skill_loader import _sanitize_skill_name
 
     entries: List[Dict[str, Any]] = []
     problems: List[str] = []
-    seen: set[str] = set()
+    seen: Dict[str, str] = {}
     if not root.is_dir():
         return {"format": "plain", "entries": [], "categories": [], "official": {}, "problems": ["folder is missing"]}
-    for folder in _skill_folders(root):
+    for folder in _skill_folders(root, problems):
         manifest = read_manifest(folder)
         single = (getattr(manifest, "name", "") or repo_name or root.name) if folder == root else folder.name
         name = _sanitize_skill_name(single)
+        where = folder.relative_to(root).as_posix()
         if name in seen:
-            problems.append(f"{folder.name}: name {name!r} appears twice")
+            problems.append(f"{where}: not offered, {seen[name]} already offers the name {name!r}")
             continue
-        seen.add(name)
+        seen[name] = where
         entry: Dict[str, Any] = {"name": name, "description": str(getattr(manifest, "description", "") or ""),
                                  "version": str(getattr(manifest, "version", "") or ""), "category": [],
-                                 "owner": "", "withdrawn": None,
-                                 "source": {"kind": "folder", "path": folder.relative_to(root).as_posix()},
+                                 "owner": "", "withdrawn": None, "source": {"kind": "folder", "path": where},
                                  **_manifest_facts(manifest, folder)}
         try:
             entry["digest"] = tree_release_digest(folder, manifest)
         except Exception as exc:
             entry["digest"] = ""
-            problems.append(f"{folder.name}: {exc}")
+            problems.append(f"{where}: {exc}")
         entries.append(entry)
     return {"format": "plain", "entries": entries, "official": {}, "categories": [], "problems": problems}
 
@@ -304,8 +322,8 @@ def _date_entries(clone: pathlib.Path, snapshot: Dict[str, Any]) -> None:
     paths = {}
     for entry in snapshot.get("entries") or []:
         source = entry.get("source") or {}
-        path = (f"entries/{entry['name']}.json" if source.get("kind") == "git" else
-                str(pathlib.PurePosixPath(str(snapshot.get("path") or "."), str(source.get("path") or "."))))
+        rel = f"entries/{entry['name']}.json" if source.get("kind") == "git" else str(source.get("path") or ".")
+        path = str(pathlib.PurePosixPath(str(snapshot.get("path") or "."), rel))
         paths[entry["name"]] = "" if path == "." else path
     try:
         dates = last_changed(clone, paths)
@@ -323,12 +341,13 @@ def refresh_source(drive_root: pathlib.Path, row: Dict[str, Any], *, wait_sec: f
 
     def write_snapshot(clone: pathlib.Path, commit: str) -> None:
         base = _inside(clone, str(row.get("path") or "")) or clone
-        if (clone / "hub.json").is_file():
-            snapshot = parse_hub_tree(clone)
-            snapshot["signals"] = _parse_signals(fetch_signals(clone, url=row["url"]))
+        path = base.relative_to(clone).as_posix() if base != clone else ""
+        if (base / "hub.json").is_file():
+            snapshot = parse_hub_tree(base)  # the signals branch belongs to a hub at the top of its repository
+            snapshot["signals"] = None if path else _parse_signals(fetch_signals(clone, url=row["url"]))
         else:
             snapshot = parse_plain_tree(base, repo_name=pathlib.PurePosixPath(str(row.get("url") or "")).stem)
-            snapshot["path"] = base.relative_to(clone).as_posix() if base != clone else ""
+        snapshot["path"] = path
         _date_entries(clone, snapshot)
         snapshot.update({"schema_version": SNAPSHOT_SCHEMA_VERSION, "commit": commit, "read_at": utc_now_iso()})
         atomic_write_json(cache / SNAPSHOT_FILENAME, snapshot)
@@ -380,21 +399,31 @@ def _stale(meta: Dict[str, Any]) -> bool:
     return (datetime.now(timezone.utc) - when).total_seconds() > REFRESH_AFTER_SEC
 
 
+def _problems(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    problems = [str(item) for item in (snapshot or {}).get("problems") or []]
+    return {"problems": problems} if problems else {}
+
+
 def snapshot_for(drive_root: pathlib.Path, row: Dict[str, Any], *, repo_dir: Optional[pathlib.Path] = None,
                  refresh: bool = False) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """``(snapshot, status)`` of one source from local data; may start a background refresh."""
+    """``(snapshot, status)`` of one source from local data; may start a background refresh. The status names
+    the snapshot's ``problems`` (what it could not offer, and why)."""
     kind = row["kind"]
     if kind == "builtin":
         from ouroboros.config import REPO_DIR
 
         return builtin_snapshot(pathlib.Path(repo_dir or REPO_DIR)), {"state": "ready"}
     if kind == "local":
-        return parse_plain_tree(pathlib.Path(row["path"])), {"state": "ready", "last_read_at": utc_now_iso()}
+        snapshot = parse_plain_tree(pathlib.Path(row["path"]))
+        return snapshot, {"state": "ready", "last_read_at": utc_now_iso(), **_problems(snapshot)}
     if kind == "registry":
         return None, {"state": "search"}
     meta = read_meta(drive_root, row)
     snapshot = read_snapshot(drive_root, row)
-    if refresh or snapshot is None or _stale(meta):
+    # Views of one repository and revision share its fetch: a view behind the last good one reads it again.
+    behind = bool(snapshot and meta.get("commit") and not meta.get("error")
+                  and snapshot.get("commit") != meta["commit"])
+    if refresh or snapshot is None or _stale(meta) or behind:
         refresh_in_background(drive_root, row, refresh_source)
     from ouroboros.skill_source_git import is_refreshing
 
@@ -405,7 +434,7 @@ def snapshot_for(drive_root: pathlib.Path, row: Dict[str, Any], *, repo_dir: Opt
         status["error"] = str(meta["error"])
     if snapshot is not None and is_refreshing(drive_root, row):
         status["refreshing"] = True
-    return snapshot, status
+    return snapshot, {**status, **_problems(snapshot)}
 
 
 # --- items -------------------------------------------------------------------------------------------
@@ -507,11 +536,27 @@ def installed_index(drive_root: pathlib.Path, *, repo_path: Optional[str] = None
 
 
 def record_matches_row(record: Dict[str, Any], row: Dict[str, Any]) -> bool:
-    """Whether an install record came from this source row (same id, or the same repository)."""
+    """Whether an install record came from this source row.
+
+    A repository record written since rows have views names its view (``path`` present, maybe empty) and matches
+    only a row of the same kind reading that view of that address, whatever its id: a removed source's id comes
+    back when its name is added again for another address or view. An older record matches its id or its
+    repository (every view of it), as before; so do built-in, local and registry records."""
+    from ouroboros.skill_sources import source_view
+
     source = record.get("source") or {}
-    if source.get("id") == row["id"]:
-        return True
-    return bool(source.get("url") and source.get("url") == row.get("url") and source.get("kind") == row["kind"])
+    same_repository = bool(source.get("url") and source.get("url") == row.get("url")
+                           and source.get("kind") == row["kind"])
+    if source.get("kind") in {"hub", "git"} and "path" in source:
+        return same_repository and source_view(source) == source_view(row)
+    return source.get("id") == row["id"] or same_repository
+
+
+def row_for_record(record: Dict[str, Any], rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The row an install record came from: of the rows it matches, its own id first."""
+    own = (record.get("source") or {}).get("id")
+    matching = [row for row in rows if record_matches_row(record, row)]
+    return next((row for row in matching if row["id"] == own), matching[0] if matching else None)
 
 
 def update_state(record: Dict[str, Any], entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -538,8 +583,9 @@ def _endorses_release(row: Dict[str, Any], snapshot: Dict[str, Any], name: str, 
 
 
 def _entry_for_record(record: Dict[str, Any], snapshots: Dict[str, tuple]) -> tuple[bool, Optional[Dict[str, Any]]]:
-    """``(source known, entry)``: the entry of a record's source in the cached snapshots."""
-    for row, snapshot in snapshots.values():
+    """``(source known, entry)``: the entry of a record's source in the cached snapshots (its own row first)."""
+    own = (record.get("source") or {}).get("id")
+    for row, snapshot in sorted(snapshots.values(), key=lambda pair: pair[0]["id"] != own):
         if not record_matches_row(record, row):
             continue
         if snapshot is None:
@@ -579,8 +625,12 @@ def install_listing(drive_root: pathlib.Path, loaded: Any, snapshots: Dict[str, 
                                                          "left_source": False}
     category = list((entry or {}).get("category") or [])
     source = record.get("source") or {}
+    # The connected source the record matches now, whatever id it was installed under (none: no id); the name,
+    # kind and part stay as recorded.
+    matched = row_for_record(record, [row for row, _snapshot in snapshots.values()])
     return {**connector, "category": category, "removal": removal, "install": {
-        "source": {key: source[key] for key in ("id", "name", "kind", "part") if source.get(key)},
+        "source": {**({"id": matched["id"]} if matched else {}),
+                   **{key: source[key] for key in ("name", "kind", "part") if source.get(key)}},
         "official": official, "release": dict(record.get("release") or {}),
         "basis": record.get("basis"), "base_known": bool(base),
         "modified": (current != base) if base and current else None,
@@ -623,8 +673,8 @@ def cached_snapshots(drive_root: pathlib.Path, rows: List[Dict[str, Any]], *,
             out[row["id"]] = (row, builtin_snapshot(pathlib.Path(repo_dir or REPO_DIR)))
         elif row["kind"] in {"hub", "git"}:
             out[row["id"]] = (row, read_snapshot(drive_root, row))
-        elif row["kind"] == "local":
-            out[row["id"]] = (row, None)  # scanned in place: its skills are installed where they live
+        else:  # a folder is scanned in place and a registry only searched: neither keeps a catalog
+            out[row["id"]] = (row, None)
     return out
 
 
@@ -711,13 +761,11 @@ def entry_payload_dir(drive_root: pathlib.Path, row: Dict[str, Any], snapshot: D
     elif row["kind"] == "local":
         base = pathlib.Path(row["path"])
     elif source.get("kind") == "git":
-        from ouroboros.skill_source_git import checkout_at_commit
-
         base = checkout_at_commit(drive_root, source["repo"], source["commit"])
         return _inside(base, source.get("path", "")) or base
-    else:
-        base = clone_dir(drive_root, row)
-        if source.get("kind") == "folder" and snapshot.get("path"):
+    else:  # Consumers keep this path after return, so even a currently matching shared clone is not stable.
+        base = checkout_at_commit(drive_root, clone_dir(drive_root, row).resolve().as_uri(), str(snapshot["commit"]))
+        if snapshot.get("path"):
             base = _inside(base, snapshot["path"]) or base
     folder = _inside(base, source.get("path", ""))
     if folder is None or not folder.is_dir():
@@ -750,39 +798,50 @@ def item_detail(drive_root: pathlib.Path, item_id: str, *, rows: Optional[List[D
                                                     "discussion": signals.get("discussion_url")}.items() if value}}
 
 
-def probe_source(drive_root: pathlib.Path, *, url: str = "", path: str = "") -> Dict[str, Any]:
-    """What an address or folder holds, read once into a scratch folder (nothing is saved)."""
+def probe_source(drive_root: pathlib.Path, *, url: str = "", path: str = "", revision: str = "",
+                 subfolder: str = "") -> Dict[str, Any]:
+    """What an address (at ``revision``, in ``subfolder``) or a folder holds, read once into a scratch folder
+    (nothing is saved). A repository's answer names the exact ``commit`` it read."""
     from ouroboros.force_remove import force_rmtree
     from ouroboros.skill_source_git import SkillSourceFetchError, fetch_tree, scratch_dir
-    from ouroboros.skill_sources import SkillSourceError, repository_owner, validate_git_url
+    from ouroboros.skill_sources import SkillSourceError, repository_owner, validate_git_url, view_fields
+
+    def found(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        return {"found": [e["name"] for e in snapshot["entries"]], **_problems(snapshot)}
 
     if path:
         root = pathlib.Path(path).expanduser()
+        if str(revision or "").strip() or str(subfolder or "").strip():
+            return {"error": "A folder on this computer is read as it is: leave the revision and subfolder empty."}
         if not root.is_absolute() or not root.is_dir():
-            return {"error": "Choose an existing folder on this computer (an absolute path)."}
-        snapshot = parse_plain_tree(root)
-        return {"kind": "local", "suggested_name": root.name, "found": [e["name"] for e in snapshot["entries"]]}
+            return {"error": "Choose an existing folder on this computer (an absolute path), or a repository "
+                             "address (https://, ssh://, git@host:path or file://)."}
+        return {"kind": "local", "suggested_name": root.name, **found(parse_plain_tree(root))}
     try:
-        url = validate_git_url(url)
+        url, view = validate_git_url(url), view_fields(revision, subfolder)
     except SkillSourceError as exc:
         return {"error": str(exc)}
     warning = {"warning": "not_encrypted"} if url.startswith("http://") else {}
     scratch = scratch_dir(drive_root, "probe")
     try:
-        fetch_tree(scratch / "repo", url, "")
+        commit = fetch_tree(scratch / "repo", url, view.get("commit") or view.get("ref") or "")
         clone = scratch / "repo"
+        base = _inside(clone, view.get("path", ""))
+        if base is None or not base.is_dir():
+            return {**warning, "error": f"{url} has no folder {view.get('path')} at "
+                                       f"{view.get('ref') or commit[:12]}."}
         stem = pathlib.PurePosixPath(url.rstrip("/")).stem or "skills"
-        if (clone / "hub.json").is_file():
-            snapshot = parse_hub_tree(clone)
+        if (base / "hub.json").is_file():
+            snapshot = parse_hub_tree(base)
             hub = snapshot.get("hub") or {}
             answer = {"kind": "hub", "suggested_name": str(hub.get("name") or stem)}
             owner = str(hub.get("maintainer") or "") or repository_owner(url)
         else:
-            snapshot = parse_plain_tree(clone, repo_name=stem)
+            snapshot = parse_plain_tree(base, repo_name=stem)
             answer, owner = {"kind": "git", "suggested_name": stem}, repository_owner(url)
         if owner:
             answer["owner"] = owner
-        return {**answer, **warning, "found": [e["name"] for e in snapshot["entries"]]}
+        return {**answer, **warning, "commit": commit, **found(snapshot)}
     except SkillSourceFetchError as exc:
         return {**warning, "error": f"This computer could not read {url}: {exc}"}
     finally:
@@ -794,5 +853,6 @@ __all__ = [
     "entry_payload_dir", "find_item", "install_listing", "installed_index", "installed_release_digest",
     "listing_install_fields", "listing_snapshots",
     "item_detail", "items_for", "parse_hub_tree", "parse_plain_tree", "probe_source", "read_manifest", "read_snapshot",
-    "record_matches_row", "refresh_source", "registry_items", "snapshot_for", "tree_release_digest", "update_state",
+    "record_matches_row", "refresh_source", "registry_items", "row_for_record", "snapshot_for", "tree_release_digest",
+    "update_state",
 ]

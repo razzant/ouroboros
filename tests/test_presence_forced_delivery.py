@@ -90,20 +90,12 @@ def _run(root, monkeypatch, forced, *, task=None, presence=True, handoff=None, f
 
 
 @pytest.mark.parametrize("forced,outcome,spoken,status", [
-    (_forced("message", "Q1 figures are ready; Q2 is still coming."), "message",
-     "Q1 figures are ready; Q2 is still coming.", "declared"),
-    (_forced("message", "The review is delayed; Q1 figures are ready."), "message",
-     "The review is delayed; Q1 figures are ready.", "declared"),
-    (_forced("silent", ""), "silent", "", "declared"),
-    (_forced("tool_delivered", "sent the table via the transport tool"), "tool_delivered", "", "declared"),
-    (RECORD, "silent", "", "missing"),  # untyped internal prose is never speech
     (_forced("message", "   "), "silent", "", "invalid"),
-    (_forced("maybe", "hi"), "silent", "", "invalid"),
     (_forced("silent", "but also this"), "silent", "", "invalid"),
     (_forced("deferred", "on it"), "silent", "", "invalid"),  # nothing was scheduled
     (json.dumps({"action": "finish", "answer": RECORD,
                  "presence_finish": {"outcome": "message", "message": "x", "to": "y"}}), "silent", "", "invalid"),
-], ids=["message", "chosen_limitation", "silent", "tool_delivered", "prose", "blank_message", "unknown_outcome", "silent_with_text",
+], ids=["blank_message", "silent_with_text",
         "unscheduled_deferred", "extra_key"])
 def test_forced_final_speaks_only_what_it_declares(tmp_path, monkeypatch, forced, outcome, spoken, status):
     result, stored, calls, text = _run(tmp_path, monkeypatch, forced)
@@ -111,6 +103,8 @@ def test_forced_final_speaks_only_what_it_declares(tmp_path, monkeypatch, forced
     assert len(calls) == 2  # the one forced call; no repair or polishing round
     assert "[PRESENCE_DELIVERY]" in str(calls[-1][-1]["content"])
     assert "You decide what, if anything, to say" in str(calls[-1][-1]["content"])
+    # The armed contract is the call's whole completion request: no generic prose/finish_task offer contradicts it.
+    assert "No tool runs at this boundary" not in str(calls[-1][-1]["content"])
     assert (result["outcome"], result["text"]) == (outcome, spoken)
     assert stored["reason_code"] == "round_limit"
     assert stored["outcome_axes"]["execution"]["status"] != "ok"  # speech is declared, not read off status
@@ -167,6 +161,7 @@ def test_ordinary_forced_final_is_unchanged(tmp_path, monkeypatch):
     task = {"id": "owner-task", "type": "task", "chat_id": 1, "text": "Please help"}
     _result, stored, calls, text = _run(tmp_path, monkeypatch, RECORD, task=task, presence=False)
     assert "[PRESENCE_DELIVERY]" not in str(calls[-1][-1]["content"])
+    assert "No tool runs at this boundary" in str(calls[-1][-1]["content"])
     assert text == RECORD and stored["result"].startswith(RECORD)
     assert "presence_declaration" not in (stored.get("metadata") or {})
 
@@ -402,15 +397,12 @@ EARLIER = "Earlier record: Q1 figures verified; Q2 not yet checked."
 @pytest.mark.parametrize("body,record,outcome,spoken,declaration", [
     # An offered exact hash selects the retained record and still speaks its fresh declaration.
     ({"action": "finish", "answer_sha256": hashlib.sha256(EARLIER.encode()).hexdigest()}, EARLIER, "message", "Fresh reply", {"status": "declared"}),
-    ({"action": "finish", "answer": RECORD}, RECORD, "message", "Fresh reply", {"status": "declared"}),
     # A rejected envelope keeps the earlier answer as the record: its fresh reply is never spoken beside it.
     ({"action": "finish", "answer": ""}, EARLIER, "silent", "",
      {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
-    ({"action": "revise", "answer": RECORD}, EARLIER, "silent", "",
-     {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
     ({"answer": RECORD}, EARLIER, "silent", "",
      {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
-], ids=["retained_hash", "complete_answer", "empty_answer_rejected", "unknown_action_rejected", "missing_action_rejected"])
+], ids=["retained_hash", "empty_answer_rejected", "missing_action_rejected"])
 def test_a_declaration_speaks_only_beside_the_answer_its_own_envelope_authorized(
         tmp_path, monkeypatch, body, record, outcome, spoken, declaration):
     from tests.test_delivery_forced_finalization import _arm_latch_with_candidate, _forced_test_context

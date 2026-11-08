@@ -8,6 +8,7 @@ exception message: an unnamed busy read stays unknown, never the task store.
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timedelta, timezone
 import functools
 import json
 import sqlite3
@@ -23,7 +24,7 @@ from ouroboros.gateway.router import collect_routes
 from tests._store_shared import seed_result
 from tests.test_consciousness_view import FIXTURE, _call
 
-COVERAGE = "wakes that reached a model call in the last 48 h"
+COVERAGE = "Wakes that reached a model call in the last 48 h"
 FOCUS = {"wake_cause": "focus", "focus": {"place_id": "mail", "conversation_key": "chat:a:r"}}
 
 
@@ -73,8 +74,9 @@ def client(tmp_path, monkeypatch, wake):
     monkeypatch.setattr(state, "load_state", lambda: {"bg_consciousness_enabled": True})
     clock = object.__new__(BackgroundConsciousness)
     clock._drive_root = tmp_path
+    next_wake = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     monkeypatch.setattr(clock, "status_snapshot", lambda: {"enabled": True, "places_brief": [],
-                                                           "next_wake_at": "2026-10-24T09:00:00Z"})
+                                                           "next_wake_at": next_wake})
     app = Starlette(routes=collect_routes(data_dir=tmp_path))
     app.state.drive_root = tmp_path
 

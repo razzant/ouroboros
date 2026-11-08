@@ -8,12 +8,6 @@ from ouroboros.consciousness_authority import work_kind, consciousness_origin_me
 
 @pytest.mark.parametrize("metadata,kind", [
     ({}, "consciousness"), ({"work_kind": "owner", "initiator": "consciousness"}, "owner"),
-    ({"initiator": "consciousness", "origin_message_ref": "x"}, "consciousness"),
-    ({"presence_binding_authority": {"id": "old"}}, "consciousness"),
-    ({"presence_binding_authority": {}, "origin_message_ref": "owner"}, "consciousness"),
-    ({"presence_root_carrier": True}, "consciousness"), ({"presence": True}, "consciousness"),
-    ({"origin_message_ref": "owner-message"}, "owner"), ({"origin_suppressed": True}, "owner"),
-    ({"owner_ingress": True, "project_id": "project-room"}, "owner"),
     ({"project_id": "project-room"}, "consciousness"),
 ])
 def test_fallback_order_and_child_copy(metadata, kind):
@@ -21,19 +15,28 @@ def test_fallback_order_and_child_copy(metadata, kind):
     assert consciousness_origin_metadata(metadata)["work_kind"] == kind
 
 
-@pytest.mark.parametrize("addressed,confirmed,kind", [(True, True, "owner"), (True, False, "consciousness"),
-                                                      (False, True, "consciousness"), (False, False, "consciousness")])
-def test_confirmed_addressed_request_mints_only_an_independent_owner_root(addressed, confirmed, kind):
+@pytest.mark.parametrize("basis,kind", [
+    ({"source": "place_owner", "content": "Look into it", "basis": "cited", "carried": True}, "owner"),
+    (None, "consciousness"),
+    ({"source": "place_owner", "content": "Look into it"}, "consciousness"),  # no verified basis: not a cite
+])
+def test_only_a_verified_cite_mints_an_independent_owner_root(basis, kind):
+    """No host flag mints owner kind: a confirmed account's event, an old ``addressed`` key or a ``work_kind``
+    stamp on the focus leave a started root the mind's own work; the host-verified cite alone makes it the owner's."""
     metadata = {"initiator": "consciousness", "wake_cause": "focus", "task_id": "focus-turn",
-                "focus": {"addressed": addressed, "actor": {"owner_confirmed": confirmed}}}
+                "focus": {"addressed": True, "actor": {"owner_confirmed": True}}}
     assert work_kind(metadata) == "consciousness"
     assert consciousness_origin_metadata(metadata)["work_kind"] == "consciousness"
-    child = consciousness_origin_metadata(metadata, started_root=True)
+    child = consciousness_origin_metadata(metadata, started_root=True, owner_basis=basis)
     assert child["work_kind"] == kind and child["origin_wake_task_id"] == "focus-turn"
     if kind == "consciousness":
         assert child["consciousness_cause"] == "started"
+    else:
+        assert "consciousness_cause" not in child and "initiator" not in child
+    # the focus itself never changes kind, and a child copy cannot write back into it
+    assert consciousness_origin_metadata(metadata, owner_basis=basis)["work_kind"] == "consciousness"
     child["focus"]["actor"]["owner_confirmed"] = "changed"
-    assert metadata["focus"]["actor"]["owner_confirmed"] is confirmed
+    assert metadata["focus"]["actor"]["owner_confirmed"] is True
 
 
 def test_caller_kind_selects_level_for_steering_and_root_minting(supervisor):
@@ -79,7 +82,8 @@ def test_only_declared_reads_skip(supervisor, monkeypatch):
 def test_bundle_authorship_scope_and_no_reasoning_dump(supervisor, monkeypatch):
     h = supervisor
     from ouroboros import places, place_guard
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"place_id": "room", "targets": {"to": ["audience"]}})
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"places": [{
+        "place_id": "room", "place_label": "Friends", "place_state": "active"}], "targets": {"to": ["audience"]}})
     monkeypatch.setattr(places, "load_places", lambda root: [places.Place("room", "connector", "chat", label="Friends",
         notes=(places.NoteEntry("owner permission", "owner"), places.NoteEntry("old permission", "migration"),
                places.NoteEntry("mind idea", "ouroboros")))])

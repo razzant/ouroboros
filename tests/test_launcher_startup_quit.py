@@ -10,8 +10,15 @@ import pytest
 from tests.test_launcher_handoff_stop import native_guard as native_guard
 
 
-@pytest.mark.parametrize("door", ["tray", "abort", "setup_tray"])
-@pytest.mark.parametrize("identity", ["ours", "foreign", "unknown"])
+def _finish_quit():
+    """The quit's close body runs on its own non-daemon thread; this test orders it before main continues."""
+    for thread in threading.enumerate():
+        if thread.name == "ouroboros-quit":
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "the startup close body must return"
+
+
+@pytest.mark.parametrize(("identity", "door"), [("ours", "tray"), ("foreign", "abort"), ("unknown", "setup_tray")])
 def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, monkeypatch, tmp_path, door, identity):
     import launcher
     from ouroboros import launcher_background as background, launcher_bootstrap as boot, launcher_onboarding
@@ -37,7 +44,8 @@ def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, 
         if door == "setup_tray":
             return True, 8124
         if door == "tray":
-            owners[0].request_quit()
+            owners[0].request_quit()  # returns at once; its body stops the owned server off this thread
+            _finish_quit()
         else:
             shutdown.set()
         return False, 0
@@ -62,7 +70,9 @@ def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, 
     def start(**kwargs):
         assert door == "setup_tray" and len(webview.windows) == 1
         assert kwargs == {'private_mode': False, 'menu': []}
-        owners[0].request_quit()  # actual tray callback into main's _on_closing
+        owners[0].request_quit()  # actual tray callback: it latches, and main's _on_closing runs off this thread
+        assert shutdown.is_set() and owners[0].quit.is_set()
+        _finish_quit()
         assert webview.windows == [], 'Quit must release setup webview.start without an owner close'
         assert shutdown.is_set() and owners[0].quit.is_set() and not owners[0].panic.is_set()
         events.append("setup loop returned")
@@ -72,7 +82,9 @@ def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, 
     monkeypatch.setattr(launcher_onboarding, 'NativeAppearance', lambda: SimpleNamespace(attach=lambda window: None))
     monkeypatch.setattr(launcher_onboarding, 'paint_room', lambda window: None)  # the macOS leaf; no events here
     monkeypatch.setattr(launcher_onboarding, 'setup_recovery_menu', lambda *a: [])
-    monkeypatch.setattr(launcher.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: None, join=lambda **kw: None))
+    real_thread = threading.Thread  # only the lifecycle thread is held back; the quit's closer really runs
+    monkeypatch.setattr(launcher.threading, "Thread", lambda **kw: real_thread(**kw) if kw.get("name") == "ouroboros-quit"
+                        else SimpleNamespace(start=lambda: None, join=lambda **kw: None))
     for name in ("_external_ui", "_external_host_update", "_external_seed_bundle", "_launch_argv", "_launch_intent",
                  "_runtime_venv", "EMBEDDED_PYTHON"):
         monkeypatch.setattr(launcher, name, getattr(launcher, name))

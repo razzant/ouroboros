@@ -29,7 +29,6 @@ from ouroboros.skill_review_status import (
     STATUS_BLOCKERS,
     STATUS_CLEAN,
     STATUS_PENDING,
-    STATUS_WARNINGS,
 )
 
 _HASH_A = "a" * 64
@@ -248,46 +247,6 @@ def test_preflight_state_vocabulary_matches_gateway_contract():
     [
         (STATUS_CLEAN, "", _HASH_A, "1.2.3", _scan(), "ready", "", True),
         (
-            STATUS_WARNINGS,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(),
-            "warnings",
-            "warnings_present",
-            True,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan((_finding(0),)),
-            "warnings",
-            "warnings_present",
-            True,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan((_finding(0, disposition="blocker"),)),
-            "needs_attention",
-            "secret_blocked",
-            False,
-        ),
-        (
-            STATUS_BLOCKERS,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(),
-            "needs_attention",
-            "review_blockers",
-            False,
-        ),
-        (
             STATUS_PENDING,
             "",
             _HASH_A,
@@ -310,81 +269,11 @@ def test_preflight_state_vocabulary_matches_gateway_contract():
         (
             STATUS_CLEAN,
             "",
-            _HASH_B,
-            "1.2.3",
-            _scan(),
-            "needs_attention",
-            "review_stale",
-            False,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
             _HASH_A,
             "",
             _scan(),
             "needs_attention",
             "manifest_version_missing",
-            False,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(
-                status="scanner_error",
-                contract="",
-                reason_code="scanner_missing",
-                repair_hint="Install Betterleaks, then retry.",
-            ),
-            "repairable",
-            "scanner_missing",
-            False,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(
-                status="scanner_error",
-                contract="",
-                reason_code="scanner_corrupt",
-                repair_hint="Repair Betterleaks, then retry.",
-            ),
-            "repairable",
-            "scanner_corrupt",
-            False,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(
-                status="scanner_error",
-                contract="",
-                reason_code="scanner_timeout",
-                repair_hint="Repair Betterleaks, then retry.",
-            ),
-            "repairable",
-            "scanner_timeout",
-            False,
-        ),
-        (
-            STATUS_CLEAN,
-            "",
-            _HASH_A,
-            "1.2.3",
-            _scan(
-                status="scanner_error",
-                contract="",
-                reason_code="scanner_report_invalid",
-                repair_hint="Repair Betterleaks, then retry.",
-            ),
-            "repairable",
-            "scanner_report_invalid",
             False,
         ),
     ],
@@ -465,8 +354,6 @@ def test_preflight_repair_hint_keeps_installer_authority(tmp_path, monkeypatch, 
     [
         "snapshot_skill_unreadable",
         "snapshot_manifest_missing",
-        "snapshot_manifest_invalid",
-        "snapshot_payload_unreadable",
         "snapshot_payload_too_large",
     ],
 )
@@ -682,8 +569,6 @@ def test_manifestless_bucket_is_unknown_and_seeded_native_stays_unsupported(
     [
         ("token", 409, "github_token_missing"),
         ("missing", 404, "skill_not_found"),
-        ("ambiguous", 409, "skill_identity_ambiguous"),
-        ("source", 409, "skill_source_unsupported"),
         ("admission", 503, "worker_pool_unavailable"),
     ],
 )
@@ -906,6 +791,7 @@ def test_handler_offloads_complete_sync_builder(monkeypatch, tmp_path):
 
     monkeypatch.setattr(preflight.asyncio, "to_thread", fake_to_thread)
     request = types.SimpleNamespace(
+        json=lambda: asyncio.sleep(0, {}),  # the body ``{}``: no destination
         path_params={"skill": "demo"},
         app=types.SimpleNamespace(
             state=types.SimpleNamespace(

@@ -16,10 +16,10 @@ import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
     OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    memberState, ownStopPress, reasonText, reconcileWorkState, resumeTargets, roomStatusView, workControls, workLine,
-    workMenuActions, workQuestion, workRowView,
+    memberPaused, memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
+    resumeTargets, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
-import { SERVER_REASONS, room, serverMark, work as builtWork } from './work_fixture.js';
+import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
 
 setMissTransport(() => Promise.resolve(null));
 const CASES = JSON.parse(readFileSync(new URL('./fixtures/work_projection_cases.json', import.meta.url), 'utf8')).cases;
@@ -115,15 +115,18 @@ test('only the client facts overlay the room, each with its mark: socket closed,
 // at (the bar keeps it apart from its word, to drop first); once its Main call started it says the word its census
 // move gives, never Sending or Thinking before the census sees the request go out.
 test('a turn still preparing says its start step beside Preparing on the bar and on every other surface', () => {
-    const state = stateOf('direct_preparing', 1);
-    const bar = roomStatusView(state);
-    assert.deepEqual([bar.text, bar.step, bar.tone, bar.mark], ['Preparing', 'Building context', 'live', 'moving']);
-    assert.equal(summarizeRoom(state.room, state.works).label, 'Preparing · Building context');
-    const row = workRowView(state.works[0]);
-    assert.deepEqual([row.word, row.secondary], ['Preparing', 'Building context']);
-    const card = cardWorkView(state.works[0]);
-    assert.deepEqual([card.text, card.secondary], ['Preparing', 'Building context']);
-    assert.equal(roomStatusView(state, { stopping: 'immediate' }).text, 'Cancelling…', 'the owner\'s own Stop says only its word');
+    // An inline executor's row and a carried lane row (the ordinary path since #2654) say the same thing.
+    for (const name of ['direct_preparing', 'carried_preparing']) {
+        const state = stateOf(name, 1);
+        const bar = roomStatusView(state);
+        assert.deepEqual([bar.text, bar.step, bar.tone, bar.mark], ['Preparing', 'Building context', 'live', 'moving'], name);
+        assert.equal(summarizeRoom(state.room, state.works).label, 'Preparing · Building context', name);
+        const row = workRowView(state.works[0]);
+        assert.deepEqual([row.word, row.secondary], ['Preparing', 'Building context'], name);
+        const card = cardWorkView(state.works[0]);
+        assert.deepEqual([card.text, card.secondary], ['Preparing', 'Building context'], name);
+        assert.equal(roomStatusView(state, { stopping: 'immediate' }).text, 'Cancelling…', 'the owner\'s own Stop says only its word');
+    }
     const called = stateOf('direct_requested', 1);
     assert.deepEqual([roomStatusView(called).text, workRowView(called.works[0]).secondary], ['Working', '']);
     assert.ok(!('step' in roomStatusView(called)) && !('step' in roomStatusView(stateOf('working_call'))),
@@ -210,6 +213,21 @@ test('the owner\'s own Stop press on a work\'s card says itself on the row at on
     assert.equal(workRowView(live, { stopping: 'immediate' }).word, 'Cancelling…');
     assert.equal(workRowView(live).word, 'Sending');
     assert.equal(workRowView(work('paused_by_owner'), { stopping: 'immediate' }).word, 'Paused');
+});
+
+test('a sleep whose chosen helper still awaits its own Resume says so beside Waiting, with no new door or turn', () => {
+    const state = stateOf('sleeping_on_paused_helper');
+    const row = workRowView(state.works[0]);
+    assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
+        secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until Ouroboros resumes it' });
+    // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
+    const grouped = workControls(state.works[0]);
+    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
+    assert.deepEqual([roomStatusView(state).owner, roomStatusView(state).amber], [false, '']);
+    // A translation keeps the count; the helper's own Activity sentence is unchanged.
+    assert.equal(reasonText({ code: 'awaited_helpers_mind', count: 3, text: 'x' }),
+        '3 helpers it waits for are paused until Ouroboros resumes them');
+    assert.equal(memberState(state, 'sw-c').because[0].code, 'awaiting_selection');
 });
 
 test('a reusable slot gets no control by its id; a real target keeps its own', () => {
@@ -335,11 +353,80 @@ test('the test builders name the marks the server names', () => {
     assert.equal(builtWork({ activity_id: 'x' }, { confirmed: false }).mark, 'moving', 'work observed running moves');
 });
 
-test('the focus line is the work\'s own update_focus text under its state, and none without one', () => {
-    const focused = { ...work('working_call'), focus: { text: '  Release 7.7 · code merged · waiting for 7 signed files ', at: 1 } };
-    assert.equal(workRowView(focused).focus, 'Release 7.7 · code merged · waiting for 7 signed files');
+test('the focus line is the work\'s own update_focus text under its state, led by when it was written, and none without one', () => {
+    const at = '2026-10-17T15:20:00Z';
+    const focused = { ...work('working_call'), focus: { text: '  Release 7.7 · code merged · waiting for 7 signed files ', at } };
+    assert.equal(workRowView(focused).focus, `${clock(at)} · Release 7.7 · code merged · waiting for 7 signed files`);
+    // A line the server sent without its time says none: no stale word, no guess.
+    assert.equal(workRowView({ ...focused, focus: { text: 'Drafting', at: null } }).focus, 'Drafting');
     assert.equal(workRowView(work('working_call')).focus, '');
-    assert.equal(workRowView({ ...work('working_call'), focus: { text: '   ', at: 1 } }).focus, '');
+    assert.equal(workRowView({ ...work('working_call'), focus: { text: '   ', at } }).focus, '');
+});
+
+test('a sleep says every source it chose in the server\'s words, joined by "or", a chosen time last in the viewer\'s clock', () => {
+    assert.ok(Object.keys(SERVER_SLEEPS).length >= 16);
+    for (const [name, reason] of Object.entries(SERVER_SLEEPS)) {
+        const at = (reason.wake || []).find((clause) => clause.kind === 'time')?.at;
+        assert.equal(reasonText(reason), at ? reason.text.replace(at, clock(at)) : reason.text, name);
+    }
+    assert.equal(reasonText(SERVER_SLEEPS.unrecorded), 'Sleeping until it is woken', 'a record without a selection');
+    const at = '2026-10-17T18:05:00+00:00';
+    assert.equal(reasonText(SERVER_SLEEPS.every_kind), 'Sleeping until all 2 tasks it chose finish or its external run '
+        + `finishes or a service it started stops or a reviewer answers or Draft the release notes writes or ${clock(at)}`);
+    // A time alone also wakes on any message; the task it names, chosen as its sender too, finishes or writes.
+    assert.equal(reasonText(SERVER_SLEEPS.time), `Sleeping until a message arrives or ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.time_only), `Sleeping until ${clock(at)}`);
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Sleeping until Draft the release notes finishes or writes');
+    assert.equal(reasonText(SERVER_SLEEPS.task_and_sender_and_time),
+        `Sleeping until Draft the release notes finishes or writes or ${clock(at)}`);
+    // The chosen helper by its census name, never its id; what still runs beside it stays its own fact.
+    assert.equal(workLine(work('sleeping_on_named_helper')),
+        'Sleeping until Draft the release notes finishes or writes · 1 helper still working');
+    assert.equal(workLine(work('sleeping_until_time')), `Sleeping until a message arrives or ${clock(at)}`);
+    assert.ok(!workLine(work('sleeping_on_named_helper')).includes('sn-c'));
+    // A clause this client does not know, or a time it cannot read, keeps the server's sentence whole.
+    for (const wake of [[{ kind: 'mail' }, { kind: 'later' }], [{ kind: 'time', at: 'soon' }], []]) {
+        assert.equal(reasonText({ code: 'sleeping', text: 'Sleeping until x', wake }), 'Sleeping until x');
+    }
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'Sleeping until {what}': { text: 'Спит, пока {what}' },
+            '{name} finishes': { text: 'не закончится {name}' },
+            '{a} or {b}': { text: '{a} или {b}' },
+            [CODE_PREFIX + 'work.sleep.reviewer']: { text: 'не ответит ревьюер' } } });
+        // A translation keeps the name as written; a clause it lacks stays the server's English until translated.
+        assert.equal(reasonText(SERVER_SLEEPS.task), 'Спит, пока не закончится Draft the release notes');
+        assert.equal(reasonText(SERVER_SLEEPS.reviewer), 'Спит, пока не ответит ревьюер');
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_time), `Спит, пока не закончится Draft the release notes или ${clock(at)}`);
+        assert.equal(reasonText(SERVER_SLEEPS.task_and_sender), 'Спит, пока Draft the release notes finishes or writes');
+    } finally { applyPayload(prior); }
+});
+
+test('the words a Pause recorded follow its head for any declared author; only the head is translated', () => {
+    const owner = { code: 'paused_by_owner', text: 'You paused it', since: '2026-10-17T15:00:00Z',
+        by: { actor: 'owner', text: 'По прямому распоряжению Антона: stop the export', at: '2026-10-17T15:00:00Z' } };
+    assert.equal(reasonText(owner), 'You paused it: По прямому распоряжению Антона: stop the export');
+    assert.equal(workLine({ because: [owner] }), `You paused it: По прямому распоряжению Антона: stop the export · ${PRESSED}`);
+    // The owner's own button records no words: as before.
+    assert.equal(reasonText({ ...owner, by: { ...owner.by, text: '' } }), 'You paused it');
+    assert.ok(!reasonText(owner).toLowerCase().includes('on your behalf'));
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            [CODE_PREFIX + 'work.because.paused_by_owner']: { text: 'Вы поставили на паузу' } } });
+        assert.equal(reasonText(owner), 'Вы поставили на паузу: По прямому распоряжению Антона: stop the export');
+    } finally { applyPayload(prior); }
+});
+
+test('a member is paused only where a confirmed work in any room says so', () => {
+    const paused = stateOf('paused_by_owner', 1);  // another room's chat: the work still counts
+    assert.equal(memberPaused(paused, 'o'), true);
+    assert.equal(memberPaused(stateOf('working_call'), 'w'), false);
+    assert.equal(memberPaused(paused, 'absent'), false);
+    assert.equal(memberPaused(emptyWorkState(), 'o'), false);
+    const unconfirmed = { episodes: new Map([['o', { ...work('paused_by_owner'), confirmed: false }]]) };
+    assert.equal(memberPaused(unconfirmed, 'o'), false, 'an unconfirmed work proves nothing');
 });
 
 test('controls group by action with exact targets; Resume is a button, a pending Stop leaves its escalation', () => {
@@ -656,4 +743,76 @@ test('the line\'s clock: the time today, the date as well on another day; second
     // The owner's press is said with its time; no other reason gets one.
     assert.equal(workLine(work('paused_by_owner')), `You paused it · ${clock(work('paused_by_owner').because[0].since)}`);
     assert.equal(workLine(work('spending_limit')), 'Spending limit reached');
+});
+
+test('a recorded Stop says itself on the row and the card of a press no card saw, beside the word it still is', () => {
+    const work = { activity: 'working', transition: 'none', call: '', confirmed: true, mark: 'moving', turn: [], tails: [],
+        episode: { task_id: 'turn', live: true },
+        because: [{ code: 'stop_requested', text: 'Stop requested: it ends at its next step' }] };
+    const row = workRowView(work);
+    assert.equal(row.word, 'Working');
+    assert.equal(row.secondary, 'Stop requested: it ends at its next step');
+    assert.equal(cardWorkView(work).secondary, 'Stop requested: it ends at its next step');
+    // The owner's own press on a loaded card keeps its immediate word, and says nothing twice.
+    assert.equal(workRowView(work, { stopping: 'immediate' }).word, 'Cancelling…');
+    assert.equal(workRowView(work, { stopping: 'immediate' }).secondary, '');
+    // Without the fact a working work's card keeps its own chip: nothing invents a Stop.
+    assert.equal(cardWorkView({ ...work, because: [] }), null);
+});
+
+// #2380/#2411: a held work's latest refused Resume about the control holding it now, as the server sends it
+// (work_stop.last_resume), rides last on its line, dated and naming who asked; its words explain the word in the
+// card's details. It is never a control or the owner's turn, and a work an incomplete body omitted drops it with its
+// line. The host's own refused start of a Continue whose earlier work settled is that Continue's reason instead.
+test('a refused Resume is dated history at the end of the line, its words in the card\'s details', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const owner = work('paused_resume_refused');
+    const words = `Resume refused at ${REFUSED}: task h1 is queued to run; task h2 is queued to run`;
+    assert.equal(workLine(owner), `You paused it · ${PRESSED} · Resume refused at ${REFUSED}`);
+    assert.equal(resumeAttemptWords(owner.last_resume), words);
+    const card = cardWorkView(owner);
+    assert.deepEqual([card.text, card.secondary, card.note], ['Paused', workLine(owner), words]);
+    const chip = taskActivityPresentation({ workView: card, work: { mark: owner.mark, owner: false } });
+    assert.deepEqual([chip.text, chip.secondary, chip.note], ['Paused', workLine(owner), words]);
+    assert.deepEqual(workControls(owner).resume, 'rr', 'the door\'s own Resume, unchanged');
+    // Ouroboros's own refused Resume is said as its own, beside the app stop that still holds the work.
+    const mind = work('saved_resume_refused');
+    assert.equal(workLine(mind), `Saved when the app stopped · Resume by Ouroboros refused at ${REFUSED}`);
+    assert.equal(workControls(mind).resume, 'sr');
+    // A refusal about another, earlier Pause is no fact of this one: the server sends none.
+    const earlier = work('paused_resume_refused_earlier');
+    assert.deepEqual([earlier.last_resume, workLine(earlier), cardWorkView(earlier).note],
+        [undefined, `You paused it · ${PRESSED}`, undefined]);
+    for (const nothing of [null, {}, { at: 'not a time' }]) assert.equal(resumeAttemptClause(nothing), '');
+    // An incomplete body that omits the work keeps it unconfirmed: no line, so no history on it either.
+    const kept = reconcileWorkState(stateOf('paused_resume_refused'),
+        { supervisor_ready: true, works: [], works_complete: false, rooms: {} }, 42);
+    assert.deepEqual([kept.works[0].activity, workLine(kept.works[0]), cardWorkView(kept.works[0])], ['unknown', '', null]);
+});
+
+test('a refused Resume\'s words read in the install language by their exact text; a sentence the memory lacks stays English', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const prior = currentPayload();
+    const attempt = (text) => ({ at: '2026-10-17T15:05:00Z', by: { actor: 'owner' }, error: 'e', text });
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'Resume refused at {time}': { text: 'Resume отклонён в {time}' },
+            'task h1 is queued to run': { text: 'задача h1 ждёт запуска' },
+        } });
+        assert.equal(resumeAttemptWords(attempt('task h1 is queued to run')), `Resume отклонён в ${REFUSED}: задача h1 ждёт запуска`);
+        assert.equal(resumeAttemptWords(attempt('  task h2 is queued to run ')), `Resume отклонён в ${REFUSED}: task h2 is queued to run`);
+        assert.equal(resumeAttemptWords(attempt('')), `Resume отклонён в ${REFUSED}`);
+        assert.equal(resumeAttemptWords({ text: 'task h1 is queued to run' }), '', 'no dated clause: nothing is said');
+    } finally { applyPayload(prior); }
+});
+
+test('a Continue whose own start was refused after its earlier work settled says so, waiting, with no Resume', () => {
+    const REFUSED = clock('2026-10-17T15:05:00Z');
+    const held = work('continue_start_refused');
+    assert.equal(workRowView(held).word, 'Waiting');
+    assert.equal(workLine(held), `Continue tries to start again by itself · Start refused at ${REFUSED}`);
+    assert.equal(resumeAttemptWords(held.last_resume), `Start refused at ${REFUSED}: accounting unavailable`);
+    assert.equal(cardWorkView(held).note, `Start refused at ${REFUSED}: accounting unavailable`);
+    assert.equal(workControls(held).resume, '', 'it tries again by itself: no Resume is offered');
+    assert.ok(!/earlier attempt's work is confirmed finished/.test(workLine(held)), 'never the stale wait');
 });

@@ -33,8 +33,6 @@ def test_a_lost_store_is_unavailable_never_empty(tmp_path):
 @pytest.mark.parametrize("status,fields,expected", [
     ("running", {}, {"nonterminal", "pending_drives"}),
     ("running", {"root_phase_checkpoint": {"post_task_synthesis": "paused"}}, {"synthesis"}),
-    ("running", {"delegated_runs_unreconciled": ["r"]}, {"delegated_runs"}),
-    ("running", {"child_ref_promotion": {"schema_version": 1, "status": "incomplete", "pending_refs": [{"path": "x"}]}}, {"promotions"}),
     ("completed", {}, {"terminal_projection", "synthesis"}),
 ])
 def test_membership_is_atomic_with_the_result_write(tmp_path, monkeypatch, status, fields, expected):
@@ -244,6 +242,8 @@ def test_recovery_reads_open_members_among_2000_completed(tmp_path, monkeypatch)
         return original(root, task_id)
     monkeypatch.setattr(task_store, "read_document", counted)
     monkeypatch.setattr(results, "read_document", counted)
+    batched = task_store.documents_by_ids  # the members a pass reads together (``obligations.result_rows``)
+    monkeypatch.setattr(task_store, "documents_by_ids", lambda root, ids: reads.extend(ids) or batched(root, ids))
     monkeypatch.setattr(results, "list_task_results", lambda *a, **kw: pytest.fail("history enumeration"))
     monkeypatch.setattr(status, "effective_task_result", lambda root, row, **kw: row)
     monkeypatch.setattr(pipeline, "_settle_terminal_projection", lambda *a, **kw: None)
@@ -298,3 +298,67 @@ def test_an_old_body_writing_a_legacy_latch_file_is_reconciled_into_an_intent(tm
     assert store_import.run_legacy_reconcile(tmp_path)["root_report"]["status"] == "reconciled"
     assert results.load_task_result(tmp_path, "old-task", strict=True)["_schema_version"] == 1
     assert cancel_pending(tmp_path, "old-task", strict=True)
+
+
+def test_a_retired_sets_rows_and_unsent_lines_retire_once_without_delivery(tmp_path, monkeypatch):
+    """The lost-Max episode left with its producer (29.10): the first boot of this generation removes the row an
+    older body kept and stamps it, a stamped boot reads no row, the explicit rebuild repeats it, and a line that
+    producer queued stays preserved as exhausted, never delivered. Other producers are unaffected."""
+    from ouroboros import startup_migrations as m
+    from ouroboros import terminal_outbox
+    from supervisor import terminal_delivery as outbox
+
+    m.prepare_startup_state(tmp_path)
+    marks = m.watermarks(tmp_path)
+    assert marks.pop("retired_sets_generation") == m.RETIRED_SETS_GENERATION  # a fresh install stamps it at once
+    (tmp_path / "state" / "migrations.json").write_text(json.dumps(marks), encoding="utf-8")  # an older body's file
+    o.add(tmp_path, "memory_max", "episode", {"id": "e1", "notices": {"open": {"id": "memory_max:e1:open"}}})
+    o.add(tmp_path, "unknowns", "kept", {"reason": "another set"})
+    assert outbox.register_pending_delivery(tmp_path, {
+        "type": "send_message", "chat_id": 1, "task_id": "", "text": "Max lost: an older body's line.",
+        "role": "system", "system_type": "memory_max_notice", "delivery_id": "memory_max:e1:open"})
+    for did, kind in (("memory_max:legacy:open", ""), ("legacy-type-only", "memory_max_notice"),
+                      ("ordinary", "task_checkpoint"), ("low_start:task:1", "low_start_notice")):
+        assert outbox.register_pending_delivery(tmp_path, {"type": "send_message", "chat_id": 1,
+            "text": "Retained exact payload", "role": "system", "system_type": kind, "delivery_id": did})
+    before = outbox._read_registry(tmp_path)
+    assert m.prepare_startup_state(tmp_path)["retired_rows"] == 1
+    assert o.members(tmp_path, "memory_max") == {} and set(o.members(tmp_path, "unknowns")) == {"kept"}
+    assert m.watermarks(tmp_path)["retired_sets_generation"] == m.RETIRED_SETS_GENERATION
+    o.add(tmp_path, "memory_max", "episode", {"id": "e2"})  # an older body's run after the stamp
+    with monkeypatch.context() as patch:
+        patch.setattr(o, "members", lambda *_a: pytest.fail("a stamped generation reads no row"))
+        patch.setattr(terminal_outbox, "update_json_locked", lambda *_a, **_kw: pytest.fail("a stamped boot reads no outbox"))
+        assert "retired_rows" not in m.prepare_startup_state(tmp_path)
+    assert m.prepare_startup_state(tmp_path, rebuild=True)["retired_rows"] == 1  # the explicit rebuild repeats it
+    after = outbox._read_registry(tmp_path)
+    assert set(after["pending"]) == {"ordinary", "low_start:task:1"}
+    assert after["pending"] == {did: before["pending"][did] for did in after["pending"]}
+    assert set(after["exhausted"]) == {"memory_max:e1:open", "memory_max:legacy:open", "legacy-type-only"}
+    for did, row in after["exhausted"].items():
+        assert row["reason"] == "producer_retired"
+        assert {k: row[k] for k in before["pending"][did]} == before["pending"][did]
+        assert not outbox.already_delivered(tmp_path, did) and did not in after.get("receipts", {})
+
+
+def test_retired_delivery_migration_retries_failed_writes_and_preserves_actual_send_facts(tmp_path, monkeypatch):
+    from ouroboros import startup_migrations as m, terminal_outbox
+    from supervisor import terminal_delivery as outbox
+
+    m.prepare_startup_state(tmp_path)
+    m.stamp(tmp_path, retired_sets_generation=1)
+    unsent, sent = "memory_max:unsent:open", "memory_max:sent:open"
+    for did in (unsent, sent):
+        assert outbox.register_pending_delivery(tmp_path, {"type": "send_message", "delivery_id": did,
+            "chat_id": 1, "text": "Saved payload", **({"emitted": {"text": "Saved payload"}} if did == sent else {})})
+    before = outbox._registry_path(tmp_path).read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(terminal_outbox, "update_json_locked", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("busy")))
+        with pytest.raises(OSError):
+            m.retire_sets(tmp_path)
+    assert m.watermarks(tmp_path)["retired_sets_generation"] == 1
+    assert outbox._registry_path(tmp_path).read_bytes() == before
+    m.retire_sets(tmp_path)
+    state = outbox._read_registry(tmp_path)
+    assert unsent in state["exhausted"] and sent in state["pending"] and not state["delivered"]
+    assert m.watermarks(tmp_path)["retired_sets_generation"] == m.RETIRED_SETS_GENERATION

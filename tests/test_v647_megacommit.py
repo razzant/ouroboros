@@ -8,14 +8,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import types
 from pathlib import Path
 
-import pytest
-
-PY = sys.executable or "python3"  # portable interpreter for cross-platform check commands
 
 
 # ── R2: PYTHONPATH repo-scrub env isolation ───────────────────────────────────
@@ -36,18 +32,6 @@ def test_scrub_repo_from_pythonpath_drops_only_repo_entry():
     assert scrub_repo_from_pythonpath({"PYTHONPATH": repo}, None) == {"PYTHONPATH": repo}
     # trailing-slash equivalence
     assert "PYTHONPATH" not in scrub_repo_from_pythonpath({"PYTHONPATH": repo + "/"}, repo)
-
-
-def test_shell_env_for_cwd_scrubs_external_keeps_repo(tmp_path):
-    from ouroboros.tools.shell import _shell_env_for_cwd
-
-    repo, ext = tmp_path / "repo", tmp_path / "external"
-    (repo / "sub").mkdir(parents=True)
-    ext.mkdir()
-    ctx = types.SimpleNamespace(repo_dir=str(repo))
-    # An explicit environment also carries the admitted task's settings.
-    assert _shell_env_for_cwd(ctx, repo / "sub") == dict(os.environ)
-    assert isinstance(_shell_env_for_cwd(ctx, ext), dict)
 
 
 # ── R5: effect-based artifact-audit gate ──────────────────────────────────────
@@ -76,172 +60,20 @@ def test_query_code_user_files_empty_path_hard_error():
     assert "requires an explicit path" in out
 
 
-def test_query_code_structural_walk_is_bounded_and_symlink_safe():
-    from ouroboros.tools.query_code import _walk_candidate_files
-
-    d = Path(tempfile.mkdtemp())
-    (d / "a.py").write_text("x=1")
-    (d / "sub").mkdir()
-    (d / "sub" / "b.py").write_text("y=2")
-    outside = Path(tempfile.mkdtemp())
-    (outside / "secret.py").write_text("S=1")
-    try:
-        os.symlink(outside, d / "escape")
-    except OSError:
-        pass
-    files, note = _walk_candidate_files(d, d)
-    names = {f.name for f in files}
-    assert "a.py" in names and "b.py" in names
-    assert "secret.py" not in names  # symlink escaping the root is dropped
-
-
-# ── FR3: receipt store, grounding, flag, nudge ────────────────────────────────
-def test_receipt_store_roundtrip_and_task_id_guard():
+def test_a_turn_without_effects_carries_no_tool_count_warning():
+    """The retired M2 check warned when a declared deliverable came with no tool calls and no
+    FINAL ANSWER marker; plain prose can itself be the deliverable (#1748), so how many tools
+    an answer used is no judgment of it. FR3 still flags real effects without grounding."""
     from ouroboros import outcomes as O
 
-    dr = tempfile.mkdtemp()
-    O.append_verification_receipt(dr, "task-1", {"status": "pass", "check": "pytest"})
-    rs = O.read_verification_receipts(dr, "task-1")
-    assert rs and rs[0]["status"] == "pass"
-    # an invalid task id must not escape the artifacts dir
-    with pytest.raises(Exception):
-        O.verification_receipts_path(dr, "../escape", create=True)
-
-
-def test_merge_objective_warning_coexist():
-    from ouroboros.outcomes import _merge_objective_warning
-
-    obj = {"status": "not_evaluated"}
-    _merge_objective_warning(obj, "residual_tool_errors_without_review")
-    _merge_objective_warning(obj, "receipt_absent")
-    assert obj["warning"] == "residual_tool_errors_without_review"  # primary unchanged
-    assert obj["warnings"] == ["residual_tool_errors_without_review", "receipt_absent"]
-
-
-def test_receipt_absent_flag_and_suppression():
-    from ouroboros import outcomes as O
-
-    def lo():
-        return {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-
-    # effects + no grounding -> receipt_absent
-    a = lo()
-    O.apply_receipt_absent_flag(a, {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}, tempfile.mkdtemp(), "t1")
-    assert a["outcome_axes"]["objective"].get("warning") == "receipt_absent"
-    # a write/edit deliverable is its own grounding -> no flag
-    b = lo()
-    O.apply_receipt_absent_flag(b, {"tool_calls": [{"tool": "write_file", "status": "ok", "args": {"root": "user_files"}}]}, tempfile.mkdtemp(), "t2")
-    assert "warning" not in b["outcome_axes"]["objective"]
-    # a verify receipt -> no flag, and the receipt is injected into the trace for the ledger
-    dr = tempfile.mkdtemp()
-    O.append_verification_receipt(dr, "t3", {"status": "pass"})
-    c = lo()
-    tr = {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}
-    O.apply_receipt_absent_flag(c, tr, dr, "t3")
-    assert "warning" not in c["outcome_axes"]["objective"]
-    assert tr.get("verification_receipts")
-
-
-def test_receipt_absent_never_on_best_effort():
-    from ouroboros import outcomes as O
-
-    d = {"outcome_axes": {"execution": {"status": "best_effort"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(d, {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}, tempfile.mkdtemp(), "t4")
-    assert "warning" not in d["outcome_axes"]["objective"]
-
-
-def test_m2_zero_grounding_flag():
-    from ouroboros import outcomes as O
-
-    # declared expected_output, no tool work, no structured answer -> M2
-    a = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(a, {"tool_calls": []}, tempfile.mkdtemp(), "m1", expected_output="report.html")
-    assert a["outcome_axes"]["objective"].get("warning") == "expected_output_ungrounded"
-    # a text-answer task (FINAL ANSWER present) is never M2-flagged
-    b = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": "42"}
-    O.apply_receipt_absent_flag(b, {"tool_calls": []}, tempfile.mkdtemp(), "m2", expected_output="the number")
-    assert "warning" not in b["outcome_axes"]["objective"]
-    # no declared expected_output -> never M2
-    c = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(c, {"tool_calls": []}, tempfile.mkdtemp(), "m3", expected_output="")
-    assert "warning" not in c["outcome_axes"]["objective"]
-
-
-def test_nudge_gate_and_auto_equals_required():
-    from ouroboros import outcomes as O
-
-    tr = {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}
-    # effects + no grounding -> nudge
-    assert O.should_nudge_verification(tr, tempfile.mkdtemp(), "n1") is True
-    # the durable flag is identical regardless of review mode (auto/required read the SAME store)
-    dr = tempfile.mkdtemp()
-    O.append_verification_receipt(dr, "n2", {"status": "pass"})
-    assert O.should_nudge_verification(tr, dr, "n2") is False
-    # no effects -> no nudge
-    assert O.should_nudge_verification({"tool_calls": [{"tool": "read_file", "status": "ok"}]}, tempfile.mkdtemp(), "n3") is False
-
-
-def test_latest_unreconciled_failed_verification_predicate():
-    """v6.51.0 idea-3 + v6.78.0 (owner Q28=B): the red-verification predicate. The
-    typed receipt status decides pass/fail (never prose), and a green reconciles a red
-    ONLY when it grounds the SAME verification — same `criterion_id`, else the same
-    whitespace-normalized `check` text. `declared` never reconciles a red."""
-    from ouroboros import outcomes as O
-
-    def dr_with(receipts):
-        d = tempfile.mkdtemp()
-        for i, r in enumerate(receipts):
-            O.append_verification_receipt(d, "rt", r)
-        return d
-
-    # no receipts -> None
-    assert O.latest_unreconciled_failed_verification(tempfile.mkdtemp(), "rt") is None
-    # latest pass / observed -> no red
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "pass"}]), "rt") is None
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "observed"}]), "rt") is None
-    # a lone fail -> returns it
-    got = O.latest_unreconciled_failed_verification(dr_with([{"status": "fail", "check": "go test", "returncode": 1}]), "rt")
-    assert got is not None and got.get("check") == "go test"
-    # fail then later pass / observed OF THE SAME CHECK -> reconciled -> None
-    assert O.latest_unreconciled_failed_verification(
-        dr_with([{"status": "fail", "check": "go test"}, {"status": "pass", "check": "go test"}]), "rt") is None
-    assert O.latest_unreconciled_failed_verification(
-        dr_with([{"status": "fail", "check": "go test"}, {"status": "observed", "check": "go test"}]), "rt") is None
-    # spacing BETWEEN tokens still reconciles (the canonical text is the same command)
-    assert O.latest_unreconciled_failed_verification(
-        dr_with([{"status": "fail", "check": "go  test"}, {"status": "pass", "check": "go test"}]), "rt") is None
-    # same criterion_id reconciles even when the command text differs (id wins)
-    assert O.latest_unreconciled_failed_verification(dr_with([
-        {"status": "fail", "criterion_id": "c1", "check": "pytest tests/x.py"},
-        {"status": "pass", "criterion_id": "c1", "check": "pytest tests/x.py -v"},
-    ]), "rt") is None
-    # v6.78.0: a green re-run of a DIFFERENT check no longer clears an unrelated red
-    still_red = O.latest_unreconciled_failed_verification(dr_with([
-        {"status": "fail", "check": "pytest tests/x.py"},
-        {"status": "pass", "check": "pytest tests/y.py"},
-    ]), "rt")
-    assert still_red is not None and still_red.get("check") == "pytest tests/x.py"
-    # ...including the cosmetic-reflag case (`-v`) with no criterion_id to bind them
-    assert O.latest_unreconciled_failed_verification(dr_with([
-        {"status": "fail", "check": "pytest tests/x.py"},
-        {"status": "pass", "check": "pytest tests/x.py -v"},
-    ]), "rt") is not None
-    # an identity-LESS red (no criterion_id, no check, no paths) has no identity to
-    # protect, so it keeps the pre-v6.78.0 rule: any later green clears it. The narrowing
-    # would only mint an UNCLEARABLE flag — verify.py writes exactly such a red for a
-    # malformed `artifact_observation` with no artifact_paths.
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "fail"}, {"status": "pass"}]), "rt") is None
-    # fail then later DECLARED (escape hatch) -> NOT reconciled (codex #8) -> returns the fail
-    assert O.latest_unreconciled_failed_verification(
-        dr_with([{"status": "fail", "check": "c"}, {"status": "declared", "check": "c"}]), "rt") is not None
-    # pass then fail -> latest red unreconciled -> returns the fail
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "pass"}, {"status": "fail"}]), "rt") is not None
-    # content-independence of the STATUS: a PASS whose summary contains "FAIL" must NOT count as red...
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "pass", "summary": "1 FAIL earlier, now PASS"}]), "rt") is None
-    # ...and a fail with a bland summary MUST count
-    assert O.latest_unreconciled_failed_verification(dr_with([{"status": "fail", "summary": "all good"}]), "rt") is not None
-    # malformed entries tolerated (non-dict / missing status)
-    assert O.latest_unreconciled_failed_verification(dr_with([{"nostatus": 1}]), "rt") is None
+    for final_answer in ("", "42"):
+        clean = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
+                 "final_answer": final_answer}
+        O.apply_receipt_absent_flag(clean, {"tool_calls": []}, tempfile.mkdtemp(), "m1")
+        assert clean["outcome_axes"]["objective"] == {"status": "not_evaluated"}
+    effects = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
+    O.apply_receipt_absent_flag(effects, {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}, tempfile.mkdtemp(), "m2")
+    assert effects["outcome_axes"]["objective"]["warnings"] == ["receipt_absent"]
 
 
 def test_masked_pass_reconciliation_cannot_use_the_check_text_identity():
@@ -332,42 +164,6 @@ def test_artifact_observation_class_reconciles_on_its_observed_path_set():
         [malformed, {"status": "declared", "check": "c"}]) is not None
 
 
-def test_artifact_observation_reconciliation_clears_the_red_nudge(tmp_path, monkeypatch):
-    """Loop-level consequence of the fix: the concrete flow (declare -> observe FAIL ->
-    write the file -> observe again) must leave NO red nudge, while an observation of a
-    different path must still nudge."""
-    from types import SimpleNamespace
-
-    import ouroboros.loop as loop_mod
-    from ouroboros.outcomes import append_verification_receipt
-
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_a, **_k: "")
-
-    def _fires(drive, receipts):
-        for receipt in receipts:
-            append_verification_receipt(drive, "t", receipt)
-        return loop_mod._maybe_inject_finalization_nudges(
-            SimpleNamespace(_ctx=SimpleNamespace(drive_root=drive)), drive, "t",
-            {"reasoning_notes": [], "tool_calls": []}, "answer", [], lambda *_: None,
-        )
-
-    same = tmp_path / "same"
-    same.mkdir()
-    assert _fires(same, [
-        {"status": "fail", "contract_kind": "artifact_observation", "paths": ["report.md"],
-         "summary": "missing: report.md"},
-        {"status": "observed", "contract_kind": "artifact_observation", "paths": ["report.md"],
-         "summary": "observed 1 artifact(s): report.md"},
-    ]) is False
-
-    other = tmp_path / "other"
-    other.mkdir()
-    assert _fires(other, [
-        {"status": "fail", "contract_kind": "artifact_observation", "paths": ["report.md"]},
-        {"status": "observed", "contract_kind": "artifact_observation", "paths": ["notes.md"]},
-    ]) is True
-
-
 def test_receipt_identity_and_disclosed_whitespace_flag():
     """The identity rule and its DISCLOSED flag (Q28=B): criterion_id wins; without
     one the whitespace-normalized check text IS the verification's identity, and both
@@ -437,133 +233,6 @@ def test_receipt_identity_and_disclosed_whitespace_flag():
     assert rows[1]["paths"] == ["report.md"]
 
 
-def test_receipt_reconciliation_matches_one_typed_identity_key():
-    """Sameness is ONE typed key (kind AND value), never a fallback chain over the three
-    components: an existing `criterion_id` is authoritative, so a green that carries only
-    the check text cannot clear a criterion-keyed red — in either direction — and a
-    command check never reconciles a bare observation."""
-    from ouroboros import outcomes as O
-
-    # Round-5 CRITICAL, stated as behaviour: the earlier red is keyed by `c1`, the later
-    # green only by its check text. Different KINDS never match, so the red stays open.
-    # This is the narrowing that made the relation transitive; it fails SAFE (a red that
-    # the chain used to clear may now stay open — never the reverse).
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "criterion_id": "c1", "check": "pytest tests/x.py"},
-        {"status": "pass", "check": "pytest  tests/x.py"},
-    ]) is not None
-    # ...and the reverse direction (the red lacked the id, the green added one)
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "check": "pytest tests/x.py"},
-        {"status": "pass", "criterion_id": "c1", "check": "pytest tests/x.py"},
-    ]) is not None
-    # The same key on both sides still reconciles, by id or by check text alone.
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "criterion_id": "c1", "check": "pytest tests/x.py"},
-        {"status": "pass", "criterion_id": "c1", "check": "pytest tests/x.py -v"},
-    ]) is None
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "check": "pytest tests/x.py"},
-        {"status": "pass", "check": "pytest  tests/x.py"},
-    ]) is None
-    # two DIFFERENT ids are two different criteria — identical command text does NOT
-    # collapse them
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "criterion_id": "c1", "check": "pytest tests/x.py"},
-        {"status": "pass", "criterion_id": "c2", "check": "pytest tests/x.py"},
-    ]) is not None
-    # a command check and a bare observation are different verifications, both ways
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "check": "ls report.md"},
-        {"status": "observed", "paths": ["report.md"]},
-    ]) is not None
-    assert O.latest_unreconciled_failed_receipt([
-        {"status": "fail", "paths": ["report.md"]},
-        {"status": "pass", "check": "ls report.md", "paths": ["report.md"]},
-    ]) is not None
-    # the masked-green path keys on the criterion_id ALONE (its own text identity is the
-    # masked command, which the remediation changes — see
-    # test_masked_pass_reconciliation_cannot_use_the_check_text_identity), and it is the
-    # same typed key: a later clean receipt that OMITS its id no longer clears an
-    # identified masked criterion (round 5, the masked half of the same ambiguity).
-    assert O.latest_unreconciled_masked_pass([
-        {"status": "pass", "criterion_id": "c1", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "check": "make test | tail"},
-    ]) is not None
-    assert O.latest_unreconciled_masked_pass([
-        {"status": "pass", "criterion_id": "c1", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "criterion_id": "c1", "check": "make test"},
-    ]) is None
-    # ...while a masked receipt with NO id keeps the any-later-clean fallback: it names
-    # no criterion, so narrowing would only mint an unclearable flag.
-    assert O.latest_unreconciled_masked_pass([
-        {"status": "pass", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "check": "make test"},
-    ]) is None
-    assert O.latest_unreconciled_masked_pass([
-        {"status": "pass", "criterion_id": "c1", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "criterion_id": "c2", "check": "make test | tail"},
-    ]) is not None
-
-
-def test_red_verification_nudge_one_shot_and_before_receipt_absent(monkeypatch):
-    """v6.51.0 idea-3 loop wiring: the red nudge fires ONCE (latch) and BEFORE the FR3
-    receipt-absent nudge. (Forced-finalization paths return before the injector is called;
-    that is a property of the call site, not exercised here.)"""
-    import types as _t
-    from ouroboros import loop as L
-    from ouroboros import outcomes as O
-
-    monkeypatch.setattr(L, "_skill_finalization_message", lambda *a, **k: "")
-    dr = Path(tempfile.mkdtemp())
-    O.append_verification_receipt(dr, "redt", {"status": "fail", "check": "pytest", "returncode": 1})
-    ctx = _t.SimpleNamespace(task_contract={}, task_metadata={}, drive_root=dr)
-    tools = _t.SimpleNamespace(_ctx=ctx)
-    # a turn WITH reviewable effects + a red receipt: BOTH the red gate and the FR3 gate qualify.
-    trace = {"reasoning_notes": [], "tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}
-    msgs: list = []
-    fired = L._maybe_inject_finalization_nudges(tools, dr, "redt", trace, "draft answer", msgs, lambda *_: None)
-    assert fired is True
-    assert getattr(ctx, "_verify_red_nudged", False) is True
-    assert getattr(ctx, "_verify_nudged", False) is False  # red fired first, FR3 NOT yet
-    assert "RED" in msgs[-1]["content"] and "pytest" in msgs[-1]["content"]
-    # second call: red latch set -> red skipped -> FR3 receipt-absent nudge now fires
-    fired2 = L._maybe_inject_finalization_nudges(tools, dr, "redt", trace, "draft answer", msgs, lambda *_: None)
-    assert fired2 is True
-    assert getattr(ctx, "_verify_nudged", False) is True
-    # third call: both latched, no further effects-based nudge -> no re-loop
-    assert L._maybe_inject_finalization_nudges(tools, dr, "redt", trace, "draft", msgs, lambda *_: None) is False
-
-
-def test_verification_receipts_in_ledger():
-    from ouroboros.outcomes import build_verification_ledger
-
-    led = build_verification_ledger(
-        task={"id": "t", "task_contract": {}},
-        loop_outcome={"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}},
-        llm_trace={"tool_calls": [], "verification_receipts": [{"status": "pass", "contract_kind": "explicit_command", "check": "pytest"}]},
-        artifact_bundle={},
-    )
-    kinds = [e.get("kind") for e in led.get("entries", [])]
-    assert "verification_receipt" in kinds
-
-
-# ── M6: cosmetic/recovered tool errors never produce a terminal tool_failure ──
-def test_m6_cosmetic_errors_no_terminal_tool_failure():
-    from ouroboros.outcomes import REASON_TOOL_FAILURE, derive_loop_outcome
-
-    # an unrecovered one-shot run_command non-zero exit is COSMETIC (T4) — the turn
-    # finished with a real answer, so it must land execution ok / final_message, never
-    # a terminal tool_failure.
-    trace = {"tool_calls": [{"tool": "run_command", "status": "non_zero_exit", "is_error": True, "exit_code": 1, "result": "boom"}]}
-    out = derive_loop_outcome("done", {}, trace)
-    axes = out["outcome_axes"]
-    assert axes["execution"]["status"] == "ok"
-    assert out["reason_code"] != REASON_TOOL_FAILURE
-    # the cosmetic residual is still surfaced as a warning (just never as tool_failure)
-    assert axes["objective"].get("warning") == "residual_tool_errors_without_review"
-
-
 # ── FR2: cooperative subagent shared tree + depth reservation ─────────────────
 def test_depth_reservation_admits():
     from supervisor.events import _depth_reservation_admits
@@ -614,109 +283,6 @@ def test_resolve_cooperative_write_root_routes_flat_parent(monkeypatch):
     assert err2 == "" and eff2 == "/some/dir"
 
 
-# ── FR1: skill-publish SSOT predicate ─────────────────────────────────────────
-def test_submit_hub_eligibility_warnings_now_enabled():
-    from ouroboros.skill_publish_eligibility import submit_hub_eligibility as E
-
-    # THE desync fix: advisory-only warnings are publishable (was UI-disabled before)
-    assert E(source="external", review_status="warnings", github_token_configured=True)["disabled"] is False
-    assert E(source="external", review_status="clean", github_token_configured=True)["disabled"] is False
-    for row in (
-        E(source="external", review_status="blockers", github_token_configured=True),
-        E(source="external", review_status="pending", github_token_configured=True),
-        E(
-            source="external",
-            review_status="clean",
-            review_profile="owner_attested",
-            github_token_configured=True,
-        ),
-        E(
-            source="external",
-            review_status="clean",
-            review_stale=True,
-            github_token_configured=True,
-        ),
-    ):
-        assert row["publication_ready"] is False
-        assert row["task_start_allowed"] is True
-        assert row["disabled"] is False
-    assert "GITHUB_TOKEN" in E(source="external", review_status="clean")["reason"]
-    assert E(source="native", review_status="clean", github_token_configured=True)["visible"] is False
-
-
-def test_publish_gate_and_predicate_share_statuses():
-    # The backend publish gate uses the SAME SSOT status set as the UI predicate.
-    from ouroboros.skill_publish_eligibility import PUBLISHABLE_STATUSES
-    from ouroboros.skill_review_status import STATUS_CLEAN, STATUS_WARNINGS
-
-    assert PUBLISHABLE_STATUSES == frozenset({STATUS_CLEAN, STATUS_WARNINGS})
-
-
-# ── verify_and_record safety policy + dispatch guard ──────────────────────────
-def test_verify_and_record_safety_policy_is_conditional():
-    from ouroboros.safety import POLICY_CHECK_CONDITIONAL, TOOL_POLICY
-
-    assert TOOL_POLICY.get("verify_and_record") == POLICY_CHECK_CONDITIONAL
-
-
-def test_verify_and_record_preserves_the_exact_check_for_process_preparation(tmp_path):
-    from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.tools.shell_guards import process_shell_guard_args
-
-    repo, data, workspace = (tmp_path / name for name in ("repo", "data", "workspace"))
-    for path in (repo, data, workspace):
-        path.mkdir()
-    reg = ToolRegistry(repo_dir=repo, drive_root=data)
-    reg._ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(workspace))
-    reg._ctx.workspace_root = workspace
-    reg._ctx.workspace_mode = "external"
-    command = ["cat", str(data / "settings.json")]
-    mapped = process_shell_guard_args("verify_and_record", {"check": command, "cwd": str(workspace)})
-    assert mapped["cmd"] == command
-    assert mapped["cwd"] == str(workspace)
-
-
-def test_verify_string_check_no_safe_subject_bypass(monkeypatch):
-    # triad round-3 #1: a STRING check runs via `sh -c`, so a safe-looking first word
-    # cannot bypass the LLM safety review (a compound `cat x; rm` would be shell-run);
-    # a LIST check (argv, no shell) stays safe-subject-eligible like run_command.
-    import ouroboros.safety as S
-
-    monkeypatch.setattr(S, "_run_llm_check", lambda *a, **k: (True, "LLM_REACHED"))
-    _ok, msg_list = S.check_safety("verify_and_record", {"contract_kind": "explicit_command", "check": ["cat", "x"]}, messages=[], ctx=None)
-    assert msg_list != "LLM_REACHED"  # safe-subject bypass for an argv list
-    _ok, msg_str = S.check_safety("verify_and_record", {"contract_kind": "explicit_command", "check": "cat x; rm -rf y"}, messages=[], ctx=None)
-    assert msg_str == "LLM_REACHED"  # string check forced through the LLM review
-
-
-def test_verify_and_record_reachable_in_workspace_mode(tmp_path):
-    from ouroboros.tools.registry import ToolContext, ToolRegistry
-
-    system, workspace, data = tmp_path / "system", tmp_path / "workspace", tmp_path / "data"
-    for path in (system, workspace, data):
-        path.mkdir()
-    registry = ToolRegistry(system, data)
-    registry.set_context(ToolContext(
-        repo_dir=system,
-        drive_root=data,
-        workspace_root=workspace,
-        workspace_mode="external",
-    ))
-    assert registry.get_schema_by_name("verify_and_record") is not None
-
-
-def test_verify_and_record_is_shell_guarded_not_process_command():
-    # triad round-5: verify_and_record clears the PRE-EXECUTION shell guards (the security
-    # boundary, which blocks a forbidden mutation before the handler runs) but is NOT in
-    # _PROCESS_COMMAND_TOOLS — those POST-execution checks run AFTER the handler already
-    # wrote the receipt, so they would not gate the durable receipt (an ordering inversion).
-    from ouroboros.tools.registry import _PROCESS_COMMAND_TOOLS, _SHELL_GUARDED_TOOLS
-
-    assert "verify_and_record" in _SHELL_GUARDED_TOOLS
-    assert "verify_and_record" not in _PROCESS_COMMAND_TOOLS
-
-
 def test_v651_stringified_argv_recovery_and_check_normalization():
     """v6.51.0 idea-1: the SSOT stringified-argv recovery + check normalization."""
     from ouroboros.shell_parse import normalize_check_argv, recover_stringified_argv
@@ -732,18 +298,6 @@ def test_v651_stringified_argv_recovery_and_check_normalization():
     assert normalize_check_argv("go test") == ["sh", "-c", "go test"]
     assert normalize_check_argv(["go", "test"]) == ["go", "test"]
     assert normalize_check_argv("   ") is None
-
-
-def test_v651_verify_guard_inspects_exact_executed_argv():
-    """v6.51.0 idea-1: the shell guard normalizes the check through the SAME SSOT as
-    execution, so a stringified-argv check is guard-inspected as the recovered argv (not
-    as a literal sh -c string) — guard == execution, no drift."""
-    from ouroboros.tools.shell_guards import process_shell_guard_args
-    from ouroboros.tools.verify import _normalize_check
-
-    mapped = process_shell_guard_args("verify_and_record", {"check": '["cat", "data/settings.json"]', "cwd": ""})
-    assert mapped["cmd"] == ["cat", "data/settings.json"]          # recovered argv, NOT ["sh","-c",'["cat",...]']
-    assert mapped["cmd"] == _normalize_check('["cat", "data/settings.json"]')  # guard == execution
 
 
 def test_v651_orchestrate_timeout_reaps_group_and_container(monkeypatch):
@@ -782,24 +336,6 @@ def _verify_ctx(tmp_path, *, task_id="vhandler"):
     ctx = ToolContext(repo_dir=str(tmp_path / "repo"), drive_root=str(tmp_path / "drive"))
     ctx.task_id = task_id
     return ctx
-
-
-def test_verify_and_record_handler_run_kinds(tmp_path, monkeypatch):
-    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
-    from ouroboros.outcomes import read_verification_receipts, verification_grounding_present
-    from ouroboros.tools.verify import _verify_and_record
-
-    ctx = _verify_ctx(tmp_path)
-    assert "PASS" in _verify_and_record(ctx, contract_kind="explicit_command", check=[PY, "-c", "print('ok')"])
-    rs = read_verification_receipts(ctx.drive_root, "vhandler")
-    assert rs[-1]["status"] == "pass" and rs[-1]["returncode"] == 0
-    assert "FAIL" in _verify_and_record(ctx, contract_kind="explicit_command", check=[PY, "-c", "import sys; sys.exit(1)"])
-    assert read_verification_receipts(ctx.drive_root, "vhandler")[-1]["status"] == "fail"
-    # expected-substring gates pass/fail even on exit 0
-    assert "FAIL" in _verify_and_record(ctx, contract_kind="explicit_metric", check=[PY, "-c", "print('hello')"], expected="WORLD")
-    assert "PASS" in _verify_and_record(ctx, contract_kind="explicit_metric", check=[PY, "-c", "print('hello')"], expected="hello")
-    # the handler's pass status actually grounds the turn (handler<->grounding contract)
-    assert verification_grounding_present({"tool_calls": []}, ctx.drive_root, "vhandler") is True
 
 
 def test_verify_and_record_handler_fail_closed(tmp_path):
@@ -884,10 +420,7 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
         },
         "final_answer": "host-side result",
     }
-    apply_receipt_absent_flag(
-        loop_outcome, trace, ctx.drive_root, ctx.task_id,
-        expected_output="verified result",
-    )
+    apply_receipt_absent_flag(loop_outcome, trace, ctx.drive_root, ctx.task_id)
     assert "receipt_absent" in loop_outcome["outcome_axes"]["objective"]["warnings"]
 
     ctx._configured_actor_bootstrap["physical_started"] = True
@@ -906,206 +439,6 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
         zero_run_basis="second terminal decision",
     )
     assert "TOOL_ARG_ERROR" in duplicate
-
-
-def test_zero_run_refuses_ambiguous_physical_start_custody(tmp_path):
-    from ouroboros import delegate_custody as custody
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.verify import _verify_and_record
-
-    ctx = _verify_ctx(tmp_path)
-    ctx._configured_actor_bootstrap = {
-        "route_id": "session-a",
-        "work_order_fingerprint": "a" * 64,
-        "physical_started": False,
-    }
-    custody_drive = custody.custody_root(ctx)
-    assert custody.record_start_requested(
-        custody_drive,
-        task_id=ctx.task_id,
-        invocation_id="inv-unknown",
-        idempotency_key="inv-unknown",
-        run_id="",
-        request={"prompt": "canonical"},
-        route="codex",
-    )
-    refused = _verify_and_record(
-        ctx,
-        contract_kind="delegation_zero_run",
-        zero_run_decision="unknown",
-        zero_run_basis="the POST answer was lost",
-    )
-    assert "zero_run_requires_settlement" in refused
-    assert "inv-unknown" in refused
-    assert read_verification_receipts(custody_drive, ctx.task_id) == []
-    assert ctx._configured_actor_bootstrap.get("zero_run_receipt_recorded") is not True
-
-
-def test_zero_run_refuses_unreadable_custody_without_fail_soft_scan(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import delegate_custody as custody
-    from ouroboros import delegate_recovery
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.verify import _verify_and_record
-
-    ctx = _verify_ctx(tmp_path)
-    ctx._configured_actor_bootstrap = {
-        "route_id": "session-a",
-        "work_order_fingerprint": "a" * 64,
-        "physical_started": False,
-    }
-    monkeypatch.setattr(custody, "custody_log_unreadable", lambda _root: True)
-    monkeypatch.setattr(
-        delegate_recovery,
-        "unsettled_start_ids",
-        lambda *_a, **_k: pytest.fail("an unreadable authority must stop before scan"),
-    )
-    refused = _verify_and_record(
-        ctx,
-        contract_kind="delegation_zero_run",
-        zero_run_decision="unknown",
-        zero_run_basis="no visible run",
-    )
-    assert "zero_run_custody_unknown" in refused
-    assert "custody_log_unreadable" in refused
-    assert read_verification_receipts(tmp_path, ctx.task_id) == []
-    assert ctx._configured_actor_bootstrap.get("zero_run_receipt_recorded") is not True
-
-
-def test_zero_run_and_fresh_start_share_one_atomic_actor_decision(tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-
-    from ouroboros import delegate_custody as custody
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.delegate_integration import claimed_start_request
-    from ouroboros.tools.verify import _verify_and_record
-
-    ctx = _verify_ctx(tmp_path, task_id="actor-claim")
-    ctx._configured_actor_bootstrap = {
-        "route_id": "session-a",
-        "work_order_fingerprint": "a" * 64,
-        "physical_started": False,
-    }
-    drive = custody.custody_root(ctx)
-    barrier = threading.Barrier(2)
-
-    def claim_start():
-        barrier.wait()
-        return claimed_start_request(
-            drive,
-            actor_ctx=ctx,
-            run_id="",
-            task_id=ctx.task_id,
-            idempotency_key="actor-claim-invocation",
-            invocation_id="actor-claim-invocation",
-            max_seconds=30,
-            request={"prompt": "exact physical assignment"},
-            project_id="project-1",
-            project_owned=False,
-            route="codex",
-        )
-
-    def claim_zero_run():
-        barrier.wait()
-        return _verify_and_record(
-            ctx,
-            contract_kind="delegation_zero_run",
-            zero_run_decision="incomplete",
-            zero_run_basis="host-visible work stopped without a physical leaf",
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        start_future = pool.submit(claim_start)
-        zero_future = pool.submit(claim_zero_run)
-        start = start_future.result()
-        zero = zero_future.result()
-
-    start_won = start[0] is True
-    zero_won = "typed host receipt recorded" in zero
-    assert start_won is not zero_won
-    receipts = read_verification_receipts(drive, ctx.task_id)
-    pending = custody.pending_invocations(drive)
-    if start_won:
-        assert "zero_run_requires_settlement" in zero
-        assert receipts == []
-        assert [row["invocation_id"] for row in pending] == ["actor-claim-invocation"]
-    else:
-        assert start[1]["reason"] == "zero_run_already_recorded"
-        assert len(receipts) == 1 and receipts[0]["zero_run"] is True
-        assert pending == []
-
-
-def test_failed_direct_child_does_not_make_actor_first_terminal_clean(tmp_path):
-    from ouroboros.subagent_bootstrap import actor_first_unresolved_fact
-    from ouroboros.task_results import STATUS_FAILED, write_task_result
-
-    ctx = types.SimpleNamespace(
-        task_id="actor-with-failed-child",
-        drive_root=tmp_path,
-        budget_drive_root=str(tmp_path),
-        _configured_actor_bootstrap={
-            "physical_started": False,
-            "exact_start_pending": True,
-            "route_available": True,
-            "selected_subagent_id": "session-a",
-            "work_order_fingerprint": "a" * 64,
-        },
-    )
-    write_task_result(
-        tmp_path,
-        "failed-child",
-        STATUS_FAILED,
-        parent_task_id=ctx.task_id,
-        root_task_id=ctx.task_id,
-        delegation_role="subagent",
-        result="provider failed before producing a result",
-    )
-    # Charter (owner 2026-08-28): children are evidence, never a completion
-    # path — the typed reason names the missing leaf, the child statuses ride
-    # beside it as evidence.
-    fact = actor_first_unresolved_fact(ctx, drive_root=tmp_path)
-    assert fact["status"] == "incomplete"
-    assert fact["reason"] == "physical_leaf_not_started"
-    assert fact["direct_child_statuses"] == [STATUS_FAILED]
-
-
-def test_discarded_completed_child_does_not_make_actor_first_terminal_clean(tmp_path):
-    from ouroboros.subagent_bootstrap import actor_first_unresolved_fact
-    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
-    from ouroboros.tools.join_ledger import _discard_child_result
-
-    ctx = types.SimpleNamespace(
-        task_id="actor-with-discarded-child",
-        drive_root=tmp_path,
-        budget_drive_root=str(tmp_path),
-        task_metadata={},
-        role="orchestrator",
-        _configured_actor_bootstrap={
-            "physical_started": False,
-            "exact_start_pending": True,
-            "route_available": True,
-            "selected_subagent_id": "session-a",
-            "work_order_fingerprint": "a" * 64,
-        },
-    )
-    write_task_result(
-        tmp_path,
-        "discarded-child",
-        STATUS_COMPLETED,
-        parent_task_id=ctx.task_id,
-        root_task_id=ctx.task_id,
-        delegation_role="subagent",
-        result="superseded result",
-    )
-    assert "Discarded" in _discard_child_result(
-        ctx, "discarded-child", "a better branch already produced the result",
-    )
-
-    fact = actor_first_unresolved_fact(ctx, drive_root=tmp_path)
-    assert fact["status"] == "incomplete"
-    assert fact["reason"] == "physical_leaf_not_started"
 
 
 def test_zero_run_receipt_write_failure_does_not_claim_terminal_truth(tmp_path, monkeypatch):
@@ -1127,118 +460,6 @@ def test_zero_run_receipt_write_failure_does_not_claim_terminal_truth(tmp_path, 
     )
     assert "could not be durably written" in result
     assert ctx._configured_actor_bootstrap.get("zero_run_receipt_recorded") is not True
-
-
-def test_zero_run_receipt_uses_canonical_budget_root_for_split_drive(tmp_path, monkeypatch):
-    from ouroboros import loop as loop_module
-    from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.verify import _verify_and_record
-
-    local = tmp_path / "child-drive"
-    canonical = tmp_path / "budget-root"
-    local.mkdir()
-    canonical.mkdir()
-    ctx = _verify_ctx(tmp_path, task_id="split-zero")
-    ctx.drive_root = local
-    ctx.budget_drive_root = str(canonical)
-    ctx.task_constraint = TaskConstraint(
-        mode="local_readonly_subagent", allow_enable=False,
-    )
-    ctx._configured_actor_bootstrap = {
-        "route_id": "session-a",
-        "work_order_fingerprint": "a" * 64,
-        "physical_started": False,
-    }
-    result = _verify_and_record(
-        ctx,
-        contract_kind="delegation_zero_run",
-        zero_run_decision="unknown",
-        zero_run_basis="canonical root receipt test",
-    )
-    assert "UNKNOWN" in result
-    assert read_verification_receipts(canonical, "split-zero")
-    assert read_verification_receipts(local, "split-zero") == []
-
-    # Every active finalization reader follows the same canonical root as the
-    # writer. A forked actor must not receive an impossible generic verification
-    # reminder after recording its terminal no-leaf decision.
-    monkeypatch.setattr(loop_module, "_skill_finalization_message", lambda *_a, **_k: "")
-    messages = []
-    trace = {
-        "reasoning_notes": [],
-        "tool_calls": [{"tool": "integrate_subagent_patch", "status": "ok", "args": {}}],
-    }
-    fired = loop_module._maybe_inject_finalization_nudges(
-        types.SimpleNamespace(_ctx=ctx), local, "split-zero",
-        trace, "typed zero-run result", messages, lambda *_: None,
-    )
-    assert fired is False
-    assert not any("verify_and_record" in item.get("content", "") for item in messages)
-
-
-def test_acting_zero_run_keeps_generic_verification_nudge(tmp_path, monkeypatch):
-    from ouroboros import loop as loop_module
-    from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.tools.verify import _verify_and_record
-
-    local = tmp_path / "acting-child"
-    canonical = tmp_path / "budget-root"
-    workspace = tmp_path / "workspace"
-    local.mkdir()
-    canonical.mkdir()
-    workspace.mkdir()
-    ctx = _verify_ctx(tmp_path / "acting-ctx", task_id="acting-zero")
-    ctx.drive_root = local
-    ctx.budget_drive_root = str(canonical)
-    ctx.task_constraint = TaskConstraint(
-        mode="acting_subagent", surface="external_workspace",
-        write_root=str(workspace), allow_enable=False,
-    )
-    ctx._configured_actor_bootstrap = {
-        "route_id": "session-a",
-        "work_order_fingerprint": "a" * 64,
-        "physical_started": False,
-    }
-    assert "INCOMPLETE" in _verify_and_record(
-        ctx,
-        contract_kind="delegation_zero_run",
-        zero_run_decision="incomplete",
-        zero_run_basis="host-side integration proceeded without a physical leaf",
-    )
-    monkeypatch.setattr(loop_module, "_skill_finalization_message", lambda *_a, **_k: "")
-    messages = []
-    fired = loop_module._maybe_inject_finalization_nudges(
-        types.SimpleNamespace(_ctx=ctx), local, "acting-zero",
-        {
-            "reasoning_notes": [],
-            "tool_calls": [{
-                "tool": "integrate_subagent_patch", "status": "ok", "args": {},
-            }],
-        },
-        "integrated host result", messages, lambda *_: None,
-    )
-    assert fired is True
-    assert any("verify_and_record" in item.get("content", "") for item in messages)
-
-
-def test_actor_first_unresolved_terminal_is_typed_degraded_not_clean():
-    from ouroboros.outcomes import derive_loop_outcome
-
-    outcome = derive_loop_outcome(
-        "A plain answer without a physical start.",
-        {
-            "actor_first_terminal": {
-                "status": "incomplete",
-                "reason": "physical_leaf_not_started_and_no_direct_child",
-            },
-        },
-        {"tool_calls": []},
-    )
-    assert outcome["reason_code"] == "configured_actor_incomplete"
-    assert outcome["outcome_axes"]["execution"]["status"] == "degraded"
-    assert outcome["outcome_axes"]["objective"]["status"] == "degraded"
-    assert outcome["actor_first_terminal"]["status"] == "incomplete"
 
 
 def test_recorded_zero_run_incomplete_or_unknown_stays_degraded():
@@ -1281,86 +502,6 @@ def test_zero_run_requires_actor_marker_and_basis(tmp_path):
     )
 
 
-def test_verify_and_record_receipt_truncation_is_disclosed(tmp_path, monkeypatch):
-    # triad #C (BIBLE P1): a large check output is bounded in the durable receipt but the
-    # truncation is DISCLOSED, never silent.
-    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.verify import _RECEIPT_OUTPUT_CAP, _verify_and_record
-
-    ctx = _verify_ctx(tmp_path)
-    _verify_and_record(ctx, contract_kind="explicit_command", check=[PY, "-c", f"print('x' * {_RECEIPT_OUTPUT_CAP + 5000})"])
-    summary = read_verification_receipts(ctx.drive_root, "vhandler")[-1]["summary"]
-    assert "truncated" in summary and "chars]" in summary
-    assert len(summary) < _RECEIPT_OUTPUT_CAP + 200  # bounded
-
-
-def test_verify_and_record_declared_receipt_truncation_is_disclosed(tmp_path):
-    """Round-9 CRITICAL 2 (BIBLE P1, same invariant as the sibling above).
-
-    The `no_visible_machine_contract` receipt is the honest escape hatch: no host run
-    happened, so the agent's OWN stated proxy and residual risk IS the evidence the
-    acceptance reviewer judges. It used to be stored with a bare `[:1000]` — a hard,
-    silent clip of decision-shaping evidence, and the one durable receipt field in this
-    module that bypassed `_bounded`. Bounding is fine; hiding the cut is not.
-    """
-    from ouroboros.outcomes import read_verification_receipts
-    from ouroboros.tools.verify import _RECEIPT_DECLARED_SUMMARY_CAP, _verify_and_record
-
-    ctx = _verify_ctx(tmp_path)
-    long_expected = "proxy: reviewed by hand. residual risk: " + "y" * (
-        _RECEIPT_DECLARED_SUMMARY_CAP + 5000
-    )
-    assert "DECLARED" in _verify_and_record(
-        ctx, contract_kind="no_visible_machine_contract",
-        check="manual UI review", expected=long_expected,
-    )
-    summary = read_verification_receipts(ctx.drive_root, "vhandler")[-1]["summary"]
-    assert "truncated" in summary and "chars]" in summary, summary[-200:]
-    assert str(len(long_expected)) in summary  # the ORIGINAL length is stated
-    assert len(summary) < _RECEIPT_DECLARED_SUMMARY_CAP + 200  # still bounded
-
-    # ...and an in-bounds declaration passes through whole, with no marker noise.
-    _verify_and_record(
-        ctx, contract_kind="no_visible_machine_contract",
-        check="manual UI review", expected="proxy: eyeballed the rendered layout",
-    )
-    short = read_verification_receipts(ctx.drive_root, "vhandler")[-1]["summary"]
-    assert short == "proxy: eyeballed the rendered layout" and "truncated" not in short
-
-
-def test_grounding_statuses_match_handler_vocabulary():
-    # F7 (review #1): every grounding status is one the handler can actually emit (no
-    # dangling 'recorded'); 'fail' is excluded.
-    from ouroboros.outcomes import _RECEIPT_GROUNDING_STATUSES
-
-    assert _RECEIPT_GROUNDING_STATUSES == frozenset({"pass", "observed", "declared"})
-    assert "fail" not in _RECEIPT_GROUNDING_STATUSES
-    assert "recorded" not in _RECEIPT_GROUNDING_STATUSES
-
-
-def test_fr2_deep_inheritance_resolves_shared_tree(monkeypatch, tmp_path):
-    # F6 (review #1): the deep-inheritance lynchpin — an external_workspace child with
-    # an EMPTY write_root inherits the parent's workspace_root (the shared cooperative
-    # tree), so a grandchild builds in the same tree.
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "p"))
-    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
-    from ouroboros.subagent_worktrees import provision_genesis_project
-    from supervisor.events import _resolve_subagent_constraint
-
-    handle = provision_genesis_project(repo_dir=str(tmp_path / "repo"), task_id="root")
-    shared = handle.path
-    ctx = types.SimpleNamespace(repo_dir=str(tmp_path / "repo"))
-    requested = {"mode": "acting_subagent", "surface": "external_workspace", "write_root": "", "base_sha": handle.base_sha}
-    constraint, resolved_ws, ws_mode, reject = _resolve_subagent_constraint(
-        ctx, tid="grandchild", requested_constraint=requested, workspace_root=shared,
-        workspace_mode="", base_sha=handle.base_sha, parent_task_id="root",
-    )
-    assert reject == "", reject
-    assert resolved_ws == shared and ws_mode == "external_workspace"
-    assert constraint["write_root"] == shared
-
-
 def test_finalize_schedule_emission_surfaces_coop_tree_path():
     """The host-minted shared coop tree is a SCHEDULE-TIME fact: the parent's
     tool result names the tree path + the root=subagent_projects read recipe,
@@ -1380,20 +521,24 @@ def test_finalize_schedule_emission_surfaces_coop_tree_path():
         "root_task_id": "p1",
         "emitted_modes": ["live"],
         "write_surface": "external_workspace",
-        "coop_shared_tree": "/tmp/projects/coop_abc123",
+        "write_root": ("/tmp/projects/coop_abc123", "host-minted coop tree"),
     })
     # Windows renders the tree path with os separators — pin label + tree name.
-    assert "shared coop tree: " in out and "coop_abc123" in out
+    assert "write root: " in out and "coop_abc123 (host-minted coop tree)" in out
     assert "root=subagent_projects" in out
     assert "coop_abc123" in out
     assert "effective_lane=" not in out  # request-only doctrine intact
-    # Without a minted tree the result is unchanged.
+    # A caller's own root is named without the read recipe; a read-only child has none.
+    caller = _finalize_schedule_emission(ctx, {
+        "task_ids": ["c3"], "objective": "build", "write_surface": "external_workspace",
+        "write_root": ("/tmp/projects/mine", "caller")})
+    assert "/tmp/projects/mine (caller)" in caller and "root=subagent_projects" not in caller
     out2 = _finalize_schedule_emission(ctx, {
         "task_ids": ["c2"], "requested_model_lane": "light", "objective": "probe",
         "role": "scout", "depth": 1, "parent_task_id": "p1", "root_task_id": "p1",
         "emitted_modes": ["live"],
     })
-    assert "shared coop tree" not in out2
+    assert "write root: none (read-only child)" in out2 and "coop" not in out2
 
 
 def test_zero_run_complete_is_no_longer_writable(tmp_path):

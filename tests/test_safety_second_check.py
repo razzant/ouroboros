@@ -40,7 +40,7 @@ def test_second_verdict_final_for_write(supervisor, second, allowed):
     call = h.calls[1]
     assert call["light_model"] == "claudexor::source=model"
     assert call["model_role"] == "subagent:second" and call["account"] == "account"
-    assert call["effort"] == "high" and call["attempts_limit"] == 1
+    assert call["effort"] == "high" and call["attempts_limit"] == 1 and call["latch"] is False  # outside the first's latch
     assert call["system_prompt"] == h.calls[0]["system_prompt"]
     assert h.calls[0]["user_prompt"] in call["user_prompt"]
     assert "overturning it needs a reason" in call["user_prompt"]
@@ -59,6 +59,17 @@ def test_speech_returns_both_reasons_even_when_second_overturns(supervisor):
     assert not ok and "first reason" in msg and "delegated" in msg
     assert h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]
     assert len(h.calls) == 2
+
+
+@pytest.mark.parametrize("second,allowed", [("SAFE", True), ("DANGEROUS", False)])
+def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
+    h = supervisor
+    h.values["OUROBOROS_SUBAGENTS"] = catalog()
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first reason"},
+                      json.dumps({"answer": json.dumps({"status": second, "reason": "second reason"})})])
+    ok, msg = h.module.check_safety("write_remote", {"x": 1}, ctx=h.ctx)
+    assert (ok, len(h.calls)) == (allowed, 2)
+    assert msg == "" if allowed else "second: DANGEROUS — second reason" in msg
 
 
 @pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline")])

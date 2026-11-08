@@ -1,32 +1,24 @@
 import { bindPageHeader, renderPageHeader } from './page_header.js';
+import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { fetchJson, jsonPost } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { downloadViaHostBridge, setInlineStatus } from './ui_helpers.js';
 import { bindMenu } from './ui_interactions.js';
+import { formatBytes } from './storage_format.js';
 
-function formatFileSize(size) {
-    const num = Number(size);
-    if (!Number.isFinite(num) || num < 0) return '';
-    if (num < 1024) return `${num} B`;
-    if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
-    return `${(num / (1024 * 1024)).toFixed(1)} MB`;
-}
+// A row is its folder or file glyph in the secondary ink (the folder is the Files page's own icon; page_icons.js
+// has no file glyph), the name, a file's size, and a folder's quiet chevron: what a row does is the row itself.
+const FILE_ICON = strokeIcon('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>');
+const entryIcon = (type) => `<span class="files-entry-icon" aria-hidden="true">${type === 'dir' ? PAGE_ICONS.files : FILE_ICON}</span>`;
+const metaLine = (...parts) => parts.filter(Boolean).join(' · ');
+const CHOOSE_A_FILE = 'Choose a file to preview it.';
 
-function iconForEntry(entry) {
-    return entry.type === 'dir' ? '▸' : '•';
-}
+// The preview's own sentences are prose in the reading face; a file's text keeps the code face (style.css).
+const previewNote = (text) => Object.assign(document.createElement('p'), { className: 'files-empty', textContent: text });
 
-function defaultDirectoryMeta() {
-    return 'Browse folders, preview/edit text files, upload, download, copy, and move files here. This is a file manager, not a chat attachment picker.';
-}
-
-function defaultDirectoryContent() {
-    return 'Open a folder or file from the left panel to browse, preview, or edit its contents.';
-}
-
-export function initFiles({ state: appState, setBeforePageLeave } = {}) {
+export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
     const page = document.createElement('div');
     page.id = 'page-files';
     page.className = 'page app-page-glass';
@@ -35,7 +27,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             page: 'files',
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
-        <div class="files-layout">
+        <div class="files-layout" data-files-view="list">
             <section class="files-sidebar">
                 <div class="files-toolbar">
                     <input id="files-search" class="ui-control" name="files-filter" type="text" aria-label="Filter current folder" placeholder="Filter current folder...">
@@ -45,25 +37,29 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                     <div class="files-browser-actions">
                         <button class="btn btn-default" id="files-paste" title="Paste copied or moved item" hidden>Paste</button>
                         <button class="btn btn-default" id="files-new-file" title="Create file">+ File</button>
-                        <button class="btn btn-default" id="files-new-dir" title="Create directory">+ Dir</button>
+                        <button class="btn btn-default" id="files-new-dir" title="Create folder">+ Folder</button>
                     </div>
                 </div>
                 <div id="files-list" class="files-list scroll-fade-y" tabindex="0" aria-label="Files in current folder"></div>
             </section>
             <section class="files-preview">
-                <div class="files-preview-header">
+                <div class="files-preview-back">
+                    <button type="button" class="btn btn-default files-back" data-files-back>Back to folder</button>
+                </div>
+                <div class="files-preview-header" hidden>
                     <div>
-                        <div id="files-preview-path" class="files-preview-path">Files</div>
-                        <div id="files-preview-meta" class="files-preview-meta">${defaultDirectoryMeta()}</div>
+                        <div id="files-preview-path" class="files-preview-path"></div>
+                        <div id="files-preview-meta" class="files-preview-meta"></div>
                     </div>
                     <div class="files-preview-actions">
                         <button class="btn btn-default" id="files-download" hidden>Download</button>
                         <button class="btn btn-default" id="files-open-external" hidden>Open externally</button>
+                        <button class="btn btn-ghost" id="files-discard" hidden>Discard</button>
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
                 <div id="files-preview-status" class="ui-status files-preview-status" role="status" aria-live="polite" hidden></div>
-                <div id="files-preview-content" class="files-preview-content scroll-fade-y">${defaultDirectoryContent()}</div>
+                <div id="files-preview-content" class="files-preview-content scroll-fade-y"><p class="files-empty">${CHOOSE_A_FILE}</p></div>
             </section>
             <div class="files-drop-overlay" aria-hidden="true">
                 <div class="files-drop-card">Drop files to upload into the current folder</div>
@@ -72,7 +68,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 <button type="button" role="menuitem" class="files-context-item" data-action="download">Download</button>
                 <button type="button" role="menuitem" class="files-context-item" data-action="copy">Copy</button>
                 <button type="button" role="menuitem" class="files-context-item" data-action="move">Move</button>
-                <button type="button" role="menuitem" class="files-context-item" data-action="paste">Paste Here</button>
+                <button type="button" role="menuitem" class="files-context-item" data-action="paste">Paste here</button>
                 <button type="button" role="menuitem" class="files-context-item files-context-item-danger" data-action="delete">Delete</button>
             </div>
         </div>
@@ -82,6 +78,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const layoutEl = page.querySelector('.files-layout');
     const listEl = page.querySelector('#files-list');
     const breadcrumbEl = page.querySelector('#files-breadcrumb');
+    const previewHeaderEl = page.querySelector('.files-preview-header');
     const previewPathEl = page.querySelector('#files-preview-path');
     const previewMetaEl = page.querySelector('#files-preview-meta');
     const previewContentEl = page.querySelector('#files-preview-content');
@@ -90,6 +87,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     let contextMenuBinding = null;
     let contextAnchor = null;
     const saveBtn = page.querySelector('#files-save');
+    const discardBtn = page.querySelector('#files-discard');
     const downloadBtn = page.querySelector('#files-download');
     const openExternalBtn = page.querySelector('#files-open-external');
     const pasteBtn = page.querySelector('#files-paste');
@@ -97,6 +95,10 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const newDirBtn = page.querySelector('#files-new-dir');
     const searchEl = page.querySelector('#files-search');
     const refreshBtn = page.querySelector('#files-refresh');
+    const sidebarEl = page.querySelector('.files-sidebar');
+    const previewEl = page.querySelector('.files-preview');
+    const backBtn = page.querySelector('[data-files-back]');
+    backBtn.insertAdjacentHTML('afterbegin', `<span aria-hidden="true">${SHELL_ICONS.back}</span>`);
     // On a desk the folder's location starts the bar and its own actions join Refresh at the end; in the stack
     // layout they stay over the list they act on (docs/DESIGN.md "Page header"). In the bar a long location scrolls
     // inside it: it rests at its end, the folder you are in, after each path and whenever the bar gives it another
@@ -146,6 +148,59 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     let viewRequest = 0;
     let draftRevision = 0;
 
+    // A page too narrow for both (style.css, the `files` container) shows the folder's list first and the chosen file
+    // once one is chosen, never both: `data-files-view` says which. Back to folder returns to the list and keeps an
+    // unsaved draft, which the file's row (or a new file's own row) reopens and which leaving the file still asks
+    // about. Side by side the view changes nothing on screen; focus moves there only off a control a resize hid.
+    // The file shown alone is one layer of the shell's stack (layers.js, DESIGN "Layers and dismissal"), so Escape,
+    // the system Back and Telegram's Back close it exactly as Back to folder does; beside the list it is no layer.
+    const FILE_LAYER = 'files-file';
+    let listScroll = 0;
+    let unsavedMark = '';
+    const panesShown = () => [sidebarEl, previewEl].filter((pane) => pane.getClientRects().length > 0).length;
+    const singlePane = () => panesShown() === 1;
+    const unsavedPath = () => (state.editorDirty && !state.editorIsNew ? state.editorPath : '');
+
+    // On the list alone, the folder's status (a failed read, a copy waiting for Paste, an upload) stands over the list
+    // it is about; beside the file it stays under the file's header.
+    function placeStatus() {
+        const home = singlePane() && layoutEl.dataset.filesView !== 'file' ? listEl : previewContentEl;
+        if (previewStatusEl.nextElementSibling !== home) home.before(previewStatusEl);
+    }
+
+    // What the person last focused inside Files: by the time a resize is observed an engine may already have moved
+    // focus from a control the new layout hid to the page's body.
+    let lastFocus = null;
+    layoutEl.addEventListener('focusin', (event) => { lastFocus = event.target; });
+
+    function showPane(view, focusTarget = null) {
+        const focused = document.activeElement;
+        const active = focused === document.body && lastFocus?.isConnected ? lastFocus : focused;
+        const changed = layoutEl.dataset.filesView !== view;
+        layoutEl.dataset.filesView = view;
+        placeStatus();
+        const single = singlePane();
+        syncLayer(single && view === 'file');
+        if (single && changed && view === 'list') listEl.scrollTop = listScroll;
+        // Focus never stays on what just left the screen (the pane put away, or Back once both panes fit): it goes
+        // to Back on a file shown alone, otherwise to the file's row.
+        const lost = layoutEl.contains(active) && !active.getClientRects().length;
+        if (!(single && focusTarget) && !lost) return;
+        const row = [...listEl.querySelectorAll('.files-entry.selected')].find((node) => node.getClientRects().length);
+        const target = (single && focusTarget) || (single && view === 'file' ? backBtn : row || listEl);
+        target.focus({ preventScroll: true });
+    }
+
+    // The row of the file whose edits are not saved says so while only the list is in sight (style.css).
+    function markUnsaved() {
+        const path = unsavedPath();
+        if (path === unsavedMark) return;
+        unsavedMark = path;
+        listEl.querySelectorAll('.files-entry[data-path]').forEach((row) => {
+            row.toggleAttribute('data-unsaved', Boolean(path) && row.dataset.path === path);
+        });
+    }
+
     function updateEditorActions() {
         const visible = state.editorWritable && state.selectedType === 'file';
         const canSave = visible && (
@@ -154,11 +209,14 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 : state.selectedPath === state.editorPath
         ) && (state.editorDirty || state.editorIsNew);
         saveBtn.hidden = !visible;
+        discardBtn.hidden = !state.editorIsNew;
+        discardBtn.disabled = state.editorSaving;
         saveBtn.disabled = !canSave || state.editorSaving;
         saveBtn.textContent = state.editorSaving ? 'Saving…' : 'Save';
         const fileSelected = state.selectedType === 'file' && Boolean(state.selectedPath);
         downloadBtn.hidden = !fileSelected;
         openExternalBtn.hidden = !fileSelected;
+        markUnsaved();
     }
 
     function resetEditorState() {
@@ -183,8 +241,10 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
 
     function setPreview({ path, meta, content, html, node }) {
         showStatus('');
-        previewPathEl.textContent = path || 'Select a file';
+        previewPathEl.textContent = path || '';
         previewMetaEl.textContent = meta || '';
+        // Nothing chosen: the header has nothing to say and takes no room.
+        previewHeaderEl.hidden = !path && !meta;
         if (node) {
             previewContentEl.replaceChildren(node);
             return;
@@ -214,6 +274,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 draftRevision += 1;
                 state.editorFilename = nameInput.value;
                 state.editorDirty = state.editorValue !== state.editorOriginal || state.editorFilename !== state.editorOriginalFilename;
+                previewPathEl.textContent = nameInput.value.trim() || 'New file';
                 showStatus('');
                 updateEditorActions();
             });
@@ -255,7 +316,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     async function canLeaveEditor() {
         if (!state.editorDirty) return true;
         const result = await showModal({
-            title: 'Discard Changes?',
+            title: 'Discard changes?',
             message: 'You have unsaved edits in the current file. Leave without saving?',
             confirmLabel: 'Discard',
             cancelLabel: 'Stay',
@@ -271,15 +332,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         const downloadItem = contextMenuEl.querySelector('[data-action="download"]');
         const pasteItem = contextMenuEl.querySelector('[data-action="paste"]');
         const deleteItem = contextMenuEl.querySelector('[data-action="delete"]');
-        if (downloadItem) {
-            downloadItem.hidden = type !== 'file';
-        }
-        if (pasteItem) {
-            pasteItem.hidden = !state.clipboard || (type === 'file');
-        }
-        if (deleteItem) {
-            deleteItem.hidden = !path;
-        }
+        if (downloadItem) downloadItem.hidden = type !== 'file';
+        if (pasteItem) pasteItem.hidden = !state.clipboard || (type === 'file');
+        if (deleteItem) deleteItem.hidden = !path;
         contextMenuEl.querySelectorAll('[data-action="copy"], [data-action="move"]').forEach((item) => {
             item.hidden = !path;
         });
@@ -320,7 +375,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         breadcrumbEl.innerHTML = '';
         items.forEach((item, idx) => {
             const btn = document.createElement('button');
-            btn.className = 'files-crumb';
+            btn.className = 'files-crumb ui-hit-area';
             btn.textContent = item.name;
             btn.addEventListener('click', () => {
                 loadDirectory(item.path).catch(showError);
@@ -336,8 +391,23 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         revealCurrentFolder();
     }
 
+    // A new file's unsaved draft has no row in the folder yet: on the list alone it gets one, at the top, to reopen it.
+    function draftRow() {
+        const name = state.editorFilename.trim();
+        const label = name ? `<span class="files-entry-name">${escapeHtml(name)}</span>`
+            : '<span class="files-entry-untitled">New file</span>';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'files-entry is-draft selected';
+        button.innerHTML = `${entryIcon('file')}${label}<span class="files-entry-meta"><span class="files-entry-unsaved">unsaved</span></span>`;
+        button.addEventListener('click', () => showPane('file', backBtn));
+        return button;
+    }
+
     function renderList() {
         listEl.innerHTML = '';
+        if (state.editorIsNew) listEl.appendChild(draftRow());
+        unsavedMark = unsavedPath();
         const entries = filteredEntries();
         const listEntries = [];
         if (state.parentPath && state.path !== '.') {
@@ -367,10 +437,16 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 button.setAttribute('aria-expanded', 'false');
             }
             button.className = `files-entry ${entry.isParentLink ? 'parent-link' : ''} ${selected ? 'selected' : ''}`;
+            if (!entry.isParentLink) button.dataset.path = entry.path;
+            button.toggleAttribute('data-unsaved', Boolean(unsavedMark) && entry.path === unsavedMark);
+            const file = entry.type === 'file';
+            const chevron = entry.type === 'dir' && !entry.isParentLink
+                ? `<span class="files-entry-chevron" aria-hidden="true">${SHELL_ICONS.chevron}</span>` : '';
             button.innerHTML = `
-                <span class="files-entry-icon">${iconForEntry(entry)}</span>
+                ${entryIcon(entry.type)}
                 <span class="files-entry-name">${escapeHtml(entry.name)}</span>
-                <span class="files-entry-meta">${entry.isParentLink ? 'up' : (entry.type === 'file' ? formatFileSize(entry.size) : 'open')}</span>
+                <span class="files-entry-meta"><span class="files-entry-size">${file ? escapeHtml(formatBytes(entry.size)) : ''}</span>${file ? '<span class="files-entry-unsaved">unsaved</span>' : ''}</span>
+                ${chevron}
             `;
             button.addEventListener('contextmenu', (event) => {
                 if (entry.isParentLink) return;
@@ -400,6 +476,48 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             listEl.appendChild(button);
         });
     }
+
+    // The list's place survives the file shown in front of it: a list out of sight forgets its scroll.
+    listEl.addEventListener('scroll', () => {
+        if (listEl.getClientRects().length) listScroll = listEl.scrollTop;
+    }, { passive: true });
+    // Back to folder, and the layer's own close (Escape, the system Back, Telegram's Back): the list again, the draft
+    // kept for its row, focus on that row.
+    function closeFile() {
+        renderList();
+        showPane('list', listEl.querySelector('.files-entry.selected') || listEl);
+    }
+    backBtn.addEventListener('click', closeFile);
+
+    // Focus stays this module's (showPane), so the layer neither takes it nor hands it back.
+    function syncLayer(open) {
+        if (!layers) return;
+        if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null, onClose: closeFile });
+        else layers.remove(FILE_LAYER);
+    }
+
+    // A width that changes how many panes fit (a turned phone, a resized window) keeps focus in sight and the status
+    // beside what it is about. The watch lives while Files is the page shown (app.js `showPage`, `ouro:page-shown`):
+    // put away, the page drops its watch and its layer; shown again, the first observation re-reads its panes.
+    let panes = 0;
+    const panesWatch = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        const shown = panesShown();
+        if (shown === panes) return;
+        panes = shown;
+        if (shown) showPane(layoutEl.dataset.filesView);
+        else syncLayer(false);
+    }) : null;
+    function watchPanes(shown) {
+        if (shown) {
+            panesWatch?.observe(layoutEl);
+            return;
+        }
+        panesWatch?.disconnect();
+        panes = 0;
+        syncLayer(false);
+    }
+    window.addEventListener('ouro:page-shown', (event) => watchPanes(event?.detail?.page === 'files'));
+    if (appState?.activePage === 'files') watchPanes(true);
 
     function showStatus(text, tone = 'muted') {
         setInlineStatus(previewStatusEl, text, tone);
@@ -434,6 +552,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             state.selectedPath = '';
             state.selectedType = 'dir';
             resetEditorState();
+            showPane('list');
         }
         state.rootPath = data.root_path || state.rootPath;
         state.path = data.path || '.';
@@ -444,15 +563,19 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
 
         if (!preserveEditor || (!state.selectedPath && !state.editorWritable)) {
             setPreview({
-                path: data.display_path || state.rootPath || 'Files',
-                meta: data.truncated ? 'Directory listing truncated.' : defaultDirectoryMeta(),
-                content: defaultDirectoryContent(),
+                path: '',
+                meta: data.truncated ? 'Only part of this folder is listed.' : '',
+                node: previewNote(CHOOSE_A_FILE),
             });
         }
     }
 
     async function loadFile(path) {
-        if (state.selectedPath === path && state.editorPath === path) return;
+        // The file already in the editor, its draft as it was (on the list alone, its row reopens it).
+        if (state.selectedPath === path && state.editorPath === path) {
+            showPane('file', backBtn);
+            return;
+        }
         const request = ++viewRequest;
         if (!(await canLeaveEditor()) || request !== viewRequest) return;
         const revision = draftRevision;
@@ -468,54 +591,49 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         state.selectedPath = data.path || path;
         state.selectedType = 'file';
         renderList();
+        // Every kind of file is shown the same way: alone on a narrow page, with Back to folder focused.
         if (data.is_image && data.content_url) {
             resetEditorState();
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • ${data.media_type || 'image'}`,
+                meta: metaLine(formatBytes(data.size), data.media_type || 'image'),
                 html: `<img class="files-preview-image" src="${escapeHtmlAttr(data.content_url)}" alt="${escapeHtmlAttr(data.name || data.path || 'image')}">`,
             });
-            return;
-        }
-
-        if (data.is_pdf && data.content_url) {
+        } else if (data.is_pdf && data.content_url) {
             resetEditorState();
             const safeUrl = escapeHtmlAttr(data.content_url);
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • PDF preview`,
+                meta: metaLine(formatBytes(data.size), 'PDF preview'),
                 html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtmlAttr(data.name || 'PDF preview')}"></iframe>`,
             });
-            return;
-        }
-
-        if (!data.is_text) {
+        } else if (!data.is_text) {
             resetEditorState();
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • binary or unsupported preview`,
-                content: 'Binary or non-text file preview is not available in the UI yet.',
+                meta: formatBytes(data.size),
+                node: previewNote('This kind of file has no preview here. Download it or open it externally.'),
             });
-            return;
+        } else {
+            const editable = !data.truncated;
+            state.editorPath = state.selectedPath;
+            state.editorOriginalFilename = data.name || '';
+            state.editorOriginal = data.content || '';
+            state.editorValue = data.content || '';
+            state.editorDirty = false;
+            state.editorWritable = editable;
+            state.editorIsNew = false;
+            state.editorFilename = data.name || '';
+            updateEditorActions();
+            setPreview({
+                path: data.display_path || state.rootPath || 'Files',
+                meta: editable
+                    ? metaLine(formatBytes(data.size), 'editable')
+                    : metaLine(formatBytes(data.size), 'preview truncated', 'read-only'),
+                node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
+            });
         }
-
-        const editable = !data.truncated;
-        state.editorPath = state.selectedPath;
-        state.editorOriginalFilename = data.name || '';
-        state.editorOriginal = data.content || '';
-        state.editorValue = data.content || '';
-        state.editorDirty = false;
-        state.editorWritable = editable;
-        state.editorIsNew = false;
-        state.editorFilename = data.name || '';
-        updateEditorActions();
-        setPreview({
-            path: data.display_path || state.rootPath || 'Files',
-            meta: editable
-                ? `${formatFileSize(data.size)} • editable`
-                : `${formatFileSize(data.size)} • preview truncated • read-only`,
-            node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
-        });
+        showPane('file', backBtn);
     }
 
     function filenameFromPath(path) {
@@ -536,8 +654,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
 
     async function createDirectory() {
         const result = await showModal({
-            title: 'Create Directory',
-            message: 'Enter a name for the new directory in the current folder.',
+            title: 'New folder',
+            message: 'Name',
             input: true,
             confirmLabel: 'Create',
             cancelLabel: 'Cancel',
@@ -546,7 +664,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!result?.confirmed || !name) return;
         await jsonPost('/api/files/mkdir', { path: state.path || '.', name });
         await loadDirectory(state.path || '.');
-        showStatus(`Directory ${name} created.`, 'success');
+        showStatus(`Folder ${name} created.`, 'success');
     }
 
     async function finishFileOperation(view, { directory, path = '', type = 'dir', message }) {
@@ -558,6 +676,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             state.selectedType = type;
             updateEditorActions();
             setPreview({ path: path || state.rootPath, meta: message, content: '' });
+            // What changed is in the folder: its list says so, with the message over it on a narrow page.
+            showPane('list');
         }
         showStatus(message, 'success');
         // A completed write remains real, but it cannot take over newer work.
@@ -598,7 +718,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!(await canLeaveEditor())) return;
 
         const result = await showModal({
-            title: `Delete ${entry.type === 'dir' ? 'Directory' : 'File'}?`,
+            title: `Delete ${entry.type === 'dir' ? 'folder' : 'file'}?`,
             message: entry.type === 'dir'
                 ? `Delete "${entry.name}" and all its contents? This cannot be undone.`
                 : `Delete "${entry.name}"? This cannot be undone.`,
@@ -612,7 +732,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         await jsonPost('/api/files/delete', { path });
 
         await finishFileOperation(view, {
-            directory, message: `${entry.type === 'dir' ? 'Directory' : 'File'} deleted: ${entry.name}.`,
+            directory, message: `${entry.type === 'dir' ? 'Folder' : 'File'} deleted: ${entry.name}.`,
         });
     }
 
@@ -676,7 +796,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             if (nameInput === document.activeElement) editor?.focus();
             nameInput?.remove();
             previewPathEl.textContent = data.display_path || state.editorPath;
-            previewMetaEl.textContent = `${formatFileSize(data.size)} • editable`;
+            previewMetaEl.textContent = metaLine(formatBytes(data.size), 'editable');
             showStatus(state.editorDirty ? 'Saved. Newer edits are still unsaved.' : 'Saved.', 'success');
         } finally {
             state.editorSaving = false;
@@ -709,12 +829,11 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         renderList();
         updateEditorActions();
         setPreview({
-            path: state.path && state.path !== '.'
-                ? `${state.rootPath || 'Files'}/${state.path}`
-                : (state.rootPath || 'Files'),
-            meta: 'New file • editable',
+            path: 'New file',
+            meta: 'Not saved yet',
             node: renderEditor('', { isNew: true }),
         });
+        showPane('file', previewContentEl.querySelector('.files-editor-name'));
     }
 
     searchEl.addEventListener('input', () => {
@@ -729,6 +848,17 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
 
     newDirBtn.addEventListener('click', () => {
         createDirectory().catch(showError);
+    });
+
+    // A new file's draft is dropped whole: nothing was written, so nothing is asked.
+    discardBtn.addEventListener('click', () => {
+        if (!state.editorIsNew || state.editorSaving) return;
+        state.selectedPath = '';
+        state.selectedType = 'dir';
+        resetEditorState();
+        renderList();
+        setPreview({ path: '', meta: '', node: previewNote(CHOOSE_A_FILE) });
+        showPane('list', listEl);
     });
 
     pasteBtn.addEventListener('click', () => {

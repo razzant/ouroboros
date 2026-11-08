@@ -65,6 +65,7 @@ FACTS = """sel => {
         cardRight: rect(card).right, cardHScroll: card.scrollWidth > card.clientWidth + 1,
         sideRight: rect(q('.chat-live-summary-side')).right,
         titleClipped: title.scrollWidth > title.clientWidth + 1,
+        titleCut: title.scrollHeight > title.clientHeight + 1,
         // The labelled facts of the card's own details, as `Label: value` parts.
         factsText: [...(card.querySelector(':scope > .chat-live-details > [data-live-facts]')?.children || [])]
             .map((row) => `${row.querySelector('dt').textContent}: ${row.querySelector('dd').textContent}`).join(' · '),
@@ -171,12 +172,14 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 assert root["toggleShown"] and root["disclosureTag"] == "BUTTON", root
                 # The summary outranks the details: body-size activity line.
                 assert root["activityFont"] == "14px", root
-                # A long identity ellipsizes inside a phone's row (below the 720px switch the room has no sidebar
-                # beside it since #1998, so a narrow window alone no longer squeezes it); the side controls stay
-                # inside the card.
+                # A long identity takes a second line inside a phone's row before it is cut, and ends that line
+                # with an ellipsis (owner 29.10: the name is not lost before a secondary control; below the 720px
+                # switch the room has no sidebar beside it since #1998, so a narrow window alone no longer squeezes
+                # it); the row never wraps and the side controls stay inside the card.
                 set_viewport(page, 390, 800)
                 long = page.evaluate(FACTS, CHILD % "nest-long")
-                assert long["titleClipped"] and long["titleLines"] <= 1.2, long
+                assert long["titleCut"] and 1.8 <= long["titleLines"] <= 2.2, long
+                assert abs(long["titleTop"] - long["chipTop"]) <= 4 and long["toggleShown"], long
                 assert long["sideRight"] <= long["cardRight"] + 1 and not long["cardHScroll"], long
                 set_viewport(page, 1100, 800)
                 # Live path: a twin's narration frame keeps its id, and a NEW sibling of the
@@ -252,8 +255,8 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 assert "Agent model: gpt-5.6-sol" in first_planner["factsText"]
                 assert "Agent model: gemini-3.6-flash" in second_planner["factsText"]
                 assert "gpt-5.6-sol" in first_planner["metaText"] and "gemini-3.6-flash" in second_planner["metaText"]
-                # A child's review count stays in its own foot while collapsed, like the root's (the action row under
-                # its metadata line), never a band of the summary.
+                # A child's review count stays docked in its own foot while collapsed (the action row under its
+                # metadata line; a root's is Details' twin in its head), never a band of the summary.
                 _emit_ws_frame(page, {**child_frame, "task_id": "nest-review", "subagent_task_id": "nest-review",
                                       "subagent_role": "reviewer", "subagent_event": "completed",
                                       "content": "reviewer re-read the candidate and filed a long note " + "word " * 40,

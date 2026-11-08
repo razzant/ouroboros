@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _MODEL_SLOTS = frozenset({"main", "light"})
+# How an admitted turn runs: ``event`` is the bounded text turn; ``call`` lets the
+# binding open one live audio session (a long turn under the same ceiling).
+EXECUTION_EVENT = "event"
+EXECUTION_CALL = "call"
+_EXECUTIONS = frozenset({EXECUTION_EVENT, EXECUTION_CALL})
 
 
 class PresenceRuntimeError(ValueError):
@@ -28,16 +33,25 @@ def _validate_positive_int(value: object, *, field: str) -> int:
     return value
 
 
+def validate_execution(value: object, *, field: str = "execution") -> str:
+    """One of ``event`` / ``call``; anything else is a typed refusal, never a default."""
+    if not isinstance(value, str) or value not in _EXECUTIONS:
+        raise PresenceRuntimeError("invalid_execution", field)
+    return value
+
+
 @dataclass(frozen=True)
 class PresenceRuntimeDefaults:
     """Reviewed symbolic defaults declared by a presence profile."""
 
     model_slot: str = "main"
     inline_max_rounds: int = 10
+    execution: str = EXECUTION_EVENT
 
     def __post_init__(self) -> None:
         _validate_model_slot(self.model_slot)
         _validate_positive_int(self.inline_max_rounds, field="inline_max_rounds")
+        validate_execution(self.execution)
 
 
 @dataclass(frozen=True)
@@ -46,12 +60,15 @@ class PresenceRuntimeOverrides:
 
     model_slot: str | None = None
     inline_max_rounds: int | None = None
+    execution: str | None = None
 
     def __post_init__(self) -> None:
         if self.model_slot is not None:
             _validate_model_slot(self.model_slot)
         if self.inline_max_rounds is not None:
             _validate_positive_int(self.inline_max_rounds, field="inline_max_rounds")
+        if self.execution is not None:
+            validate_execution(self.execution)
 
 
 @dataclass(frozen=True)
@@ -62,6 +79,10 @@ class ResolvedPresenceRuntime:
     requested_inline_max_rounds: int
     inline_max_rounds: int
     capped: bool
+    execution: str = EXECUTION_EVENT
+
+    def __post_init__(self) -> None:
+        validate_execution(self.execution)
 
 
 _BUILTIN_DEFAULTS = PresenceRuntimeDefaults()
@@ -100,4 +121,5 @@ def resolve_presence_runtime(
         requested_inline_max_rounds=requested_rounds,
         inline_max_rounds=effective_rounds,
         capped=effective_rounds != requested_rounds,
+        execution=overrides.execution or defaults.execution,
     )

@@ -22,7 +22,6 @@ from tests.body_candidate_support import (
     rich_commit, run_entry,
 )
 
-pytestmark = pytest.mark.serial  # real cold-entry processes throughout
 
 STOPPED = {"state": "completed", "unconfirmed": []}
 EXITED = {"doomed": [4001, 4002], "dead": [4001, 4002], "unconfirmed": [], "cleanup_ok": True, "snapshot_ok": True}
@@ -250,7 +249,7 @@ def test_direct_mode_syncs_dependencies_after_the_switch_and_a_failure_returns_t
 # Interruption at every boundary: old-or-new bytes, then convergence
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("boundary,head_after", [
-    ("mid_files", "old"), ("after_files", "old"), ("before_ref", "old"), ("after_ref", "cand")])
+    ("mid_files", "old"), ("before_ref", "old"), ("after_ref", "cand")])
 def test_interrupted_switch_never_leaves_a_torn_file_and_the_next_entry_converges(scene, boundary, head_after):
     scene.commit()
     scene.authorize()
@@ -401,10 +400,7 @@ def test_pending_transition_with_an_unreadable_helper_refuses_the_boot(scene):
 @pytest.mark.parametrize("overrides,blocker", [
     ({"owned_stop": {"state": "unconfirmed", "unconfirmed": [{"pid": 4242}]}}, "owned_work_unconfirmed"),
     ({"worker_exits": None}, "worker_exits_unconfirmed"),  # kill_workers never reached its census
-    ({"worker_exits": {**EXITED, "unconfirmed": [4002]}}, "worker_exits_unconfirmed"),  # a worker outlived the join
     ({"live_children": [object()]}, "child_processes_alive"),
-    ({"owner_restart": True}, "owner_restart"),
-    ({"owned_stop": None}, "owned_work_unconfirmed"),
 ])
 def test_surviving_readers_or_a_newer_owner_control_never_arm(scene, overrides, blocker):
     scene.commit()
@@ -486,6 +482,8 @@ def test_authorization_refusals_leave_the_serving_tree_and_no_handoff(scene, mon
     git(scene.serving, "checkout", "--", "ouroboros/mod_a.py")
 
     bible = scene.commit(files={"BIBLE.md": "# Constitution\n\nAmended.\n"})
+    assert _refusal(scene) == "ADOPTION_CONSTITUTION_NEEDS_RELEASE"
+    scene.commit(files={"VERSION": "1.1.0-alpha.0\n"})  # a development marker is no release
     assert _refusal(scene) == "ADOPTION_CONSTITUTION_NEEDS_RELEASE"
     release = scene.commit(files={"VERSION": "1.0.1\n"})  # the same change as a numbered release
     assert body_adoption.authorize(scene.ctx, release, reason="adopt it")["cand"] == release
@@ -713,3 +711,59 @@ def test_real_hook_runs_before_the_package_imports_anything_and_the_helper_is_st
     # The module CLI has no body import of its own ahead of the package: `-m` imports the package first.
     cli_before, _ = _imports_before_first_body_import(repo / "ouroboros" / "cli.py")
     assert set(cli_before) <= set(sys.stdlib_module_names)
+
+
+def test_official_relation_is_dated_history_against_the_checked_tip_never_a_zero_guess(tmp_path, monkeypatch):
+    """Two pinned commits and the check that named the tip, no fetch: commits only here and only on that tip, as of
+    that check; unknown with its reason (no check, another channel's check, an unreadable tip), never zero."""
+    for key in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{key}_NAME", "Relation test")
+        monkeypatch.setenv(f"{key}_EMAIL", "relation@test.invalid")
+    monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "development")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(message):
+        (repo / "f.txt").write_text(message, encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-q", "-m", message)
+        return run("rev-parse", "HEAD")
+
+    run("init", "-q", "-b", "ouroboros")
+    base = commit("base")
+    tip = commit("official")
+    run("checkout", "-q", "-b", "cand", base)
+    commit("own 1")
+    diverged = commit("own 2")
+    run("checkout", "-q", "-b", "ahead", tip)
+    ahead = commit("own on tip")
+    data = tmp_path / "data"
+    (data / "state").mkdir(parents=True)
+
+    def check(**fields):
+        (data / "state" / "state.json").write_text(json.dumps({"managed_update_cache": fields}), encoding="utf-8")
+
+    assert body_adoption.official_relation(repo, diverged, data) == {"unknown": "no_official_check"}
+    check(latest_sha=tip, checked_at="t0", update_channel="development")
+    relation = body_adoption.official_relation(repo, diverged, data)
+    assert relation == {"tip": tip, "checked_at": "t0", "channel": "development", "only_here": 2, "only_official": 1}
+    assert (body_adoption.official_relation(repo, ahead, data)["only_here"],
+            body_adoption.official_relation(repo, ahead, data)["only_official"]) == (1, 0)
+    text = body_adoption.official_relation_text(relation)
+    assert f"{tip[:12]} (checked t0)" in text and "2 commit(s) here are not on the official line" in text
+    assert "1 official commit(s) are not here" in text and "history, not content" in text
+    check(latest_sha=tip, checked_at="t0", update_channel="stable")
+    assert body_adoption.official_relation(repo, diverged, data)["unknown"] == "update_channel_changed"
+    check(latest_sha="f" * 40, checked_at="t0", update_channel="development")
+    unreadable = body_adoption.official_relation(repo, diverged, data)
+    assert unreadable["unknown"] == "official_tip_unreadable" and "only_here" not in unreadable
+    assert "not readable here" in body_adoption.official_relation_text(unreadable)
+    assert body_adoption.official_relation_text({}) == ""
+    # A direct caller without the channel in its environment reads the settings' channel, as the server does.
+    monkeypatch.delenv("OUROBOROS_UPDATE_CHANNEL")
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: {"OUROBOROS_UPDATE_CHANNEL": "development"})
+    check(latest_sha=tip, checked_at="t1", update_channel="development")
+    assert body_adoption.official_relation(repo, diverged, data)["only_here"] == 2

@@ -1,8 +1,8 @@
-// Owner Batch4: "Continue" on a card whose root task was interrupted.
+// Owner Batch4: "Continue" on a card whose root task was interrupted or stopped by its author as unfinished.
 //
 // The server decides what a settled card may offer (`continuation_offer` on the
-// task detail: a Continue after a technical interruption, or the successor this
-// task already has). The press carries ONE random action nonce kept in local
+// task detail: a Continue after a technical interruption or an author's stop, or
+// the successor this task already has). The press carries ONE random action nonce kept in local
 // storage per task, so a retry or a reload after a lost answer returns the SAME
 // admission instead of starting a second task; a timeout is never read as "not
 // continued". The card then points to its successor (a stale card never offers
@@ -14,7 +14,7 @@ import { ensureLiveActionsEl, ownLiveActionsEl } from './chat_activity.js';
 import { fmt, tr, tx } from './i18n.js';
 import { taskDoneIsTerminal, taskReasonPhrase } from './log_events.js';
 import { showToast } from './toast.js';
-import { setInlineStatus } from './ui_primitives.js';
+import { errorWords, setInlineStatus } from './ui_primitives.js';
 
 const NONCE_KEY = 'ouro_continue_nonce:';
 const inFlight = new Set();
@@ -37,7 +37,7 @@ export function continueNonce(taskId, storage, retainedNonce = '') {
     return nonce;
 }
 
-/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, actionNonce?: string}} */
+/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, refusal?: string, actionNonce?: string}} */
 export function continueOfferView(detail) {
     const offer = detail?.continuation_offer;
     if (!offer || typeof offer !== 'object') return { kind: 'none' };
@@ -47,7 +47,19 @@ export function continueOfferView(detail) {
     if (offer.eligible === false && offer.refusal === 'hard_limit_reached') {
         return { kind: 'refusal', cause: String(offer.cause || offer.refusal) };
     }
+    // A finite budget whose remainder the saved execution clock cannot establish: the host refuses
+    // rather than guess. Its `cause` is the interruption's, so the note names the budget instead.
+    if (offer.eligible === false && offer.refusal === 'execution_budget_unknown') {
+        return { kind: 'refusal', refusal: 'execution_budget_unknown' };
+    }
     return offer.eligible ? { kind: 'offer', cause: String(offer.cause || '') } : { kind: 'none' };
+}
+
+function refusalPhrase(view) {
+    return view.refusal === 'execution_budget_unknown'
+        ? tr('task.continue.budget_unknown',
+            "The time left in this task's execution budget could not be read from its saved clock, so no new task starts.")
+        : taskReasonPhrase(view.cause);
 }
 
 /**
@@ -85,8 +97,11 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
             return String(body.successor_task_id);
         }
         if (body.state === 'bound' && body.action_nonce) continueNonce(id, storage, body.action_nonce);
-        // The same nonce stays: pressing again retries this very admission.
-        toast(`Continue not confirmed: ${exc?.message || exc}`, 'error');
+        // The same nonce stays: pressing again retries this very admission. A typed hard limit says itself; any other
+        // failure is said in the shared failure words (U131), its raw text kept for the log.
+        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause) : '';
+        if (!limit) console.warn('Continue not confirmed', exc);
+        toast(limit ? `Continue not confirmed: ${limit}` : `Continue not confirmed. ${errorWords(exc).text}`, 'error');
         return '';
     } finally {
         inFlight.delete(id);
@@ -113,13 +128,16 @@ export function continueControlSuccessor(record) {
  * without being opened. A live event row (task_done, task_eval, …) says nothing
  * about it and never removes a shown action; when it is the terminal of a ROOT
  * card that did not complete cleanly (a best-effort completion may be a
- * technical limit), the card reads the full detail once to learn the offer.
+ * technical limit, and an author's stop is unfinished), the card reads the full
+ * detail once to learn the offer.
  */
 export function syncContinueAction(record, detail, { read = fetchTaskDetail, write = (fn) => fn() } = {}) {
     if (!detail || typeof detail !== 'object') return false;
     if (!('continuation_offer' in detail)) {
         const status = String(detail.task_terminal_status || detail.status || '').toLowerCase();
-        const clean = ['completed', 'done'].includes(status) && detail.outcome_axes?.execution?.status !== 'best_effort';
+        const axes = detail.outcome_axes;
+        const authorStop = axes?.execution?.task_completion?.action === 'stop' || axes?.objective?.reason === 'author_stop';
+        const clean = ['completed', 'done'].includes(status) && axes?.execution?.status !== 'best_effort' && !authorStop;
         if (record?.root && !record.isSubagent && !offerReads.has(record) && taskDoneIsTerminal(detail) && !clean) {
             offerReads.add(record);
             Promise.resolve().then(() => read(record.groupId))
@@ -152,7 +170,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
             note.dataset.continueRefusal = String(record.groupId || '');
             actions.appendChild(note);
         }
-        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${taskReasonPhrase(view.cause)}`, 'neutral');
+        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${refusalPhrase(view)}`, 'neutral');
         return !refusal;
     }
     refusal?.remove();
@@ -171,6 +189,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail, wri
     button.textContent = view.kind === 'retry' ? tr('task.continue.retry', 'Retry Continue') : tr('task.continue.label', 'Continue');
     button.disabled = false;
     button.title = view.kind === 'retry' ? tr('task.continue.retry_title', 'Retry the same unconfirmed Continue action')
+        : view.cause === 'author_stop' ? tr('task.continue.stopped_title', 'Start a new task that continues this unfinished work')
         : fmt('Start a new task that continues this interrupted one ({cause})', { cause: tx(view.cause || 'technical interruption') });
     button.onclick = async (event) => {
         event.stopPropagation();

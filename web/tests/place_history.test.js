@@ -64,6 +64,10 @@ test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(historyFactWords({role: 'assistant'}), []);
     assert.deepEqual(historyFactWords({place_history: {delivery_state: 'authored'}}), ['Delivery not confirmed']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'focus_started'}}}), ['Focus started']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'current_author'}}}), ['Passed to the current author']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'own_account'}}}), ['Heard; written by the account it sends as']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work', recipient:'work-7'}}}), ['Passed to work work-7']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work'}}}), ['Passed to work in this conversation']);
 });
 
 test('a retained row without new fields renders byte for byte as on e3bd98c20', async (t) => {
@@ -92,6 +96,47 @@ test('delivery rows stamp the recorded account, as you for its owner, and nothin
     assert.doesNotMatch(metas[2].textContent, /as you|as /);
     assert.ok(metas.every((meta) => meta.textContent.includes('Ouroboros') && meta.textContent.includes('Delivered')));
     assert.equal(f.q('img'), null);
+    reader.close();
+});
+
+test('a reaction row reads as its fact, never as an empty or spoken message', async (t) => {
+    const f = fixture(t);
+    const heard = { kind: 'message', attention: { decision: 'heard', reason: 'reaction_context_only' } };
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('anonymous'), text: '', sender_label: 'Anonymous reactions', place_history: { ...heard, reaction: { summary: 'counts observed: 👍 3 on message 7' } } },
+        { ...row('mine'), text: '', role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'set reaction 👍, requested on message 7' } } },
+        { ...row('plain'), text: '', place_history: { kind: 'message' } },
+    ]) });
+    await tick();
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    const word = (node) => node.querySelector('.place-convo-reaction')?.textContent;
+    assert.deepEqual(rows.map(word), ['Reaction: counts observed: 👍 3 on message 7', 'Reaction: set reaction 👍, requested on message 7', undefined]);
+    assert.ok(rows[0].querySelector('.place-convo-who').textContent.includes('Anonymous reactions'));
+    assert.ok(rows[0].querySelector('.place-convo-meta').textContent.includes('Heard as context'));
+    assert.equal(rows[1].querySelector('.chat-markdown'), null, 'no markdown body is mounted for a receipt');
+    reader.close();
+});
+
+test('words a receipt carries beside its reaction stay its speech, and only the prefix translates', async (t) => {
+    const f = fixture(t);
+    setMissTransport(() => Promise.resolve(null));
+    applyPayload({ language: 'fr', english: false, entries: {
+        'code:places.history.reaction': { text: 'Réaction :' }, Settings: { text: 'Réglages' },
+    } });
+    t.after(() => applyPayload({ language: '', english: true, entries: {} }));
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('mine', 'On it.'), role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'Settings' } } },
+        { ...row('failed', ''), role: 'system', place_history: { kind: 'delivery', delivery_state: 'failed', reaction: { summary: 'failed: Settings' } } },
+    ]) });
+    await tick();
+    createTranslator({ skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(f.doc.body);
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    assert.equal(rows[0].querySelector('.chat-markdown').textContent.trim(), 'On it.', 'the words are mounted as speech');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').textContent, 'Réaction : Settings');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').querySelector('[data-i18n-authored]')?.textContent, 'Settings', 'the summary stays authored');
+    assert.equal(rows[1].className, 'place-convo-row is-system', 'a failed receipt keeps its System row');
+    assert.equal(rows[1].querySelector('.chat-markdown'), null);
+    assert.equal(rows[1].querySelector('.place-convo-reaction').textContent, 'Réaction : failed: Settings');
     reader.close();
 });
 
@@ -154,7 +199,8 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
         facts: ['direct_message', 'from_bot', { id: 'signal.words', label: 'PR words' }], labels: { direct_message: 'Declared mail' } });
     const heard = { ...row('heard'), place_history: { kind: 'message', attention: { decision: 'heard' },
         facts: ['any_message', 'direct_message', 'from_bot', 'signal.words'] } };
-    f.reply(({ url }) => url === current.source.url ? status.promise : page([heard]));
+    const statusUrl = `${current.source.url}?account_id=${encodeURIComponent(current.accountId)}`;
+    f.reply(({ url }) => url === statusUrl ? status.promise : page([heard]));
     const sheet = openPlaceSheet(current, { readRooms: async () => index() });
     t.after(() => sheet.close());
     const payload = { text: 'Ready', tone: 'ok', labels: { any_message: 'Every arrival', direct_message: unsafeText } };
@@ -171,7 +217,7 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
     assert.ok(f.q('[data-heard-fact="direct_message"]').hasAttribute('data-i18n-authored'));
     assert.equal(f.q('img'), null);
     assert.deepEqual(sheet.place.labels, { direct_message: 'Declared mail' });
-    assert.equal(f.requests.filter(({ url }) => url === current.source.url).length, 1);
+    assert.equal(f.requests.filter(({ url }) => url === statusUrl).length, 1);
 });
 
 test('reader labels return to core words when absent without replacing the retained message', async (t) => {
@@ -242,6 +288,17 @@ test('page, pending import, range gaps and unknown coverage have distinct words'
     assert.match(capturedWindowNote({}), /not fully reported/);
     assert.match(placeRoomsHtml({rooms:[],coverage}), /No saved conversation found in this index/);
     assert.match(placeRoomsHtml({rooms:[],coverage:{...coverage,importing:true}}), /still being imported/);
+});
+
+test('a thread row says it is a thread in its one meta line; the raw thread id stays off its face', () => {
+    const thread = { room_chat_id: 7, label: 'joi-eva_agentic-bots', last_at: '2026-11-02T10:14:00Z', unanswered_count: 0,
+        thread_id: '1793546052.282509' };
+    const html = placeRoomsHtml({ rooms: [thread], coverage: {} });
+    const face = html.replace(/<[^>]+>/g, ' ');
+    assert.doesNotMatch(face, /1793546052|Thread:/, 'no id on the row');
+    assert.match(face, /thread ·/);
+    assert.match(html, /title="Thread 1793546052\.282509"/, 'the id is still there for whoever looks for it');
+    assert.doesNotMatch(placeRoomsHtml({ rooms: [{ ...thread, thread_id: '' }], coverage: {} }), /thread ·|title=/);
 });
 
 test('reader forwards large IDs, retries exact cursor and excludes progress/evidence', async (t) => {

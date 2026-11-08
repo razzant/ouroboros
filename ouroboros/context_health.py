@@ -21,6 +21,7 @@ from typing import Any, Dict, List
 from ouroboros.jsonl_tail import cached_tail_objects
 from ouroboros.utils import read_json_dict, read_text
 from ouroboros.store import StoreError
+from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
 
@@ -200,13 +201,15 @@ def _plan_review_note(env: Any, task_id: str) -> str:
 def _identity_age_line(env: Any) -> str:
     """When ``identity.md`` was last written, as a fact; whether that is long is the mind's reading
     (the STALE/THIN identity and EMPTY/BLOATED scratchpad verdicts and their OK lines left with the
-    owner's rule that no threshold stands in for judgment). An absent file is no fact."""
+    owner's rule that no threshold stands in for judgment). An absent file is no fact. A write's timestamp can run
+    ahead of a coarse clock (Windows, Python 3.10: 15.6 ms), so a file written just now is 0.0 h old, never -0.0."""
     import time as _time
 
     try:
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
-            return f"identity.md last updated {(_time.time() - identity_path.stat().st_mtime) / 3600:.1f} h ago"
+            age = max(0.0, _time.time() - identity_path.stat().st_mtime)
+            return f"identity.md last updated {age / 3600:.1f} h ago"
     except Exception:
         pass
     return ""
@@ -321,8 +324,9 @@ def _own_run_outcome_lines(custody_root: Any, custody_state: Any, task_id: str,
     return lines
 
 
+@timed_section("health")
 def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
-                            attempt_key: str = "", view_role: str = "") -> str:
+                            attempt_key: str = "") -> str:
     """Render the health-invariant WARNING block for one reader's context.
 
     Called once when a task's context is built (a task-start snapshot, not
@@ -347,16 +351,8 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     supervision acknowledgement records it; with ``task_id`` it names the reader's
     OWN settled runs whose terminal payload this attempt's transcript never took
     (``_own_run_outcome_lines``). Empty renders none of those lines.
-
-    ``view_role`` is the reader's memory view role: an integrating one (not a delegated child or
-    nanny) reads the open lost-Max episode (``memory_max.health_line``, one row).
     """
     checks: List[str] = []
-    if view_role:
-        from ouroboros.memory_max import health_line
-
-        checks.extend(filter(None, [health_line(env.drive_root, view_role)]))
-
     try:
         from ouroboros.claudexor_exit_facts import health_line
         engine_exit = health_line(env.drive_path("logs/supervisor.jsonl").parent.parent)
@@ -417,15 +413,19 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     except Exception:
         pass
 
-    try:
-        state_data = read_json_dict(env.drive_path("state/state.json")) or {}
-        from ouroboros.usage_accounting import usage_breakdown
-
-        accounted = float(usage_breakdown(env.drive_root).get("accounted_usd") or 0.0)
-        if state_data.get("budget_drift_alert"):
-            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${accounted:.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
-    except Exception:
-        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — budget drift check skipped")
+    # The drift check saved its own like-for-like pair and baseline (supervisor.state._apply_openrouter_ground_truth):
+    # the line says the two changes since that baseline, the ones its percentage compares (as /status prints them),
+    # with no usage-store read on a context build.
+    state_data = read_json_dict(env.drive_path("state/state.json")) or {}
+    if state_data.get("budget_drift_alert"):
+        try:
+            ledger = state_data.get("openrouter_checked_ledger_settled_usd", state_data.get("openrouter_ledger_settled_usd"))
+            ledger_since = float(ledger) - float(state_data["session_openrouter_settled_snapshot"])
+            key_since = float(state_data["openrouter_total_usd"]) - float(state_data["session_total_snapshot"])
+            checks.append(f"WARNING: BUDGET DRIFT {float(state_data['budget_drift_pct']):.1f}% — since its baseline the "
+                          f"ledger counted ${ledger_since:.2f} of OpenRouter spend, the key's usage grew ${key_since:.2f}")
+        except (KeyError, TypeError, ValueError):
+            checks.append("WARNING: BUDGET DRIFT — the saved drift figures are unreadable (state/state.json)")
 
     checks.extend(filter(None, [_identity_age_line(env)]))
 
@@ -504,7 +504,12 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     try:
         from ouroboros.delegate_custody import undisposed_patches
         from ouroboros.config import get_subagent_projects_root
+        from ouroboros.launch_roots import WorkRootUnavailable
 
+        try:
+            projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve()
+        except WorkRootUnavailable:  # undecided: no folder is "yours" through it; every warning still shows
+            projects_root = None
         for run in undisposed_patches(custody_root, custody_state) if not custody_gap else ():
             # C1: a settled mutating run's work lives in its private snapshot (and its
             # captured patch, once one exists) until someone explicitly applies or
@@ -536,8 +541,8 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                 if active_root and str(run.target_root or "").strip():
                     target = pathlib.Path(run.target_root).expanduser().resolve()
                     active = pathlib.Path(active_root).expanduser().resolve()
-                    if target == active or (target.is_relative_to(active) and active.is_relative_to(
-                            pathlib.Path(get_subagent_projects_root()).expanduser().resolve())):
+                    if target == active or (target.is_relative_to(active) and projects_root is not None
+                                            and active.is_relative_to(projects_root)):
                         foreign_work(owner)["yours"].append(str(run.run_id))
                 continue
             decide_clause = (

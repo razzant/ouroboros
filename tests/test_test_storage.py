@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -14,7 +15,6 @@ from ouroboros.test_evidence import diagnostic_directory
 from ouroboros.test_environment import declare_scratch, retain_tree
 
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 def _safe(tmp_path, command, *, keep=False, evidence=None):
@@ -28,8 +28,34 @@ def _safe(tmp_path, command, *, keep=False, evidence=None):
     return result, paths[-1] if paths else None
 
 
-@pytest.mark.parametrize("red", [False, True])
-def test_known_pytest_scratch_released_with_complete_raw_output_and_diagnostics(tmp_path, red):
+def test_safe_test_registered_private_copy_routes_implicit_evidence_to_task_store(tmp_path, monkeypatch):
+    from ouroboros import artifacts, subagent_worktrees
+
+    data = tmp_path / "data"
+    temp_parent = tmp_path / "temp"
+    data.mkdir()
+    temp_parent.mkdir()
+    task_id = "safe-test-copy-task"
+    subagent_worktrees._put_record({"path": str(REPO), "task_id": task_id}, data)
+    env = os.environ.copy()
+    env["OUROBOROS_DATA_DIR"] = str(data)
+    env.pop("OUROBOROS_TEST_EVIDENCE_ROOT", None)
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py"),
+         "--temp-parent", str(temp_parent), "--", sys.executable, "-c", "print('TASK_OWNED_EVIDENCE')"],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    evidence = Path(next(line.split(" ", 1)[1] for line in result.stderr.splitlines()
+                         if line.startswith("SAFE_TEST_EVIDENCE ")))
+    expected = artifacts.task_artifact_dir_path(data, task_id) / "source_handles" / "test-evidence"
+    assert evidence.is_relative_to(expected)
+    assert b"TASK_OWNED_EVIDENCE" in next(evidence.glob("command-*/stdout.bin")).read_bytes()
+
+
+@pytest.mark.parametrize("red,keep", [(False, False), (True, False), (False, True)])
+def test_known_pytest_scratch_released_with_complete_raw_output_and_diagnostics(tmp_path, red, keep):
     probe = tmp_path / "probe"
     probe.mkdir()
     (probe / "test_probe.py").write_text('''import os, pathlib, sys
@@ -45,11 +71,16 @@ def test_probe(tmp_path):
     assert ''' + str(not red) + "\n", encoding="utf-8")
     args = [sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(probe),
             "--confcutdir", str(probe), "-o", "addopts=", "-q", "-s", str(probe)]
-    result, evidence = _safe(tmp_path, args)
+    result, evidence = _safe(tmp_path, args, keep=keep)
     assert result.returncode == int(red), result.stderr
     record = json.loads((evidence / "result.json").read_text())
-    assert not Path(record["scratch"]).exists(), record
-    assert record["cleanup"]["released"] and record["containment_error"] == ""
+    root = Path(record["scratch"])
+    if keep:  # debug retention holds even a passed test's folder, from the command's start
+        assert next(root.glob("b*/t/test_probe*/reproducible.bin")).stat().st_size == 3_000_000
+        import shutil
+        shutil.rmtree(root)  # this test's own new ended root
+    assert not root.exists(), record
+    assert bool(record["cleanup"]["released"]) is not keep and record["containment_error"] == ""
     raw = next(evidence.glob("command-*/stdout.bin")).read_bytes()
     err = next(evidence.glob("command-*/stderr.bin")).read_bytes()
     assert b"STDOUT_HEAD" + b"o" * 100_000 + b"STDOUT_TAIL" in raw
@@ -101,21 +132,58 @@ def test_controller_signatures_survive_a_bounded_preview(tmp_path):
     assert 'nothing recorded why' in verdict and 'Do NOT mark' not in verdict
 
 
-def test_retention_unknown_siblings_and_symlinks_are_not_released(tmp_path):
+@pytest.mark.parametrize("held", ["nested", "unreadable", "root"])
+def test_retention_keeps_only_its_own_folder_and_never_unknown_siblings_or_links(tmp_path, held):
     from ouroboros.safe_test_supervisor import release_scratch
-    root = tmp_path / "owned"
-    known, unknown = root / "known", root / "unknown"
-    known.mkdir(parents=True)
-    unknown.mkdir()
-    declare_scratch(known, "pytest-session")
-    (unknown / "work").write_text("keep")
-    retain_tree(known, "unconfirmed child")
+    from ouroboros.test_environment import RETENTION_MARKER
+    from tests._shared import retire_synthetic_retention
+
+    if held == "unreadable" and (os.name == "nt" or os.geteuid() == 0):
+        pytest.skip("needs a directory this user cannot list")
+    run = tmp_path / "run"  # a finished battery: two tests of one worker, a session root, data nobody declared
+    (run / "b0").mkdir(parents=True)
+    declare_scratch(run / "b0", "pytest-basetemp")
+    worker = run / "b0" / "t" / "popen-gw0"
+    test, sibling, session, unknown = worker / "test_held0", worker / "test_other0", run / "p1", run / "unknown"
+    (test / "deep").mkdir(parents=True)
+    for path in (sibling, session, unknown):
+        path.mkdir(parents=True)
+    declare_scratch(session, "pytest-session")
+    for path in (test / "work", sibling / "work", session / "work", unknown / "work"):
+        path.write_text("bytes")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "target").write_text("not ours")
+    (run / "link").symlink_to(outside, target_is_directory=True)  # a link is unknown data at the top, gone as a link below
+    (worker / "link").symlink_to(outside, target_is_directory=True)
+    sealed = test / "deep" / "sealed"
+    sealed.mkdir()
+    marked = {"nested": test / "deep", "root": run}.get(held)
+    if marked is not None:
+        retain_tree(marked, "unconfirmed child")
+    else:
+        sealed.chmod(0)
     try:
-        assert release_scratch(root)["retained"] == [str(root)]
-        assert known.is_dir() and (unknown / "work").is_file()
+        result = release_scratch(run)
+        assert result["retained"] == [str(run)]
+        assert (test / "work").is_file(), "the test's processes work anywhere in its folder"
+        assert (unknown / "work").is_file() and (run / "link").is_symlink() and (outside / "target").is_file()
+        assert (run / "b0" / "OUROBOROS_TEST_SCRATCH.txt").is_file(), "what the kept folder lives in stays declared"
+        if held == "root":
+            assert result["released"] == [] and (sibling / "work").is_file() and (session / "work").is_file()
+            assert "retention marker" in result["reason"]
+        else:
+            assert not sibling.exists() and not session.exists() and not (worker / "link").is_symlink()
+            assert {str(sibling), str(session), str(worker / "link")} == set(result["released"])
+            assert "reason" not in result and not (run / RETENTION_MARKER).exists(), "one marker kept the whole run"
+        kept = [str(run)] if held == "root" else [str(test)]
+        assert [row["path"] for row in result["kept"]] == kept
+        if marked is not None:
+            assert result["kept"][0]["reasons"] == ["unconfirmed child"]
     finally:
-        # This marker models an unknown process; the fixture spawned none.
-        (known / 'OUROBOROS_RETAINED.txt').unlink()
+        sealed.chmod(0o700)
+        if marked is not None:  # this marker models an unknown process; the fixture spawned none
+            assert retire_synthetic_retention(marked, "unconfirmed child")
 
 
 def _repo(root, source):
@@ -146,6 +214,21 @@ def test_native_ctxless_green_red_keep_full_source_and_logs(tmp_path, capsys, re
     assert b"NATIVE_HEAD" + b"x" * 100_000 + b"NATIVE_TAIL" in next(evidence.glob("pytest-*/stdout.bin")).read_bytes()
     assert (evidence / "source/untracked/admitted-input.bin").read_bytes() == b'untracked\x00exact'
     assert b"dirty input" in (evidence / "source/candidate.diff").read_bytes()
+
+
+def test_native_debug_keep_holds_the_root_before_any_test_runs(tmp_path, monkeypatch, capsys):
+    from ouroboros.preflight_runner import run_hermetic_pytest
+    from tests._shared import retire_synthetic_gate_hold
+    repo = _repo(tmp_path / "repo", "import os, pathlib\ndef test_probe():\n    assert (pathlib.Path("
+                 "os.environ['OUROBOROS_TEST_TEMP_ROOT']) / 'OUROBOROS_RETAINED.txt').is_file()\n")
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_KEEP", "1")
+    assert run_hermetic_pytest(repo, pytest_args=["tests", "-q"], timeout=60) is None
+    evidence = Path(next(line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines()
+                         if line.startswith("PREFLIGHT_EVIDENCE ")))
+    root = Path(json.loads((evidence / "result.json").read_text())["scratch"])
+    assert retire_synthetic_gate_hold(repo, root, "explicit preflight debug retention")
+    import shutil
+    shutil.rmtree(root)  # this test's own new ended root
 
 
 def test_native_timeout_preserves_obtained_output(tmp_path, capsys):
@@ -248,6 +331,8 @@ def test_failed_containment_setup_never_reexecutes_the_command(tmp_path, monkeyp
     root.mkdir()
     calls = []
     class BrokenContainer:
+        token = 'OURO_PROC_CONTAINER_fixture'
+
         def spawn(self, command, **kwargs):
             calls.append('spawn')
             raise OSError('setup failed after possible creation')
@@ -355,6 +440,92 @@ def test_hard_interruption_retains_scratch_and_partial_evidence(tmp_path, stage)
         # outside it and its own measured container has now proven teardown.
         if root is not None:
             shutil.rmtree(root)
+
+
+# A Ctrl-C consumer shaped like scripts/run_tests.py: its final line comes only after its own cleanup.
+_INT_CONSUMER = '''import os, signal, sys, time
+from pathlib import Path
+def stop(_signum, _frame):
+    print("CONSUMER_INTERRUPTED", flush=True)
+    time.sleep(float(sys.argv[2]))
+    print("=== consumer: exit 130", flush=True)
+    sys.exit(130)
+signal.signal(signal.SIGINT, stop)
+ready = Path(sys.argv[1])
+ready.with_suffix(".pending").write_text(str(os.getpid()))
+ready.with_suffix(".pending").replace(ready)
+time.sleep(120)
+'''
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX INT export window; Windows keeps Job teardown')
+@pytest.mark.parametrize('cleanup', [0, 60])  # inside the owner's 10 s INT window, or far beyond it
+def test_ctrl_c_window_records_an_outer_cut_and_never_a_completion(tmp_path, cleanup):
+    from ouroboros import platform_layer as pl
+    from ouroboros.process_containment import ProcessContainer
+    evidence_parent = diagnostic_directory(tmp_path / 'evidence', f'int-window-{cleanup}')
+    ready = evidence_parent / 'ready'
+    container = ProcessContainer()
+    with (evidence_parent / 'launcher.log').open('wb') as output:
+        proc = container.spawn([sys.executable, '-I', '-S', str(REPO / 'scripts/safe_test.py'), '--temp-parent', '/tmp',
+                                '--evidence-dir', str(evidence_parent), '--', sys.executable, '-c', _INT_CONSUMER,
+                                str(ready), str(cleanup)], cwd=REPO, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert ready.exists(), (evidence_parent / 'launcher.log').read_text()
+            assert pl.signal_pid(proc.pid, signal.SIGINT)
+            code = proc.wait(timeout=60)
+        finally:
+            assert container.reap() == ''
+            container.close()
+    [run] = [path for path in evidence_parent.glob('run-*') if (path / 'result.json').exists()]
+    record = json.loads((run / 'result.json').read_bytes())
+    command = json.loads(next(run.glob('command-*/result.json')).read_bytes())
+    raw = next(run.glob('command-*/stdout.bin')).read_bytes()
+    log = (evidence_parent / 'launcher.log').read_text()
+    # Interrupted is never a success, whether or not the consumer finished its own cleanup.
+    assert (code, record['returncode'], record['stopped']) == (130, 130, 'signal 2'), log
+    assert b'CONSUMER_INTERRUPTED' in raw and command['interrupt_escalation'] == record['interrupt_escalation']
+    if cleanup:
+        assert record['interrupt_escalation'].endswith('its own completion is unconfirmed'), record
+        assert 'SAFE_TEST_INTERRUPT_ESCALATED' in log and command['returncode'] == -signal.SIGTERM
+        assert b'=== consumer: exit 130' not in raw, 'this case must really cut the completion'
+    else:
+        # A consumer that completed inside the window is never reported as cut.
+        assert record['interrupt_escalation'] == '' and 'SAFE_TEST_INTERRUPT_ESCALATED' not in log, log
+        assert command['returncode'] == 130 and b'=== consumer: exit 130' in raw
+    assert record['containment_error'] == '' and not Path(record['scratch']).exists(), record
+
+
+def test_a_lost_final_record_leaves_every_observed_fact_in_the_pending_one(tmp_path, monkeypatch, capsys):
+    from ouroboros import safe_test_supervisor as owner
+    repo = _repo(tmp_path / 'repo', 'def test_ok():\n    assert True\n')
+    root = tmp_path / 'scratch'
+    root.mkdir()
+    real, written = owner.write_record, []
+
+    def final_lost(path, value):
+        if Path(path).name == 'result.json':
+            written.append(dict(value))
+            if value['cleanup'] != 'pending':
+                raise OSError('controlled loss of the final record')
+        return real(path, value)
+    monkeypatch.setattr(owner, 'write_record', final_lost)
+    assert owner.main(root, repo, [sys.executable, '-c', 'raise SystemExit(3)'],
+                      evidence_parent=diagnostic_directory(tmp_path / 'evidence', 'pending-record')) == 3
+    err = capsys.readouterr().err
+    run = Path(next(line.split(' ', 1)[1] for line in err.splitlines() if line.startswith('SAFE_TEST_EVIDENCE ')))
+    pending, final = written
+    assert 'SAFE_TEST_EVIDENCE_INCOMPLETE controlled loss of the final record' in err
+    assert json.loads((run / 'result.json').read_bytes()) == pending and pending['cleanup'] == 'pending'
+    # Only cleanup and retention move on; the INT-window observation and every other fact are already there.
+    moving = {'cleanup', 'retention_reason', 'kept', 'containment_tokens'}
+    assert {key: value for key, value in final.items() if key not in moving} == {
+        key: value for key, value in pending.items() if key not in moving}
+    assert (pending['returncode'], pending['execution'], pending['stopped'], pending['interrupt_escalation']) == (
+        3, 'executed', '', '')
 
 
 def test_unwritable_default_evidence_falls_back_but_an_explicit_destination_never_moves(tmp_path, monkeypatch, capsys):

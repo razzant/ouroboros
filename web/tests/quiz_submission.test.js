@@ -135,7 +135,7 @@ test('the feedback follows the answer it describes: Forget first and quiet, the 
         assert.equal(box.nextElementSibling, feedback);
         assert.equal(feedback.hidden, true, 'nothing to say takes no line');
         assert.deepEqual(feedback.children.map((node) => node.className), ['chat-quiz-submission-note', 'chat-quiz-storage-note',
-            'chat-quiz-forget btn btn-xs btn-ghost', 'chat-quiz-check btn btn-xs btn-default', 'chat-quiz-retry btn btn-xs btn-default']);
+            'chat-quiz-forget btn btn-sm btn-ghost', 'chat-quiz-check btn btn-sm btn-default', 'chat-quiz-retry btn btn-sm btn-default']);
         choose(card); await turn(); await turn();
         assert.equal(card.dataset.submission, 'unknown');
         assert.equal(feedback.hidden, false);
@@ -252,6 +252,23 @@ test('Project recovery requires its existing project binding; foreign and unknow
             card = fx.decision.buildQuizCard(WS_MSG); await turn();
             card.querySelector('.chat-quiz-retry').click(); await turn();
             assert.equal(fx.calls.length, 0); assert.equal(card.dataset.submission, 'unknown');
+        } finally { fx.restore(); }
+    }
+});
+
+test('a private Main question its Project also shows recovers there; another Project never does', async () => {
+    for (const [also, posts] of [[['p1'], 1], [['other'], 0]]) {
+        const storage = store();
+        let fx = baseFixture({ storage, projectId: 'p1', chatId: 23, fetchImpl: async () => { throw new Error('lost'); } });
+        let card = fx.decision.buildQuizCard(WS_MSG); choose(card); await turn(); fx.restore();
+        fx = baseFixture({ storage, projectId: 'p1', chatId: 23, rawDetail: true, fetchDetail: async () => ({
+            task_id: 't-1', owner_quiz: { 'qz-1': WS_MSG },
+            question_rooms: { 'qz-1': { state: 'known', chat_id: 1, project_id: '', also_project_ids: also } },
+        }) });
+        try {
+            card = fx.decision.buildQuizCard(WS_MSG); await turn();
+            card.querySelector('.chat-quiz-retry').click(); await turn();
+            assert.equal(fx.calls.length, posts, also.join());
         } finally { fx.restore(); }
     }
 });

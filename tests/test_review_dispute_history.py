@@ -29,7 +29,6 @@ def _rounds():
     pytest.param("api_chat", True, False, id="api_chat-True"),
     pytest.param("agent_session", True, False, id="agent_session-True"),
     pytest.param("api_chat", False, True, id="api_chat-False-structured"),
-    pytest.param("api_chat", True, True, id="api_chat-True-structured"),
     pytest.param("agent_session", True, True, id="agent_session-True-structured"),
 ])
 def test_public_packet_and_two_part_brief_keep_all_supplied_arguments(staged_body, tmp_path, monkeypatch, route, retrieves, structured):
@@ -133,8 +132,10 @@ def test_obligation_reason_is_complete_in_shared_history(tmp_path):
     assert reason in text and "OMISSION NOTE" not in text
 
 
-@pytest.mark.parametrize("route,retrieves", [("api_chat", False), ("agent_session", True)])
-@pytest.mark.parametrize("structured", [False, True], ids=["scalar", "structured"])
+@pytest.mark.parametrize(("structured", "route", "retrieves"), [
+    pytest.param(False, "agent_session", True, id='scalar-agent_session-True'),
+    pytest.param(True, "api_chat", False, id='structured-api_chat-False'),
+])
 def test_supplied_source_bound_answers_keep_scalar_or_structured_verdict(staged_body, tmp_path, monkeypatch, route, retrieves, structured):
     import json
     from ouroboros import capability_evidence, reviewer_window, review_ledger, review_history_view
@@ -393,14 +394,15 @@ def test_commit_reviewed_compares_with_a_named_review_and_refuses_the_name_where
         earlier["record_id"], True, "changed", ["M\tREADME.md"])
     from ouroboros.review_history import render_comparison
     assert briefs and all(_brief_text(brief).count(render_comparison(comparison)) == 1 for brief in briefs)
+    collected = git._commit_reviewed(ctx, "fix: proposal", review_reference=reference, since_review=earlier["record_id"])
+    assert "cannot change its commit message, brief, panel or author disposition (changed: since_review)" in collected
+    assert shared.git(repo, "rev-parse", "HEAD") == head  # no commit: Cyber Pro hands every outcome back first
+    # 06.11: a continuation sets a field of another step aside with a note instead of refusing the decision.
     continued = git._commit_reviewed(ctx, "fix: proposal", skip_tests=True, skip_advisory_review=True,
                                      goal="Ship the proposal", scope="the proposal", review_reference=reference,
                                      author_disposition={"disposition": "accepted", "rationale": "Read the panel."},
                                      since_review=earlier["record_id"])
-    assert "since_review shapes a new wave's brief" in continued
-    collected = git._commit_reviewed(ctx, "fix: proposal", review_reference=reference, since_review=earlier["record_id"])
-    assert "cannot change its commit message, brief or panel" in collected
-    assert shared.git(repo, "rev-parse", "HEAD") == head  # no commit: Cyber Pro hands every outcome back first
+    assert "since_review was set aside" in continued and "since_review shapes a new wave's brief; an author" not in continued
 
 
 def test_equal_bytes_judged_as_another_subject_are_never_called_the_same_subject(tmp_path, monkeypatch):

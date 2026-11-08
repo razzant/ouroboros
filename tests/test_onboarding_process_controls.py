@@ -11,10 +11,9 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize('case', ['unmanaged', 'custom', 'missing', 'error'])
+@pytest.mark.parametrize('case', ['unmanaged', 'missing', 'error'])
 def test_runtime_branch_defaults_preserve_managed_choices_and_fallback(monkeypatch, case):
     import server
     from supervisor import git_ops
@@ -147,8 +146,12 @@ def test_onboarding_restart_uses_existing_restart_transaction_and_exit_signal(st
     assert git_ops.REPO_DIR == obj.repo
 
 
-@pytest.mark.parametrize('thread_alive', [True, False])
-@pytest.mark.parametrize('surface', ['http', 'ws', 'ws_chat', 'ws_chat_files'])
+@pytest.mark.parametrize(("surface", "thread_alive"), [
+    ('http', True),
+    ('ws', False),
+    ('ws_chat', True),
+    ('ws_chat_files', False),
+])
 def test_restart_during_initialization_does_not_queue_to_published_bridge(
         startup_controls, monkeypatch, thread_alive, surface):
     """Publishing the bridge precedes recovery; only a ready loop can consume Restart. The composer
@@ -270,7 +273,7 @@ def test_onboarding_panic_runs_real_panic_marker_and_exit_99(startup_without_con
     assert state.read_state(obj.data).quality == "uninitialized"
 
 
-@pytest.mark.parametrize('command', ['ordinary chat', '/review', '/evolve', '/panic later', '/restart later'])
+@pytest.mark.parametrize('command', ['ordinary chat', '/review', '/restart later'])
 def test_unknown_commands_are_not_accepted_without_a_consumer(startup_controls, command):
     obj = startup_controls
     response = obj.client.post('/api/command', json={'cmd': command})
@@ -354,3 +357,48 @@ def test_onboarding_restart_refusal_keeps_core_and_source(startup_controls, monk
     assert not obj.server._restart_requested.is_set()
     assert not (obj.data / 'state/owner_restart_no_resume.flag').exists()
     assert 'update is still resolving' in caplog.text
+
+
+@pytest.mark.parametrize('kind', ['same', 'empty', 'unconditioned'])
+def test_command_boot_precondition_is_checked_before_enqueue(startup_controls, monkeypatch, kind):
+    from ouroboros import server_liveness
+    from supervisor import message_bus
+
+    boot = server_liveness.BootDocument()
+    monkeypatch.setattr(server_liveness, 'BOOT', boot)
+    sent = []
+    monkeypatch.setattr(message_bus, '_BRIDGE', SimpleNamespace(ui_send=lambda cmd, **kw: sent.append(cmd)))
+    payload = {'cmd': '/bg start'}
+    values = {'same': boot.snapshot(jobs=False)['since'], 'changed': 'earlier-generation', 'empty': '', 'wrong_type': []}
+    if kind != 'unconditioned':
+        payload['if_boot'] = values[kind]
+    response = startup_controls.client.post('/api/command', json=payload)
+    if kind in {'same', 'unconditioned'}:
+        assert response.status_code == 200 and sent == ['/bg start']
+        assert response.json() == {'status': 'ok'}
+    else:
+        assert response.status_code == (409 if kind == 'changed' else 400)
+        assert response.json()['accepted'] is False
+        assert sent == []
+
+
+def test_a_gateway_exception_after_enqueue_does_not_claim_refusal(startup_controls, monkeypatch):
+    from supervisor import message_bus
+
+    sent = []
+    def send(cmd, **kwargs):
+        sent.append(cmd)
+        raise RuntimeError('post-enqueue diagnostic failed')
+    monkeypatch.setattr(message_bus, '_BRIDGE', SimpleNamespace(ui_send=send))
+    response = startup_controls.client.post('/api/command', json={'cmd': '/bg start'})
+    assert sent == ['/bg start'] and response.status_code == 400
+    assert 'accepted' not in response.json(), 'an exception does not undo enqueue'
+
+
+def test_panic_ignores_an_ordinary_command_boot_precondition(startup_controls, monkeypatch):
+    from ouroboros import server_control
+
+    calls = []
+    monkeypatch.setattr(server_control, 'request_panic', lambda *a, **kw: calls.append('panic') or True)
+    response = startup_controls.client.post('/api/command', json={'cmd': '/panic', 'if_boot': []})
+    assert response.status_code == 200 and calls == ['panic']

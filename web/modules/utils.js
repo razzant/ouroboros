@@ -89,7 +89,7 @@ const readDate = (value) => {
     const date = value ? new Date(value) : null;
     return date && !Number.isNaN(date.getTime()) ? date : null;
 };
-const absoluteTime = (value, zone = false) => readDate(value)?.toLocaleString(undefined, {
+export const absoluteTime = (value, zone = false) => readDate(value)?.toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     ...(zone ? { timeZoneName: 'short' } : {}),
 }) || '';
@@ -329,8 +329,9 @@ export function decodeHtmlEntities(value) {
 }
 
 export function formatUsdWhole(value) {
+    // Whole dollars with digit groups, as every other money line ("$30,034"; owner, board of 06.11).
     const num = Number(value);
-    return Number.isFinite(num) ? `$${num.toFixed(0)}` : '$0';
+    return Number.isFinite(num) ? `$${Math.round(num).toLocaleString('en-US')}` : '$0';
 }
 
 export function formatUsd2(value) {
@@ -341,14 +342,13 @@ export function formatUsd2(value) {
     return Number.isFinite(num) ? `$${num.toFixed(2)}` : '—';
 }
 
-export function allowanceLabel(spent, daily, unknownUnmetered = 0, integrityDegraded = false) {
-    // The consciousness allowance line: an absent number stays absent (never $0.00), a
-    // window with unmetered rows prints as a floor ("≥"), a quarantined ledger says so.
-    if (spent === null || spent === undefined || daily === null || daily === undefined) return '';
-    if (!Number.isFinite(Number(spent)) || !Number.isFinite(Number(daily))) return '';
-    const floor = Number(unknownUnmetered) > 0 ? '≥ ' : '';
-    const degraded = integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd2(spent)} / ${formatUsd2(daily)}${degraded}`;
+/** A known dollar amount: two places, four under a cent and `<$0.0001` below that, so a positive amount never
+ *  reads as the priced zero `$0.00`; absent or unreadable is the dash. */
+export function formatUsdKnown(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '—';
+    return num > 0 && num < 0.0001 ? '<$0.0001' : `$${num > 0 && num < 0.01 ? num.toFixed(4) : num.toFixed(2)}`;
 }
 
 export function formatUsd4(value) {
@@ -658,11 +658,22 @@ export function extractVersions(data) {
 
 export function formatDualVersion(data) {
     const { appVersion, runtimeVersion } = extractVersions(data);
-    return `app ${appVersion} | rt ${runtimeVersion}`;
+    return `App ${appVersion} · Runtime ${runtimeVersion}`;
 }
 
 const versionField = (value) => (typeof value === 'string' ? value.trim() : '');
 let versionRead = 0;
+let appVersionRead = '';
+const appVersionWatchers = new Set();
+
+/** The app version the newest landed health read reported (`loadVersion`); '' while none did. */
+export const lastAppVersion = () => appVersionRead;
+
+/** Call `watcher` when a landed health read changes `lastAppVersion()`; returns its disposer. */
+export function watchAppVersion(watcher) {
+    appVersionWatchers.add(watcher);
+    return () => appVersionWatchers.delete(watcher);
+}
 
 /**
  * The sidebar's runtime version and About's app/runtime pair, from one `/api/health` read. app.js
@@ -677,6 +688,10 @@ export async function loadVersion() {
     const runtime = versionField(data?.runtime_version) || versionField(data?.version);
     if (read !== versionRead || !runtime) return;
     const versions = { runtime_version: runtime, app_version: versionField(data.app_version) };
+    if (appVersionRead !== versions.app_version) {  // the Updates page's App chip
+        appVersionRead = versions.app_version;
+        appVersionWatchers.forEach((watcher) => watcher());
+    }
     const nav = document.getElementById('nav-version');
     if (nav) nav.textContent = `v${runtime}`;
     const about = document.getElementById('about-version');

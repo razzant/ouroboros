@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from ouroboros.control_actor import control_actor, observed_control_stop
+from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
 from ouroboros.delegate_recovery import owner_restart_in_progress
 from ouroboros.work_stop import SELECTION_KEY, clear_refusal, continuation_refusal, release_refusal, retain_consumed_selection
 from ouroboros.utils import utc_now_iso
@@ -239,7 +239,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
     if blockers:
         return {"ok": False, "error": "owner_pause_effects_unsettled", "blockers": blockers,
                 "action": "wait_for_effect_settlement"}
-    refusal = _global_money_refusal(q, budget_remaining) or _root_money_refusal(result_root, task, root_task_id)
+    refusal = _global_money_refusal(q, budget_remaining, [task]) or _root_money_refusal(result_root, task, root_task_id)
     if refusal:
         return refusal
     try:
@@ -248,9 +248,18 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
                                            actor_id=task_id if actor else None)
     except Exception:
         return {'ok': False, 'error': 'owner_pause_custody_unreadable'}
-    grant = {"by": control_actor(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(), "granted_at_ts": time.time(),
-             "single_use": True, "selected_by": str(selected_by or "owner"), "authority": "explicit_resume",
-             'root_resume_basis': root_state['basis'], "generation": int(fence.get("generation") or 0), "warm": True}
+    from ouroboros.presence_carrier import kept_allowance_lift, lift_allowance, lifted_record, owner_allowance_lift
+    # A warm stack's record is its durable row (its queue row may be a lane seed). The owner's decision lands there and on
+    # its queue row with this release; every warm grant carries it to the stack, which a newer Pause may have parked
+    # before it took an earlier grant up (#2566).
+    record = load_task_result(result_root, task_id) or {}
+    lift = {} if selected_by or not actor else owner_allowance_lift(record, result_root)
+    decision = lift or kept_allowance_lift(record)
+    grant = {"by": resume_author(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
+             "granted_at_ts": time.time(), "single_use": True, "selected_by": str(selected_by or "owner"),
+             "authority": "explicit_resume",
+             'root_resume_basis': root_state['basis'], "generation": int(fence.get("generation") or 0), "warm": True,
+             **({"producer_allowance_lifted": decision} if decision else {})}
     projected = None
     if actor:
         # The census above passed never-started members on the durable fence alone when the
@@ -264,7 +273,8 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
             if current == fence and actor:
                 set_fence_state(result_root, root_task_id, fence_id=fence_id, state=FENCE_RELEASED,
                                 expected_state=str(fence.get("state") or ""),
-                                release_reason="owner_resume", resume_grant=grant)
+                                release_reason="owner_resume", resume_grant=grant,
+                                row_update=(lambda row: lifted_record(row, lift)) if lift else None)
             elif current == fence:
                 selected = dict(fence.get("selected_members") or {})
                 selected[task_id] = {"grant_id": grant["grant_id"], "selected_at": grant["granted_at"], "warm": True}
@@ -281,6 +291,8 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
     held_siblings: List[str] = []
     if actor:
         with q._queue_lock:
+            if lift and isinstance((q.RUNNING.get(task_id) or {}).get("task"), dict):
+                lift_allowance(q.RUNNING[task_id]["task"], lift)  # the row a later park keeps, published below
             latch = q.BUDGET_ROOT_FENCES.get(root_task_id)
             if isinstance(latch, dict) and latch.get("cause") == "owner_pause" and str(latch.get("fence_id") or "") == fence_id:
                 # This newer warm grant supersedes the root's queue carriers,
@@ -307,7 +319,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
                 q.BUDGET_ROOT_FENCES.pop(root_task_id, None)
                 held_siblings, _markers, _rebound = hold_root_resume_descendants(
                     q, root_task_id, latch, grant, actor_id=task_id)
-            persisted = q.persist_queue_snapshot(reason="owner_pause_warm_resumed")
+            persisted = q.publish_queue_snapshot(reason="owner_pause_warm_resumed")  # durable before release
     else:
         persisted = True
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
@@ -319,13 +331,19 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
             "grant_id": grant["grant_id"], "held_siblings": held_siblings, "snapshot_persisted": bool(persisted)}
 
 
-def _global_money_refusal(q: Any, budget_remaining: Any) -> Optional[Dict[str, Any]]:
+def _global_money_refusal(q: Any, budget_remaining: Any,
+                          starts: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     try:
         # Authoritative, never the admit-only stale snapshot: a grant is money.
         remaining = budget_remaining(q.load_state(), strict=True, allow_stale=False)
     except Exception:
         return {"ok": False, "error": "monetary_authority_unavailable"}
-    if remaining <= 0:
+    from supervisor.worker_assignment import needs_paid_admission
+
+    # A reached global limit refuses paid admission only: a Resume proceeds when nothing it ``starts`` needs it,
+    # and their every send still meets the reservation. Without ``starts`` (a money pause names a refused paid
+    # send) it refuses.
+    if remaining <= 0 and (starts is None or any(needs_paid_admission(task) for task in starts)):
         return {"ok": False, "error": "budget_still_exhausted", "action": "increase_budget_then_resume"}
     return None
 
@@ -367,6 +385,39 @@ def _root_money_refusal(result_root: Any, task: Dict[str, Any], root_task_id: st
                 return {"ok": False, "error": "root_hard_cap_exhausted",
                         "action": "increase_budget_then_resume"}
     return None
+
+
+def _unlifted_record(row: Dict[str, Any], lift: Dict[str, Any]) -> Dict[str, Any]:
+    """``presence_carrier.lifted_record`` undone in the write withdrawing its grant: number back, decision gone."""
+    record = dict(row)
+    metadata = record["metadata"] = dict(record.get("metadata") or {})
+    metadata.pop("producer_allowance_lifted", None)
+    metadata["root_cost_ceiling_usd"] = lift["ceiling_usd"]
+    return record
+
+
+def take_back_owner_resume_lift(task: Dict[str, Any], before: Dict[str, Any], result_root: Any) -> None:
+    """A grantless release that did not land decided nothing (``presence_carrier.owner_resume_lift``): the durable row
+    takes its number back; the queue row is its caller's to restore. ``before`` is that row as the lift found it: a
+    decision it already kept stays. A store that refuses keeps the owner's decision on that record, nothing released,
+    until the row's next release reads it; the door still refuses, and the failure is logged."""
+    from ouroboros.presence_carrier import kept_allowance_lift
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+
+    lift = kept_allowance_lift(task)
+    if not lift or kept_allowance_lift(before):
+        return
+
+    def undo(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        require_writable_task_result_schema(row)
+        return stamp_task_result_schema(_unlifted_record(row, lift)) if row else None
+
+    try:
+        patch_document(pathlib.Path(result_root), str(task.get("id") or ""), undo)
+    except Exception:
+        log.warning("The owner's decision on %s stays on its record: its release did not land", task.get("id"),
+                    exc_info=True)
 
 
 def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected_by: str = "",
@@ -483,8 +534,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
             return {"ok": False, "error": HOLD_REVOCATION_UNWRITTEN, "detail": str(exc)[:200],
                     "grant_id": live_grant.get("grant_id"), "action": "retry_or_cancel"}
         row = {**row, "state": STATE_PAUSED, "grant": revoked}
-    refusal = _resume_custody_refusal(result_root, task_id, row, external)
-    if refusal:
+    if refusal := _resume_custody_refusal(result_root, task_id, row, external):
         return refusal
     row = {**row, "external_runs": external,  # an owner Pause's sent work: settled per THIS read
            **({"settlement": "settled"} if row.get("settlement") else {})}
@@ -502,8 +552,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     ceiling = resolve_task_execution_timeout_sec(task)  # None = unlimited; 0 = exhausted
     if ceiling is not None and started and executed_sec >= float(ceiling):
         return {"ok": False, "error": "lifetime_exhausted", "executed_sec": round(executed_sec, 1)}
-    refusal = _global_money_refusal(q, budget_remaining)
-    if refusal:
+    if refusal := _global_money_refusal(q, budget_remaining, None if str(row.get("reason") or "budget") == "budget" else [task]):
         return refusal
     # The grant binds to the queue row's own lineage (``root_task_id`` above), the
     # one ``budget_resume_dispatch_allowed`` revalidates: a saved pause's root field
@@ -533,8 +582,11 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     # A later Resume raises the generation; older grants cannot become live again.
     generation = int(row.get("resume_generation") or 0) + 1
     pause_generation = int(row.get("pause_generation") or 0)
+    from ouroboros.presence_carrier import lift_allowance, lifted_record, owner_allowance_lift
+    lift = {} if selected_by or sleep_wake else owner_allowance_lift(task, result_root)  # decided once (#2566)
     grant = {
-        "by": control_actor(), **({"owner_pause_fence_id": owner_fence_id} if owner_fence_id else {}),
+        "by": resume_author(),
+        **({"owner_pause_fence_id": owner_fence_id} if owner_fence_id else {}),
         "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(), "granted_at_ts": now,
         "single_use": True, "paused_duration_sec": prior_paused + max(0.0, now - paused_at),
         "executed_sec_before_pause": round(executed_sec, 3),
@@ -542,13 +594,13 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         "selected_by": "sleep_wake" if sleep_wake else str(selected_by or "owner"),
         "authority": "sleep_readiness" if sleep_wake else "explicit_resume",
         "sleep_id": str((row.get("sleep") or {}).get("sleep_id") or "") if sleep_wake else "",
-        'root_resume_basis': root_state['basis'],
-        "root_grant_id": str(root_grant.get("grant_id") or ""),
+        'root_resume_basis': root_state['basis'], "root_grant_id": str(root_grant.get("grant_id") or ""),
         "root_resume_generation": int(root_grant.get("generation") or 0),
         "root_fence_id": (str((q.BUDGET_ROOT_FENCES.get(root_task_id) or {}).get("fence_id") or "")
                           if not actor else ""),
         "refresh_planning_threshold": str(row.get("rail") or "") in {
             "graceful_ceiling", "wrapup_last_fit", "soft_land"},
+        **({"producer_allowance_lifted": lift} if lift else {}),
     }
     prior_pause = dict(pause)
     try:
@@ -556,7 +608,8 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         set_budget_pause(result_root, task_id,
                          {**row, "state": STATE_RESUME_GRANTED, "grant": grant,
                           "resume_generation": generation},
-                         expected_pause_id=pause_id, expected_state=str(row.get("state") or ""))
+                         expected_pause_id=pause_id, expected_state=str(row.get("state") or ""),
+                         row_update=(lambda current: lifted_record(current, lift)) if lift else None)
     except Exception as exc:
         return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
     task.pop("_budget_pause", None)
@@ -576,6 +629,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
             'root_resume_generation', 'root_fence_id', 'root_resume_basis')},
     }
     task["budget_resumed_at"] = grant["granted_at"]
+    lifted_from = lift_allowance(task, lift)  # stands with the snapshot below, or is rolled back with the grant
     # The exact handoff owns selection until consumption; old stops survive only
     # in these local rollback copies, never in the new grant or selection.
     released_hold = task.pop(BUDGET_HOLD_KEY, None)
@@ -599,9 +653,9 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         # so its descendants wait for explicit selection exactly as when a latch lifts (Q9).
         held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
             q, root_task_id, {"fence_id": owner_fence_id, "cause": "owner_pause"}, grant, actor_id=task_id)
-    if not q.persist_queue_snapshot(reason="budget_exact_resume_granted"):
+    if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):  # durable before the grant stands
         task.pop("_budget_pause_resume", None)
-        task["_budget_pause"] = prior_pause
+        task.update(lifted_from, _budget_pause=prior_pause)  # the allowance a lift moved returns with the pause
         if released_hold is not None:
             task[BUDGET_HOLD_KEY] = released_hold
         if prior_selection is not None:
@@ -619,7 +673,8 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         try:
             set_budget_pause(result_root, task_id, row, expected_pause_id=pause_id,
                              expected_state=STATE_RESUME_GRANTED,
-                             expected_grant_id=str(grant["grant_id"]))
+                             expected_grant_id=str(grant["grant_id"]),
+                             row_update=(lambda current: _unlifted_record(current, lift)) if lift else None)
             return {"ok": False, "error": "snapshot_not_persisted"}
         except Exception as rollback_error:
             detail = str(rollback_error)[:120]
@@ -920,10 +975,14 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
     except Exception:
         return {"ok": False, "error": "cancellation_authority_unavailable"}
     with q._queue_lock:
+        rows = [t for t in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())] if isinstance(t, dict)]
         # A Continue of this answered root that may already write would overlap the late work.
-        successors = [str(t.get("id") or "") for t in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())]
-                      if isinstance(t, dict) and ((t.get("metadata") or {}).get("continuation") or {}).get(
+        successors = [str(t.get("id") or "") for t in rows
+                      if ((t.get("metadata") or {}).get("continuation") or {}).get(
                           "predecessor_task_id") == task_id and (t.get("id") in q.RUNNING or not budget_hold_fact(t))]
+        # All this Resume can start: the tree's queued and warm members. The answered root runs nothing again and
+        # its unsent late review is never sent again (``review_pause``), so review-only work starts no actor.
+        members = [dict(t) for t in rows if str(t.get("root_task_id") or "") == task_id and t.get("id") != task_id]
     # The whole tree's sent work must have settled, exactly as for a paused loop's Resume.
     # Reviewers already launched finish separately; Resume does not wait for them.
     blockers = [{"kind": "continuation_successor", "task_id": tid} for tid in successors] + _owner_pause_blockers(
@@ -935,7 +994,7 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
                                  or (row.get("metadata") or {}).get("deadline_at"))
     if deadline is not None and deadline <= utc_now():
         return {"ok": False, "error": "deadline_passed"}
-    return _global_money_refusal(q, budget_remaining) or _root_money_refusal(
+    return _global_money_refusal(q, budget_remaining, members) or _root_money_refusal(
         root, {**row, "id": task_id}, str(row.get("root_task_id") or task_id))
 
 

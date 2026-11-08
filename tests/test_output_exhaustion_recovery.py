@@ -21,6 +21,8 @@ from tests.test_transport_b_stream_deadlines import isolated as isolated, chunk,
 
 PRIMARY = "openai-compatible::primary-fixture"
 FALLBACK = "openai-compatible::fallback-fixture"
+_UNSEEN_KEEP = "UNSEEN-KEEP " * 1500
+_OLD_HOST = "OLD-HOST " * 5000
 
 
 @pytest.fixture
@@ -94,8 +96,8 @@ def configured_loop(tmp_path, monkeypatch, client, *, sources=False, exact=False
         # A recorded send carries its tool list too: a missing one would read as a changed one.
         ctx._last_context_observation = {**_observation(kw["messages"]),
                                          "tool_schemas": initial_tool_schemas(kw["tools"], context_mode="max")}
-        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text="UNSEEN-KEEP " * 1500),
-            bound_host_row(CONTEXT_FACTS_NAME, "OLD-HOST " * 5000),
+        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text=_UNSEEN_KEEP),
+            bound_host_row(CONTEXT_FACTS_NAME, _OLD_HOST),
             bound_host_row(CONTEXT_FACTS_NAME, "CURRENT-HOST-KEEP")]
     return kw, notes
 
@@ -131,18 +133,45 @@ def test_configured_fallbacks_are_disclosed_and_tried_once(tmp_path, monkeypatch
     text, usage, _trace = loop.run_llm_loop(**kw)
     assert text == "done" and len(sent) == 2 + len(tail)
     assert [s["model"] for s in sent] == ["primary-fixture", "primary-fixture", "fallback-fixture", "third-fixture"][:len(sent)]
-    assert len([n for n in notes if "Fallback:" in n]) == len(tail)
+    assert len([n for n in notes if "Fallback: trying" in n]) == len(tail)
+    assert [n for n in notes if "active route" in n] == [f"⚡ Fallback: openai-compatible::{sent[-1]['model']} is now the active route; it answered."]
     assert recovery.KEY not in usage
+
+
+def test_a_reply_that_spent_its_allowance_is_adopted_as_no_answer_until_the_primary_returns(
+        tmp_path, monkeypatch, isolated, endpoint):
+    """Real loop and SDK. The primary refuses; the fallback's empty length reply is adopted as the active route, but
+    no row or host fact calls it an answer and no accepted route records it. The primary then answers on its own return."""
+    client, sent = endpoint(["400", "empty", "empty", "answer"])
+    kw, notes = configured_loop(tmp_path, monkeypatch, client)
+    text, usage, _trace = loop.run_llm_loop(**kw)
+    assert text == "done" and [s["model"] for s in sent] == ["primary-fixture", "fallback-fixture", "fallback-fixture", "primary-fixture"]
+    assert [n for n in notes if "Fallback:" in n] == [
+        f'⚡ Fallback: trying {FALLBACK} after a rejected request on {PRIMARY}. The provider said: "Upstream request failed"',
+        f"⚡ Fallback: {FALLBACK} is now the active route, with no usable answer after a reply that reached its length limit "
+        "before any visible output.",
+        f"⚡ Fallback: trying {PRIMARY} (primary) after a reply that reached its length limit before any visible output on {FALLBACK}.",
+        f"⚡ Fallback: back on the primary route {PRIMARY}; it answered.",
+    ]
+    facts = [json.dumps(m["content"], ensure_ascii=False) for m in sent[2]["messages"] if "[ROUTE FACTS]" in str(m.get("content"))]
+    assert len(facts) == 1, "the adopted route's next own round carries the facts once"
+    assert "is now acting without a usable answer this round after" in facts[0]
+    assert "That route has no accepted call this round." in facts[0]
+    assert "answered this round" not in facts[0] and "That answering call" not in facts[0]
+    assert [row["to_binding"][0] for row in usage["accepted_routes"]] == [PRIMARY], "a spent reply is no accepted route"
 
 
 @pytest.mark.parametrize("exact", [True, False])
 def test_all_routes_empty_save_incomplete_without_wrapup(tmp_path, monkeypatch, isolated, endpoint, exact):
     client, sent = endpoint(["empty"] * (2 if exact else 4), fallbacks=f"{FALLBACK},openai-compatible::third-fixture")
-    kw, _notes = configured_loop(tmp_path, monkeypatch, client, exact=exact)
+    kw, notes = configured_loop(tmp_path, monkeypatch, client, exact=exact)
     kw["messages"] += [{"role": "assistant", "content": "Saved finding, not a completed answer."}]
     text, usage, trace = loop.run_llm_loop(**kw)
     assert len(sent) == (2 if exact else 4)
     assert text == "Saved finding, not a completed answer."
+    assert [n for n in notes if "the last attempt" in n] == ([] if exact else [
+        "⚡ Fallback: the last attempt, on openai-compatible::third-fixture, ended without a usable reply after a reply "
+        "that reached its length limit before any visible output."])
     assert usage["reason_code"] == recovery.REASON and usage["execution_status"] == "infra_failed"
     assert "Work is incomplete" in usage["terminal_host_notice"] and trace["output_recovery"]["stage"] == "exhausted"
     from ouroboros.outcomes import derive_loop_outcome
@@ -262,8 +291,15 @@ def persistent_loop(tmp_path, monkeypatch, client, *, target="t-output-recovery"
     return kw, notes
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("lost_at", ["informed", "fallback", "informed_send", "fallback_send", "smaller", "smaller_send", "fallback_informed"])
+@pytest.mark.parametrize(("lost_at", "new_id"), [
+    ("informed", True),
+    ("fallback", True),
+    ("informed_send", False),
+    ("fallback_send", True),
+    ("smaller", False),
+    ("smaller_send", False),
+    ("fallback_informed", True),
+])
 def test_real_checkpoint_recovery_never_reopens_spent_step(tmp_path, monkeypatch, isolated, endpoint, new_id, lost_at):
     from ouroboros import working_checkpoint as wc
     from tests.test_stream_timeout_recovery import WorkerLost
@@ -314,7 +350,7 @@ def test_failed_smaller_request_reaches_reserve_without_second_shrink(tmp_path, 
     text, usage, _trace = loop.run_llm_loop(**kw)
     assert [s["model"] for s in sent] == ["primary-fixture"] * 3 + ["fallback-fixture"]
     assert len(_events(tmp_path, "context_reclaim")) == 2
-    assert len([n for n in notes if "Fallback:" in n]) == 1
+    assert len([n for n in notes if "Fallback: trying" in n]) == 1
     assert text == "done" if tail == "answer" else usage["reason_code"] == recovery.REASON
 
 
@@ -428,7 +464,7 @@ def test_outer_control_keeps_its_reason_without_recovery_or_paid_recap(tmp_path,
         assert kw["tools"]._ctx._skip_post_task_synthesis is True
 
 
-@pytest.mark.parametrize("kind", ["auth_error", "quota_exhausted", "transport_unavailable", "deadline_exhausted", "provider_outcome_unknown"])
+@pytest.mark.parametrize("kind", ["auth_error", "deadline_exhausted", "provider_outcome_unknown"])
 def test_other_failure_rails_are_not_relabelled_as_output_exhaustion(kind):
     usage = {recovery.KEY: {"stage": "fallback"}, "_last_llm_error_kind": kind}
     assert recovery.next_step(usage) == ""

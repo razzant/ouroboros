@@ -24,7 +24,6 @@ from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
 from ouroboros.review_state import load_state
 from ouroboros.task_results import write_task_result
 
-pytestmark = pytest.mark.serial
 TASK = "receptive-author"
 
 
@@ -193,12 +192,26 @@ def _produce(a, run):
     return thread
 
 
-def _commit(a, outcome, key="result", **kwargs):
+def _commit(a, outcome, key="result", message="Change value", paths=("change.py",), **kwargs):
     def run():
         with _parent(a):
-            outcome[key] = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py"],
+            outcome[key] = a.git._commit_reviewed(a.ctx, message, paths=list(paths),
                                                   skip_advisory_review=True, **kwargs)
     return _produce(a, run)
+
+
+def _collected_at_zero(a, reference, settled):
+    """What collecting a settled round at $0 owes (``settle_completed_round``, #2410), on the wave's own rows: the
+    call's own row names the settled record yet bought nothing (unpaid, no custody), the settled row keeps its paid
+    outcome with no custody left, and no third row names that record."""
+    from ouroboros.review_state import _attempt_has_active_review_custody
+
+    rows = {row.attempt: row for row in load_state(a.data).attempts if row.review_record_id == settled.review_record_id}
+    own, old = rows[reference["attempt"]], rows[settled.attempt]
+    assert sorted(rows) == sorted({own.attempt, old.attempt}) and own.attempt != old.attempt, rows
+    assert not own.paid and not _attempt_has_active_review_custody(own), own
+    assert old.paid and (old.status, old.phase) == ("reviewed", "review_only"), old
+    assert not _attempt_has_active_review_custody(old), old
 
 
 def _read_mail(a):
@@ -253,7 +266,9 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "no second paid send"
     reference = json.loads(again["result"].split("\n", 1)[1])["review_reference"]
-    assert reference["attempt"] == attempt.attempt
+    # Settled, the wave is a completed round: the call collects ITS record at $0 under its own row (#2587/#2590).
+    assert reference["review_record_id"] == attempt.review_record_id
+    _collected_at_zero(a, reference, attempt)
     # Only the explicit continuation commits, over the current bytes.
     (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
     final = {}
@@ -264,6 +279,140 @@ def test_mail_ends_the_author_wait_reviewers_continue_over_frozen_bytes_and_git_
     assert a.ctx._commit_review_status == "author_continued" and len(a.pushes) == 1
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
     assert len(_notices(a)) == 1
+
+
+@pytest.mark.parametrize("first_paths,collect,moved", [
+    (["change.py", "maybe.txt"], {"paths": None}, False),
+    (["maybe.txt"], {"paths": None}, False),
+    (["maybe.txt"], "reference", False),
+    (["change.py", "second.py"], {"paths": ["change.py"]}, False),
+    (["change.py", "maybe.txt"], {"paths": None}, True),
+    (["change.py", "maybe.txt"], "reference", True),
+])
+def test_frozen_wave_rejoin_keeps_the_actual_uncertain_candidate(author, monkeypatch, first_paths, collect, moved):
+    """The real attribution resolver and frozen-review rejoin compose: collecting the open wave takes
+    the composition it retained, an uncertain path included, and the settled handback unstages all of
+    it, so the next commit starts from an index holding nothing of that wave.
+    Only the reviewer/model, publication and test runner use the fixture's stand-ins.
+    """
+    from ouroboros.mutation_attribution import capture_mutation_baseline
+
+    a, outcome = author, {}
+    (a.repo / "change.py").write_text("value = 1\n", encoding="utf-8")
+    (a.repo / "maybe.txt").write_text("observed copy edit\n", encoding="utf-8")
+    capture_mutation_baseline(a.data, TASK, [{
+        "surface_type": "system_repo", "host_root": str(a.repo),
+        "candidate": {"candidate_id": "recorded-copy"}, "basis": {"kind": "observed"},
+    }])
+    if moved:  # a real overlapping base move, accepted explicitly by the first call
+        (a.repo / "change.py").write_text("value = 99\n", encoding="utf-8")
+        _git(a.repo, "add", "change.py")
+        _git(a.repo, "commit", "-qm", "advance the candidate")
+    for name in {"change.py", "second.py"} & set(first_paths):
+        (a.repo / name).write_text("value = 2\n", encoding="utf-8")
+    selected, facts, error, _binding = a.git._task_attributed_commit_paths(a.ctx, first_paths)
+    assert not error and selected == first_paths and facts["uncertain"] == ["maybe.txt"], error
+
+    def call(key, **kwargs):
+        with _parent(a):
+            outcome[key] = a.git._commit_reviewed(a.ctx, "Change value", skip_advisory_review=True, **kwargs)
+
+    first = _produce(a, lambda: call("first", paths=selected))
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    assert "review_checkouts" in a.roots["m1"]
+    write_owner_message(a.data, "Keep working from the saved review.", TASK)
+    _join(first)
+    assert "reviewers are still running" in outcome["first"], outcome["first"]
+    uncertain = "selected with uncertain attribution: maybe.txt"
+    assert (uncertain in outcome["first"]) is ("maybe.txt" in first_paths)
+    entries, head = _git(a.repo, "ls-files", "-s", "-z"), _git(a.repo, "rev-parse", "HEAD")
+    _read_mail(a)
+    staged, observations = threading.Event(), []
+    real_stage = a.git._stage_candidate_for_review
+
+    def observe_stage(ctx, *args, **kwargs):
+        result = real_stage(ctx, *args, **kwargs)
+        observations.append(((bool(ctx._review_open_peers), bool(ctx._review_resume_pending)), kwargs["attribution"], result))
+        staged.set()
+        return result
+
+    monkeypatch.setattr(a.git, "_stage_candidate_for_review", observe_stage)
+    reference = json.loads(outcome["first"].split("\n", 1)[1])["review_reference"]
+    second = _produce(a, lambda: call("second", **({"review_reference": reference} if collect == "reference"
+                                                   else collect)))
+    until(lambda: staged.is_set() or not second.is_alive())
+    assert staged.is_set(), outcome.get("second")  # refused before staging: the wave is never collected
+    route, attribution, (classified, _snapshot, refused) = observations[0]
+    assert route == ((False, True) if collect == "reference" else (True, False)), route  # resumed / open-peer rejoin
+    assert refused is None and set(classified) == set(first_paths), refused
+    assert attribution["uncertain"] == ["maybe.txt"] and _git(a.repo, "ls-files", "-s", "-z") == entries
+    a.reviewer.release()
+    _join(second)
+    assert outcome["second"].startswith("Review outcome returned before commit."), outcome["second"]
+    assert (uncertain in outcome["second"]) is ("maybe.txt" in first_paths), outcome["second"]
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"], "the same frozen subject is collected without another send"
+    assert _git(a.repo, "diff", "--cached", "--name-only") == "", "the handback leaves nothing of the wave staged"
+    (a.repo / "other.py").write_text("value = 3\n", encoding="utf-8")
+    _read_mail(a)  # the [Review settled] notice, read before the next call as the loop reads it
+    _join(_produce(a, lambda: call("next", paths=["other.py"])))
+    assert outcome["next"].startswith("Review outcome returned before commit."), outcome["next"]
+    assert _git(a.repo, "diff", "--cached", "--name-only") == ""
+    assert _git(a.repo, "rev-parse", "HEAD") == head and not a.pushes
+
+
+@pytest.mark.parametrize("message,paths", [
+    ("Release value", ["VERSION"]),  # a distinct intent leaving the staged uncertain carrier unnamed
+    ("Release value", ["VERSION", "pyproject.toml"]),  # the same new subject naming it
+    ("Change value", ["change.py"]),  # the open wave's own intent, over newer working bytes
+])
+def test_a_new_subject_beside_an_open_frozen_wave_keeps_its_own_selection(author, message, paths):
+    """Only a call that collects an open frozen wave exactly keeps that wave's retained composition. A
+    distinct intent, or the same intent over newer bytes, is a new subject under the ordinary rules: a
+    staged uncertain carrier it does not name refuses before anything is staged or bought; naming it
+    reviews it in a wave of its own."""
+    from ouroboros.mutation_attribution import capture_mutation_baseline
+
+    a, outcome, same_intent = author, {}, message == "Change value"
+    (a.repo / "change.py").write_text("value = 1\n", encoding="utf-8")  # change.py: this task's own edit below
+    carrier = a.repo / "pyproject.toml"
+    carrier.write_text('[project]\nname = "ouroboros"\nversion = "1.0.0"\n', encoding="utf-8")
+    _git(a.repo, "add", "pyproject.toml")
+    _git(a.repo, "commit", "-qm", "carrier")
+    carrier.write_text('[project]\nname = "ouroboros"\nversion = "1.0.1"\ndescription = "earlier work"\n',
+                       encoding="utf-8")  # changed before the baseline: uncertain in this recorded copy
+    capture_mutation_baseline(a.data, TASK, [{
+        "surface_type": "system_repo", "host_root": str(a.repo),
+        "candidate": {"candidate_id": "recorded-copy"}, "basis": {"kind": "observed"},
+    }])
+    (a.repo / "change.py").write_text("value = 2\n", encoding="utf-8")
+    first = _commit(a, outcome, key="first", paths=["change.py", "pyproject.toml"] if same_intent else ["change.py"])
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    write_owner_message(a.data, "Keep working while the review runs.", TASK)
+    _join(first)
+    first_attempt = json.loads(outcome["first"].split("\n", 1)[1])["review_reference"]["attempt"]
+    _read_mail(a)
+    if same_intent:  # the frozen subject stays staged while its working file moves on
+        (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
+    else:  # a release prepared while the old reviewers keep change.py
+        _git(a.repo, "restore", "--staged", "change.py")
+        _git(a.repo, "add", "pyproject.toml")
+        (a.repo / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    head, entries = _git(a.repo, "rev-parse", "HEAD"), _git(a.repo, "ls-files", "-s", "-z")
+    rounds = list(a.reviewer.rounds)
+
+    _join(_commit(a, outcome, key="second", message=message, paths=paths))
+
+    open_wave = next(row for row in load_state(a.data).attempts if row.attempt == first_attempt)
+    assert (open_wave.status, open_wave.phase) == ("reviewing", "late_wait"), "the open wave keeps its own row"
+    if "pyproject.toml" in paths:
+        second = json.loads(outcome["second"].split("\n", 1)[1])["review_reference"]
+        assert second["attempt"] != first_attempt and len(a.reviewer.rounds) > len(rounds), outcome["second"]
+        assert "selected with uncertain attribution: pyproject.toml" in outcome["second"]
+    else:
+        assert "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED" in outcome["second"], outcome["second"]
+        assert "pyproject.toml (attribution uncertain, not in paths)" in outcome["second"]
+        assert a.reviewer.rounds == rounds and _git(a.repo, "ls-files", "-s", "-z") == entries
+    assert _git(a.repo, "rev-parse", "HEAD") == head and not a.pushes
 
 
 def _commit_count(a):
@@ -423,7 +572,8 @@ def test_a_late_settlement_after_another_call_touches_only_its_own_attempt(autho
     again = {}
     _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
-    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == left.attempt
+    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["review_record_id"] == left.review_record_id
+    _collected_at_zero(a, json.loads(again["result"].split("\n", 1)[1])["review_reference"], left)
     collected = next(row for row in load_state(a.data).attempts if row.attempt == left.attempt)
     assert {row["slot_id"] for row in collected.triad_raw_results} >= {"first", "second"}
     assert sorted(a.reviewer.rounds) == ["m1", "m1", "m2", "m2"] and _commit_count(a) == 1
@@ -472,7 +622,8 @@ def test_a_distinct_candidate_gets_its_own_panel_while_the_left_wave_keeps_custo
     again = {}
     _join(_commit(a, again))
     assert again["result"].startswith("Review outcome returned before commit."), again["result"]
-    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["attempt"] == a_attempt.attempt
+    assert json.loads(again["result"].split("\n", 1)[1])["review_reference"]["review_record_id"] == a_attempt.review_record_id
+    _collected_at_zero(a, json.loads(again["result"].split("\n", 1)[1])["review_reference"], a_attempt)
     assert len(a.reviewer.rounds) == rounds == 4, "the exact A identity was collected, not re-bought"
     assert _commit_count(a) == 1
 
@@ -642,8 +793,7 @@ def test_unknown_seat_notice_names_custody_instead_of_claiming_settlement(tmp_pa
     assert facts["review_feedback"]["unknown_seats"] == 1
 
 
-@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
-@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize(("interactive", "mode"), [(True, "pro"), (False, "cyber_pro")])
 def test_a_settled_handback_leaves_no_open_custody_behind(author, mode, interactive):
     """A settled outcome handed back before Git closes its attempt: a revised candidate then
     buys its own review (Cyber Pro included), never a $0 'still running' replay."""
@@ -803,12 +953,12 @@ def test_a_failed_settled_duty_write_recovers_from_retained_seats_while_controll
     a = author
     real_owe, written, refused = late_review_marks.owe_after_end, [], []
 
-    def refuse_rewrites(drive_root, duty_id, duty):
+    def refuse_rewrites(drive_root, duty_id, duty, *, replace=True):
         if duty_id in written:
             refused.append(dict(duty))
             return False
         written.append(duty_id)
-        return real_owe(drive_root, duty_id, duty)
+        return real_owe(drive_root, duty_id, duty, replace=replace)
 
     with monkeypatch.context() as fault:
         fault.setattr(late_review_marks, "owe_after_end", refuse_rewrites)
@@ -894,3 +1044,200 @@ def test_an_unreadable_or_unknown_left_record_never_claims_a_settled_seat(tmp_pa
     assert "2 seat(s) have no retained outcome and stay unknown" in lines[0] and "settled" not in lines[0]
     assert lines[1].startswith("- m1 (seat first): answered") and lines[2].startswith("- m2 (seat second): outcome unknown")
     assert lines[3].startswith("- m3 (seat third): outcome unknown"), "never 'the same unchanged call collects it'"
+
+
+def _open_uncertain_wave(a, out, *, feedback=False):
+    from ouroboros import review_custody
+    from ouroboros.mutation_attribution import capture_mutation_baseline
+
+    (a.repo / "change.py").write_text("value = 1\n")
+    (a.repo / "maybe.txt").write_text("earlier uncertain work\n")
+    capture_mutation_baseline(a.data, TASK, [{
+        "surface_type": "system_repo", "host_root": str(a.repo),
+        "candidate": {"candidate_id": "observed-copy"}, "basis": {"kind": "observed"},
+    }])
+    (a.repo / "change.py").write_text("value = 2\n")
+    first = _commit(a, out, key="first", paths=["change.py", "maybe.txt"])
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    if feedback:
+        with review_custody._ACTIVE_LOCK:
+            entry = next(e for e in review_custody._ACTIVE.values()
+                         if e.recovery_binding.get("slot_id") == "first")
+        a.reviewer.gates["m1"].set()
+        assert entry.event.wait(60)
+        until(lambda: entry.key not in review_custody._ACTIVE)
+    write_owner_message(a.data, "Continue after this retained observation", TASK)
+    _join(first)
+    _read_mail(a)
+    return json.loads(out["first"].split("\n", 1)[1])["review_reference"]
+
+
+@pytest.mark.parametrize("paths", [None, ["change.py"], ["change.py", "maybe.txt"]])
+def test_collection_exception_belongs_to_final_subject_after_lock_wait(author, monkeypatch, paths):
+    a, out = author, {}
+    reference = _open_uncertain_wave(a, out)
+    real_acquire, arrived, observed = a.git._acquire_git_lock, threading.Event(), []
+    held = real_acquire(a.ctx)
+
+    def acquire(ctx, *args, **kwargs):
+        observed.append(getattr(ctx._review_collected_peer, "attempt", None))
+        arrived.set()
+        return real_acquire(ctx, *args, **kwargs)
+
+    monkeypatch.setattr(a.git, "_acquire_git_lock", acquire)
+    rounds = list(a.reviewer.rounds)
+
+    def run():
+        with _parent(a):
+            out["second"] = a.git._commit_reviewed(a.ctx, "Change value", paths=paths, skip_advisory_review=True)
+
+    second = _produce(a, run)
+    try:
+        assert arrived.wait(60)
+        (a.repo / "change.py").write_text("value = 3\n")
+    finally:
+        a.git._release_git_lock(held)
+    _join(second)
+    assert observed == [reference["attempt"]]
+    if paths and "maybe.txt" in paths:
+        current = json.loads(out["second"].split("\n", 1)[1])["review_reference"]
+        assert current["attempt"] != reference["attempt"] and len(a.reviewer.rounds) > len(rounds)
+    else:
+        assert "REVIEW_SELECTION_CHANGED_BLOCKED" in out["second"], out["second"]
+        assert a.reviewer.rounds == rounds
+        assert "maybe.txt" in _git(a.repo, "diff", "--cached", "--name-only")
+    original = next(row for row in load_state(a.data).attempts if row.attempt == reference["attempt"])
+    assert (original.status, original.phase) == ("reviewing", "late_wait")
+
+
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_a_decision_written_beside_its_review_lands_only_with_the_reference_it_read(author, monkeypatch, mode):
+    """Owner 11.10 (review 06.11), both directions with real Git and the real batch: a decision written in the same
+    assistant message as its review stages nothing and names that review's exact reference, which reaches the mind
+    with the outcome; the next call quoting it lands, its empty message taken from the reviewed call."""
+    from ouroboros import config, loop_tool_execution as le
+
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline(mode)
+    a = author
+    a.reviewer.release()
+    shown, effects, base = [], [], _git(a.repo, "rev-parse", "HEAD")
+
+    def execute(tools, tc, *args):
+        with _parent(a):
+            text = a.git._commit_reviewed(a.ctx, **json.loads(tc["function"]["arguments"]))
+        effects.append((_git(a.repo, "rev-parse", "HEAD") != base, bool(shown), text))
+        return {"result": text, "is_error": False}
+
+    monkeypatch.setattr(le, "_execute_with_timeout", execute)
+    monkeypatch.setattr(le, "_get_tool_timeout", lambda *a: 60)
+    monkeypatch.setattr(le, "process_tool_results", lambda *a, **k: shown.append(a[0]) or 0)
+    decided = {"disposition": "accepted", "rationale": "Accept the review."}
+
+    def turn(*arguments):
+        calls = [{"id": f"call-{len(effects) + n}", "function": {"name": "commit_reviewed", "arguments": json.dumps(args)}}
+                 for n, args in enumerate(arguments)]
+        le.handle_tool_calls(calls, SimpleNamespace(_ctx=a.ctx), a.data / "logs", TASK, None, [], {"tool_calls": []},
+                             lambda *a: None)
+
+    turn({"commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True},
+         {"commit_message": "", "author_disposition": decided})
+    assert [effect[:2] for effect in effects] == [(False, False), (False, False)], effects
+    refusal = effects[1][2]
+    assert "Nothing was staged or committed" in refusal and "review_reference=" in refusal
+    reference = json.loads(refusal.split("review_reference=", 1)[1].strip().rstrip("."))
+    turn({"commit_message": "", "author_disposition": decided, "review_reference": reference})
+    assert effects[2][:2] == (True, True), effects[2][2]
+    assert _git(a.repo, "log", "-1", "--format=%s") == "Change value"
+
+
+def test_refused_author_continuation_preserves_source_and_corrected_reference(author):
+    a, out = author, {}
+    reference = _open_uncertain_wave(a, out, feedback=True)
+    fields = ("status", "phase", "paid", "late_result_pending", "finished_ts", "review_retry_key", "review_record_id")
+
+    def source():
+        row = next(row for row in load_state(a.data).attempts if row.attempt == reference["attempt"])
+        return {name: getattr(row, name) for name in fields}
+
+    before, rounds = source(), list(a.reviewer.rounds)
+    decision = {"disposition": "partial", "rationale": "Read the first seat's settled feedback."}
+    _join(_commit(a, out, key="bad", paths=["absent.txt"], review_reference=reference, author_disposition=decision))
+    assert "GIT_ATTRIBUTION_BLOCKED" in out["bad"], out["bad"]
+    assert source() == before, "a fresh refusal must not adopt the source wave's row"
+    _join(_commit(a, out, key="corrected", paths=["change.py", "maybe.txt"], review_reference=reference,
+                  author_disposition=decision))
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" not in out["corrected"], out["corrected"]
+    assert a.reviewer.rounds == rounds
+
+
+@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"), ("cyber_pro", "advisory")])
+def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_without_its_bytes(author, monkeypatch,
+                                                                                            mode, enforcement):
+    """#2587/#2590 through the public tool, under ordinary Advisory, Blocking and Cyber Pro. The first wave finds a
+    critical bug; mail releases the author and the wave settles FAIL in the background. The unchanged identical call
+    collects that FAIL at $0 with no Git effect. With the settled round's checkout released, its reference returns
+    the whole old outcome read-only without reverting the author's correction; the corrected candidate gets its own
+    panel instead of waiting on finished work, and the old record keeps its FAIL."""
+    import shutil
+
+    from ouroboros import config
+    from ouroboros.review_ledger import load_record
+    from ouroboros.tools.review_subject import round_checkout_repo
+
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline(mode)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    a, outcome, answered, chat = author, {}, {}, author.reviewer.chat
+
+    def first_wave_fails(messages, model, model_role="", **kwargs):
+        response, usage = chat(messages, model, model_role, **kwargs)
+        answered[model] = answered.get(model, 0) + 1
+        if answered[model] == 1:  # the first wave finds a critical bug; later waves judge the correction
+            answer = json.loads(response["content"])
+            answer.update(change_clean=False, change=[{"item": "bug", "verdict": "FAIL", "severity": "critical",
+                                                       "reason": "change.py sets the wrong value"}])
+            response = {"content": json.dumps(answer)}
+        return response, usage
+    a.reviewer.chat = first_wave_fails
+    head = _git(a.repo, "rev-parse", "HEAD")
+    thread = _commit(a, outcome)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    write_owner_message(a.data, "How is the commit going?", TASK)
+    _join(thread)
+    left = load_state(a.data).attempts[-1]
+    reference = {"surface": "commit", "review_record_id": left.review_record_id, **{key: getattr(left, key) for key in (
+        "repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
+    a.reviewer.release()
+    until(lambda: _notices(a))
+    settled = next(row for row in load_state(a.data).attempts if row.attempt == left.attempt)
+    assert (settled.status, settled.phase, settled.late_result_pending) == ("reviewed", "review_only", False)
+    assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"
+    _read_mail(a)
+    unchanged = {}
+    _join(_commit(a, unchanged))  # the same bytes and intent: the settled FAIL, collected at $0
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"] and _git(a.repo, "rev-parse", "HEAD") == head, unchanged
+    assert "REVIEWED_ATTEMPT_IN_PROGRESS" not in unchanged["result"], unchanged["result"]
+    shutil.rmtree(round_checkout_repo(a.ctx, left.review_retry_key, TASK).parent, ignore_errors=True)
+    (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")  # the author's correction, staged
+    _git(a.repo, "add", "change.py")
+    index = _git(a.repo, "ls-files", "-s")
+
+    with _parent(a):
+        read = a.git._commit_reviewed(a.ctx, review_reference=reference)
+
+    assert read.startswith("Review outcome already settled, returned read-only"), read
+    shown = json.JSONDecoder().raw_decode(read, read.index("{"))[0]
+    assert shown["aggregate"] == "FAIL" and shown["findings"]["critical_findings"] and len(shown["rows"]) == 2, shown
+    assert (a.repo / "change.py").read_text(encoding="utf-8") == "value = 3\n" and _git(a.repo, "ls-files", "-s") == index
+    assert _git(a.repo, "rev-parse", "HEAD") == head and sorted(a.reviewer.rounds) == ["m1", "m2"]
+    corrected = {}
+    _join(_commit(a, corrected))
+    result = corrected["result"]
+    assert "REVIEWED_ATTEMPT_IN_PROGRESS" not in result and "this other intent waits" not in result, result
+    assert sorted(a.reviewer.rounds) == ["m1", "m1", "m2", "m2"], "the corrected candidate got its own panel"
+    if (mode, enforcement) == ("pro", "blocking"):
+        assert _git(a.repo, "show", "HEAD:change.py") == "value = 3", result
+    else:
+        assert result.startswith("Review outcome returned before commit."), result
+    assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"

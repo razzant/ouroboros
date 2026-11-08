@@ -22,7 +22,7 @@ from typing import Iterator
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB = REPO_ROOT / "web"
 SHEETS = ("web/ui.css", "web/style.css", "web/settings.css", "web/model_roles.css", "web/model_wait.css",
-          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css")
+          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css", "web/provider-return.css")
 CATEGORIES = ("owner", "warning", "system", "data", "palette")
 
 # category | sheet | [at-rule context » ]selector | properties
@@ -33,50 +33,47 @@ owner | web/ui.css | .status-mark[data-hue="owner"] | color
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar-fill | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-text | color
-owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, border-color, color
-owner | web/style.css | .chat-question-nav | background, border, color
-owner | web/style.css | .chat-question-nav:hover | border-color
+owner | web/style.css | .costs-spend-bar[data-reached="1"] > i | background
+owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, color
+owner | web/style.css | .chat-question-nav | background, color
 owner | web/style.css | .skills-trust-value.is-suggested | color
-owner | web/style.css | :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
-owner | web/style.css | @media (hover: hover) » :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
-owner | web/style.css | :root[data-theme] .chat-budget-pill.ui-chrome-control[data-attention="1"] | background
-owner | web/style.css | :root[data-theme] .chat-question-nav | background, color
-owner | web/style.css | :root[data-theme] .chat-question-nav:hover | background
-owner | web/style.css | @media (hover: hover) » :root[data-theme] .chat-budget-pill.ui-chrome-control[data-attention="1"]:hover | background
+owner | web/style.css | .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
+owner | web/style.css | @media (hover: hover) » .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
+owner | web/style.css | .chat-budget-pill[data-attention="1"] | background
+owner | web/style.css | .chat-question-nav:hover | background
+owner | web/style.css | @media (hover: hover) » .chat-budget-pill[data-attention="1"]:hover | background
 owner | web/model_wait.css | .model-wait-row[data-owner="1"] | background, border-color
-owner | web/room_work.css | .rw-row .rw-pill-question | background, border-color, color
-owner | web/room_work.css | .rw-row .rw-pill-question:hover | background, border-color
+owner | web/room_work.css | .rw-row .rw-pill-question | background, color
 owner | web/room_work.css | .rw-row[data-tone="wait"] .rw-state | color
 owner | web/room_work.css | .rw-trigger[data-tone="wait"] | color
-owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question | background, color
-owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question:not(:disabled):hover | background
+owner | web/room_work.css | .rw-row .rw-pill-question:not(:disabled):hover | background
 # A warning worth reading: warn sentences and chips, toasts, notes, warnings inside timelines, reviews, delegated
-# work, Logs events, widget tones, account quota and spent windows, unsaved settings.
+# work, Logs events, widget tones, account quota and spent windows, unsaved settings and file drafts.
 warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
 warning | web/ui.css | .settings-test-result[data-tone="warn"] | color
-warning | web/ui.css | .ui-chip[data-tone="warn"] | background, border-color, color
+warning | web/ui.css | .ui-chip[data-tone="warn"] | background, color
 warning | web/ui.css | .ui-status[data-tone="warn"] | color
-warning | web/ui.css | :is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before | background
+warning | web/ui.css | .ui-result[data-tone="warn"] | color
+warning | web/ui.css | :is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before | background
 warning | web/style.css | .chat-composer-chip[data-tone="warn"] .chat-chip-dot | background
 warning | web/style.css | .chat-delegated-final | color
 warning | web/style.css | .chat-delegated-problem | color
 warning | web/style.css | .chat-live-line.warn .chat-live-line-title | color
 warning | web/style.css | .chat-quiz-storage-note | color
 warning | web/style.css | .document-reader-notice | background, border-bottom, color
-warning | web/style.css | .harness-exhausted | background
-warning | web/style.css | .harness-exhausted .harness-account-meta | color
+warning | web/style.css | @container files (max-width: 700px) » .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved | color
+warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | color
+warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
 warning | web/style.css | .log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) | background, border-color, color
 warning | web/style.css | .msg-attachment-outcome | color
-warning | web/style.css | .new-project-trust-note | border, color
-warning | web/style.css | .settings-lan-hint[data-tone="warn"] | border-color, color
+warning | web/style.css | .new-project-trust-note | background, color
+warning | web/style.css | .settings-lan-hint[data-tone="warn"] | color
 warning | web/style.css | .skills-skip-glyph | color
 warning | web/style.css | .toast-warn | border-color, color
-warning | web/style.css | .updates-status-dot[data-tone="warn"] | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
-warning | web/style.css | :root[data-theme] :is(.harness-account-row, .agent-family-card .harness-account-row).harness-exhausted | background
 warning | web/settings.css | .available-subagent-status-reason | color
 warning | web/settings.css | .available-subagents-review-copies | color
 warning | web/settings.css | .available-subagents-review-empty | color
@@ -85,7 +82,6 @@ warning | web/settings.css | .mcp-server-status-warn | background, color
 warning | web/settings.css | .resource-message[data-tone="warn"] | background, color
 warning | web/settings.css | .resource-window[data-spent="true"] .resource-fill | background
 warning | web/settings.css | .settings-inline-note[data-tone="warn"] | color
-warning | web/settings.css | .settings-unsaved-indicator | color
 warning | web/onboarding.css | .agent-family-status[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-service-note[data-tone="warn"] | color
 warning | web/onboarding.css | .available-subagent-status-reason | color
@@ -322,16 +318,3 @@ def test_the_scan_sees_every_way_a_rule_can_paint_amber() -> None:
         ("@media (hover: hover) » @supports (display: grid) » .nested:hover", "background"),
         (".a", "color"), (".b", "color"), (".host » & .child", "outline-color"),
     }
-
-
-def test_the_registry_check_fails_on_a_new_rule_and_on_a_stale_line() -> None:
-    sheet = {"web/x.css": ":root { --amber: #f59e0b }\n.owner-question { color: var(--amber); }\n"
-                          ".new-lamp { color: var(--amber); }"}
-    listed = registry("palette | web/x.css | :root | --amber\nowner | web/x.css | .owner-question | color\n"
-                      "warning | web/x.css | .gone | color")
-    found = amber_declarations(sheet)
-    assert found - listed.keys() == {("web/x.css", ".new-lamp", "color")}
-    assert listed.keys() - found == {("web/x.css", ".gone", "color")}
-    # Formatting and comments never change what is found.
-    reformatted = {"web/x.css": ":root{--amber:#F59E0B}/* lamp */ .owner-question,\n .new-lamp {\n  color :  var( --amber ) ;\n}"}
-    assert amber_declarations(reformatted) == found

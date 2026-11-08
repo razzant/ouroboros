@@ -6,7 +6,8 @@ agent never drift:
   - ``gateway/projects.py`` turn-into-project conversion (reuses an admission name,
     or names inline as a race fallback);
   - ``ensure_project_scope`` (the agent self-creates + names a project);
-  - ``admission_names`` (headless runs and chat promotion, no model call);
+  - ``admission_names`` (headless runs and chat promotion, no model call), also for the
+    head a late answer or card press starts (``late_input_names``: by what it answers);
   - ``spawn_turn_namer`` (a direct Main turn, named once it starts working:
     the first non-addressing tool call triggers one bounded Light call).
 
@@ -302,8 +303,13 @@ def _refresh_root_cost_after_naming(drive_root: Any, task_id: str) -> None:
 
 def spawn_turn_namer(
     drive_root: Any, task_id: str, text: str, *, broadcast: Optional[Callable[[dict], None]] = None,
+    fallback_candidates: Sequence[object] = (),
 ) -> None:
     """Coin an LLM title for a direct turn that started working, in a DAEMON thread.
+
+    ``fallback_candidates`` are ``llm_project_name``'s: a turn admitted with its own name
+    passes that name, so a failed or unavailable Light call leaves it standing (it is
+    never rewritten as its fallback) instead of naming the turn from ``text``.
 
     Called once per Main turn from the first non-addressing tool-call frame (the
     seam that already stamps that frame as work: ``supervisor/log_addressing.py``),
@@ -351,7 +357,8 @@ def spawn_turn_namer(
             def _call() -> None:
                 try:
                     _result.append(llm_project_name(
-                        body, drive_root=drive_root, task_id=task_id, caller_deadline_ts=deadline_ts,
+                        body, fallback_candidates=fallback_candidates, drive_root=drive_root, task_id=task_id,
+                        caller_deadline_ts=deadline_ts,
                     ))
                 except Exception:
                     log.debug("turn namer inner call failed for %s", task_id, exc_info=True)
@@ -379,6 +386,9 @@ def spawn_turn_namer(
             name = _result[0]
             if not name:
                 return
+            if any(fallback_candidates) and name == fallback_project_name(*fallback_candidates, body):
+                _refresh_root_cost_after_naming(drive_root, task_id)  # the call settled; nothing coined
+                return  # the name it would fall back to already stands
             from ouroboros.task_results import (
                 STATUS_RUNNING,
                 load_task_result,
@@ -415,6 +425,23 @@ def spawn_turn_namer(
         log.debug("turn namer thread spawn failed for %s", task_id, exc_info=True)
 
 
+def summary_names_run(metadata: Any, task_contract: Any = None) -> bool:
+    """An accepted closing sentence names a wake or an unbound schedule run.
+
+    Completion admission already excludes children; an ordinary root's sentence is only its closing line.
+    """
+    from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from types import SimpleNamespace
+
+    meta = metadata if isinstance(metadata, dict) else {}
+    occurrence = meta.get("schedule_occurrence")
+    binding = presence_caller_binding(SimpleNamespace(task_metadata=meta, task_contract=task_contract))
+    return (is_own_clock_wake(meta) or is_focus_wake(meta)
+            or (isinstance(occurrence, dict) and bool(str(occurrence.get("schedule_id") or "").strip())
+                and bool(str(occurrence.get("token") or "").strip()) and binding is None))
+
+
 def admission_names(body: Dict[str, Any], description: str) -> tuple:
     """The run's owner-facing name at admission: ``(title, suggested_name)``.
 
@@ -434,3 +461,27 @@ def admission_names(body: Dict[str, Any], description: str) -> tuple:
     if explicit:
         return explicit, explicit
     return "", clean_model_title(strip_markdown(description), max_len=PROJECT_NAME_MAX)
+
+
+def derived_run_name(task: Dict[str, Any]) -> str:
+    """The name a listed run shows until its namer coins one: its stored ``suggested_name``, else
+    ``admission_names`` over its request — the description a caller or a delegation wrote (a child's
+    text opens with its role block), else the owner's own text. A Presence turn's text is its
+    correspondent's words, never its name. "" when nothing names it."""
+    stored = str(task.get("suggested_name") or "").strip()
+    if stored or task.get("_presence_turn"):
+        return stored
+    request = task.get("description") or task.get("objective") or task.get("text") or ""
+    return admission_names(task, str(request))[1]
+
+
+def late_input_names(metadata: Dict[str, Any], answered: str, owner_words: str) -> tuple:
+    """``(suggested_name, naming input)`` of the head a late answer or a press on a finished author's card
+    starts, never its host frame: ``answered`` is what it answers (``owner_quiz.late_answer_name``,
+    ``card_decision.card_press_name``), the owner's words when that is empty. Derived as ``admission_names``
+    derives: an authored ``metadata.title`` wins and needs no namer (naming input ``""``). Otherwise the one
+    Main namer at first work (``spawn_turn_namer``) reads the answered text and the owner's words, with the
+    admission name as its fallback; an input that later joins the head never renames it.
+    """
+    title, name = admission_names(metadata, answered or owner_words)
+    return name, "" if title else "\n".join(part for part in (answered, owner_words) if part)

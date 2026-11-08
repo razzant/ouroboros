@@ -9,6 +9,7 @@ is live kernel state, never what a command line looks like:
   a task; the engine's ``CLAUDEXOR_RUN_SCOPE_<hex>`` is recognised for shedding and read
   from the engine's own index at Panic). Inherited by descendants; Linux reads exact
   NUL-separated ``/proc/<pid>/environ`` entries, but nondumpable/setuid peers may hide them;
+  ``OURO_LAUNCH_SCOPE_<hex>`` names one service launch, whose own stop alone reads it;
   on macOS only for non-platform binaries — ``ps -E`` shows no environment for Apple's
   own ``/bin/sh``, ``/bin/sleep``, ``/usr/bin/find`` under SIP, so the marker alone is
   blind to exactly a ``find`` orphaned under a killed shell. ``ps -E`` also prints that
@@ -34,8 +35,9 @@ Every answer about one process is typed: ``alive`` or ``zombie`` with birth and 
 ``absent`` (ESRCH) or ``unreadable`` (a failed or stalled reader, or a Linux ``/proc`` row
 with no readable kernel boot time or zone to spell its birth in); unreadable is never read
 as gone. Linux reads ``/proc`` (the documented Docker image ships no ``ps``); macOS reads
-ONE ``ps -E -A`` for the table and ONE ``ps -p a,b,c`` per identity batch, both under the C
-locale without ``TZ`` and with every scope marker shed, so the reader never lists itself. Environment bytes
+ONE ``ps -A`` for the table (``-E`` only when a marker is asked for) and ONE ``ps -p a,b,c``
+per identity batch, both under the C locale without ``TZ`` and with every scope marker shed,
+so the reader never lists itself. Environment bytes
 are never logged or persisted. Windows has no environment census. Membership, the reap and
 the durable records live in ``process_scope``.
 """
@@ -58,6 +60,7 @@ SCOPE_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*_SCOPE_[0-9a-f]{32}$")
 SCOPE_VALUE = "1"
 INSTALL_SCOPE_PREFIX = "OURO_INSTALL_SCOPE_"
 TASK_SCOPE_PREFIX = "OURO_TASK_SCOPE_"
+LAUNCH_SCOPE_PREFIX = "OURO_LAUNCH_SCOPE_"  # one service launch's own: its stop's reach, never a task lifetime
 RUN_SCOPE_PREFIX = "CLAUDEXOR_RUN_SCOPE_"
 
 _CENSUS_TIMEOUT_SEC = 20
@@ -82,6 +85,11 @@ def mint_marker(prefix: str) -> str:
 
 def is_scope_name(name: str) -> bool:
     return bool(SCOPE_NAME_RE.match(str(name or "")))
+
+
+def is_launch_marker(name: str) -> bool:
+    """One service launch's own marker, never a task's or the installation's."""
+    return is_scope_name(name) and str(name).startswith(LAUNCH_SCOPE_PREFIX)
 
 
 def scope_entries(env: Mapping[str, str], *, prefix: str = "") -> Dict[str, str]:
@@ -302,10 +310,10 @@ def _proc_markers(pid: int, assignments: set, wanted: set) -> Optional[set]:
 
 # --- macOS/BSD: ps is the only kernel-state reader
 
-def _ps_identities(pids: List[int]) -> Dict[int, _Identity]:
+def _ps_identities(pids: List[int], timeout: float = _BIRTH_TIMEOUT_SEC) -> Dict[int, _Identity]:
     try:
         out = subprocess.run(["ps", "-o", "pid=,pgid=,lstart=,state=", "-p", ",".join(str(pid) for pid in pids)],
-                             capture_output=True, text=True, errors="replace", timeout=_BIRTH_TIMEOUT_SEC,
+                             capture_output=True, text=True, errors="replace", timeout=timeout,
                              env=_ps_env())
     except Exception:
         return {pid: _Identity(IDENTITY_UNREADABLE) for pid in pids}
@@ -322,9 +330,10 @@ def _ps_identities(pids: List[int]) -> Dict[int, _Identity]:
     return {pid: found.get(pid, _Identity(IDENTITY_ABSENT)) for pid in pids}
 
 
-def read_identities(pids: Iterable[int]) -> Dict[int, _Identity]:
+def read_identities(pids: Iterable[int], *, timeout: Optional[float] = None) -> Dict[int, _Identity]:
     """One batched identity read (``alive``/``zombie`` with birth and pgid, ``absent`` or
-    ``unreadable``) for ``pids``: Linux from ``/proc``, macOS from ONE ``ps -p a,b,c``."""
+    ``unreadable``) for ``pids``: Linux from ``/proc``, macOS from ONE ``ps -p a,b,c`` (``timeout``
+    bounds it; its own bound otherwise)."""
     wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
     if not wanted:
         return {}
@@ -332,7 +341,7 @@ def read_identities(pids: Iterable[int]) -> Dict[int, _Identity]:
         return {pid: _Identity(IDENTITY_UNREADABLE) for pid in wanted}
     if os.path.isdir("/proc"):
         return {pid: _proc_identity(pid) for pid in wanted}
-    return _ps_identities(wanted)
+    return _ps_identities(wanted, _BIRTH_TIMEOUT_SEC if timeout is None else max(0.0, timeout))
 
 
 def measure_birth(pid: int) -> str:
@@ -349,11 +358,19 @@ def birth_text(pid: int) -> str:
     return identity.birth if identity is not None and identity.state in (IDENTITY_ALIVE, IDENTITY_ZOMBIE) else ""
 
 
-def census(markers: Iterable[str] = ()) -> Optional[Dict[int, _Row]]:
+def census(markers: Iterable[str] = (), *, env_rows: Any = None,
+           timeout: float = _CENSUS_TIMEOUT_SEC) -> Optional[Dict[int, _Row]]:
     """One snapshot of the live process table: pid, ppid, pgid, birth, state and which
     of ``markers`` each process visibly carries. ``None`` when the table could not be
     read (unknown, never empty). Linux reads ``/proc`` (no ``ps`` needed); macOS reads
-    the one ``ps -E`` column that mixes argv and environment (module docstring: residual)."""
+    the one ``ps -E`` column that mixes argv and environment (module docstring: residual).
+    Without markers no environment is read on either system: on macOS that drops ``-E``,
+    whose per-process argument-area read dominates the table's cost on a busy host.
+    ``env_rows(rows)`` (macOS) names, from the whole table, the only pids whose environment
+    a marker read covers, in one ``ps -E -p`` batch; the others report ``markers=None`` (not
+    read). Linux reads every ``/proc/<pid>/environ`` as before: a subreaper can adopt an
+    orphan there. ``timeout`` bounds the whole read, both ``ps`` of a targeted one (a caller
+    inside a shutdown's grace passes its share); expiring is a failed read."""
     if _pl.IS_WINDOWS:
         return None
     wanted = {str(marker) for marker in markers if marker}
@@ -362,10 +379,13 @@ def census(markers: Iterable[str] = ()) -> Optional[Dict[int, _Row]]:
         return _proc_rows(assignments, wanted)
     if _birth_zone() is False:
         return None  # each row carries the instant its birth names: unknown without the zone
+    targeted, began = bool(wanted) and env_rows is not None, time.monotonic()
+    columns = ["-E", "-ww", "-A", "-o", "pid=,ppid=,pgid=,lstart=,state=,command="] if wanted and not targeted else [
+        "-A", "-o", "pid=,ppid=,pgid=,lstart=,state="]
     try:
-        out = subprocess.run(["ps", "-E", "-ww", "-A", "-o", "pid=,ppid=,pgid=,lstart=,state=,command="],
+        out = subprocess.run(["ps", *columns],
                              capture_output=True, text=True, errors="replace",
-                             timeout=_CENSUS_TIMEOUT_SEC, env=_ps_env())
+                             timeout=timeout, env=_ps_env())
     except Exception:
         return None
     if out.returncode != 0:
@@ -379,7 +399,35 @@ def census(markers: Iterable[str] = ()) -> Optional[Dict[int, _Row]]:
         words = set(rest.split())
         rows[int(pid)] = _Row(int(pid), int(ppid), int(pgid), birth.strip(), birth_epoch(birth),
                               _state_letter(state), {marker for marker in wanted if f"{marker}={SCOPE_VALUE}" in words})
+    if targeted and rows:
+        chosen = sorted({int(pid) for pid in env_rows(rows)} & set(rows))
+        left = timeout - (time.monotonic() - began)
+        found = (_ps_markers(chosen, wanted, left) if left > 0 else None) if chosen else {}
+        if found is None:
+            return None  # the environments asked for could not be read: the table is unknown, never clean
+        for pid, row in rows.items():
+            row.markers = found.get(pid, set()) if pid in found else None
     return rows or None
+
+
+def _ps_markers(pids: List[int], wanted: set, timeout: float = _CENSUS_TIMEOUT_SEC) -> Optional[Dict[int, set]]:
+    """``{pid: markers}`` for the listed pids from one ``ps -E -p`` read (macOS); a pid the read
+    no longer shows is absent from the answer; ``None`` when the read itself failed."""
+    try:
+        out = subprocess.run(["ps", "-E", "-ww", "-o", "pid=,command=", "-p", ",".join(str(pid) for pid in pids)],
+                             capture_output=True, text=True, errors="replace", timeout=timeout,
+                             env=_ps_env())
+    except Exception:
+        return None
+    if out.returncode not in (0, 1):  # 1: some listed pid is gone, the others still print
+        return None
+    found: Dict[int, set] = {}
+    for line in (out.stdout or "").splitlines():
+        head, _, rest = line.strip().partition(" ")
+        if head.isdigit():
+            words = set(rest.split())
+            found[int(head)] = {marker for marker in wanted if f"{marker}={SCOPE_VALUE}" in words}
+    return found
 
 
 def leader_facts(pid: int) -> Tuple[int, str]:
@@ -396,7 +444,9 @@ def leader_facts(pid: int) -> Tuple[int, str]:
 
 __all__ = [
     "IDENTITY_ABSENT", "IDENTITY_ALIVE", "IDENTITY_UNREADABLE", "IDENTITY_ZOMBIE", "INSTALL_SCOPE_PREFIX",
-    "RUN_SCOPE_PREFIX", "SCOPE_NAME_RE", "SCOPE_VALUE", "TASK_SCOPE_PREFIX", "birth_epoch", "birth_text",
-    "canonical_birth", "census", "installation_scope_entries", "is_scope_name", "leader_facts", "lstart_text",
+    "LAUNCH_SCOPE_PREFIX", "RUN_SCOPE_PREFIX", "SCOPE_NAME_RE", "SCOPE_VALUE", "TASK_SCOPE_PREFIX", "birth_epoch",
+    "birth_text",
+    "canonical_birth", "census", "installation_scope_entries", "is_launch_marker", "is_scope_name", "leader_facts",
+    "lstart_text",
     "measure_birth", "mint_marker", "parse_proc_stat", "read_identities", "scope_entries", "shed_scopes",
 ]

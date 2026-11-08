@@ -44,6 +44,19 @@ function pythonTupleNames(source, name) {
     return new Set([...body.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
 }
 
+/** Fields a Python TypedDict `class name(Base...):` declares, its in-file bases' included; `known` maps an
+ *  imported base to its fields. A frame's contract is what it declares, whichever class statement declares it. */
+function pythonClassFields(source, name, known = {}) {
+    const header = source.match(new RegExp(`^class ${name}\\(([A-Za-z_]\\w*)[^)]*\\):.*\\n`, 'm'));
+    assert.ok(header, `class ${name} not found — the wire contract moved, update this test`);
+    const start = header.index + header[0].length;
+    const end = source.slice(start).search(/^\S/m);  // the class body ends at the next top-level line
+    const body = end === -1 ? source.slice(start) : source.slice(start, start + end);
+    const base = header[1];
+    const inherited = known[base] ?? (base === 'TypedDict' ? new Set() : pythonClassFields(source, base, known));
+    return new Set([...inherited, ...[...body.matchAll(/^ {4}([a-z_]+): /gm)].map((m) => m[1])]);
+}
+
 test('every accounting field the costs page reads is a field the history endpoint emits', () => {
     // v7 moved the cost-breakdown endpoint (and its field tuple) out of
     // gateway/history.py into gateway/cost_breakdown.py; history.py re-exports it.
@@ -262,8 +275,13 @@ test('live structured delivery frames keep additive grouping and size fields', (
     const contracts = repoFile('ouroboros/gateway/contracts.py');
     const types = moduleFile('api_types.js');
 
+    // Every structured delivery frame declares the shared stored-row identity, directly or through its family's base.
+    const reference = pythonClassFields(repoFile('ouroboros/gateway/reference_contracts.py'), 'ChatReferenceFields');
+    assert.ok(reference.has('row_address'), 'ChatReferenceFields not parsed — the contract moved, update this test');
     for (const className of ['PhotoOutbound', 'VideoOutbound', 'DocumentOutbound', 'LinksOutbound', 'QuizOutbound']) {
-        assert.ok(contracts.includes(`class ${className}(ChatReferenceFields):`));
+        const fields = pythonClassFields(contracts, className, { ChatReferenceFields: reference });
+        const missing = [...reference].filter((field) => !fields.has(field));
+        assert.deepEqual(missing, [], `${className} no longer declares the shared row identity: ${missing}`);
         assert.ok(types.includes(`@typedef {Object} ${className}`));
     }
     assert.match(bus, /"type": "photo",[\s\S]*?"task_id": str\(task_id or ""\)/);

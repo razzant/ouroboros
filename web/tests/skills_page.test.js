@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { publicationDisclosure } from '../modules/skill_presentation.js';
+import { browseCardState } from '../modules/skill_browse.js';
+import { installedSkillModel } from '../modules/skill_card_renderer.js';
 
 import {
     buildHealPrompt, destinationFromChoice, inFlightCount, installedFilterCounts, lifecycleEventsFromQueue,
@@ -54,6 +56,31 @@ test('the filter strip counts facts of the loaded list', () => {
     assert.equal(matchesInstalledFilter({ name: 'v', lifecycle_virtual: true, enabled: false }, 'off'), false);
 });
 
+test('page-module faults participate in Installed filters and Browse state', () => {
+    const telegram = byName('telegram');
+    const pageModules = { faults: [{ skill: telegram.name, current: true, reason: 'fixture failed' }], held: [] };
+    assert.equal(installedSkillModel(telegram, { pageModules }).needs, true);
+    assert.equal(matchesInstalledFilter(telegram, 'needs', installedSkillModel(telegram, { pageModules })), true);
+    const counts = installedFilterCounts(rows(), pageModules);
+    assert.equal(counts.needs, 5, 'a page-local fault must be reflected in Needs you');
+    const browse = browseCardState(
+        { id: 'telegram-row', name: telegram.name, source_id: telegram.install?.source?.id, source_name: 'built-in', installed: true },
+        { installed: telegram, listed: true, pageModules },
+    );
+    assert.match(browse.status, /needs you/);
+});
+
+test('a held page module after Panic explains reload instead of offering a dead Start it action', () => {
+    const telegram = byName('telegram');
+    const model = installedSkillModel(telegram, {
+        pageModules: { faults: [], held: [{ key: 'module:telegram', skill: telegram.name, reason: 'start' }], stopped: true },
+    });
+    const html = model.trays.join('');
+    assert.equal(model.needs, true);
+    assert.match(html, /Reload this page to restore it/);
+    assert.doesNotMatch(html, /start_host_module/);
+});
+
 test('«Update all» covers only unmodified updates installed through trust from a row still trusted', () => {
     const list = rows();
     assert.deepEqual(updateAllCandidates(list, SOURCES).map((skill) => skill.name), ['weather']);
@@ -92,9 +119,38 @@ test('publish destinations: back to the origin, the owner’s git source, the co
     assert.deepEqual(destinationFromChoice('source:mine'), { source_id: 'mine', mode: 'entry' });
     assert.equal(destinationFromChoice(''), null);
     assert.equal(destinationFromChoice('default'), null, 'no connected destination keeps the host default, never an invented source id');
+    // A hub read from a folder of its repository takes no entries; its pointer entries still go back to their authors.
+    const folderHub = { id: 'team-hub', name: 'Team hub', kind: 'hub', url: 'https://github.com/team/tools', path: 'catalog' };
+    const fromFolderHub = byName('anime_studio');
+    fromFolderHub.install.source = { id: 'team-hub', kind: 'hub', name: 'Team hub' };
+    assert.deepEqual(publishDestinations(fromFolderHub, [...withGit, folderHub]).map((choice) => choice.value),
+        ['source:mine', 'source:ouroboros-community']);
+    fromFolderHub.install.release.repo = 'https://github.com/CrossRead/anime';
+    assert.equal(publishDestinations(fromFolderHub, [...withGit, folderHub])[0].value, 'origin:team-hub');
+    // A view pinned to a commit never reads a publication: not a destination of its own.
+    const pinned = { id: 'pinned', name: 'Pinned', kind: 'git', url: 'https://github.com/alice/skills', commit: 'a'.repeat(40) };
+    assert.deepEqual(publishDestinations(byName('minecraft-widget'), [...withGit, pinned]).map((choice) => choice.value),
+        ['source:mine', 'source:ouroboros-community']);
+    // Neither does a view of a tag named in full; a branch named in full is an ordinary destination.
+    const tagged = { ...pinned, id: 'tagged', commit: undefined, ref: 'refs/tags/v1.0.0' };
+    const branch = { ...pinned, id: 'branch', commit: undefined, ref: 'refs/heads/main' };
+    assert.deepEqual(publishDestinations(byName('minecraft-widget'), [...withGit, tagged, branch]).map((choice) => choice.value),
+        ['source:mine', 'source:branch', 'source:ouroboros-community']);
     assert.deepEqual(publishDestinations(byName('telegram'), SOURCES).map((choice) => choice.value), ['source:ouroboros-community']);
     assert.deepEqual(publishDestinations(byName('telegram'), SOURCES.filter((row) => row.kind !== 'hub')), [],
         'nothing to choose: the host publishes to its default');
+});
+
+test('a copy whose view is connected again under another id follows the source the host matches now', () => {
+    // Team now reads another view of the repository; Shared reads the view the copy came from. The host names
+    // Shared in the listing, under the name the copy was installed with.
+    const team = { id: 'team', name: 'Team', kind: 'git', url: 'https://github.com/example/skills', ref: 'next', path: 'pack', trust: 'trusted' };
+    const shared = { ...team, id: 'shared', name: 'Shared', ref: 'stable', trust: 'review' };
+    const alpha = byName('weather');
+    alpha.install.source = { id: 'shared', name: 'Team', kind: 'git' };
+    assert.deepEqual(publishDestinations(alpha, [team, shared]).map((choice) => choice.value), ['origin:shared', 'source:team']);
+    assert.deepEqual(updateAllCandidates([alpha], [team, shared]), [], 'its updates come from Shared, a review row');
+    assert.deepEqual(updateAllCandidates([alpha], [team, { ...shared, trust: 'trusted' }]).map((skill) => skill.name), ['weather']);
 });
 
 test('the repair prompt carries bounded diagnostics as data', () => {

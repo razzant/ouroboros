@@ -258,11 +258,11 @@ def test_malformed_disposition_names_every_violation_in_one_reply(tmp_path):
         "unknown key(s) supports_claims",
         "disposition must be one of",
         "child_result_sha256 must be the 64-char hex sha",
-        "at most 500 characters",
         "Correct example",
         "atomic no-op",
     ):
         assert fragment in result, fragment
+    assert "rationale" not in result and "500" not in result  # a long rationale is no violation
     assert tree_ledger_rows("parent1", data_root=tmp_path) == []
 
     # A valid payload with a MISSING rationale also gets the aggregated shape.
@@ -275,6 +275,10 @@ def test_malformed_disposition_names_every_violation_in_one_reply(tmp_path):
     )
     assert "tree_note text is required as the rationale" in no_reason
     assert "Correct example" in no_reason
+    # The same 501 characters with a valid payload are the rationale, recorded whole.
+    accepted = _tree_note(_parent_ctx(tmp_path), "decision", "x" * 501, payload=_payload("child1", "integrated", digest))
+    assert accepted.startswith("OK:")
+    assert [row["text"] for row in tree_ledger_rows("parent1", data_root=tmp_path)] == ["x" * 501]
 
 
 def test_ledger_append_renders_the_same_aggregated_violations(tmp_path):

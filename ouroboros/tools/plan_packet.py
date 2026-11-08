@@ -160,6 +160,18 @@ def _evidence_author(item: Mapping[str, Any]) -> str:
     return "file content; its author is not attested by the host"
 
 
+DENIED_ATTACH_HINT = ("Settings and runtime files outside your own task stores cannot be attached directly. Use "
+                      "task:<id> for a helper's saved result, chat:<id> for dialogue, or a readable file in your own "
+                      "task_drive/artifact_store or workspace for other evidence.")
+
+
+def omission_hint(omissions: Sequence[Mapping[str, Any]]) -> str:
+    """What to attach instead, once per list, when a locator met a deny root (``denied_path``); the code and the
+    deny itself are unchanged. Both renders print it: the author's read (``plan_review.render_record``) and the
+    participant's packet (``render_evidence``)."""
+    return DENIED_ATTACH_HINT if any(o.get("reason") == "denied_path" for o in omissions) else ""
+
+
 def render_evidence(manifest: Mapping[str, Any]) -> str:
     """The attached evidence, each item labelled with whose words it carries, every absence named."""
     declared = list(manifest.get("declared") or [])
@@ -168,10 +180,14 @@ def render_evidence(manifest: Mapping[str, Any]) -> str:
     lines: list[str] = []
     for item in manifest.get("attached") or []:
         redacted = ", secrets_redacted=true" if item.get("secrets_redacted") else ""
+        ref = item.get("ref") if isinstance(item.get("ref"), Mapping) else None
+        whole = (f"The whole source this part was read from ({item.get('bytes')} bytes, the sha256 above) is in task "
+                 f"custody: a session reads `{item.get('file')}`; a native episode reads "
+                 f"read_file(root='artifact_store', path='{ref.get('path')}').\n") if ref else ""
         lines.append(
             f"### {item.get('locator')} (kind={item.get('kind')}, sha256={item.get('sha256')}, "
             f"bytes={item.get('bytes')}, attached_bytes={item.get('attached_bytes')}{redacted})\n"
-            f"Carries: {_evidence_author(item)}.\n"
+            f"Carries: {_evidence_author(item)}.\n{whole}"
             f"----- BEGIN {item.get('locator')} -----\n{item.get('text') or ''}\n"
             f"----- END {item.get('locator')} -----\n"
         )
@@ -181,6 +197,9 @@ def render_evidence(manifest: Mapping[str, Any]) -> str:
         lines.append("| locator | reason |\n|---|---|")
         lines.extend(f"| {_cell(o.get('locator'))} | {_cell(o.get('reason'))} |" for o in omissions)
         lines.append("")
+        hint = omission_hint(omissions)
+        if hint:
+            lines.append(hint + "\n")
     else:
         lines.append("none\n")
     return "\n".join(lines)

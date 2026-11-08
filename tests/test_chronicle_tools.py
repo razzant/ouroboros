@@ -359,8 +359,9 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
                  expected_sequence=head)
     assert part["ok"] and part["room_id"] == "5"
     # The receipt measures what the fold did and names what it did not: this view and the Max room stay as they were.
-    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. This task's view is not refreshed; the next start "
-                              "re-measures its Max room.")
+    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. Originals remain readable by address. "
+                              "This task's view is not refreshed; the next start re-measures its Max room "
+                              "and rewrites the cached story from the first changed retelling.")
     refused = json.loads(_chronicle_write(ctx, kind="part", text="again", member_ids=["legacy-b00-r5"],
                                           expected_sequence=part["room_head"]))
     assert refused["reason"] == "already_folded" and "effect" not in refused
@@ -370,7 +371,7 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
     assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters.")
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
-    assert hidden["effect"].startswith("withdrawn: the account leaves the common view and the records it told return")
+    assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
     assert first["ok"] and first["revision"] == first["node_id"]
     again = json.loads(_chronicle_write(ctx, kind="correction", target_id="legacy-b01-r5", text="second"))
@@ -425,7 +426,7 @@ def test_rows_read_attributes_each_row_by_its_source_fields_as_text(tmp_path):
     assert lines[3] == (f"[{ts(2)}; host; {addr(rows[1])}] host facts for taskA001: status=completed; outcome=Done; "
                         "phase=done; final=unknown; result: get_task_result(task_id=taskA001)")
     assert lines[4].startswith(f"[{ts(3)}; child kid00001 of taskA001; ") and lines[4].endswith("child report")
-    assert lines[5] == f"[{ts(4)}; Ouroboros; {addr(rows[3])}] my answer"
+    assert lines[5] == f"[{ts(4)}; Ouroboros (task taskA001); {addr(rows[3])}] my answer"  # the work that sent it
     assert "Ouroboros" not in "".join(lines[2:5])
     only = _memory_read(ctx_for(tmp_path), rows=True, task_id="kid00001").split("\n")
     assert only[0] == "room 1; rows; task_id kid00001" and len(only) == 3
@@ -456,10 +457,10 @@ def test_an_install_without_any_lineage_row_attributes_old_outgoing_rows_by_task
     lines = _memory_read(ctx, rows=True).split("\n")[2:]
     assert lines[1].startswith(f"[{ts(2)}; outgoing, author not recorded; {addr(rows[1])}]")
     assert lines[2].startswith(f"[{ts(3)}; child kid00002 of root0001; ")
-    assert lines[3] == f"[{ts(4)}; Ouroboros; {addr(rows[3])}] Done."
+    assert lines[3] == f"[{ts(4)}; Ouroboros (task root0001); {addr(rows[3])}] Done."
     assert ChronicleStore(tmp_path).activation()["metadata"]["lineage_epoch"]["pos"] == 4
     later = chat(tmp_path, [{"chat_id": 1, "direction": "out", "ts": ts(5), "task_id": "root0002", "text": "Next."}])
-    assert _memory_read(ctx, rows=True).split("\n")[-1] == f"[{ts(5)}; Ouroboros; {addr(later[0])}] Next."
+    assert _memory_read(ctx, rows=True).split("\n")[-1] == f"[{ts(5)}; Ouroboros (task root0002); {addr(later[0])}] Next."
 
 
 def test_node_read_shows_stamp_original_and_corrections_with_the_acting_revision(tmp_path):
@@ -738,11 +739,11 @@ def test_mark_view_and_release_including_an_imported_nomination(tmp_path):
     listed = _memory_read(ctx)
     assert "visibility meaning" in listed and "quote: verbatim words" not in listed
     assert "legacy-nomination-0123456789abcdef" in listed  # a global mark is in every room
-    released = json.loads(_memory_mark(ctx, release_id="legacy-nomination-0123456789abcdef",
+    released = json.loads(_memory_mark(ctx, release_ids=["legacy-nomination-0123456789abcdef"],
                                        reason="published the note myself"))
     assert released["ok"] and released["operation"] == "mark_release"
     assert [m["id"] for m in store.active_marks("1")] == [mark["mark_id"]]
-    assert json.loads(_memory_mark(ctx, release_id=mark["mark_id"]))["reason"] == "invalid"  # a reason is required
+    assert json.loads(_memory_mark(ctx, release_ids=[mark["mark_id"]]))["reason"] == "invalid"  # a reason is required
 
 
 # --- host facts helpers and boundaries ------------------------------------------------------------
@@ -790,7 +791,8 @@ def test_the_write_and_read_schemas_carry_account_selection_and_revision():
     assert {"sources", "replaces", "shown"} <= set(schemas["chronicle_write"])
     assert schemas["chronicle_write"]["sources"]["type"] == "array" and schemas["chronicle_write"]["shown"]["type"] == "boolean"
     assert schemas["memory_read"]["revision"]["type"] == "string"
-    assert all(reader in schemas["memory_read"]["room_id"]["description"] for reader in ("'*'", "'candidates'"))
+    assert "'*'" in schemas["memory_read"]["room_id"]["description"]
+    assert "candidates" not in schemas["memory_read"]["room_id"]["description"]
     assert not any(reader in schemas[name]["room_id"]["description"]
                    for name in ("chronicle_write", "memory_mark") for reader in ("'*'", "'candidates'"))
     assert "author" not in schemas["chronicle_write"] and "told_by" not in schemas["chronicle_write"]
@@ -904,3 +906,57 @@ def test_acting_child_registry_reads_chat_history_and_writes_memory_but_no_note(
     refused = registry.execute("chronicle_write", {"kind": "note", "text": "must not land"})
     assert json.loads(refused)["reason"] == "not_integrator" and "ACTING_SUBAGENT_BLOCKED" not in refused
     assert not (data / "memory" / "chronicle" / "records.jsonl").exists()
+
+
+def _github_row(conversation, thread, minute, text, **extra):
+    """A row of one issue thread of a GitHub repository (a place conversation without its thread)."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    chat = presence_chat_id(conversation_key("github", "me", conversation, thread))
+    transport = {"provider": "github", "account_id": "me", "conversation_id": conversation, "thread_id": thread,
+                 "actor": {"platform_actor_id": "u7"}}
+    return {"chat_id": chat, "direction": "in", "ts": f"2026-09-06T01:{minute:02d}:00+00:00", "text": text,
+            "source": "presence:github", "client_message_id": f"gh-{conversation}-{thread}-{minute}",
+            "transport": transport, **extra}
+
+
+def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_own_room(tmp_path):
+    """S3: ``covers={'to': row, 'conversation': true}`` takes the open rows up to that row of every room of its
+    conversation (three issue threads of one repository), each sealed in its own room, and its reader and an
+    account's preview name each room with the exact reader of its covered rows, the middle thread's too; a later page
+    over one of them is ``already_sealed``; another repository and a later row stay open; without ``conversation`` a
+    page seals its one room and reads as before; a conversation page lives in a room it seals."""
+    from ouroboros import memory_inventory as mi
+    from tests import _memory_inventory_shared as shared
+
+    shared.world(tmp_path)
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    rows = chat(tmp_path, [_github_row("repo.1", "i1", 1, "first issue"), _github_row("repo.1", "i2", 2, "second issue"),
+                           _github_row("repo.1", "i3", 3, "third issue"), _github_row("repo.2", "i9", 4, "another repository"),
+                           _github_row("repo.1", "i1", 5, "later")])
+    i1, i2, i3, other = (str(rows[n]["chat_id"]) for n in (0, 1, 2, 3))
+    refused = _chronicle_write(ctx, kind="page", room_id=other, text="x", covers={"to": addr(rows[2]), "conversation": True})
+    assert "TOOL_ARG_ERROR" in refused and "lives in a room it seals" in refused, refused
+    page = write(ctx, kind="page", room_id=i3, text="Three issues read; the repository is quiet.",
+                 covers={"to": addr(rows[2]), "conversation": True})
+    assert page["ok"] and page["rows"] == 3 and page["rooms"] == sorted([i1, i2, i3]), page
+    covers = store.get(page["node_id"])["covers"]
+    assert covers["mode"] == "conversation" and covers["rooms"] == {i1: [sha(rows[0])], i2: [sha(rows[1])], i3: [sha(rows[2])]}
+    assert store.get(page["node_id"])["metadata"]["room_label"].endswith("(whole conversation, 3 rooms)")
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[4])]  # later stays open
+    assert mi.open_room_rows(tmp_path, i2) == [] and len(mi.open_room_rows(tmp_path, other)) == 1
+    readers = {room: f"memory_read(room_id='{room}', rows=true, from='{addr(row)}', to='{addr(row)}')"
+               for room, row in ((i1, rows[0]), (i2, rows[1]), (i3, rows[2]))}
+    document = _memory_read(ctx, node_id=page["node_id"])
+    assert all(reader in document for reader in readers.values()), document  # every room it sealed, the middle one too
+    assert "second issue" in _memory_read(ctx, room_id=i2, rows=True, **{"from": addr(rows[1]), "to": addr(rows[1])})
+    account = write(ctx, kind="account", text="The repository, read.", sources=[page["node_id"]], room_id=i3)["node_id"]
+    preview = _memory_read(ctx, proposed_selection={"target_id": account, "replaces": [page["node_id"]]}, room_id=i3)
+    assert all(f"rows: {reader}" in preview for reader in readers.values()), preview  # one reader per covered room
+    again = write(ctx, kind="page", room_id=i1, text="dup", covers={"from": addr(rows[0]), "to": addr(rows[0])})
+    assert again["ok"] is False and again["reason"] == "already_sealed"
+    single = write(ctx, kind="page", room_id=other, text="The other repository.", covers={"to": addr(rows[3])})
+    assert single["ok"] and single["rows"] == 1 and "rooms" not in store.get(single["node_id"])["covers"]
+    assert "Rooms this page covers" not in _memory_read(ctx, node_id=single["node_id"])  # one room: as before
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[4])]

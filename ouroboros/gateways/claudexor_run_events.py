@@ -80,6 +80,35 @@ def route_listed(gateway: Any, operation: Tuple[str, str], *, timeout_sec: Optio
     return operation in listed
 
 
+# Each harness row's declared ``liveInput`` per exact engine identity: a static profile facet of
+# the engine build, unlike the row's presence (a harness's availability), which is never cached.
+_LIVE_INPUT: Dict[Tuple[str, str], Dict[str, str]] = {}
+
+
+def declared_live_input(gateway: Any, route: str, *, timeout_sec: Optional[float]) -> Optional[str]:
+    """``route``'s declared ``liveInput`` (``"none"`` for a row without it), ``None`` when the
+    capability catalog does not list the route. One catalog read — the engine's full harness
+    doctor, seconds on a busy daemon, asked at every supervised wait before — per exact engine
+    identity (version AND build sha) serves every later question; an unlisted route is asked
+    again. The identity is the gateway's own handshake, else one this process remembers for the
+    same daemon generation; with neither, the read is made and remembered by nobody (no
+    handshake is spent here). A hole on a read propagates typed."""
+    from ouroboros.gateways.claudexor_metadata import remembered_engine
+
+    key = engine_identity(gateway) if getattr(gateway, "engine_version", "") else remembered_engine(gateway)
+    key = key if key and all(key) else None
+    with _SUPPORT_LOCK:
+        known = (_LIVE_INPUT.get(key) or {}) if key else {}
+    if route not in known:
+        rows = gateway.agent_capabilities(timeout_sec=timeout_sec).get("harnesses") or []
+        known = {**known, **{str(row["id"]): str(row.get("liveInput") or "none")
+                             for row in rows if isinstance(row, dict) and row.get("id")}}
+        if key:
+            with _SUPPORT_LOCK:
+                _LIVE_INPUT[key] = known
+    return known.get(route)
+
+
 def run_events_supported(gateway: Any, *, timeout_sec: float) -> bool:
     """Does the handshaken engine behind ``gateway`` list the run event stream?
 

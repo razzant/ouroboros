@@ -64,7 +64,7 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
     stands in only for a record without Presence provenance.
     """
     from ouroboros.dialogue_provenance import (
-        presence_metadata_binding, presence_related_work, presence_target_record,
+        presence_record_binding, presence_related_work, presence_target_record, presence_task_binding,
     )
 
     if "presence_binding_id" in evt:
@@ -74,13 +74,34 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
         row = meta.get("task") if isinstance(meta, dict) else None
-        binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
-        if binding is None and isinstance(row, dict) and isinstance(row.get("task_contract"), dict):
-            binding = "" if "capability_ceiling" in row["task_contract"] else None
+        binding = presence_task_binding(row) if isinstance(row, dict) else None
     if binding is None:
         return False
     target = str(evt.get("target_task_id") or task.get("id") or "").strip()
-    return not presence_related_work(binding, presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task))
+    record = presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task)
+    if binding and task.get("_inline_presence_author") and presence_record_binding(record) == binding:
+        return False  # the live author of this place's own conversation: place_guard names it to its callers
+    if binding and _delivered_in_conversation(ctx, target, evt.get("sender_origin")):
+        return False  # the work that leads this thread (it has a delivery here): a lineage-scoped note (owner 06.11, 4=A)
+    return not presence_related_work(binding, record)
+
+
+def _delivered_in_conversation(ctx: Any, task_id: str, sender_origin: Any) -> bool:
+    """Whether ``task_id`` has a delivery receipt in the sender's own conversation (its run origin's provider, account,
+    conversation and thread): the host's record that this work wrote there, a thread it rooted or answered, read from
+    the dialogue store and never from the target's say-so."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _live_task_rows
+
+    origin = sender_origin if isinstance(sender_origin, dict) else {}
+    if not task_id or not (origin.get("provider") and origin.get("conversation_id")):
+        return False
+    key = conversation_key(str(origin["provider"]), str(origin.get("account_id") or ""), str(origin["conversation_id"]),
+                           str(origin.get("thread_id") or ""))
+    try:
+        return any(row.get("type") == "presence_delivery" for row in _live_task_rows(ctx.DRIVE_ROOT, task_id, key))
+    except Exception:
+        return False  # an unreadable store proves no relation
 
 
 def _refuse_steering_while_cancelling(
@@ -194,6 +215,43 @@ def _steer_receipt(
     return receipt
 
 
+def _presence_author(ctx: Any, target: str):
+    """``(agent, lock, row)`` of this process's live inline Presence author ``target``, moved or not; else the
+    narrow reason a live inline turn takes nothing here; else None (no such live turn: ``target_unknown``).
+
+    A live author resolves even while its intake is closed: the delivery transaction then refuses it under
+    the same lock (``presence_author_closed`` while its turn still runs). A live turn whose author is not in
+    its loop here, a starting one included, is ``presence_author_closed`` too, one in another process has no
+    endpoint here (``presence_author_elsewhere``), and one whose facts cannot be read is never called ended
+    (``presence_author_unreadable``).
+    """
+    try:
+        from ouroboros.conversation_lease import presence_author_agent, resolved_presence_turns
+        from ouroboros.task_results import load_task_result
+        from supervisor.cancel_publication import live_presence_row
+
+        observed = resolved_presence_turns(ctx.DRIVE_ROOT)
+        fact = next((fact for fact in observed["roots"] if fact["task_id"] == target), None)
+        if fact is None:
+            if observed["complete"] or not live_presence_row(load_task_result(ctx.DRIVE_ROOT, target, strict=True) or {}):
+                return None
+            return "presence_author_unreadable"
+        if fact["state"] == "unreadable":
+            return "presence_author_unreadable"
+        if not fact["local"]:
+            return "presence_author_elsewhere"
+        agent = presence_author_agent(ctx.DRIVE_ROOT, target)
+        lock = getattr(agent, "_owner_message_admission_lock", None)
+        if lock is not None and fact["state"] == "running":
+            with lock:
+                if getattr(agent, "_busy", False) and getattr(agent, "_current_task_id", None) == target:
+                    return agent, lock, {**fact["row"], "id": target, "_inline_presence_author": True}
+        return "presence_author_closed"
+    except Exception:
+        log.debug("steer_task: inline Presence author %s unreadable", target, exc_info=True)
+        return "presence_author_unreadable"
+
+
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     """Deliver a steering message to an addressable independent root.
 
@@ -225,6 +283,14 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 direct_active = task is not None
     except Exception:
         direct_active = False
+    presence_refusal = ""
+    if not direct_active:
+        presence = _presence_author(ctx, target)
+        if isinstance(presence, tuple):
+            direct_agent, direct_lock, task = presence
+            direct_active = True
+        elif presence:
+            presence_refusal = presence  # used only if no queue row holds the target either
     if not direct_active:
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(target) if isinstance(running, dict) else None
@@ -269,7 +335,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     # follow-up reaches that actor's mailbox, never a second direct turn. A
     # direct turn that is neither is simply unknown here.
     if not isinstance(task, dict):
-        refusal = "target_unknown"
+        refusal = presence_refusal or "target_unknown"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
     elif _presence_target_refused(ctx, evt, task):
@@ -333,7 +399,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 and getattr(direct_agent, "_accepting_owner_messages", False)
                 and str(getattr(direct_agent, "_current_task_id", "") or "") == target
             ):
-                refused = refuse("target_closed")
+                from ouroboros.presence_runner import presence_turn_is_live
+
+                # A closed inline author whose turn still runs has not finished.
+                refused = refuse("presence_author_closed" if task.get("_inline_presence_author")
+                                 and presence_turn_is_live(target, drive_root=ctx.DRIVE_ROOT) else "target_closed")
         drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_active else _task_drive_for_task(task, target)
         if not direct_active:
             _queue_lock.acquire()

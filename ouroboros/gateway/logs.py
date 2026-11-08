@@ -154,7 +154,7 @@ def _dialogue_tail(root: pathlib.Path, stream: str, limit: int, task_ids: Option
             before = page[-1].seq
         rows = sorted(rows[:limit], key=lambda row: row.seq)
     ordinals = ordinals_of(root, stream, [row.seq for row in rows])
-    return [(ordinals[row.seq].ordinal + 1, row.row) for row in rows]
+    return [(ordinals[row.seq].ordinal + 1, row.row) for row in ds.whole_rows(root, rows)]
 
 
 __all__ = ["api_logs_tail"]

@@ -1,5 +1,6 @@
 // Captured conversation content mounted inside the Place sheet. The sheet owns navigation and drafts.
 import { apiClient } from './api_client.js';
+import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { tr } from './i18n.js';
@@ -48,9 +49,10 @@ export function historyFactWords(row) {
     const facts = row.place_history || {};
     const attention = facts.attention;
     const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
-        no_wake_match: 'Heard; no wake matched', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection' };
+        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
+        own_account: 'Heard; written by the account it sends as' };
     return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
-        ? heard[attention.reason] || 'Heard' : '',
+        ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
         delivered: 'Delivered', failed: 'Delivery failed', uncertain: 'Delivery outcome unknown' }[facts.delivery_state] || ''].filter(Boolean);
 }
@@ -58,10 +60,9 @@ export function historyFactWords(row) {
 export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {}) {
     const state = error ? `<p role="alert" data-i18n-authored>${escapeHtml(error)}</p>` : rooms === null
         ? '<p class="place-sheet-note" role="status">Reading captured conversations…</p>' : rooms.length
-            ? `<ul class="consciousness-place-rows place-rooms">${rooms.map((room) => `<li><button type="button" class="consciousness-place-row place-room-row" data-place-room="${room.room_chat_id}">
+            ? `<ul class="consciousness-place-rows place-rooms">${rooms.map((room) => `<li><button type="button" class="consciousness-place-row place-room-row" data-place-room="${room.room_chat_id}"${room.thread_id ? ` title="${escapeHtml(`Thread ${room.thread_id}`)}"` : ''}>
                 <span class="consciousness-place-name" data-i18n-authored>${escapeHtml(room.label || room.address)}</span>
-                <span class="consciousness-place-facts">${!room.label ? '<span>Name not recorded</span> · ' : ''}<time data-i18n-authored>${escapeHtml(timeText(room.last_at))}</time>${room.unanswered_count === null ? ' · Focus count unavailable' : room.unanswered_count > 0 ? ` · ${room.unanswered_count} open ${room.unanswered_count === 1 ? 'focus' : 'focuses'}` : ''}</span>
-                ${room.thread_id ? `<span class="place-sheet-note">Thread: <span data-i18n-authored>${escapeHtml(room.thread_id)}</span></span>` : ''}
+                <span class="consciousness-place-facts">${!room.label ? '<span>Name not recorded</span> · ' : ''}${room.thread_id ? 'thread · ' : ''}<time data-i18n-authored>${escapeHtml(timeText(room.last_at))}</time>${room.unanswered_count === null ? ' · Focus count unavailable' : room.unanswered_count > 0 ? ` · ${room.unanswered_count} open ${room.unanswered_count === 1 ? 'focus' : 'focuses'}` : ''}</span>
             </button></li>`).join('')}</ul>`
             : '<p>No saved conversation found in this index.</p>';
     return `${state}${coverage?.importing ? '<p class="place-sheet-note" role="status">Older records are still being imported; this list may be incomplete.</p>' : ''}
@@ -107,10 +108,20 @@ function messageNode(row, markdown, place) {
         <time data-i18n-authored datetime="${escapeHtml(time.at)}" title="${escapeHtml(time.title)}">${escapeHtml(timeText(time.at))}</time>
         ${historyFactWords(row).map((fact) => `<span class="place-convo-fact">${escapeHtml(fact)}</span>`).join('')}${heard}${sender ? `<span class="place-convo-fact">${sender}</span>` : ''}`;
     updateHeardLabels(meta, place);
-    const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
-    if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
-    else { text.classList.add('place-history-plain'); text.textContent = row.text; }
-    article.append(meta, text);
+    article.append(meta);
+    const reaction = facts.reaction?.summary;
+    if (row.text || !reaction) { // a reaction row has no words of its own; words sent beside one stay speech
+        const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
+        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
+        else { text.classList.add('place-history-plain'); text.textContent = row.text; }
+        article.append(text);
+    }
+    if (reaction) {
+        const line = document.createElement('p'); line.className = 'place-sheet-note place-convo-reaction';
+        const summary = document.createElement('span'); summary.dataset.i18nAuthored = ''; summary.textContent = reaction;
+        line.append(`${tr('places.history.reaction', 'Reaction:')} `, summary);
+        article.append(line);
+    }
     if (facts.held === true && facts.checked === false && typeof facts.held_text === 'string') {
         const label = document.createElement('p'); label.className = 'place-sheet-note';
         label.textContent = tr('places.history.held_unchecked', 'held, unchecked');
@@ -201,7 +212,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             if (hadRows && target === null) scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
         } catch (error) {
             if (closed || version !== generation) return;
-            find('[data-history-status]').textContent = error?.message || String(error);
+            find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
             retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;
         } finally {

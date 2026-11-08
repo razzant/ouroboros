@@ -139,7 +139,7 @@ S30_WAKE_WATCH_SEC = 10.0
 #     (a %-format); the resumed round of a GRACEFUL pause carries its rendering,
 #     REFRESHED_NOTICE_MARKER, followed by the refreshed ceiling.
 FORCED_WRAPUP_MARKER = "[BUDGET LIMIT]"
-RESUME_NOTICE_MARKER = "This task continued from its budget pause after an explicit owner Resume"
+RESUME_NOTICE_MARKER = "This task continued from its budget pause after"
 REFRESH_SOURCE_LITERAL = "'refreshed to $%.2f'"
 REFRESHED_NOTICE_MARKER = "planning threshold refreshed to $"
 LITERAL_SOURCES = {
@@ -187,7 +187,7 @@ def test_w8_literals_still_exist_in_the_tree():
     # Runtime scenarios keep the concrete budget notice; source selects the
     # owner/authority/budget wording through the existing mapping. Pin those choices too.
     source = (REPO_ROOT / "ouroboros/budget_pause.py").read_text(encoding="utf-8")
-    assert 'REASON_OWNER: "owner Pause"' in source
+    assert 'REASON_OWNER: "Pause"' in source
     assert 'REASON_AUTHORITY: f"technical pause (' in source
     assert 'str(row.get("reason") or ""), "budget pause")' in source
     for literal, relpath in LITERAL_SOURCES.items():
@@ -203,7 +203,6 @@ def _post_completion(stub: ScriptedStubModel, payload: dict) -> bytes:
         return resp.read()
 
 
-@pytest.mark.serial  # a real loopback port (the stub) — the serial pass
 def test_priced_stub_reports_a_final_cost_on_json_and_sse_envelopes():
     with PricedStubModel([dict(KEEPALIVE_STEP)], cost_usd=0.25) as stub:
         tool_body = {"messages": [{"role": "user", "content": "go"}],
@@ -375,7 +374,6 @@ def _wake_signal(oracle: ArtifactOracle, server, stub: ScriptedStubModel, task_i
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -470,7 +468,7 @@ def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
             assert park_events[-1].get("park_state") == STATE_PAUSED, park_events[-1]
             assert park_events[-1].get("pause_source") == "worker_event", park_events[-1]
             assert park_events[-1].get("status") == STATUS_PAUSED_EXACT, park_events[-1]
-            assert park_events[-1].get("owner_visible") is True, park_events[-1]
+            assert not {"owner_visible", "toast_once"}.intersection(park_events[-1]), park_events[-1]
 
             # The owner's census: the root is a managed task in phase budget_paused.
             activity = wait_until(
@@ -656,7 +654,6 @@ def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s30_public_detail_of_a_paused_root_reports_the_pause_not_running(
         e2e_clone, tmp_path_factory):
     """The PUBLIC status plane of an exactly paused root must agree with its durable
@@ -751,12 +748,13 @@ def _direct_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes_in_chat(
         e2e_clone, tmp_path_factory):
     """The owner's DIRECT chat turn meets a monetary rail mid-turn and pauses the
-    SAME way, under the SAME task id (#1196): the live in-process actor ends, the
-    turn's own task record is parked inline as the PENDING ``_budget_pause`` carrier
+    SAME way, under the SAME task id (#1196): its conversation-lane carrier (a
+    worker process since #2654, never the server's own thread) reports the park as
+    any pooled worker does (``pause_source=worker_event``), its RUNNING row ends and
+    the turn's own task record is parked as the PENDING ``_budget_pause`` carrier
     with its ``_is_direct_chat`` lane fact (never a second live actor, never a
     terminal, never a paid wrap-up), the census reports it as ``direct_chat`` in
     phase ``budget_paused``; a budget increase alone wakes nothing; the existing
@@ -808,7 +806,9 @@ def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes
                 assert paused.get("rail") == RAIL_DISPATCH_REFUSED, paused
                 assert paused.get("exact_continuation") is True and paused.get("replay_safe") is False, paused
                 assert paused.get("resume_policy") == RESUME_POLICY, paused
-                assert paused.get("pause_source") == "direct_turn_inline_park", paused
+                # The carrier's own pause event parked it: the retired in-process park
+                # (``direct_turn_inline_park``, supervisor/direct_pause.py) is gone with #2654.
+                assert paused.get("pause_source") == "worker_event", paused
                 assert int(paused.get("physical_calls") or 0) >= 2, paused
                 assert (paused.get("resume_point") or {}).get("phase") == "boundary", paused.get("resume_point")
                 assert "grant" not in paused, paused
@@ -834,15 +834,18 @@ def test_s31_direct_chat_turn_pauses_under_its_own_id_and_owner_resume_completes
                 ledger_at_pause = _ledger_bucket(budget_root, task_id)
                 assert ledger_at_pause["physical_calls"] == int(paused.get("physical_calls") or 0) >= 2, (
                     ledger_at_pause, paused.get("physical_calls"))
-                # The park's own receipts: the inline supervisor row and the owner event.
-                parked = [r for r in oracle.supervisor_rows("direct_turn_budget_pause_parked_inline")
-                          if str(r.get("task_id") or "") == task_id]
-                assert parked and parked[-1].get("pause_id") == pause_id, parked
+                # The park's own receipt is the owner event of the carrier's pause; no
+                # disclosed inline executor ran the turn (``conversation_inline_executor``
+                # names every execution on a server thread), so the actor that parked
+                # it was the lane's worker process.
                 park_events = wait_until(
                     lambda: [r for r in _events_for(oracle, "budget_scope_paused", task_id)
                              if r.get("pause_id") == pause_id] or None, 30)
-                assert park_events and park_events[-1].get("pause_source") == "direct_turn_inline_park", park_events
+                assert park_events and park_events[-1].get("pause_source") == "worker_event", park_events
                 assert park_events[-1].get("park_state") == STATE_PAUSED, park_events[-1]
+                inline = [r for r in oracle.supervisor_rows("conversation_inline_executor")
+                          if str(r.get("task_id") or "") == task_id]
+                assert inline == [], inline
                 # No second live actor, no terminal, no paid wrap-up.
                 assert wait_until(lambda: not _direct_activities(server, client_message_id), 30), (
                     "the live direct actor is still registered after the pause")
@@ -953,7 +956,6 @@ def _boot_restore_rows(oracle: ArtifactOracle) -> list:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s32_exact_pause_survives_a_graceful_server_restart_and_resumes_after_it(
         e2e_clone, tmp_path_factory):
     """Owner contract (#1196): an exact budget pause survives a physical epoch.

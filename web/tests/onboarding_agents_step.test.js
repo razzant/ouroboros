@@ -4,9 +4,11 @@
 // endpoint, and that the step holds nothing open after it is disposed.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { createClaudexorStatusStore, familyLabel } from '../modules/claudexor_status_store.js';
+import { compatibleEndpoint, configuredApiProviders } from '../modules/route_editor_primitives.js';
 import {
     AGENT_FAMILIES,
     LADDER_FOOTNOTE,
@@ -156,15 +158,21 @@ test('the ladder text survives on its own — the artwork carries no unique fact
 // Zero / one / several connected accounts.
 // ---------------------------------------------------------------------------
 
-test('nothing connected: no declaration, and the outcome says so plainly', () => {
+test('nothing connected: no declaration, and no outcome sentence repeating the rows and the reason beside Continue', () => {
     const snapshot = snapshotWith([]);
     assert.deepEqual(connectedHarnesses(snapshot), []);
     assert.deepEqual(subscriptionDeclaration({ connected: [] }), {
         subscriptionsConnected: false, skipSubscriptionPresets: false,
     });
-    const text = agentsOutcomeText([]);
-    assert.match(text, /Connect Codex to start without an API key/i);
-    assert.match(text, /Other subscriptions remain available for agents/);
+    assert.equal(agentsOutcomeText([]), '');
+});
+
+test('the limits warning stands under the rows in every state, before any connection', () => {
+    const html = agentsStepHtml({ compact: true, showRoster: false });
+    const [rows, warning, login] = ['id="agents-family-list"', 'Subscription limits still apply.', 'id="agents-login-host"'].map((part) => html.indexOf(part));
+    assert.ok(rows >= 0 && rows < warning && warning < login, 'rows, then the warning, then any sign-in');
+    assert.match(html, /does not enable paid credits or change your provider's spending limits\./);
+    assert.doesNotMatch(html, /agent-limits-note"[^>]*\bhidden\b/);
 });
 
 test('one connected account declares the preset request and promises nothing certain', () => {
@@ -310,6 +318,7 @@ test('preview and completion can share one open provider/local/model draft', () 
             openaiKey: ' key ', totalBudget: '25', reviewEnforcement: 'blocking',
             localSource: '', localRoutingMode: 'cloud', mainModel: 'openai/gpt-5.6-sol',
             runtimeMode: 'advanced',
+            connections: [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }],
         },
         providerFields: [{ settingKey: 'OPENAI_API_KEY', stateKey: 'openaiKey' }],
         budgetFields: [{ settingKey: 'OUROBOROS_TOTAL_BUDGET_USD', stateKey: 'totalBudget' }],
@@ -317,11 +326,48 @@ test('preview and completion can share one open provider/local/model draft', () 
         trim: (value) => String(value || '').trim(),
     });
     assert.equal(draft.OPENAI_API_KEY, 'key');
+    assert.deepEqual(draft.OUROBOROS_CONNECTIONS, [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }]);
     assert.equal(draft.OUROBOROS_TOTAL_BUDGET_USD, 25);
     assert.equal(draft.OUROBOROS_MODEL, 'openai/gpt-5.6-sol');
     assert.equal(draft.OUROBOROS_REVIEW_ENFORCEMENT, 'blocking');
     assert.equal(draft.OUROBOROS_RUNTIME_MODE, 'advanced');
     assert.equal('OUROBOROS_MODEL_HEAVY' in draft, false);
+});
+
+test('the draft reaches the compatible pair the runtime reads, following each edit', () => {
+    // The real contract's fields, drafted exactly as the wizard drafts a bootstrap's initial state.
+    const { contract, initialState } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+    const legacy = 'http://127.0.0.1:8080/v1';
+    const facts = (state) => {
+        const draft = onboardingSettingsDraft({ state: { ...initialState, ...state }, providerFields: contract.providerFields,
+            budgetFields: contract.budgetFields, modelSlots: contract.modelSlots });
+        return { sources: configuredApiProviders(draft).map((entry) => entry.id), endpoint: compatibleEndpoint(draft),
+            legacyKey: draft.OPENAI_BASE_URL };
+    };
+    // A new install drafts no legacy key at all.
+    assert.deepEqual(facts({}), { sources: [], endpoint: { baseUrl: '', apiKey: '', apiKeySetting: 'OPENAI_API_KEY', legacy: true }, legacyKey: undefined });
+    // The saved legacy pair: a masked OpenAI key now reaches the legacy address, and official OpenAI stays a choice.
+    const saved = { legacyCompatibleBaseUrl: legacy, openaiKey: '***set***' };
+    assert.deepEqual(facts(saved), { sources: ['openai', 'openai-compatible'],
+        endpoint: { baseUrl: legacy, apiKey: '***set***', apiKeySetting: 'OPENAI_API_KEY', legacy: true }, legacyKey: legacy });
+    // Clearing the key leaves an address without its key: no compatible source, nothing to send.
+    assert.deepEqual(facts({ ...saved, openaiKey: '' }).sources, []);
+    // A dedicated address, keyless or keyed, takes the built-in source; the legacy key stays home.
+    assert.deepEqual(facts({ ...saved, compatibleBaseUrl: 'http://127.0.0.1:9090/v1' }).endpoint,
+        { baseUrl: 'http://127.0.0.1:9090/v1', apiKey: '', apiKeySetting: 'OPENAI_COMPATIBLE_API_KEY', legacy: false });
+    assert.deepEqual(facts({ ...saved, compatibleBaseUrl: 'http://127.0.0.1:9090/v1', compatibleApiKey: '***set***' }).endpoint,
+        { baseUrl: 'http://127.0.0.1:9090/v1', apiKey: '***set***', apiKeySetting: 'OPENAI_COMPATIBLE_API_KEY', legacy: false });
+    // Both pairs saved, even at one address: clearing the dedicated address selects the legacy pair and names
+    // its key setting, so a kept key is read from that pair; restoring the address selects the dedicated one again.
+    const both = { ...saved, compatibleBaseUrl: legacy, compatibleApiKey: '***set***' };
+    assert.deepEqual(facts(both).endpoint,
+        { baseUrl: legacy, apiKey: '***set***', apiKeySetting: 'OPENAI_COMPATIBLE_API_KEY', legacy: false });
+    assert.deepEqual(facts({ ...both, compatibleBaseUrl: '' }).endpoint,
+        { baseUrl: legacy, apiKey: '***set***', apiKeySetting: 'OPENAI_API_KEY', legacy: true });
+    // Official OpenAI alone is that source only; a named server is its own source beside the legacy one.
+    assert.deepEqual(facts({ openaiKey: '***set***' }).sources, ['openai']);
+    assert.deepEqual(facts({ ...saved, connections: [{ kind: 'openai-compatible', name: 'lab', base_url: 'http://127.0.0.1:7070/v1' }] }).sources,
+        ['openai', 'openai-compatible', 'openai-compatible@lab']);
 });
 
 test('a late status settle invalidates preview on model/account facts, not timestamps', () => {

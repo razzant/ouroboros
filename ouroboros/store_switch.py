@@ -1,12 +1,12 @@
 """The authority switch of the current-facts store.
 
-A door that moves the checkout to a tree WITHOUT the store (UI Rollback, the automatic
-boot-smoke rollback, an Update replace to an older official ref, the agent's rollback
-through the UI door) records an intent (``record_switch_intent``, one decision for every
-door: ``switch_or_reset``) instead of switching at once; the restart exit, after every
-worker is dead (``switch_at_restart`` from ``server._check_restart``), runs
-``run_switch_seam``; a boot that finds a pending intent resumes it first
-(``start`` -> ``resume_pending_switch``):
+A door that moves the checkout to a tree WITHOUT the store, or without the reader of a dialogue
+row held by reference (UI Rollback, the automatic boot-smoke rollback, an Update replace to an
+older official ref, the agent's rollback through the UI door), records an intent
+(``record_switch_intent``, one decision for every door: ``switch_or_reset``) instead of
+switching at once; the restart exit, after every worker is dead (``switch_at_restart`` from
+``server._check_restart``), runs ``run_switch_seam``; a boot that finds a pending intent
+resumes it first (``start`` -> ``resume_pending_switch``):
 
 preflight (nothing moves on failure; a refusal is a normal restart on the current code
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
@@ -155,21 +155,28 @@ def target_file_bytes(repo_dir: Any, sha: str, rel: str) -> Optional[bytes]:
 
 
 def switch_needs(repo_dir: Any, target_sha: str) -> Dict[str, bool]:
-    """What the target tree cannot read, computed from the target before anything moves."""
+    """What the target tree cannot read, computed from the target before anything moves: a store module it
+    lacks, or (``threads``) a dialogue store that does not name ``dialogue_store.THREAD_FORMAT``."""
+    from ouroboros.dialogue_store import THREAD_FORMAT
+
+    dialogue = target_file_bytes(repo_dir, target_sha, "ouroboros/dialogue_store.py")
     return {"facts": target_file_bytes(repo_dir, target_sha, "ouroboros/store.py") is None,
             "money": target_file_bytes(repo_dir, target_sha, "ouroboros/usage_store.py") is None,
             "handles": target_file_bytes(repo_dir, target_sha, "ouroboros/evidence_packs.py") is None,
-            "dialogue": target_file_bytes(repo_dir, target_sha, "ouroboros/dialogue_store.py") is None}
+            "dialogue": dialogue is None, "threads": THREAD_FORMAT.encode("ascii") not in (dialogue or b"")}
+
+
+_DEFERRING = ("facts", "dialogue", "threads")  # the needs only the seam meets, at the restart exit (every writer dead)
 
 
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
                     reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
-    """A door's one decision after its writers are stopped: a target WITHOUT the store records
-    the intent and moves nothing (the seam exports and switches at the restart exit the door
-    requests next); a target with it runs the door's own reset now, as before the store.
+    """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
+    read a dialogue row held by reference, records the intent and moves nothing (the seam exports and
+    switches at the restart exit the door requests next); any other runs the door's own reset now.
     Returns ``(ok, message, deferred)``."""
     needs = switch_needs(repo_dir, target_sha)
-    if needs["facts"] or needs.get("dialogue"):
+    if any(needs.get(name) for name in _DEFERRING):
         record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
@@ -435,6 +442,12 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
             _progress(root, "handles")
             steps["handles"] = (restore_handles or evidence_packs.restore_checkpoint_handles)(root)
             _write_receipt(root, receipt)
+        if needs.get("threads"):
+            from ouroboros.dialogue_import import expand_for_older_body
+
+            _progress(root, "threads")
+            steps["threads"] = expand_for_older_body(root)  # every row held by reference, whole again in the store
+            _write_receipt(root, receipt)
         if needs.get("dialogue"):
             from ouroboros.dialogue_import import export_for_older_body
 
@@ -635,17 +648,18 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
     census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
     ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
     outcome; an unconfirmed stop in any of them (a missing census included) is a blocker the
-    seam refuses on, never a wait. Never raises."""
+    seam refuses on, never a wait. After that stop the door owner's bounded Git runs as this
+    exit's own finalization (``shell_process.exit_finalization``); Panic still ends it. Never raises."""
     root = pathlib.Path(root)
     owner = None
     if read_switch_intent(root) is None:
         head = rev_parse(repo_dir, "HEAD")
         needs = switch_needs(repo_dir, head) if head else {}
-        if not (needs.get("facts") or needs.get("dialogue")):  # the deferring needs of ``switch_or_reset``
+        if not any(needs.get(name) for name in _DEFERRING):
             return {"status": "no_intent"}
-        # T2: the checked-out tree already lacks the store or the dialogue store (the agent's
-        # vcs_revert, a manual checkout) and no door recorded the switch: the export runs before
-        # this exit with HEAD as the target; nothing resets a second time.
+        # T2: the checked-out tree already lacks the store, the dialogue store or its reader of a
+        # thread held by reference (the agent's vcs_revert, a manual checkout) and no door recorded
+        # the switch: the export runs before this exit with HEAD as the target; nothing resets twice.
         record_switch_intent(root, target_sha=head, target_ref="HEAD", door="vcs_rollback",
                                           reason="the checked-out tree cannot read the current stores")
         owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
@@ -659,8 +673,11 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
     ) if blocked]
     try:
-        outcome = run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
-                                               restore_handles=evidence_packs.restore_checkpoint_handles)
+        from ouroboros.tools.shell_process import exit_finalization
+
+        with exit_finalization():
+            outcome = run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
+                                      restore_handles=evidence_packs.restore_checkpoint_handles)
     except Exception as exc:
         log.critical("Authority switch at the restart exit raised; the intent waits for the next boot", exc_info=True)
         outcome = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

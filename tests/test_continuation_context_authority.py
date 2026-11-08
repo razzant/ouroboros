@@ -290,8 +290,9 @@ def test_main_projection_shows_the_brief_once_and_the_objective_once():
     assert projected["task_contract"]["objective"] == {
         "representation": "assignment", "chars": len(work_order),
         "sha256": hashlib.sha256(work_order.encode("utf-8")).hexdigest(),
-        "rule": "The objective is this task's assignment, the first user turn of this conversation; "
-                "it is not repeated here."}
+        "rule": "The objective is this task's assignment, the first user turn of this conversation; when the "
+                "whole input cannot fit a request, that turn is a pointer to its exact stored source instead. "
+                "It is not repeated here."}
     assert work_order not in json.dumps(projected), "the work order is not repeated inside the Runtime view"
 
     other = {**brief, "task_id": "older", "source": _source("older")}
@@ -301,6 +302,40 @@ def test_main_projection_shows_the_brief_once_and_the_objective_once():
     assert other_brief["source"] == other["source"], "a different identity keeps its own reader"
     assert "result" not in other_brief and other_brief["omitted_fields"]["result"] > 0
     assert kept["task_contract"]["objective"] == "A shorter title", "only the assignment itself is referenced"
+
+
+def test_main_projection_shows_a_line_broken_assignment_once():
+    """The contract strips its objective; a task text ending in a line break (a wake's rendered
+    template does) is still the one assignment, so the Runtime view references it instead of
+    delivering it a second time (28.10 19:20Z: 43,221 estimated tokens twice). A wake whose
+    observation is bound names that stored source, whichever way its first turn delivers it;
+    an objective that differs from the text stays whole."""
+    from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
+    from ouroboros.contracts.task_contract import attach_task_contract
+    from ouroboros.main_context_authority import project_main_task_authority
+
+    observation = "[Wake-up · heartbeat]\nObserved since the last accepted wake:\n" + "- task t done\n" * 2_000
+    task = attach_task_contract({"id": "wake", "text": observation})
+    assert task["task_contract"]["objective"] == observation.strip() != observation
+    before = copy.deepcopy(task)
+    reference = project_main_task_authority(task)["task_contract"]["objective"]
+    assert task == before
+    assert reference["representation"] == "assignment" and reference["chars"] == len(observation.strip())
+    assert "source" not in reference and "- task t done" not in json.dumps(reference)
+
+    source = {"sha256": "a" * 64, "lines": 2_001, "path": "wake_observation.jsonl",
+              "read": {"tool": "read_file", "arguments": {"root": "runtime_data", "path": "w/o.jsonl", "start_line": 1}}}
+    bound = attach_task_contract({"id": "wake", "text": observation, "metadata": {
+        WAKE_OBSERVATION_KEY: {"source": source, "projection_text": "pointer"}}})
+    named = project_main_task_authority(bound)["task_contract"]["objective"]
+    assert named["source"] == {key: source[key] for key in ("read", "sha256", "lines")}
+    assert named["rule"].startswith(reference["rule"]) and "`source`" in named["rule"]
+    assert "- task t done" not in json.dumps(named)
+
+    for text, objective in ((observation, "Summarize the wake"), ("Fix the parser\n", "Fix the parser and the lexer"),
+                            ("Fix the parser\n", "fix the parser")):
+        kept = project_main_task_authority({"id": "t", "text": text, "task_contract": {"objective": objective}})
+        assert kept["task_contract"]["objective"] == objective, "a different objective stays whole"
 
 
 

@@ -1,10 +1,11 @@
-"""Task input selection, declared-source composition and historical exposure.
+"""Task input selection, the declared request's omissions and historical exposure.
 
 The context facade captures governance once and supplies its runtime/user
-renderers. This leaf decides task/document eligibility and builds the selected
-core without opening the automatic shared-memory channels. Usable-response
-observations retain the first/latest selected inputs as evidence for evaluators,
-without changing current task authority or opening today's memory.
+renderers. This leaf decides task/document eligibility and names what a declared
+request's view withholds of the automatic shared-memory channels (the one
+builder in ``context`` composes it). Usable-response observations retain the
+first/latest selected inputs as evidence for evaluators, without changing
+current task authority or opening today's memory.
 """
 from __future__ import annotations
 
@@ -13,12 +14,10 @@ import hashlib
 import json
 import logging
 import pathlib
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ouroboros.context_fit import ContextCore as _ContextCore
-from ouroboros.context_runtime_facts import snapshot_labelled
 from ouroboros.contracts.task_contract import normalize_bool
-from ouroboros.memory import Memory
+from ouroboros.reference_books import BOOK_ENTRYPOINTS
 from ouroboros.store import StoreError
 
 log = logging.getLogger("ouroboros.context")
@@ -262,16 +261,45 @@ def _bound_tree_is_body(task: Dict[str, Any], ctx: Any) -> Optional[bool]:
     return True if fact == BODY_TRUE else False if fact == BODY_FALSE else None
 
 
-def development_resident(task: Dict[str, Any], ctx: Any) -> bool:
+def development_required(task: Dict[str, Any]) -> bool:
+    """This task's own direct requirement of the whole handbook in every mode (owner 1.11.2026).
+
+    Only its contract's ``context_requires_development`` is true: ``start_task`` authors that key for the new
+    task alone, and no descendant or follow-up inherits it. A top-level value alone is the older answer about
+    the subject in Max, and ``context_requires_self_body_docs`` is a subject marker: neither is this requirement.
+    """
+    contract = task.get("task_contract")
+    return isinstance(contract, dict) and contract.get("context_requires_development") is True
+
+
+def required_book_unavailable(core: Any) -> Dict[str, Any]:
+    """The existing source-unavailable refusal when the capture could not read a handbook the task directly requires,
+    else ``{}``, under its own typed cause (``required_reference_unavailable``, which Continue may continue; the other
+    authority refusals keep theirs). No map or partial book stands in for it; without the requirement the gap stays a
+    disclosed one in the view, as before."""
+    if not core.development_required or core.development_md.strip():
+        return {}
+    path = BOOK_ENTRYPOINTS["development"]
+    error = next((line for line in core.reference_book_errors if path in line), f"{path} could not be read.")
+    return {"reason_code": "required_reference_unavailable", "source": {"kind": "reference_book", "path": path},
+            "human_label": f"this task's directly required development handbook ({path})",
+            "detail": (f"{error} The whole book is this task's own requirement; no map or partial book stands in. "
+                       "Restore the source, then Continue with that requirement; changing it needs an explicit new task."),
+            "recovery_choices": ["retry_after_source_recovery", "start_explicit_fresh_task"]}
+
+
+def development_resident(task: Dict[str, Any], ctx: Any, *, subject_only: bool = False) -> bool:
     """Whether docs/DEVELOPMENT.md stays whole in Max, by the subject of the work (BIBLE P1, owner 6A).
 
-    The task's own ``context_requires_development`` wins either way (absent is not false); a delegated child
-    or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the handbook;
-    self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything else,
-    an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
+    The task's own ``context_requires_development`` wins either way (absent is not false), read from its row and
+    then its contract, which survives restore and Continue; ``subject_only`` asks what the subject alone says. A
+    delegated child or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the
+    handbook; self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything
+    else, an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
     Project membership is not a signal.
     """
-    explicit = task.get("context_requires_development")
+    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+    explicit = None if subject_only else task.get("context_requires_development", contract.get("context_requires_development"))
     if explicit is not None:
         return normalize_bool(explicit)
     if _explicit_self_body_docs_flag(task) is True:
@@ -300,6 +328,132 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
                       + json.dumps(source, ensure_ascii=False, sort_keys=True), ensure_ascii=False)
 
 
+def _wake_forms(wake: Dict[str, Any]) -> List[str]:
+    """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
+    human's card answers whole beside the exact pointer), an older wake's middle step when it bound one, then the
+    bare pointer when bound apart. The choice among them is only ever their actual fit."""
+    keys = ("projection_text", "owner_projection_text", "pointer_text")
+    return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
+
+
+def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The round boundary's choices (``loop_model_call._project_wake_input``): this wake's bound forms as its first
+    user message, in rescue order with the bare pointer last, each only when strictly smaller than ``full``."""
+    size = len(json.dumps(full, ensure_ascii=False))
+    forms = [{"role": "user", "content": text} for text in _wake_forms(wake)]
+    return [form for form in forms if len(json.dumps(form, ensure_ascii=False)) < size]
+
+
+def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
+    """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
+    ``form`` is ``whole``, ``projection`` (my human's card answers inline) or ``pointer`` (the bare pointer,
+    nothing inline)."""
+    forms = _wake_forms(wake)
+    if content is None:
+        form = "whole"
+    elif content in forms[:-1]:  # any bound form before the last carries my human's words inline
+        form = "projection"
+    else:  # the last bound form, or a projection with no words of mine: the bare pointer
+        form = "pointer"
+    return {"checkpoint_kind": "wake_input_inline" if form == "whole" else "wake_input_by_source", "round": round_idx,
+            "after_overflow": after_overflow, "form": form, "composition": wake.get("composition"),
+            "source_sha256": (wake.get("source") or {}).get("sha256")}
+
+
+def wake_projection_inputs(task: Dict[str, Any]) -> List[str]:
+    """An own-clock wake's bound deliveries as user content JSON (``_wake_forms``), only while its complete source
+    reads back exactly.
+
+    ``consciousness_wake.bind_wake_observation`` stores the whole observation and renders these around its pointer;
+    the round boundary delivers the same texts (``loop_model_call._project_wake_input``). A source its producer could
+    not store, or one that no longer verifies, leaves none: the whole input stays the only delivery and a refused
+    start names its frame.
+    """
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.consciousness_authority import is_own_clock_wake
+    from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    wake = metadata.get(WAKE_OBSERVATION_KEY)
+    if not is_own_clock_wake(metadata) or not isinstance(wake, dict) or not wake.get("projection_text"):
+        return []
+    source = wake.get("source")
+    try:
+        read_actor_source_bytes(source["canonical_root"], str(source["task_id"]), source)
+    except (KeyError, TypeError, OSError, ValueError) as exc:
+        log.warning("Wake %s observation source does not verify (%s: %s); its whole input stays the only delivery",
+                    task.get("id"), type(exc).__name__, exc)
+        return []
+    return [json.dumps(str(text), ensure_ascii=False, sort_keys=True) for text in _wake_forms(wake)]
+
+
+def rescued_start(env: Any, task: Dict[str, Any], user_content_json: str, unfit: Any, preferred: str,
+                  fit: Callable[[str], Tuple[Any, str]]) -> Tuple[Any, str, Dict[str, str]]:
+    """The start a physical refusal of the whole input leaves: ``(contents, mode, {mode: delivered input JSON})``.
+
+    Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view of the
+    known window holds it; a room-only shortfall, the directly required handbook, an unusable source or an unfit
+    rescue names the start (7A). An own-clock wake's bound deliveries come first, in every mode: its projection, then,
+    after that too proves physically unfit, its bare pointer (``wake_projection_inputs``); owner-Nano's exact input
+    pointer stays the last rescue (``task_input_pointer``).
+    """
+    from ouroboros.context_fit import MinimumViewUnfit
+
+    if not unfit.physical or unfit.required_book_tokens:
+        raise unfit
+    refused = None
+    for wake in wake_projection_inputs(task):
+        try:
+            contents, mode = fit(wake)
+        except MinimumViewUnfit as exc:
+            refused = exc
+            continue
+        return contents, mode, dict.fromkeys(contents, wake)
+    if refused is not None:
+        if preferred != "nano":
+            raise refused
+        log.info("Wake %s projections cannot fit the owner-Nano start either; the exact input pointer is the last "
+                 "rescue", task.get("id"))
+    pointer = task_input_pointer(env, task, user_content_json) if preferred == "nano" else None
+    if pointer is None:
+        raise unfit
+    contents, mode = fit(pointer)
+    return contents, mode, {"nano": pointer}
+
+
+def whole_wake_input(message: Dict[str, Any], plan: Any, wake: Dict[str, Any]) -> Dict[str, Any]:
+    """The whole wake input the round boundary measures again (``loop_model_call._project_wake_input``).
+
+    A first message that already holds one of this wake's deliveries, its projection or its bare pointer
+    (``rescued_start``, or a restored transcript), is that message with its plan's captured whole input; any other
+    first message is itself.
+    """
+    from ouroboros.context_fit import extract_plain_text_from_content
+
+    whole, captured = copy.deepcopy(message), getattr(plan, "user_content_json", None)
+    if isinstance(captured, str) and extract_plain_text_from_content(message.get("content")) in _wake_forms(wake):
+        whole["content"] = json.loads(captured)
+    return whole
+
+
+def wake_start_checkpoint(task: Dict[str, Any], plan: Any) -> Optional[Dict[str, Any]]:
+    """The round boundary's ``wake_input_by_source`` checkpoint for a start that delivered a bound projection or
+    bare pointer, naming which (``wake_input_checkpoint``).
+
+    ``round`` 0 is the start itself, before the first round; ``None`` when the start delivered any other input.
+    """
+    shown = plan.projection(plan.initial_mode).user_content_json
+    if shown is None:  # the whole input, as an ordinary start delivers it
+        return None
+    from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    wake = metadata.get(WAKE_OBSERVATION_KEY)
+    if not isinstance(wake, dict) or json.loads(shown) not in _wake_forms(wake):
+        return None
+    return wake_input_checkpoint(wake, json.loads(shown), round_idx=0, after_overflow=False)
+
+
 def _validate_declared_input_task(task: Dict[str, Any]) -> None:
     """A selected request must not silently enter an unqualified task class."""
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -314,72 +468,23 @@ def _validate_declared_input_task(task: Dict[str, Any]) -> None:
                          "(API model or configured session)")
 
 
-def _capture_declared_context_core(
-    env: Any,
-    memory: Memory,
-    task: Dict[str, Any],
-    ctx: Any,
-    *,
-    runtime_builder: Callable[..., str],
-    user_builder: Callable[[Dict[str, Any]], Any],
-    **sources: Any,
-) -> _ContextCore:
-    """Compose only declared case inputs plus governance and actual authority.
+def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
+    """The one builder's view of a declared request: the role's (a child's or a nanny's) without the story, the
+    parent's room page and its open conversation; my human's words ride it as a shared child's unless the task
+    was scheduled before ``DECLARED_WORDS_FACT``; the marks in force and the knowledge outline ride it. Identity,
+    WORLD, review history, skills and parent context are gated in the builder (``context._capture_context_core``).
+    The receipt (``subagent_work_order.input_source_selection_receipt``) names each omission."""
+    import dataclasses
 
-    Branch before shared memory is opened. Do not guess which memory sentences
-    might bias this case. Rebuilds read the same durable task selection, while
-    retries and fitting operate on the resulting immutable ContextCore. A task
-    scheduled with ``DECLARED_WORDS_FACT`` carries the owner's words that caused
-    the work right after its receipt, ahead of the dated runtime facts: the block
-    a shared child reads, rendered from the task's own frozen record.
-    """
-    from ouroboros.memory_view import _owner_words_block  # the shared child's block, byte for byte
-    from ouroboros.subagent_work_order import declared_inputs_carry_owner_words, input_source_selection_receipt
-    from ouroboros.subagent_metrics import fact_line
-    from ouroboros.subagent_runtime import (
-        current_model_visible_subagent_catalog, review_facts_block, review_records_block, subagent_supervision_fact_line,
-    )
+    from ouroboros.subagent_work_order import declared_inputs_carry_owner_words  # D03->D07 is lazy-only
 
-    canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-    same_drive = canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
-    process_memory = memory if same_drive else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
-    supplementary_messages: list = []
-    words = _owner_words_block(task) if declared_inputs_carry_owner_words(task) else ""
-    parts = [
-        "## Input source selection\n\n" + json.dumps(input_source_selection_receipt(task), ensure_ascii=False, sort_keys=True),
-        *([words] if words else []),
-        runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"],
-                        supplementary_messages_out=supplementary_messages),
-    ]
-    parts.extend(snapshot_labelled(section, sources["captured_at"]) for section in
-                 process_memory.recent_activity_sections(str(task["id"]), own_drive=None if same_drive else memory))
-    catalog_text, catalog = "", None
-    try:
-        catalog = current_model_visible_subagent_catalog()
-        if catalog:
-            catalog_text = "## Available subagents\n\n" + json.dumps(catalog, ensure_ascii=False, indent=1)
-    except Exception:
-        log.debug("Failed to build Available subagents catalog", exc_info=True)
-    review_text = ""
-    try:
-        review_text = review_facts_block()
-        parts.extend(filter(None, (
-            review_records_block(drive_root=canonical_root, task_id=str(task["id"])),
-            subagent_supervision_fact_line(task, ctx=ctx, catalog=catalog),
-            fact_line(task, drive_root=canonical_root),
-        )))
-    except Exception:
-        log.warning("Failed to build the Review block", exc_info=True)
-    return _ContextCore(
-        base_prompt=sources["base_prompt"], bible_md=sources["bible_md"],
-        architecture_md=sources["architecture_md"], development_md=sources["development_md"],
-        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text) if part),
-        dynamic_text="\n\n".join(parts),
-        user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
-        docs_need_development=_task_requires_self_body_docs(task),
-        reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),
-        compact_reference_docs=True,
-        dynamic_head_text=sources.get("design_nav", ""),
-        supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
-        connections=sources.get("connections", ("", "")),
-    )
+    return dataclasses.replace(spec, story=False, room_page=False, room_lanes=False, origin_words=False,
+                               other_conversations=False, owner_words=declared_inputs_carry_owner_words(task))
+
+
+def declared_receipt_section(task: Dict[str, Any]) -> str:
+    """``## Input source selection``: the native request's receipt, the one builder's view named in it."""
+    from ouroboros.subagent_work_order import input_source_selection_receipt  # D03->D07 is lazy-only
+
+    receipt = input_source_selection_receipt(task, native=True)
+    return "## Input source selection\n\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True)

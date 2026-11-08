@@ -21,6 +21,7 @@ class _Api:
 
 
 class _Rec:
+    bot_id = ""
     sent = []; edited = []; _id = [1000]
     muted = []
     def __init__(self, token, **kwargs): self.on_message = kwargs.get("on_message")
@@ -129,8 +130,11 @@ def test_real_reply_is_sent(tmp_path, monkeypatch):
     assert len(_Rec.sent) == 1 and "answer" in _Rec.sent[0][1]
 
 
-@pytest.mark.parametrize("notify", ["off", "on"])
-@pytest.mark.parametrize("silent", [None, "off", "on"], ids=["default", "off", "on"])
+@pytest.mark.parametrize(("silent", "notify"), [
+    pytest.param(None, "off", id='default-off'),
+    ("off", "on"),
+    ("on", "off"),
+])
 def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path, monkeypatch, silent, notify):
     """The real terminal delivery sends the model's answer alone, as its own message: the
     host notice stays a field of the result and never becomes a second message, and
@@ -172,7 +176,7 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path
                                      drive_logs=lambda: tmp_path / "logs")
     ongoing = ["I found the source.", "I am checking the result."]
     for text in ongoing:
-        assert "sent to owner chat" in _send_user_message(tool_ctx, text)
+        assert "accepted for delivery to owner chat" in _send_user_message(tool_ctx, text)
         delivery._handle_send_message(events.get_nowait(), host)
     assert not tool_ctx.pending_events
     assert all(row["system_type"] == "proactive_message" for row in published)
@@ -206,10 +210,10 @@ def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path
                                    "system_type": "terminal_incident"}, host)
     receipt_id = _Rec.sent[-1][3]
     assert receipt_id not in _Rec.muted
-    assert "sent to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
+    assert "accepted for delivery to owner chat" in _send_user_message(tool_ctx, "A later ongoing reply.")
     delivery._handle_send_message(events.get_nowait(), host)
     assert _Rec.sent[-1][1] == "A later ongoing reply." and _Rec.edited == []
-    assert plugin._get_silent_msg(api, 42) == 0
+    assert plugin._get_silent_msg(api, "", 42) == 0
 
 
 def test_routing_refusal_speaks_in_the_third_person(tmp_path, monkeypatch):
@@ -230,7 +234,7 @@ def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, 
     """A landed act publishes nothing here either; only a file the host could not attach earns one
     plain line, sent fresh: it never edits or takes over silent mode's tracked answer."""
     plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_SILENT_MODE=silent)
-    plugin._set_silent_msg(api, 42, 555)
+    plugin._set_silent_msg(api, "", 42, 555)
     handle = plugin._make_outbound(api)
     ack = {"annotation_type": "routing_ack", "status": "delivered", "action": "steer_task", "target": "t1",
            "attachment_manifest": [{"ordinal": 0, "label": "a.png", "status": "staged"}]}
@@ -239,7 +243,7 @@ def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, 
     ack["attachment_manifest"].append({"ordinal": 1, "label": "b.pdf", "status": "rejected", "reason": "source_missing"})
     asyncio.run(handle(ack))
     assert [(row[1], row[2]) for row in _Rec.sent] == [("Not attached to the task: b.pdf", "")]
-    assert _Rec.edited == [] and plugin._get_silent_msg(api, 42) == 555
+    assert _Rec.edited == [] and plugin._get_silent_msg(api, "", 42) == 555
 
 
 def test_the_not_attached_line_speaks_the_install_language(tmp_path, monkeypatch):

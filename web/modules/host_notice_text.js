@@ -8,28 +8,30 @@
 // mark and its space. Every other row renders as stored: another type, an untyped or
 // pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix
 // not listed here. Future producer changes must keep this display mapping in sync.
-import { tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
-    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling '],
+    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling ', '♻️ The server restarted itself after ',
+        '♻️ Ouroboros did not start its recovery turn '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
         '🧠 Background consciousness ', '🧠 Background consciousness:'],
     restart_notice: ['♻️ Restart requested by agent: ', '⏳ Restart drain: ', '🧬 Restart cancelled: ',
         '⚠️ Restart skipped: ', '🧬 Body adoption: '],
     consciousness_notice: ['🧠 Background consciousness '],
-    evolution_notice: ['🧬⚠️ Evolution paused: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
-        '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work', '💸 Evolution stopped: ',
+    evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
+        '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work',
         '🛑 Stopped evolution task(s): ', '⚠️ Evolution stop INCOMPLETE — still live: '],
     evolution_cycle_outcome: ['🧬 Evolution cycle absorbed ', '⚠️ Evolution cycle abandoned '],
     promotion_notice: ['❌ Evolution promotion refused: ', '❌ Failed to promote to stable: ', '✅ Promoted: '],
     managed_update_notice: ['📦 Managed update: ', '🔒 An update is using the repository.'],
-    supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
+    supervisor_failure: ['🛑 The event-bus process of this server exited', '🛑 The task loop failed three times in a row'],
     retired_settings_notice: ['⚙️ Settings: '],
     review_pool_migration_notice: ['⚙️ Review pool: ', '⚙️ Review pool initialized. ', '⚙️ Review settings migrated. ',
         '⚙️ Review settings could not be migrated automatically: '],
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
+    command_timeout_notice: ['⏱️ The separate per-call ceiling'],
     task_admission_notice: ['🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],
@@ -39,8 +41,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '⚠️ Your message was not saved: '],
     terminal_incident: ['🔌 Task ', '⚠️ Sending a message for task '],
     task_reaper_notice: ['⚠️ A timed-out worker (task '],
-    worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
-        '❌ Deep self-review failed: worker process crashed ', '❌ Task failed after ', '❌ Task `'],
+    worker_failure: ['❌ Task failed after ', '❌ Task `'],
     worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
@@ -48,7 +49,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     finalization_notice: ['⏳ Task ', '▶️ Task '],
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
-        '🌐 Provider connection ', '🌐 The primary provider temporarily refused ',
+        '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
         '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
         '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan: ', '✅ PR #', '⚠️ PR #',
         // web_search legs (`tools/search.py`) and a declared-output baseline (`tools/shell_outputs.py`).
@@ -59,12 +60,15 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
 // display (host_notice_text.test.js pins that none of them is written again).
 export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
+    supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
+    worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
+        '❌ Deep self-review failed: worker process crashed '],
     attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
         '⚠️ Some declared attachments could not be staged; '],
     cancellation_notice: ['❌ cancel '],
     task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. '],
     task_started: ['🧬 Evolution task ', '🔎 Review task '],
-    evolution_notice: ['🛑 Cancelled evolution task(s): '],
+    evolution_notice: ['🛑 Cancelled evolution task(s): ', '🧬⚠️ Evolution paused: ', '💸 Evolution stopped: '],
     host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:'],
 }));
 
@@ -82,6 +86,22 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
     // The receipt's leading mark also carries severity; keep that meaning in words.
     if (prefix === '⚠️ PR #' && display.startsWith(mark)) return `${tr('task.host.warning', 'Warning')}: ${display.slice(mark.length)}`;
     return display.startsWith(mark) ? display.slice(mark.length) : display;
+}
+
+// A pause notice's heads before the words its press recorded, which run up to the notice's retained clause
+// (ouroboros/pause_notices.py notice_text; web/tests/fixtures/pause_notice_parity.json pins both sides). The words
+// are their author's: never translated (DESIGN "Language").
+const PAUSE_HEADS = ['You paused this task: ', 'Ouroboros paused this task: '];
+const PAUSE_RETAINED = ' Its work is retained; Resume continues it.';
+
+/** A relayed host sentence in the install's language: by its exact text (`tx`), except a pause notice's recorded words,
+ *  filled unchanged into its translated frame (`fmt`). */
+export function hostSentenceText(text) {
+    const source = String(text ?? '');
+    const head = PAUSE_HEADS.find((entry) => source.startsWith(entry));
+    const end = head ? source.lastIndexOf(PAUSE_RETAINED) : -1;
+    if (!head || end <= head.length) return tx(source);
+    return fmt(`${head}{words}${source.slice(end)}`, { words: source.slice(head.length, end) });
 }
 
 // Authored narration outranks a stale host type, on both bubble and timeline paths.

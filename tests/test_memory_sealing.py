@@ -1,10 +1,9 @@
-"""Own-work sealing, terminal links and the ON/OFF candidate boundary."""
+"""Terminal links and the retired consciousness-on Light candidate path."""
 from types import SimpleNamespace
 
 import pytest
 from ouroboros import memory_view as mv, memory_fallback as mf, chat_chain
 from ouroboros.chronicle_store import ChronicleStore
-from ouroboros.memory_sealing import failed_work_units
 from ouroboros.task_results import write_task_result
 from ouroboros.tools.chronicle import _memory_read
 from tests.test_chronicle_tools import chat, ctx_for, ts, addr, sha, write
@@ -25,47 +24,43 @@ def _own_rows(root, status="failed"):
     return store, rows
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "completed", "running"])
-def test_candidates_only_cover_finished_unsealed_failures_from_their_own_task(tmp_path, status):
-    store, rows = _own_rows(tmp_path, status)
-    units = failed_work_units(tmp_path, store)
-    assert bool(units) is (status in {"failed", "cancelled"})
-    sealed = store.publish_page(room_id="1", text="I already sealed my work.",
-        covers={"rows": [sha(rows[0])], "stream_span": [0, 0]}, author={**MIND, "task_id": "failed01"})
-    assert sealed.ok
-    assert not failed_work_units(tmp_path, store)  # no re-folding a mind-authored task, even with later open rows
-
-
-@pytest.mark.parametrize("accepted", [True, False])
-def test_candidate_is_nonacting_until_adopted_and_rebuild_preserves_decision(tmp_path, monkeypatch, accepted):
+@pytest.mark.parametrize("status", ["failed", "completed", "running"])
+def test_consciousness_on_writes_nothing_even_after_unsealed_failures(tmp_path, monkeypatch, status):
     light_route(monkeypatch)
     _consciousness(monkeypatch, True)
-    store, rows = _own_rows(tmp_path)
+    store, _rows = _own_rows(tmp_path, status)
+    before = store.log_path.read_bytes()
     llm = _Light()
+    monkeypatch.setattr(mf, "select_unit", lambda *a, **k: pytest.fail("ON must not select any work"))
     run = mf.run_fallback_draft(SimpleNamespace(), {"id": "next0001"}, llm, tmp_path / "logs", {})
-    assert run.outcome == "published", run
-    candidate = store.pending_candidates()[0]
-    assert candidate["metadata"]["candidate"] and candidate["status"] == "candidate"
-    assert candidate["covers"]["rows"] == [sha(rows[0]), sha(rows[2])]
-    assert "OWN ONE" in llm.prompts[0] and "OWN TWO" in llm.prompts[0]
-    assert "FOREIGN CHILD" not in llm.prompts[0] and "FOREIGN ROOT" not in llm.prompts[0]
-    assert not store.sealed_row_refs("1") and not store.pages_of_room("1")
-    assert not failed_work_units(tmp_path, store)  # the same pending rows are not paid for twice
+    assert run.outcome == "consciousness_on" and not llm.prompts
+    assert store.log_path.read_bytes() == before and not store.sealed_row_refs("1")
+    assert not (store.directory / ".fallback.lock").exists()
+
+
+def test_retired_candidates_remain_addressable_without_a_decision_queue(tmp_path):
+    import json
+
+    store, rows = _own_rows(tmp_path)
+    candidate = store.publish_page(room_id="1", text="OLD CANDIDATE SOURCE",
+        covers={"rows": [sha(rows[0])], "stream_span": [0, 0]},
+        author={"kind": "helper", "route": "Light"}, metadata={"candidate": True}).record
+    before = store.log_path.read_bytes()
     task = {"id": "wake0001", "usage_category": "consciousness", "chat_id": 1}
     snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
-    assert "Drafts awaiting a decision: 1" in mv.render_room(snap)
-    assert candidate["text"] not in mv.render_story(snap)
+    shown = mv.render_room(snap) + mv.render_story(snap)
+    assert "Memory drafts" not in shown and "awaiting a decision" not in shown
+    assert candidate["text"] not in shown and "candidates" not in mv.snapshot_json(snap)
     ctx = ctx_for(tmp_path)
-    assert candidate["id"] in _memory_read(ctx, room_id="candidates")
-    assert not store.publish_part(room_id="1", text="Cannot fold pending", member_ids=[candidate["id"]],
-                                  author=MIND, expected_sequence=store.room_head("1")).ok
-    result = write(ctx, kind="decision", target_id=candidate["id"], accepted=accepted, reason="Read the draft and its sources")
-    assert result["ok"], result
+    assert candidate["text"] in _memory_read(ctx, node_id=candidate["id"])
+    assert "TOOL_ARG_ERROR" in _memory_read(ctx, room_id="candidates")
     store.index_path.unlink()
-    assert not store.pending_candidates()
-    assert bool(store.sealed_row_refs("1")) is accepted
-    assert bool(store.pages_of_room("1")) is accepted
-    assert sha(rows[1]) not in store.sealed_row_refs("1")
+    assert candidate["text"] in _memory_read(ctx, node_id=candidate["id"])
+    assert not store.sealed_row_refs("1") and not store.records(kinds=["decision"])
+    assert store.log_path.read_bytes() == before
+    old = json.loads(mv.snapshot_json(snap))
+    old["candidates"] = [{"id": candidate["id"], "room_id": "1"}]
+    assert mv.snapshot_from_json(json.dumps(old)) == snap  # saved pre-update view
 
 
 def test_candidate_adoption_checks_intervening_sealing_and_ordinary_drafts_still_act(tmp_path):

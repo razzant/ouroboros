@@ -228,7 +228,7 @@ def test_admission_sees_every_physical_blob_source_and_its_refusal_is_never_a_mi
     assert obs.read_blob_ref(root, refs[0])["message"]["content"].startswith("answer")  # no callback: unchanged
 
 
-@pytest.mark.parametrize("case", ["missing", "packed", "retained", "damaged"])
+@pytest.mark.parametrize("case", ["missing", "retained", "damaged"])
 def test_a_kept_miss_or_damage_never_keeps_the_read_alive(root, case):
     """A miss or a damaged loose copy is kept while later candidates are tried, and its traceback holds
     the reader's frame; a frame still holding it is a cycle that keeps the caller's ``admit`` callback
@@ -513,25 +513,28 @@ def test_unpacker_restores_usage_archive(root):
 
 # ---- the packable predicate --------------------------------------------------------
 
-@pytest.mark.parametrize("review", ["none", "closed", "open", "unclassified"])
+@pytest.mark.parametrize("review", ["none", "closed", "open", "unclassified", "council", "council_closed"])
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "rejected_duplicate",
                                     "requested", "scheduled", "running", "interrupted"])
 def test_packable_is_a_terminal_row_with_no_open_review_and_nothing_else(root, status, review):
     """Both directions: a terminal row packs whatever duty, projection or acceptance debt it carries, unless a
-    review of it is still open (its agent-session reader holds a retained handle's absolute path); a row no
+    review or council is still open (its agent-session reader holds a retained handle's absolute path); a row no
     body with the selector wrote (NULL) has no such reader and packs; a live row never packs."""
     from ouroboros import store
     from ouroboros.task_status import SETTLED_STATUSES
 
     pointers = {"none": {}, "closed": {"op": {"surface": "multi_model_review", "state": "closed"}},
-                "open": {"op": {"surface": "multi_model_review", "state": "dispatched"}}, "unclassified": {}}
+                "open": {"op": {"surface": "multi_model_review", "state": "dispatched"}}, "unclassified": {},
+                "council": {}, "council_closed": {}}
+    plan = {"schema_version": 3, "asks": [{"participants": [{
+        "status": "pending" if review == "council" else "answered"}]}]} if review.startswith("council") else {}
     _task(root, "t", blobs=1, status=status, canonical_terminal_projection_origin="terminal_transition",
-          review_operations=pointers[review], acceptance_debt={"debt_id": "d1"})
+          review_operations=pointers[review], plan_record=plan, acceptance_debt={"debt_id": "d1"})
     if review == "unclassified":
         with store.open_store(root, write=True) as txn:
             txn.conn.execute("UPDATE tasks SET review_collection_pending=NULL WHERE task_id='t'")
     with store.open_store(root, write=False) as txn:
-        assert packs.task_packable(txn, "t") == (status in SETTLED_STATUSES and review != "open")
+        assert packs.task_packable(txn, "t") == (status in SETTLED_STATUSES and review not in {"open", "council"})
         assert not packs.task_packable(txn, "missing")
 
 

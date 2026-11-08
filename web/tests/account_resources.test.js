@@ -194,7 +194,7 @@ for (const operation of ['refresh', 'reset']) {
         payload.profiles = { profiles: [{ profile: { harness_id: target.harness, profile_id: target.profile_id,
             enabled: true }, status: { verification: 'passed' } }], harnessAccounts: [] };
         payload.availability_scope = { model: null, requestKind: 'text', basis: 'quota_block' };
-        payload.quota[0].availability = { state: 'exhausted' };
+        payload.quota[0].availability = { state: 'exhausted', resets_at: '2099-01-01T05:00:00Z' };
         const incoming = atTime('2099-01-01T00:00:00Z', 0.2, 1);
         incoming.snapshots[0].availability = { state: 'available' };
         const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>

@@ -854,55 +854,36 @@ def test_symlink_escape_excluded_from_pack(tmp_path):
     assert compute_content_hash(skill_dir, manifest_scripts=[{"name": "main.py"}])
 
 
-def test_sensitive_files_fail_closed_on_load(tmp_path):
-    """Phase 3 round 20: a skill that ships an exact credential file
-    (`.env`, `credentials.json`, `id_rsa`, ...) fails to load. Rationale:
-    silently excluding the file from hash/review would let a reviewed
-    skill ``open('.env').read()`` at runtime to exfiltrate credentials
-    that the reviewer never saw. The loader fails closed via
-    ``SkillPayloadUnreadable``; the user must rename / relocate the
-    file out of the skill directory. The message names only what still
-    blocks: a certificate loads since PS-6, so it must not appear there, and
-    it names both blocking rules, since `prod.env` blocks on the `.env` tail
-    rather than on the exact-name list."""
+@pytest.mark.parametrize("name", [
+    ".env", "id_rsa", ".env.example",
+])
+def test_credential_like_filename_is_ordinary_hashed_payload(tmp_path, name):
+    """A credential-like name never refuses or hides a file (owner choice for the skill
+    path): such a file loads, joins the one walk the hash, review, delegation and
+    publication read, and its exact bytes move the content hash. Whether its bytes are
+    a working secret is the reviewers' judgment (Skill Review `payload_credentials`)."""
+    from ouroboros.skill_loader import _iter_payload_files
+
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
-    repo_root = tmp_path / "skills"
     skill_dir = _write_skill(
-        repo_root,
+        tmp_path / "skills",
         "secrety",
         manifest=_valid_script_manifest("secrety"),
         scripts={"main.py": "print('ok')\n"},
     )
-    (skill_dir / ".env").write_text("SECRET_KEY=leak\n", encoding="utf-8")
-    from ouroboros.skill_loader import SkillPayloadUnreadable
-    with pytest.raises(SkillPayloadUnreadable):
-        compute_content_hash(skill_dir, manifest_scripts=[{"name": "main.py"}])
-    # The LoadedSkill reflects the load_error rather than crashing.
+    resource = skill_dir / name
+    resource.parent.mkdir(parents=True, exist_ok=True)
+    resource.write_bytes(b"SYNTHETIC_FIXTURE=first\n")
+    root = skill_dir.resolve()
+    walked = _iter_payload_files(skill_dir, manifest_scripts=[{"name": "main.py"}])
+    assert name in {path.relative_to(root).as_posix() for path in walked}
+    before = compute_content_hash(skill_dir, manifest_scripts=[{"name": "main.py"}])
     loaded = load_skill(skill_dir, drive_root)
-    assert loaded is not None
-    assert loaded.load_error
-    assert "credential filename" in loaded.load_error.lower()
-    assert "credentials.json" in loaded.load_error and "id_rsa" in loaded.load_error
-    assert ".env-tail filename" in loaded.load_error
-    assert "prod.env" in loaded.load_error
-    assert ".pem" not in loaded.load_error
-    assert loaded.available_for_execution is False
-
-    # `prod.env` is not in the exact-name list: it blocks through the `.env`
-    # tail, so a message that calls the rule an exact filename is wrong for it.
-    tail_dir = _write_skill(
-        repo_root,
-        "tailenv",
-        manifest=_valid_script_manifest("tailenv"),
-        scripts={"main.py": "print('ok')\n"},
-    )
-    (tail_dir / "prod.env").write_text("SECRET_KEY=leak\n", encoding="utf-8")
-    tail_loaded = load_skill(tail_dir, drive_root)
-    assert tail_loaded is not None
-    assert "prod.env" in tail_loaded.load_error
-    assert ".env-tail filename" in tail_loaded.load_error
-    assert tail_loaded.available_for_execution is False
+    assert loaded is not None and loaded.load_error == ""
+    assert loaded.content_hash == before
+    resource.write_bytes(b"SYNTHETIC_FIXTURE=second\n")
+    assert compute_content_hash(skill_dir, manifest_scripts=[{"name": "main.py"}]) != before
 
 
 def test_certificate_and_key_suffixed_payload_loads_and_is_reviewable(tmp_path):
@@ -964,7 +945,13 @@ def test_sanitized_name_collision_surfaces_as_load_error(tmp_path):
 def test_collision_discovery_and_summary_do_not_touch_payload_or_state(
     tmp_path, monkeypatch
 ):
+    import importlib
     import ouroboros.skill_loader as loader
+
+    # Lazy summary consumers bind loader functions at import. Import before the
+    # fault injection so they cannot retain its sentinels after teardown.
+    importlib.import_module("ouroboros.gateway.host_service")
+    importlib.import_module("ouroboros.skill_peer_inventory")
 
     drive_root = tmp_path / "drive"
     _write_skill(
@@ -1577,9 +1564,9 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same
-    content_hash + requested_keys; any change to either resets the
-    persisted state because the owner has not consented to the new
-    shape yet."""
+    content_hash; new bytes reset the persisted state because the
+    owner has not consented to them yet (a request grown by saved
+    Settings: tests/test_skill_grant_request_growth.py)."""
     from ouroboros.skill_loader import (
         load_skill_grants,
         save_skill_grants,

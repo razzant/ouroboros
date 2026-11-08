@@ -513,7 +513,8 @@ def test_a_wave_without_a_verdict_keeps_the_author_acceptance_and_a_substantive_
     state = _state(h)
     assert state.author_disposition["subject_hash"] == accepted_hash and state.content_hash == first.content_hash
     assert state.gate_for(accepted_hash, enforcement="advisory")["blocking_reason"] == "author_accepted_advisory"
-    # The same bytes asked again in the same round would replay the settled seat; a rebuttal opens a new round.
+    # The author's rebuttal opens a new round over the same bytes (a plain repeat after a wave without a verdict
+    # is a new attempt too: tests/test_review_no_verdict_retry.py).
     h.answers["t1"] = CLEAN
     judged = _review(h, reviewers=["t1"], reason="small payload", review_rebuttal="The exception is handled; look again.")
     assert judged.status == "clean" and len(h.sends) == 3, (judged.status, judged.error, len(h.sends))
@@ -857,7 +858,7 @@ def test_every_seat_reads_the_declared_tool_effect_rule_in_the_stable_half():
 
     assert "Place connectors must declare every tool" in subject._TOOL_EFFECT_RULE
     source = pathlib.Path(subject.__file__).read_text(encoding="utf-8")
-    assert '"## Checklist (source of truth — follow it literally)", rubric, _TOOL_EFFECT_RULE,' in source
+    assert "_PREAMBLE, _CHECKLIST_HEADING, rubric, _TOOL_EFFECT_RULE," in source
 
 
 def test_the_change_section_names_what_it_cut_and_where_the_whole_is():

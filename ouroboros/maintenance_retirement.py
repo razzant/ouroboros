@@ -5,6 +5,14 @@ new artifacts; startup and explicit repair discover legacy ones. Directory times
 and unrelated completions never wake a sweep. Age grants no deletion authority.
 Source removers (a retired copy, snapshot or drive) schedule the ``bytecode`` step
 at once; a step that stops at its unlink budget owes the rest through ``next_due``.
+The ``review_threads`` step lets the engine retire a finished reviewer thread only
+after its export is retained here (``review_thread_retention``), and over the same tasks releases the
+managed document imports a finished work can no longer name (``delegate_documents``); an import that
+opens its obligation before the step's first pass sets where that pass starts reading
+(``release_opened``). A managed import owner's terminal write schedules this step even without local files.
+Otherwise waiting tasks run it only in a child running for another job; it yields between operations
+to a delegate capture that child's capture pass never had, the rest waiting for the next run.
+What the step newly saved of the engine's answers (``observed``) reaches ``logs/events.jsonl`` once.
 """
 from __future__ import annotations
 
@@ -17,7 +25,9 @@ import sys
 import uuid
 
 from ouroboros import maintenance_jobs, store
+from ouroboros.record_compression import WIRE_JOURNAL
 from ouroboros.retention import get_gc_retention_days, time
+from ouroboros.unindexed import BYTECODE, LEGACY_BYTECODE
 
 log = logging.getLogger(__name__)
 JOB = "runtime_retirement"
@@ -57,13 +67,43 @@ def artifact_changed(root, *, timestamp=None, immediate=False):
         log.debug("Retirement publication awaits startup discovery", exc_info=True)
 
 
+def release_opened(txn, *, restored_tasks=()):
+    """A managed document import opened its release obligation in this custody transaction
+    (``delegate_documents.opens_release``). Until the ``review_threads`` step's first pass, keep the
+    terminal-write position this transaction stands at as that pass's ``floor`` (the lowest wins), so
+    its first pin goes no later and the owner's terminal write, always after this point, is read. An
+    active step's cursor already reads every later write: nothing is written then. A floor written
+    after the first pass read the job row is at or above its pin, so that race loses nothing.
+    Explicit store import/fold instead supplies the restored owners: their terminal positions
+    were rebuilt, so keep the owners in this step's waiting set and schedule its existing job."""
+    from ouroboros.review_thread_retention import JOB_FIELD
+
+    row = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
+    state = row.get(JOB_FIELD) if isinstance(row.get(JOB_FIELD), dict) else {}
+    if restored_tasks:
+        # A store rebuild writes task rows before it restores custody. Their new terminal
+        # positions cannot be reconstructed from an old cursor: re-offer the actual owners.
+        waiting = sorted(set(state.get("waiting") or ()) | set(restored_tasks))
+        maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "waiting": waiting}})
+        schedule_in(txn, time.time())
+        return
+    position = int(txn.meta(store.TERMINAL_WRITES) or 0)
+    if not state.get("activated_at") and not (type(state.get("floor")) is int and state["floor"] <= position):
+        maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "floor": position}})
+
+
 def task_written(txn, task_id, columns):
-    """A task can wake retirement only if it owns physical retirement inputs."""
+    """A task can wake retirement only for its own physical inputs or managed import obligations."""
     from ouroboros.task_status import SETTLED_STATUSES
     if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
         return
+    if (txn.get_row("custody_marks", task_id) or {}).get("managed_imports"):
+        # An import can end before START and leave no filesystem retirement input. Its terminal
+        # write still owes this pass, including one racing the first activation's cursor read.
+        schedule_in(txn, time.time())
     names = (f"task_trees/{task_id}", f"services/{task_id}",
-             f"state/delegate_recovery/{task_id}.json", f"state/delegate_supervision/{task_id}.json")
+             f"state/delegate_recovery/{task_id}.json", f"state/delegate_supervision/{task_id}.json",
+             f"task_results/artifacts/{task_id}/{WIRE_JOURNAL}")
     deadlines = []
     for name in names:
         try:
@@ -77,9 +117,39 @@ def task_written(txn, task_id, columns):
         schedule_in(txn, min(deadlines))
 
 
+def _owed(row, inputs):
+    """The history-sized steps' own facts: a stopped pass, other inputs (``inputs()``, read only then), or a deadline
+    reached. Reached includes its own instant: a step that stops at its budget owes the rest at ``time.time()``, and on a
+    coarse clock (Windows, Python 3.10: 15.6 ms) the next read can return that same value."""
+    return (row.get("state") == "pending" or row.get("inputs") != inputs()
+            or row.get("next_due") is not None and time.time() >= row["next_due"])
+
+
 def due(root, row, facts, child):
-    return (row.get("state") == "pending" or row.get("inputs") != _inputs(root)
-            or row.get("next_due") is not None and time.time() > row["next_due"])
+    """The history-sized steps are owed; or, in a child already running for another job, the ``review_threads``
+    step left tasks waiting (``review_thread_retention.owed``), never by itself a reason to spawn one."""
+    history_sized = _owed(row, lambda: _inputs(root))
+    if history_sized or not child:
+        return history_sized
+    from ouroboros.review_thread_retention import owed
+
+    return owed(row)
+
+
+def _capture_arrived(root):
+    """``arrived()``: is a delegate capture ready that this child's own capture pass was never offered
+    (``delegate_capture_job.offered``)? An unread fact is no arrival: the capture job reads it itself."""
+    from ouroboros.delegate_capture_job import offered, ready_requests
+
+    had = offered(root)
+
+    def arrived():
+        try:
+            return bool(ready_requests(root) - had)
+        except Exception:
+            return False
+
+    return arrived
 
 
 def run(root, should_stop):
@@ -87,6 +157,7 @@ def run(root, should_stop):
     from ouroboros.delegate_state_sweep import sweep_settled_delegate_state
     from ouroboros.extension_reconcile_queue import prune_failed_reconcile_markers
     from ouroboros.headless import prune_task_trees
+    from ouroboros.review_thread_retention import retire_finished_review_threads
     from ouroboros.skill_uninstall_state import sweep_uninstalled_skill_state
     from ouroboros.startup_task_files import startup_tree_exclusions
     from ouroboros.tools.services import prune_service_logs
@@ -94,19 +165,27 @@ def run(root, should_stop):
 
     inputs, reports, errors = _inputs(root), {}, []
     before = maintenance_jobs.job(root, JOB) or {}
-    steps = [("delegate_state", sweep_settled_delegate_state),
-             ("skill_state", sweep_uninstalled_skill_state), ("code_intel", prune_stale_code_intel_roots),
-             ("failed_reconcile", prune_failed_reconcile_markers), ("agent_media", prune_agent_media_uploads),
-             ("bytecode", prune_stale_bytecode)]
-    # Read the durable gate again immediately before source retirement. A fresh child
-    # must never substitute its empty memory for the server's recovery result.
-    with store.open_store(root, write=False) as txn:
-        startup = txn.meta(STARTUP)
-    if isinstance(startup, dict) and startup.get("gaps") is False and not should_stop():
-        exclusions = startup_tree_exclusions(root)
-        if exclusions is not None:
-            steps[:0] = [("task_trees", lambda root: prune_task_trees(root, exclude_root_ids=exclusions)),
-                         ("services", prune_service_logs)]
+    owed = _owed(before, lambda: inputs)
+    arrived = _capture_arrived(root)  # the child's capture pass ran first: only a request it never had yields
+    # Finished reviewer threads: exported and verified here first, then released by the engine. Between operations a
+    # capture that arrived ends the step, its rest waiting for the child's next run. Alone when only its own work is
+    # owed (``due``): the history-sized steps neither run nor change their facts.
+    steps = [("review_threads", lambda root: retire_finished_review_threads(
+        root, should_stop=lambda: should_stop() or arrived()))]
+    if owed:
+        steps = [("delegate_state", sweep_settled_delegate_state),
+                 ("skill_state", sweep_uninstalled_skill_state), ("code_intel", prune_stale_code_intel_roots),
+                 ("failed_reconcile", prune_failed_reconcile_markers), ("agent_media", prune_agent_media_uploads),
+                 ("call_wire", prune_call_wire_journals), *steps, ("bytecode", prune_stale_bytecode)]
+        # Read the durable gate again immediately before source retirement. A fresh child
+        # must never substitute its empty memory for the server's recovery result.
+        with store.open_store(root, write=False) as txn:
+            startup = txn.meta(STARTUP)
+        if isinstance(startup, dict) and startup.get("gaps") is False and not should_stop():
+            exclusions = startup_tree_exclusions(root)
+            if exclusions is not None:
+                steps[:0] = [("task_trees", lambda root: prune_task_trees(root, exclude_root_ids=exclusions)),
+                             ("services", prune_service_logs)]
     for name, retire in steps:
         if should_stop():
             break
@@ -119,15 +198,16 @@ def run(root, should_stop):
             errors.append(name)
             log.warning("%s retirement failed; sources stay owed", name, exc_info=True)
     state = "pending" if should_stop() else "failed" if errors else "done"
-    deadlines = [report["next_due"] for report in reports.values() if report.get("next_due") is not None]
-    with store.open_store(root, write=True) as txn:
-        current = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
-        if current.get("arrival") != before.get("arrival") and current.get("next_due") is not None:
-            deadlines.append(current["next_due"])
-        maintenance_jobs.record_in(txn, JOB, state=state, inputs=inputs, errors=errors,
-                                   next_due=min(deadlines) if deadlines else None)
+    if owed:
+        deadlines = [report["next_due"] for report in reports.values() if report.get("next_due") is not None]
+        with store.open_store(root, write=True) as txn:
+            current = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
+            if current.get("arrival") != before.get("arrival") and current.get("next_due") is not None:
+                deadlines.append(current["next_due"])
+            maintenance_jobs.record_in(txn, JOB, state=state, inputs=inputs, errors=errors,
+                                       next_due=min(deadlines) if deadlines else None)
     if errors or any(report.get(key) for report in reports.values()
-                     for key in ("removed", "swept", "restored", "deleted_dirs", "deleted_files")):
+                     for key in ("removed", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
         append_jsonl(pathlib.Path(root) / "logs/events.jsonl",
                      {"ts": utc_now_iso(), "type": "runtime_retirement", "reports": reports, "errors": errors})
     return {"state": state, "items": len(reports)}
@@ -188,25 +268,93 @@ def prune_agent_media_uploads(
     return report
 
 
+def prune_call_wire_journals(root, retention_days=None, *, now=None) -> dict:
+    """Keep a call's whole wire until shared GC age AND proof that its task has no live owner.
+
+    Terminal writes schedule the journal's mtime deadline; startup/repair discover older files.
+    Compression preserves that mtime. An aged terminal task with uncertain ownership stays owed;
+    running/unrecorded tasks await their terminal write. No other task artifact is removed here.
+    """
+    from ouroboros.retention import age_cutoff, keep_until
+    from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_status import SETTLED_STATUSES, task_has_live_queue_ownership
+
+    root = pathlib.Path(root)
+    days = get_gc_retention_days() if retention_days is None else retention_days
+    cutoff = age_cutoff(days, now)
+    report = {"removed": 0, "kept": 0, "skipped": 0, "errors": 0}
+    base = root / "task_results" / "artifacts"
+    try:
+        if any(not stat.S_ISDIR(path.lstat().st_mode) for path in (base.parent, base)):
+            return report  # never follow a linked artifact family
+        with os.scandir(base) as listing:
+            folders = sorted((entry for entry in listing if _plain_directory(entry)), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return report
+    except OSError:
+        report["errors"] += 1
+        return report
+    for folder in folders:
+        path = pathlib.Path(folder.path) / WIRE_JOURNAL
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                report["skipped"] += 1
+                continue
+            with store.open_store(root, write=False) as txn:
+                settled = txn.row(folder.name, "status") in SETTLED_STATUSES
+            if not settled or info.st_mtime >= cutoff or not _task_proven_over(
+                    folder.name, root, lambda task: task_has_live_queue_ownership(root, task)):
+                report["kept"] += 1
+                if settled:
+                    keep_until(report, info.st_mtime, days)
+                continue
+            # A write/replacement while ownership was read invalidates this candidate.
+            if path.lstat() != info:
+                report["kept"] += 1
+                keep_until(report, path.lstat().st_mtime, days)
+                continue
+            from ouroboros.owner_keep import gate
+
+            with gate(root, folder.name, timeout_sec=0) as why:
+                if why:
+                    report["kept"] += 1
+                    continue
+                path.unlink()
+            report["removed"] += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            report["errors"] += 1
+    return report
+
+
 def prune_stale_bytecode(root, *, budget=None, sources=None) -> dict:
-    """Retire bytecode mirrors whose source directory is gone (``state/pycache``, the
+    """Retire bytecode mirrors whose source directory is gone (``state/pycache.noindex``, the
     ``PYTHONPYCACHEPREFIX`` pool workers write; ``state/python-userbase`` holds real installs and
     is never read here). Under a prefix CPython writes ``<prefix>/<source directory without its
     root>/<name>.<tag>.pyc`` (``importlib`` ``cache_from_source``), so a mirror directory names its
     source: ``"/" + relative`` on POSIX; on Windows the drive is stripped, so a mirror is stale only
     when that path is missing on every drive present now (``_source_roots``). Top-down: a stale
     mirror goes whole and is never descended; an unreadable source (access denied, a drive not
-    answering) keeps its mirror; links are neither followed nor removed. At most ``budget`` unlinks
-    a run, the rest owed through ``next_due``. A pure cache: a wrong removal costs a recompile."""
-    prefix = pathlib.Path(root) / "state" / "pycache"
+    answering) keeps its mirror; links are neither followed nor removed. The legacy ``state/pycache``
+    an older body or host writes again goes whole first, unless it is this process's own prefix.
+    At most ``budget`` unlinks a run, the rest owed through ``next_due``. A pure cache: a wrong
+    removal costs a recompile."""
+    prefix, legacy = pathlib.Path(root) / "state" / BYTECODE, pathlib.Path(root) / "state" / LEGACY_BYTECODE
     report = {"removed": 0, "unlinked": 0, "unknown": 0, "errors": 0}
-    try:
-        if not stat.S_ISDIR(os.lstat(prefix).st_mode):  # a link is not our prefix
+    left = [BYTECODE_UNLINKS_PER_RUN if budget is None else int(budget)]
+    own = getattr(sys, "pycache_prefix", None) or ""
+    own = os.path.normcase(os.path.abspath(own)) if own else ""
+    if _plain_tree(legacy) and os.path.normcase(os.path.abspath(legacy)) != own:
+        removed = _remove_mirror(legacy, left, report)
+        if removed is None:
+            report["next_due"] = time.time()
             return report
-    except OSError:
+        report["removed"] += removed
+    if not _plain_tree(prefix):
         return report
     roots = _source_roots() if sources is None else [os.fspath(path) for path in sources]
-    left = [BYTECODE_UNLINKS_PER_RUN if budget is None else int(budget)]
 
     def source(parts) -> str:
         """``present``, ``gone`` or ``unknown`` over every root; any root that has it keeps it."""
@@ -247,6 +395,14 @@ def prune_stale_bytecode(root, *, budget=None, sources=None) -> dict:
     if not walk(prefix, ()):
         report["next_due"] = time.time()  # owed: the next run of the job continues the walk
     return report
+
+
+def _plain_tree(path) -> bool:
+    """A real directory: a link is not our prefix."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _link(entry) -> bool:

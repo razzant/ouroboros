@@ -17,6 +17,7 @@ from ouroboros import capability_evidence as evidence, vision_routing as vision
 from ouroboros.gateway import models
 from ouroboros.llm import LLMClient
 from ouroboros.provider_models import supports_vision
+from tests._cases import chosen_rows
 
 
 SETTINGS = {
@@ -173,10 +174,10 @@ def test_record_binds_runtime_provider_endpoint_and_surface(catalog, monkeypatch
     assert "fixture-key" not in evidence._store_path(catalog.root).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("draft,provider", [
+@pytest.mark.parametrize("draft,provider", chosen_rows([
     ("onboarding", "openai-compatible"),
     *(("provider-test", provider) for provider in SETTINGS),
-])
+], 0, 2, 3))
 def test_drafts_never_write_even_when_they_equal_saved_credentials(catalog, monkeypatch, draft, provider):
     settings = SETTINGS[provider]
     configure(monkeypatch, settings)

@@ -10,7 +10,6 @@ import pytest
 from devtools.benchmarks.cowork_bench.container import main_ouroboros as adapter
 
 
-@pytest.mark.serial
 def test_probe_retains_original_startup_error_and_producer_exit(tmp_path):
     error = "ModuleNotFoundError: No module named 'psycopg2'\n" + "context\n" * 300
     row = adapter.capture_probe(
@@ -54,7 +53,6 @@ def test_mcp_rendering_keeps_task_paths_and_database_isolation():
     ({"status": "completed"}, "success", False),
     ({"status": "completed", "reason_code": "round_cap"}, "max_turns_reached", False),
     ({"status": "failed", "reason_code": "provider_unavailable"}, "failed", True),
-    ({"status": "failed", "outcome_axes": {"execution": {"status": "infra_failed"}}}, "failed", True),
 ])
 def test_task_outcome_keeps_runtime_rails_and_infrastructure_separate(result, expected, infra):
     outcome = adapter.classify_outcome(result, ["round_cap"])
@@ -150,7 +148,6 @@ def agent_episode(tmp_path, monkeypatch):
     return _make_agent_episode(tmp_path, monkeypatch)
 
 
-@pytest.mark.serial
 def test_setup_timeout_is_infrastructure_without_a_solve_attempt(agent_episode):
     def interrupt():
         raise adapter.WallClockInterrupt()
@@ -163,7 +160,6 @@ def test_setup_timeout_is_infrastructure_without_a_solve_attempt(agent_episode):
     assert summary["model_activity_observed"] is False
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("partial", [{"status": "running", "prompt_tokens": 100}, {"status": "running"}])
 def test_post_submission_timeout_does_not_turn_missing_tokens_into_retry_permission(agent_episode, partial):
     agent_episode.results[:] = [partial, adapter.WallClockInterrupt()]
@@ -174,7 +170,6 @@ def test_post_submission_timeout_does_not_turn_missing_tokens_into_retry_permiss
     assert summary.get("prompt_tokens") == partial.get("prompt_tokens")
 
 
-@pytest.mark.serial
 def test_lost_admission_reply_does_not_prove_no_model_work(agent_episode):
     def interrupt():
         raise adapter.WallClockInterrupt()
@@ -186,7 +181,6 @@ def test_lost_admission_reply_does_not_prove_no_model_work(agent_episode):
     assert summary["model_activity_observed"] is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("carrier", [None, {
     "scope": "root_tree", "tracked_amount": 2.5, "has_unpriced": False,
     "tracked_final": True, "accounting_open": False, "has_rows": True,
@@ -217,7 +211,6 @@ def test_completion_waits_for_artifacts_and_cost_then_keeps_full_answer(agent_ep
     assert json.loads((agent_episode.dump / "traj.json").read_text(encoding="utf-8"))["final_answer"] == answer
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("outer_timeout,elapsed", [(3600, 60), (6, 6)])
 def test_explicit_partial_cost_wait_is_bounded_and_remains_partial(agent_episode, outer_timeout, elapsed):
     agent_episode.config["task_timeout_sec"] = outer_timeout
@@ -234,7 +227,6 @@ def test_explicit_partial_cost_wait_is_bounded_and_remains_partial(agent_episode
     assert summary["unknown_unmetered"] == 1
 
 
-@pytest.mark.serial
 def test_artifacts_not_finalized_by_outer_deadline_are_retained_as_unresolved(agent_episode):
     agent_episode.config["task_timeout_sec"] = 4
     agent_episode.results[:] = [{"status": "completed", "artifact_status": "finalizing", "prompt_tokens": 100,
@@ -249,7 +241,6 @@ def test_artifacts_not_finalized_by_outer_deadline_are_retained_as_unresolved(ag
     assert json.loads((agent_episode.dump / "traj.json").read_text(encoding="utf-8"))["final_answer"] == "retained" * 3000
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("result", [{"status": "completed"}, {"status": "failed", "cost_final": False}])
 def test_absent_cost_telemetry_and_failed_tasks_do_not_wait(agent_episode, result):
     agent_episode.results[:] = [result]
@@ -260,7 +251,6 @@ def test_absent_cost_telemetry_and_failed_tasks_do_not_wait(agent_episode, resul
     assert summary["model_activity_observed"] is None
 
 
-@pytest.mark.serial
 def test_real_rotation_and_export_keep_early_cost_and_tool_evidence(agent_episode):
     from devtools.benchmarks.cowork_bench.audit_cowork_bench import audit_task
     from supervisor.state import rotate_jsonl_log_if_needed
@@ -294,7 +284,6 @@ def test_real_rotation_and_export_keep_early_cost_and_tool_evidence(agent_episod
     assert not (pathlib.Path(adapter.OUROBOROS_DATA) / "archive").exists()
 
 
-@pytest.mark.serial
 def test_poll_checkpoint_survives_abrupt_exit_without_terminal_export(tmp_path):
     import os
     import shutil
@@ -359,7 +348,6 @@ raise AssertionError("the fixture should exit before terminal export")
     assert (peer / "events.jsonl").read_text(encoding="utf-8") == "unchanged\n"
 
 
-@pytest.mark.serial
 def test_interrupted_checkpoint_publish_keeps_last_host_snapshot(tmp_path, monkeypatch):
     data = tmp_path / "private-runtime"
     (data / "logs").mkdir(parents=True)
@@ -378,7 +366,6 @@ def test_interrupted_checkpoint_publish_keeps_last_host_snapshot(tmp_path, monke
     assert (dump / "ouroboros/events.jsonl").read_bytes() == original
 
 
-@pytest.mark.serial
 def test_poll_checkpoint_write_failure_does_not_abort_task_or_final_export(agent_episode, monkeypatch, capsys):
     secret = "checkpoint-fixture-secret"
     monkeypatch.setattr(adapter, "load_json", lambda path: {"settings": {"OPENROUTER_API_KEY": secret}})

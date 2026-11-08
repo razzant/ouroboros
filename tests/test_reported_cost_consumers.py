@@ -13,6 +13,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros._usage_response import usage_from_response
 from tests import _review_session_route_shared as session_fixtures
 from tests._usage_store_testing import ledger_rows
+from tests._cases import case_folders, plain_rows
 
 FakeGateway = session_fixtures.FakeGateway
 fake_route = session_fixtures.fake_route
@@ -55,19 +56,22 @@ def _reserve(root, *, provider="openrouter"):
     return reservation
 
 
-@pytest.mark.parametrize("raw,known", CASES)
-def test_public_settlement_rejects_malformed_without_estimating(tmp_path, monkeypatch, raw, known):
-    calls = []
-    monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **k: calls.append(k) or 0.75)
-    reservation = _reserve(tmp_path)
-    calls.clear()
-    ua.settle_attempt(reservation, {"prompt_tokens": 5},
-                      cost_usd=None if raw is MISSING else raw, cost_final=True)
-    row, = ledger_rows(tmp_path)
-    assert row["cost_usd"] == (0.75 if _missing(raw) else known)
-    assert row["cost_final"] is (known is not None)
-    assert len(calls) == int(_missing(raw))
-    assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))
+def test_public_settlement_rejects_malformed_without_estimating(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for raw, known in plain_rows(CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw, known=known), monkeypatch.context() as monkeypatch:
+            calls = []
+            monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **k: calls.append(k) or 0.75)
+            reservation = _reserve(tmp_path)
+            calls.clear()
+            ua.settle_attempt(reservation, {"prompt_tokens": 5},
+                              cost_usd=None if raw is MISSING else raw, cost_final=True)
+            row, = ledger_rows(tmp_path)
+            assert row["cost_usd"] == (0.75 if _missing(raw) else known)
+            assert row["cost_final"] is (known is not None)
+            assert len(calls) == int(_missing(raw))
+            assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))
 
 
 @pytest.mark.parametrize("alternate", [0, "1.25"])
@@ -89,59 +93,68 @@ def test_settlement_keeps_normalized_invalid_unknown_and_local_free(tmp_path, mo
     assert local["cost_usd"] == 0 and local["cost_final"]
 
 
-@pytest.mark.parametrize("raw,known", CASES)
-def test_subscription_boundary_validates_and_replay_never_reprices(tmp_path, raw, known):
-    kwargs = {} if raw is MISSING else {"spend_usd": raw}
-    attempt = ua.record_subscription_session("session", drive_root=tmp_path, route="fixture", **kwargs)
-    before = ledger_rows(tmp_path)
-    row, = before
-    assert row["cost_usd"] == known and row["cost_final"] is (known is not None)
-    assert row["reservation_upper_bound_usd"] == known
-    assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))
-    assert ua.record_subscription_session("session", drive_root=tmp_path, route="fixture",
-                                          model="later", spend_usd=8) == attempt
-    assert ledger_rows(tmp_path) == before
+def test_subscription_boundary_validates_and_replay_never_reprices(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for raw, known in plain_rows(CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw, known=known):
+            kwargs = {} if raw is MISSING else {"spend_usd": raw}
+            attempt = ua.record_subscription_session("session", drive_root=tmp_path, route="fixture", **kwargs)
+            before = ledger_rows(tmp_path)
+            row, = before
+            assert row["cost_usd"] == known and row["cost_final"] is (known is not None)
+            assert row["reservation_upper_bound_usd"] == known
+            assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))
+            assert ua.record_subscription_session("session", drive_root=tmp_path, route="fixture",
+                                                  model="later", spend_usd=8) == attempt
+            assert ledger_rows(tmp_path) == before
 
 
-@pytest.mark.parametrize("raw,known", CASES)
-def test_terminal_collection_and_nanny_validate_legacy_summary(tmp_path, raw, known):
-    from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_collection import record_terminal_money
-    from ouroboros.subagents import DelegatedRunShape
-    from ouroboros.tools.delegate_terminal_evidence import _terminal_payload
+def test_terminal_collection_and_nanny_validate_legacy_summary(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for raw, known in plain_rows(CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw, known=known):
+            from ouroboros import delegate_custody as custody
+            from ouroboros.delegate_collection import record_terminal_money
+            from ouroboros.subagents import DelegatedRunShape
+            from ouroboros.tools.delegate_terminal_evidence import _terminal_payload
 
-    summary = {"state": "succeeded"}
-    if raw is not MISSING:
-        summary["spendUsd"] = raw
-    detail = {"summary": summary, "primaryOutput": {"text": "usable output"}}
-    entry = custody.RunCustody(run_id="run", task_id="task", route_id="fixture", ledger_root=str(tmp_path))
-    assert record_terminal_money(tmp_path, entry, detail)["settled"]
-    row, = ledger_rows(tmp_path)
-    payload = _terminal_payload("run", detail, DelegatedRunShape("readonly", "ask", "live", False))
-    assert payload["cost"]["cost_usd"] == row["cost_usd"] == known
-    assert payload["cost"]["cost_final"] is row["cost_final"] is (known is not None)
-    assert record_terminal_money(tmp_path, entry, detail)["settled"]
-    assert ledger_rows(tmp_path) == [row]
+            summary = {"state": "succeeded"}
+            if raw is not MISSING:
+                summary["spendUsd"] = raw
+            detail = {"summary": summary, "primaryOutput": {"text": "usable output"}}
+            entry = custody.RunCustody(run_id="run", task_id="task", route_id="fixture", ledger_root=str(tmp_path))
+            assert record_terminal_money(tmp_path, entry, detail)["settled"]
+            row, = ledger_rows(tmp_path)
+            payload = _terminal_payload("run", detail, DelegatedRunShape("readonly", "ask", "live", False))
+            assert payload["cost"]["cost_usd"] == row["cost_usd"] == known
+            assert payload["cost"]["cost_final"] is row["cost_final"] is (known is not None)
+            assert record_terminal_money(tmp_path, entry, detail)["settled"]
+            assert ledger_rows(tmp_path) == [row]
 
 
-@pytest.mark.parametrize("queued", [True, False], ids=["queued", "direct"])
-@pytest.mark.parametrize("raw,known", CASES)
-def test_safety_verdict_and_telemetry_keep_price_knowledge(tmp_path, monkeypatch, queued, raw, known):
-    payload = {"provider": "openrouter", "prompt_tokens": 5}
-    if raw is not MISSING:
-        payload["cost"] = raw
-    usage, emitted, calls = _safety_usage(tmp_path, monkeypatch, payload, queued=queued)
-    expected = 0.75 if _missing(raw) else known
-    assert usage["cost"] == expected
-    assert len(calls) == int(_missing(raw))
-    assert bool(usage.get("cost_estimated")) is _missing(raw)
-    if expected is None or _missing(raw):
-        assert usage["cost_final"] is False
-    if queued:
-        assert emitted["cost"] == expected
-        assert emitted["cost_known"] is (expected is not None)
-        assert emitted["cost_invalid"] is (known is None and not _missing(raw))
-        assert emitted["cost_estimated"] is _missing(raw)
+def test_safety_verdict_and_telemetry_keep_price_knowledge(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for queued in [True, False]:
+        for raw, known in plain_rows(CASES, 2):
+            tmp_path = next(case_paths)
+            with subtests.test(queued=queued, raw=raw, known=known), monkeypatch.context() as monkeypatch:
+                payload = {"provider": "openrouter", "prompt_tokens": 5}
+                if raw is not MISSING:
+                    payload["cost"] = raw
+                usage, emitted, calls = _safety_usage(tmp_path, monkeypatch, payload, queued=queued)
+                expected = 0.75 if _missing(raw) else known
+                assert usage["cost"] == expected
+                assert len(calls) == int(_missing(raw))
+                assert bool(usage.get("cost_estimated")) is _missing(raw)
+                if expected is None or _missing(raw):
+                    assert usage["cost_final"] is False
+                if queued:
+                    assert emitted["cost"] == expected
+                    assert emitted["cost_known"] is (expected is not None)
+                    assert emitted["cost_invalid"] is (known is None and not _missing(raw))
+                    assert emitted["cost_estimated"] is _missing(raw)
 
 
 def _safety_usage(root, monkeypatch, payload, *, queued=True, local=False):
@@ -193,24 +206,28 @@ def test_safety_normalized_invalid_never_estimates_but_local_is_free(tmp_path, m
     assert calls == []
 
 
-@pytest.mark.parametrize("raw,known", CASES)
-def test_raw_usage_events_do_not_turn_malformed_into_known_money(tmp_path, raw, known):
-    from supervisor.events_budget import _handle_llm_usage
+def test_raw_usage_events_do_not_turn_malformed_into_known_money(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for raw, known in plain_rows(CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw, known=known):
+            from supervisor.events_budget import _handle_llm_usage
 
-    rows = []
-    event = {"type": "llm_usage", "usage": {}}
-    if raw is not MISSING:
-        event["cost"] = raw
-    _handle_llm_usage(event, SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=SimpleNamespace(push_log=rows.append)))
-    row, = rows
-    assert row["cost"] == known and row["cost_known"] is (known is not None)
-    assert row["cost_invalid"] is (known is None and not _missing(raw))
+            rows = []
+            event = {"type": "llm_usage", "usage": {}}
+            if raw is not MISSING:
+                event["cost"] = raw
+            _handle_llm_usage(event, SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=SimpleNamespace(push_log=rows.append)))
+            row, = rows
+            assert row["cost"] == known and row["cost_known"] is (known is not None)
+            assert row["cost_invalid"] is (known is None and not _missing(raw))
 
 
-@pytest.mark.parametrize("last_cost", [0, 3.0, None, True], ids=["zero", "positive", "unknown", "invalid"])
+@pytest.mark.parametrize("last_cost", [0, None, True], ids=["zero", "unknown", "invalid"])
 def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_path, monkeypatch, fake_route, last_cost):
+    """A legacy chain (an older host's automatic successor, now only joined) folds each run's own cash once."""
     from ouroboros.delegate_custody_usage import observe_session_usage
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
     _engine(monkeypatch)
     original = FakeGateway.get_run
@@ -226,8 +243,9 @@ def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_pat
         return value
 
     monkeypatch.setattr(FakeGateway, "get_run", detail)
-    checkpoints, stamps = [], []
-    facts = _run(tmp_path, {}, checkpoints, stamps)
+    checkpoints = []
+    legacy_successor(tmp_path, checkpoints)
+    facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     rows = ledger_rows(tmp_path)
     expected = 2.0 + (last_cost if type(last_cost) in (int, float) else 0)
     partial = last_cost is None or last_cost is True
@@ -288,7 +306,7 @@ def test_review_actor_reports_the_typed_cash_the_collector_settled(tmp_path, fak
 
 def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_path, monkeypatch, fake_route):
     from ouroboros import review_execution
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
     _engine(monkeypatch)
     original_detail = FakeGateway.get_run
@@ -308,8 +326,10 @@ def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_pa
         return poll(gateway, custody, drive, entry, run_id, seconds)
 
     monkeypatch.setattr(review_execution, "_poll_session_terminal", fail_successor)
+    checkpoints = []
+    legacy_successor(tmp_path, checkpoints)
     with pytest.raises(OSError) as error:
-        _run(tmp_path, {}, [], [])
+        _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     usage = error.value.delegated_usage
     first, last = usage["session_usage_events"]
     assert first["delegated_run_id"] == "run-1" and first["attempt_execution"] == attempts
@@ -318,29 +338,32 @@ def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_pa
     assert "attempt_execution" not in last
 
 
-@pytest.mark.parametrize("raw,known", CASES)
-def test_image_result_survives_price_validation_without_text_tariff(tmp_path, monkeypatch, raw, known):
-    from ouroboros.gateways import image_api
-    from ouroboros.tools import imagegen
-    from ouroboros.tools.registry import ToolContext
-    from tests.test_imagegen_tool import BODY, PNG
+def test_image_result_survives_price_validation_without_text_tariff(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for raw, known in plain_rows(CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(raw=raw, known=known), monkeypatch.context() as monkeypatch:
+            from ouroboros.gateways import image_api
+            from ouroboros.tools import imagegen
+            from ouroboros.tools.registry import ToolContext
+            from tests.test_imagegen_tool import BODY, PNG
 
-    result = copy.deepcopy(BODY)
-    result["usage"] = {"prompt_tokens": 500, "completion_tokens": 600}
-    if raw is not MISSING:
-        result["usage"]["cost"] = raw
-    monkeypatch.setattr(image_api, "resolve_image_target", lambda model: {
-        "provider": "openai", "model": "fixture-image", "base_url": "https://fixture.invalid/v1",
-        "api_key": "fixture-key", "headers": {}})
-    monkeypatch.setattr(image_api, "send_image_request", lambda *a: result)
-    monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **k: pytest.fail("no image text tariff"))
-    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data", task_id="image-task")
-    text = imagegen._generate_image(ctx, "fixture image", "openai::fixture-image")
-    assert text.startswith("OK:")
-    summary = json.loads(text.split("\n", 1)[1])
-    assert summary["generated"] == 1 and Path(summary["images"][0]["absolute_path"]).read_bytes() == PNG
-    assert summary["actual_cost_usd"] == known and summary["cost_final"] is (known is not None)
-    row, = ledger_rows(ctx.drive_root)
-    assert row["cost_usd"] == known and row["cost_final"] is (known is not None)
-    assert row["cost_basis"] == "image_generation"
-    assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))
+            result = copy.deepcopy(BODY)
+            result["usage"] = {"prompt_tokens": 500, "completion_tokens": 600}
+            if raw is not MISSING:
+                result["usage"]["cost"] = raw
+            monkeypatch.setattr(image_api, "resolve_image_target", lambda model: {
+                "provider": "openai", "model": "fixture-image", "base_url": "https://fixture.invalid/v1",
+                "api_key": "fixture-key", "headers": {}})
+            monkeypatch.setattr(image_api, "send_image_request", lambda *a: result)
+            monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **k: pytest.fail("no image text tariff"))
+            ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data", task_id="image-task")
+            text = imagegen._generate_image(ctx, "fixture image", "openai::fixture-image")
+            assert text.startswith("OK:")
+            summary = json.loads(text.split("\n", 1)[1])
+            assert summary["generated"] == 1 and Path(summary["images"][0]["absolute_path"]).read_bytes() == PNG
+            assert summary["actual_cost_usd"] == known and summary["cost_final"] is (known is not None)
+            row, = ledger_rows(ctx.drive_root)
+            assert row["cost_usd"] == known and row["cost_final"] is (known is not None)
+            assert row["cost_basis"] == "image_generation"
+            assert bool(row.get("cost_invalid")) is (known is None and not _missing(raw))

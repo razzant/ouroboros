@@ -157,8 +157,8 @@ def test_ui_two_cards_one_origin_convert_into_their_own_projects(direct_server_w
 
 def _seed_live_sibling(data_dir: pathlib.Path) -> None:
     """T1 = a completed managed root (card in Main); T2 = a LIVE queued root with the same origin,
-    parked by a replay-safe budget pause so assignment never dispatches it (the same row shape
-    ``test_budget_pause_v664.py`` restores). Both render as Main root cards with the convert button."""
+    parked by a replay-safe budget pause so assignment never dispatches it. Both render as Main root
+    cards with the convert button."""
     import datetime as _dt
 
     from ouroboros.project_dialogue import _text_sha256

@@ -595,7 +595,8 @@ def read_view(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = N
         "asks": [{"ask_id": a.get("ask_id"), "ts": a.get("ts"), "revision": a.get("revision"), "message": a.get("message"),
                   "participants": [{**{k: p.get(k) for k in ("seat_id", "model", "owner_marked", "status", "dispatched",
                                                                "not_dispatched_reason", "error", "parse_error",
-                                                               "failure_code", "reported_cause", "reset_at", "unresolved")},
+                                                               "failure_code", "reported_cause", "reset_at", "unresolved",
+                                                               "room_delivery", "room_read_coverage")},
                                     "ignored_items": len((p.get("reply") or {}).get("ignored") or []) if isinstance(p.get("reply"), dict) else 0}
                                    for p in a.get("participants") or []],
                   "record_id": a.get("record_id")} for a in record.get("asks") or []],
@@ -849,12 +850,46 @@ def update_participant(root: Any, task_id: str, *, ask_id: str, seat_id: str, fa
                 if str(participant.get("seat_id") or "") == str(seat_id):
                     if facts.get("status") == "pending" and str(participant.get("status") or "pending") != "pending":
                         return record
+                    if (participant.get("superseded_operation_ids")
+                            and str(facts.get("operation_id") or "") != str(participant.get("operation_id") or "")):
+                        return record  # a reopened seat takes only facts that name its successor; none is not a name
                     participant.update(copy.deepcopy(dict(facts)))
                     _ask_panel_outcomes(ask)
                     return record
         raise PlanRecordInvalid(f"PLAN_RECORD_INVALID: no participant {seat_id!r} in ask {ask_id!r}")
 
     return _update_plan_record(root, task_id, _merge)
+
+
+_STOPPED_FACT_KEYS = ("reply", "parse_error", "error", "failure_code", "reset_at", "http_status", "transport_status",
+                      "reported_cause", "failure_details", "answered_at", "reply_ref", "delegated_run_id", "response_ref",
+                      "not_dispatched_reason", "review_controller", "unresolved", "cost")
+
+
+def reopen_participant(root: Any, task_id: str, *, ask_id: str, seat_id: str, supersedes: str,
+                       facts: Mapping[str, Any]) -> Dict[str, Any]:
+    """The projection of an explicit continuation (``review_continuation``): the stopped participant of the
+    SAME ask turns pending under its successor operation (or takes ``facts["status"]``, a successor settled
+    as never sent); its stopped facts move to ``prior_operations`` and a pending one lets the ask announce
+    its completion again. Repeating it is a no-op; any other state refuses."""
+    def _reopen(record: Dict[str, Any]) -> Dict[str, Any]:
+        ask = next((a for a in record.get("asks", []) if str(a.get("ask_id") or "") == str(ask_id)), {})
+        participant = next((p for p in ask.get("participants") or [] if str(p.get("seat_id") or "") == str(seat_id)), None)
+        current = str((participant or {}).get("operation_id") or "")
+        if participant is not None and current == str(facts.get("operation_id") or ""):
+            return record
+        if participant is None or current != supersedes or participant.get("status") == "pending":
+            raise PlanRecordInvalid(f"PLAN_CONTINUATION_CONFLICT: seat {seat_id!r} of ask {ask_id!r} is no longer {supersedes}")
+        prior = {key: participant.pop(key) for key in _STOPPED_FACT_KEYS if key in participant}
+        participant["prior_operations"] = [*(participant.get("prior_operations") or []), {
+            "operation_id": current, "status": participant.get("status"), **prior}]
+        participant.update(copy.deepcopy(dict(facts)), status=str(facts.get("status") or "pending"))
+        if participant["status"] == "pending":
+            ask.pop("completion_announced", None)
+        _ask_panel_outcomes(ask)
+        return record
+
+    return _update_plan_record(root, task_id, _reopen)
 
 
 def claim_ask_completion(root: Any, task_id: str, ask_id: str, custody: Mapping[str, str]) -> Optional[Dict[str, Any]]:
@@ -890,7 +925,7 @@ def release_ask_completion(root: Any, task_id: str, ask_id: str) -> None:
 
 
 def collection_pending(value: Any) -> bool:
-    """Body-only candidate selection, not a plan verdict or a packing obligation.
+    """Body-only pending-reader fact, not a plan verdict or a retention duty.
     Unknown record/participant shapes stay selectable. No sources or liveness are
     read here: the collector validates the record and checks its task's end."""
     if value is None or value == {}:

@@ -18,7 +18,7 @@ const HANDLES = ['min', 'rec', 'max'];
 const CONTEXT_MODES = ['nano', 'low', 'max'];
 const CONTEXT_LABELS = Object.freeze({ nano: 'Nano', low: 'Low', max: 'Max' });
 const CONTEXT_MEANINGS = Object.freeze({
-    nano: 'The compact owner window.', low: 'About 250K tokens: fits local models.', max: 'The full context window.',
+    nano: 'The compact owner window.', low: 'Aims for about 250K tokens.', max: 'The full context window.',
 });
 // When a capsule's change takes effect, said once for all three under each one's meaning (the hint's rule line).
 export const CHANGE_RULE = 'Applies to new steps; running work finishes.';
@@ -847,8 +847,15 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
         delete row.dataset.ownerCompact;
         row.style.setProperty('--capsule-value-cap', '');
-        capsules.forEach((capsule) => capsule.measureName());
+        capsules.forEach((capsule) => { delete capsule.el.dataset.nameFit; capsule.measureName(); });
         if (!wraps()) return;
+        // Names give way one at a time, the longest first, so two capsules of one value keep the words that tell them
+        // apart while the line can hold them (U123: never "Swarm · Max · Max" with room to spare).
+        const nameWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-name'));
+        for (const capsule of [...capsules].sort((a, b) => nameWidth(b) - nameWidth(a))) {
+            capsule.el.dataset.nameFit = 'off';
+            if (!wraps()) return;
+        }
         row.dataset.ownerCompact = 'true';
         const rowStyle = win?.getComputedStyle?.(row);
         const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
+import inspect
 import logging
 import os
 
@@ -81,22 +82,36 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
     except body_candidate.CandidateRefused as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
+    from ouroboros.tools.plan_ask import planning_roots
     from ouroboros.tools.tool_resolution import active_repo_dir_for
     from ouroboros.workspace_copies import same_directory
 
-    active = active_repo_dir_for(ctx)  # a room or external workspace stays this task's own folder
-    users = ("Body writes, default process cwd, child copies, review and commit_reviewed now use it"
-             if same_directory(active, bound["path"]) else
-             f"Writes and review_change with root='system_repo', commit_reviewed and self_worktree children given "
-             f"workspace_root={bound['path']} now use it, while default writes, reviews, commands without cwd and "
-             f"delegate_start runs still use {active} (pass cwd={bound['path']} for commands in the candidate)")
+    explicit = (f"Writes and review_change with root='system_repo', commit_reviewed and self_worktree children given "
+                f"workspace_root={bound['path']} now use it")
+    try:
+        active = active_repo_dir_for(ctx)  # a room or external workspace stays this task's own folder
+    except ValueError as exc:  # a room whose folder is unavailable: the candidate is bound, nothing replaces the room
+        users = (f"{explicit}; this task's own folder is unavailable ({exc}): defaults that need it fail until it "
+                 "returns, never using another folder")
+    else:
+        if same_directory(active, bound["path"]):
+            users = "Body writes, default process cwd, child copies, review and commit_reviewed now use it"
+        else:
+            try:
+                plan = f"plan_task reviews {planning_roots(ctx)[1]}"  # the task's own folder first, else the candidate
+            except ValueError as exc:
+                plan = f"plan_task refuses ({exc})"
+            users = (f"{explicit}, while default writes, review_change without root, commands without cwd and "
+                     f"delegate_start runs still use {active}; {plan} (pass cwd={bound['path']} for commands in the "
+                     "candidate)")
     return (
         f"OK: body candidate {bound['candidate_id']} is {bound['state']} — path {bound['path']}, branch "
         f"{bound['branch']}, base {str(bound['base_sha'])[:12]}. {users}; processes started inside it get an "
         f"isolated HOME/data/settings environment. The running body at {bound['repo_dir']} is unchanged until "
         "an exact reviewed commit is adopted with request_restart(adopt_commit=...), or published through the Git/PR tools."
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
-           if bound.get("previous_branch") else "")
+           if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
+        + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
     )
 
 
@@ -137,8 +152,9 @@ def _request_restart(ctx: ToolContext, reason: str, adopt_commit: str = "") -> s
             adopt_commit = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
         if str(adopt_commit or "").strip():
             handoff = body_adoption.authorize(ctx, adopt_commit, reason=restart_reason)
+            relation = body_adoption.official_relation_text(handoff.get("official_relation") or {})
             adoption_note = (f" It adopts candidate commit {handoff['cand'][:12]} onto {handoff['branch']} "
-                             "once this generation's readers have stopped.")
+                             "once this generation's readers have stopped." + (f" {relation}" if relation else ""))
     except body_adoption.AdoptionRefused as exc:
         return f"⚠️ RESTART_BLOCKED: {exc.code}: {exc.text}"
     if not adoption_note and body_candidate.is_bound(ctx):
@@ -216,8 +232,9 @@ def self_change_tool_entries() -> list:
                 "never reaches the files the live server imports. Body file writes and acting self_worktree "
                 "children prepare it automatically; processes do not, so call this first for process-first work. "
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
-                "branch) whose previous owner has ended. in_place is Cyber Pro's explicit decision to edit the "
-                "serving checkout directly instead."),
+                "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
+                "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
+                "decision to edit the serving checkout directly instead."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},
@@ -227,7 +244,8 @@ def self_change_tool_entries() -> list:
             "name": "request_restart",
             "description": (
                 "Ask supervisor to restart runtime after this task finalizes; confirmed acceptance holds new "
-                "independent work, including Main, for Restart. An unconfirmed reply proves no acceptance. "
+                "independent background work for Restart, never the owner's conversation (saved only in the final "
+                "drain). An unconfirmed reply proves no acceptance. "
                 "evolution requires its exact active commit receipt. A restart alone adopts nothing: pass "
                 "adopt_commit (the exact reviewed commit of your body candidate) to adopt it locally at this "
                 "restart, after the running generation's readers have stopped."),
@@ -335,8 +353,9 @@ def _chat_history(
     )
 
 
-def _update_scratchpad(ctx: ToolContext, content: str) -> str:
-    """LLM-driven scratchpad update — appends a timestamped block (Constitution P5: LLM-first)."""
+def _update_scratchpad(ctx: ToolContext, content: str, replaces: list | None = None, draft_source: str = "") -> str:
+    """LLM-driven scratchpad write (Constitution P5: LLM-first): append a timestamped block, or
+    fold the named blocks into one text the integrating mind accepts (#918; ``Memory.fold_scratchpad_blocks``)."""
     if not content or not isinstance(content, str) or len(content.strip()) < 10:
         return (
             _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ REJECTED: content is empty or too short "
@@ -344,7 +363,10 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
             "Scratchpad must have meaningful content (10+ chars). "
             "This likely means the tool call was malformed — check your arguments.")))
         )
-    from ouroboros.memory import Memory
+    if replaces is not None and not (isinstance(replaces, list) and all(isinstance(item, str) for item in replaces)):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ REJECTED: replaces is a list of block sha256 strings (shown after each block's heading).")))
+    from ouroboros.memory import Memory, ScratchpadFoldFailed, ScratchpadProjectionStale, scratchpad_block_sha256
     from ouroboros.knowledge import focus_signature
     from ouroboros.tool_access import canonical_data_root
 
@@ -355,22 +377,65 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     # remembers into the canonical root the next context reads.
     mem = Memory(drive_root=canonical_data_root(ctx))
     mem.ensure_files()
+    # The accepting focus, signed by the host; never a model name standing for authorship.
+    metadata = {
+        "focus": focus_signature(ctx)["focus"],
+        "task_id": str(getattr(ctx, "task_id", "") or ""),
+        "task_type": str(getattr(ctx, "current_task_type", "") or ""),
+        "delegation_role": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "",
+    }
+    draft = str(draft_source or "").strip()
+    stale = ""
     try:
-        block = mem.append_scratchpad_block(
-            content,
-            source="task",
-            metadata={
-                "focus": focus_signature(ctx)["focus"],
-                "task_id": str(getattr(ctx, "task_id", "") or ""),
-                "task_type": str(getattr(ctx, "current_task_type", "") or ""),
-                "delegation_role": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "",
-            },
-        )
+        if replaces:
+            written = mem.fold_scratchpad_blocks(content, replaces, metadata=metadata, draft_source=draft)
+        else:
+            written = mem.append_scratchpad_block(content, source="task", metadata={
+                **metadata, **({"draft_source": draft} if draft else {})})
+    except ScratchpadProjectionStale as error:
+        written, stale = error.result, str(error)
+    except ScratchpadFoldFailed as error:
+        return _fold_refusal(ctx, error)
     except RuntimeError as exc:
         if "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE" in str(exc):
             return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ {exc}")))
         raise
-    return f"OK: scratchpad block appended ({len(content)} chars, ts={block.get('ts', '?')[:16]})"
+    if replaces:
+        fold = written["block"]
+        text = (f"OK: scratchpad fold applied: {len(written['sources'])} blocks "
+                f"({sum(len(str(block.get('content', ''))) for block in written['sources'])} chars) replaced by one "
+                f"fold block ({len(content)} chars, sha256 {scratchpad_block_sha256(fold)}); exact originals journaled "
+                f"at entry_id={written['entry_id']}: {mem.scratchpad_journal_reader(ctx)}. "
+                f"Active now: {written['blocks_after']} blocks, {written['content_len']} chars.")
+    else:
+        text = (f"OK: scratchpad block appended ({len(content)} chars, ts={written.get('ts', '?')[:16]}, "
+                f"sha256 {scratchpad_block_sha256(written)})")
+    if not stale:
+        return text
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text + (
+        f"\n⚠️ SCRATCHPAD_PROJECTION_STALE: the canonical blocks hold this change, but the memory/scratchpad.md "
+        f"projection was not regenerated ({stale}); the next context renders the canonical blocks and the next "
+        "scratchpad write regenerates the file.")))
+
+
+def _fold_refusal(ctx: ToolContext, error: RuntimeError) -> str:
+    """No block changed (``ScratchpadFoldFailed``): a conflict names what is active now, a failure its cause."""
+    from ouroboros.memory import scratchpad_block_sha256 as sha256
+    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.tool_access_reads import canonical_runtime_reader
+
+    if error.kind not in ("not_active", "ambiguous"):
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE", text=(
+            f"⚠️ SCRATCHPAD_FOLD_FAILED ({error.kind}): {error}; no block changed — every active block stays "
+            "(a preserved source row without blocks_folded in memory/scratchpad_journal.jsonl is preparation only).")))
+    active = "\n".join(f"- [{str(block.get('ts', ''))[:16]} — {block.get('source', '?')}] sha256 {sha256(block)}: "
+                       f"{' '.join(str(block.get('content', '')).split())[:80]}" for block in reversed(error.active))
+    reader = canonical_runtime_reader(ctx, canonical_data_root(ctx), "memory/scratchpad_blocks.json")
+    return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE", text=(
+        f"⚠️ SCRATCHPAD_FOLD_CONFLICT ({error.kind}): {error}; no block changed. Another focus may have folded "
+        "them, or the view is older. Your earlier Scratchpad section may be stale. "
+        f"Read the complete current blocks with {reader}. "
+        f"Active blocks observed at this refusal, newest first (previews):\n{active}")))
 
 
 def owner_contact_refusal(ctx: ToolContext, chat_id: object) -> str:
@@ -445,16 +510,21 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
     """Send a separate owner reply without completing the ongoing task.
 
     ``destination="main"`` addresses the owner's main chat from an owner-visible
-    root room: the row is typed ``main_notice``, which the supervisor
-    and history replay pin to Main whatever the sender's Project binding, and
-    which never counts as the task's final answer. When to send one is the
-    model's judgment (BIBLE P5); no host counter or timer triggers it.
+    root room: the row is typed ``main_notice``, written to Main whatever the
+    sender's Project binding and shown by that Project too (one row,
+    ``room_membership.row_rooms``); it never counts as the task's final answer.
+    When to send one is the model's judgment (BIBLE P5); no host counter or
+    timer triggers it.
     """
     chat_id = getattr(ctx, "current_chat_id", None)
     if chat_id is None or chat_id == "":  # 0 is a real hidden session, not absence
         return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=("⚠️ No active chat — cannot send proactive message.")))
     if not text or not text.strip():
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ Empty message.")))
+    if reply_to_relay == "" and not getattr(ctx, "_open_relays", None):
+        # Engines that fill every optional field send "" for a return they do not mean
+        # (Grok, 27.10 stand call); with nothing open to return to, it is an ordinary send.
+        reply_to_relay = None
     # Models may fill optional keys: an empty value is the omitted default.
     target = str(destination or "").strip().lower() or "current"
     if target not in ("current", "main"):
@@ -468,7 +538,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if refusal:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
                 f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent; "
-                "destination='current' still reaches this conversation.")))
+                "destination='current' still writes this work's own room.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message
         try:
             origin = contact_origin(ctx)
@@ -512,11 +582,12 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if error:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=error, meta={"reason_code": "RELAY_RETURN_UNRESOLVED"}))
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
-        reply_meta = {"reply_to": resolve_reply(canonical_data_root(ctx), relay["source"]["address"]),
+        source_root = relay.get("_owner_source_roots", {}).get(relay["source"]["address"]) or canonical_data_root(ctx)
+        reply_meta = {"reply_to": resolve_reply(source_root, relay["source"]["address"]),
                       "reply_to_relay": relay["relay_id"]}
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl
-    mode = deliver_owner_event(ctx, {
+    event = stamp_lineage(ctx, {
         "type": "send_message",
         "chat_id": chat_id,
         "text": text,
@@ -525,7 +596,19 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         "system_type": system_type,
         "progress_meta": reply_meta,
         "ts": utc_now_iso(),
-    })
+    })  # the producer before the debt and the dispatch: a replayed answer is the same work's
+    if relay:
+        # A relay's answer is owed before the queue sees it (the terminal outbox, as Presence Main contact is):
+        # a send that fails after enqueue is retried under this id, and the open return retires only once owed.
+        from supervisor.terminal_delivery import register_pending_delivery
+        from ouroboros.tool_access import canonical_data_root
+
+        event["delivery_id"] = f"relay-return:{relay['relay_id']}:{getattr(ctx, 'task_id', '') or ''}"
+        if not register_pending_delivery(canonical_data_root(ctx), event):
+            return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
+                f"⚠️ RELAY_RETURN_NOT_OWED: the answer to relay {relay['relay_id']} could not be recorded for delivery. "
+                "Nothing was sent and the relay stays open; retry the same words."), meta={"reason_code": "RELAY_RETURN_NOT_OWED"}))
+    mode = deliver_owner_event(ctx, event)
     append_jsonl(ctx.drive_logs() / "events.jsonl", {
         "ts": utc_now_iso(),
         "type": "proactive_message",
@@ -539,11 +622,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         ctx._open_relays.pop(relay["relay_id"], None)
         from ouroboros.owner_relay import persist_held_state
         persist_held_state(ctx)
+        return (f"OK: answer to relay {relay['relay_id']} owed to {relay['source'].get('label') or 'its source room'} "
+                f"(delivery {event['delivery_id']}); the outbox retries it until sent.")
     if target == "main":
-        return "OK: notice sent to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
-    if mode == "live":
-        return "OK: message sent to owner chat."
-    return "OK: message queued for delivery."
+        return "OK: notice accepted for delivery to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
+    return publish_delivery_receipt(ctx, event, mode, "message")
 
 
 def _update_identity(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
@@ -708,6 +791,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
     from ouroboros.config import get_bg_wakeup_max_sec, get_bg_wakeup_min_sec
     from ouroboros.consciousness import (
         INTERVAL_STATE_KEY,
+        LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
         _iso,
@@ -736,7 +820,8 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
     fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY))
+              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
+              ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -761,9 +846,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                                       "source": "owner settings, not the state file"}
     facts["notes"] = [
         "stored_next_wake_at is the last time the clock persisted and fires only while enabled; the running "
-        "clock keeps it no sooner than MIN after boot, and no event moves it.",
-        "Not in this read (held in the supervisor's memory): the last wake outcome and error, failure "
-        "backoff, the allowance window and a live wake task."]
+        "clock keeps it no sooner than MIN after boot, and no event moves it; a changed daily limit retries "
+        "an allowance_exhausted last_skip MIN after that skip and after boot instead of at its reset.",
+        "last_skip is the newest skipped wake with the allowance window it met (null is unknown). Not in this "
+        "read (held in the supervisor's memory): other wake outcomes and errors, failure backoff, the current "
+        "allowance window and a live wake task."]
     return json.dumps(facts, ensure_ascii=False, indent=2)
 
 
@@ -941,13 +1028,36 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
-                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
+                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
+                 fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave one sentence for its human."""
+    without a Presence binding) may choose silence and may leave one sentence for its human.
+    A task that answers its own retained place conversation (its reply carrier: a promoted or
+    scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
+    request, error = completion_request(ctx, {
+        "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
+        "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
+        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read,
+    })
+    if error:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                 text="ERROR: COMPLETION_ARGUMENT: " + error))
+    return _stage_checked_completion(ctx, request, source="finish_task", reply_later=False)
+
+
+def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict | None, str]:
+    """The finish_task contract as one pure read: ``(request, "")`` ready to stage, or ``(None, error)``.
+
+    It builds no ToolResult and writes no context, so a forced rail reads the same request from a
+    native ``finish_task`` call or its serialized text and executes nothing (DEVELOPMENT "Forced
+    resolution is pure"). The argument names are the handler's own signature."""
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
     from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.place_reply import reply_carrier
     from ouroboros.task_results import resolve_ctx_lineage
 
+    if not isinstance(arguments, dict) or "action" not in arguments or set(arguments) - _FINISH_TASK_ARGUMENTS:
+        return None, "finish_task takes action and only its own arguments"
     metadata = getattr(ctx, "task_metadata", None) or {}
     occurrence = metadata.get("schedule_occurrence")
     self_started = (bool(getattr(ctx, "is_direct_chat", False)) and (is_own_clock_wake(metadata) or is_focus_wake(metadata))
@@ -956,31 +1066,54 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                         and str(occurrence.get("token") or "").strip()
                         and resolve_ctx_lineage(ctx)["is_root_task"]
                         and presence_caller_binding(ctx) is None))
-    summary = " ".join(str(summary or "").split())
+    action, answer, selector = arguments.get("action"), arguments.get("answer"), arguments.get("answer_sha256")
+    silent, summary = arguments.get("silent"), arguments.get("summary")
+    # A native call's parsed arguments were never checked against the schema: read each at its schema type before
+    # any truth test, so the string "false" is no silence and an object no sentence; null names nothing.
+    if silent is not None and not isinstance(silent, bool):
+        return None, "silent must be true or false"
+    if summary is not None and not isinstance(summary, str):
+        return None, "summary must be text"
+    fold_read = arguments.get("fold_read")
+    if fold_read is not None and not isinstance(fold_read, bool):
+        return None, "fold_read must be true or false"
+    summary = " ".join((summary or "").split())
+    if fold_read and not summary:
+        return None, "fold_read folds what this run read into its summary: give the sentence"
     if silent and action != "finish":
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-            text="ERROR: COMPLETION_ARGUMENT: silent requires action=finish"))
-    if (summary or silent) and not self_started:
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-            text="ERROR: COMPLETION_ARGUMENT: silent and summary are available only on a self-started run: "
-                 "a consciousness wake's own turn, or a schedule-born root without a Presence binding"))
-    allow_empty = False
-    if silent:
-        allow_empty = True
-        if answer is None and not answer_sha256:
-            answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
-    return stage_completion_request(ctx, {
-        "action": action, "answer": answer, "answer_sha256": answer_sha256,
-        "rationale": rationale, "acceptance_subject": acceptance_subject,
-        "pending_review": pending_review, "wake_silent": bool(silent) or None, "wake_summary": summary or None,
-        "swarm_comparison": swarm_comparison,
-    }, allow_empty=allow_empty)
+        return None, "silent requires action=finish"
+    # A sentence for a human this run does not speak to is decorative: dropped and named, never a veto on the answer;
+    # the fold it would stand for goes with it.
+    ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
+               if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
+    if silent and not self_started and not reply_carrier(metadata):
+        return None, ("silent is available only on a self-started run: "
+                      "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
+                      "silent also on a task answering its own place conversation")
+    if silent and answer is None and not selector:
+        answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
+    return checked_completion_request(ctx, {
+        "action": action, "answer": answer, "answer_sha256": selector,
+        "rationale": arguments.get("rationale", ""), "acceptance_subject": arguments.get("acceptance_subject"),
+        "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
+        "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
+        "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
+    }, allow_empty=bool(silent))
 
 
 def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "finish_task",
                              allow_empty: bool = False, reply_later: bool = False) -> str:
+    checked, error = checked_completion_request(ctx, request, allow_empty=allow_empty, reply_later=reply_later)
+    if error:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: COMPLETION_ARGUMENT: " + error))
+    return _stage_checked_completion(ctx, checked, source=source, reply_later=reply_later)
+
+
+def checked_completion_request(ctx: ToolContext | None, request: dict, *, allow_empty: bool = False,
+                               reply_later: bool = False) -> tuple[dict | None, str]:
+    """The pure half of staging: the normalized request (``None`` fields dropped, ``allow_empty`` set)
+    or the argument error; nothing is written."""
     import copy
-    import json
     from ouroboros.task_results import resolve_task_lineage
 
     action, answer, selector = request.get("action"), request.get("answer"), request.get("answer_sha256")
@@ -993,8 +1126,11 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
         answer = None
         request = {**request, "answer": None}
     error = ""
-    if action not in {"finish", "stop"}:
+    # Types before membership: an unhashable value in a set test raised TypeError out of a forced rail.
+    if not isinstance(action, str) or action not in {"finish", "stop"}:
         error = "action must be finish or stop"
+    elif request.get("rationale") is not None and not isinstance(request["rationale"], str):
+        error = "rationale must be text"
     elif action == "stop" and not str(request.get("rationale") or "").strip():
         error = "stop requires a rationale naming unfinished work"
     elif not reply_later and ((answer is None) == (selector is None)):
@@ -1003,7 +1139,8 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
         error = "answer must be complete nonempty text"
     elif selector is not None and (not isinstance(selector, str) or not selector.strip()):
         error = "answer_sha256 must name an offered answer"
-    elif request.get("pending_review") not in {None, "wait", "finish"}:
+    elif request.get("pending_review") is not None and (not isinstance(request["pending_review"], str)
+                                                        or request["pending_review"] not in {"wait", "finish"}):
         error = "pending_review must be wait or finish"
     elif request.get("swarm_comparison") is not None and not isinstance(request["swarm_comparison"], str):
         error = "swarm_comparison must be text"
@@ -1013,14 +1150,26 @@ def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "
     )["is_root_task"]:
         error = "pending_review is available only on root tasks"
     if error:
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: COMPLETION_ARGUMENT: " + error))
-    staged = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}
-    staged.update(source=source, reply_later=reply_later, allow_empty=allow_empty,
-                  observation=copy.deepcopy(getattr(ctx, "_completion_observation", {})))
+        return None, error
+    checked = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}
+    checked["allow_empty"] = allow_empty
+    return checked, ""
+
+
+def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, reply_later: bool) -> str:
+    import copy
+    import json
+
+    staged = {**checked, "source": source, "reply_later": reply_later,
+              "observation": copy.deepcopy(getattr(ctx, "_completion_observation", {}))}
     previous = getattr(ctx, "_completion_request", None)
     if previous is not None and previous.get("observation") == staged["observation"] and previous != staged:
         ctx._completion_conflict = True
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
-    return json.dumps({"status": "completion_requested", "completion_control": True, "action": action}, ensure_ascii=False)
+    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"],
+                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {})}, ensure_ascii=False)
+
+
+_FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

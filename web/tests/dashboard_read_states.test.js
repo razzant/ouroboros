@@ -64,6 +64,30 @@ test('Activity names known non-Project scope waits without implying a Project', 
     assert.match(mount.textContent, /&lt;bindings unavailable&gt;/);
 });
 
+test('Activity names a run as its card does, keeps the whole order behind Details, and refreshes without a word', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const order = 'Complete two confirmed recovery defects\nof the existing candidate <exact tree>.';
+    routes.set(queueUrl, response({ queue: { running: [
+        { id: 'named', type: 'task', runtime_sec: 60, task: { id: 'named', suggested_name: 'Complete two confirmed recovery defects', text: order } },
+    ], pending: [{ task: { id: 'short', suggested_name: 'Continue the project', text: 'Continue the project.' } }] } }));
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
+    const rows = section(mount, 'queue').querySelectorAll('.activity-row');
+    assert.equal(rows[0].querySelector('.activity-name').textContent, 'Complete two confirmed recovery defects');
+    const details = rows[0].querySelector('details');
+    assert.equal(details.querySelector('summary').textContent, 'Details');
+    assert.match(details.querySelector('.activity-order').textContent, /of the existing candidate &lt;exact tree&gt;\./);
+    assert.doesNotMatch(rows[0].querySelector('.activity-name').textContent, /exact tree/, 'never the whole order as its title');
+    assert.equal(rows[1].querySelector('details'), null, 'an order its name already says keeps no copy behind Details');
+    // A refresh reads silently (aria-busy only): no line comes and goes under the heading and moves the rows.
+    details.open = true;
+    const again = activity.refresh();
+    assert.equal(message(section(mount, 'queue')), '');
+    await again;
+    assert.equal(section(mount, 'queue').querySelector('.activity-row').querySelector('details').hasAttribute('open'), true, 'an open Details stays open');
+});
+
 test('Activity failed reads stay unknown; independent successful empty state stays empty', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);
@@ -128,6 +152,7 @@ test('Activity separates standing schedules from retained history and keeps Rest
     assert.match(standing[1].textContent, /Disabled schedule[\s\S]*disabled/);
     assert.equal(standing[1].querySelector('button').textContent, 'Enable');
     assert.equal(standing[1].querySelector('button').dataset.action, 'restore');
+    assert.equal(standing[1].querySelector('button').dataset.done, 'enabled', 'its outcome says the button\'s own word');
 
     assert.equal(history.hasAttribute('open'), false);
     assert.match(history.querySelector('summary').textContent, /withdrawn \(2\)/);
@@ -384,23 +409,33 @@ test('Activity unites live direct turns with queue identities and preserves queu
         running: [{ id: 'queued-1', type: 'task', runtime_sec: 9, task: { title: 'Queue title' } }],
         pending: [{ task: { id: 'paused-1', title: 'Paused work', _budget_pause: true } }],
     } }));
-    await initActivity({ mount, ws }).refresh();
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
     const queue = section(mount, 'queue');
     const rows = queue.querySelectorAll('.activity-row');
     assert.equal(rows.length, 3, 'partial positive census adds exactly the missing direct identity');
+    // The list reads by state: what works now first, then paused work collapsed under its count.
     assert.match(rows[0].textContent, /Queue title[\s\S]*Working · task · 9s/);
-    assert.match(rows[1].textContent, /Paused work[\s\S]*Paused/);
-    assert.equal(rows[1].querySelector('button').dataset.budgetPaused, '1');
+    const paused = queue.querySelector('details[data-open-key="paused"]');
+    assert.equal(paused.querySelector('summary').textContent, 'Paused (1)');
+    assert.equal(paused.hasAttribute('open'), true, 'open until the owner folds it: Resume stays one press away');
+    assert.ok(paused.contains(rows[2]) && !paused.contains(rows[0]) && !paused.contains(rows[1]));
+    assert.match(rows[2].textContent, /Paused work[\s\S]*Paused/);
+    assert.equal(rows[2].querySelector('button').dataset.budgetPaused, '1');
     // A live census row says its state in the chip's own word (translated at its producer), never the census code.
-    assert.equal(rows[2].querySelector('[data-i18n-skip]').textContent, 'Thinking');
-    assert.match(rows[2].textContent, /Direct turn[\s\S]*· 12s/);
-    assert.doesNotMatch(rows[2].textContent, /thinking/);
-    assert.equal(rows[2].querySelector('button').dataset.id, 'direct-1');
-    assert.equal(rows[2].querySelector('button').dataset.act, 'task-control');
+    assert.equal(rows[1].querySelector('[data-i18n-skip]').textContent, 'Thinking');
+    assert.match(rows[1].textContent, /Direct turn[\s\S]*· 12s/);
+    assert.doesNotMatch(rows[1].textContent, /thinking/);
+    assert.equal(rows[1].querySelector('button').dataset.id, 'direct-1');
+    assert.equal(rows[1].querySelector('button').dataset.act, 'task-control');
     // Stop… is the neutral shared trigger on every row, never a danger button.
-    assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-xs btn-default'));
+    assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
     assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl], 'reuse the existing state read');
+    // A group the owner folded stays folded through the next refresh.
+    paused.open = false;
+    await activity.refresh();
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]').hasAttribute('open'), false);
 });
 
 test('Activity names work held by an application stop as held, never as a money pause', async (t) => {
@@ -419,14 +454,17 @@ test('Activity names work held by an application stop as held, never as a money 
     await initActivity({ mount, ws }).refresh();
     const rows = section(mount, 'queue').querySelectorAll('.activity-row');
     assert.equal(rows.length, 3);
-    for (const row of rows.slice(0, 2)) {
+    // Queued work leads; the two held rows collapse under "Paused (2)", their order kept.
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]').querySelector('summary').textContent, 'Paused (2)');
+    for (const row of rows.slice(1)) {
         assert.match(row.textContent, /Paused/);
         assert.doesNotMatch(row.textContent, /budget/);
         assert.equal(row.querySelector('button').dataset.budgetPaused, '1', 'the same Resume is offered');
     }
+    assert.match(rows[1].textContent, /Saved before Quit/);
     // The owner's Resume released this hold: it is neither held nor paused any more.
-    assert.doesNotMatch(rows[2].textContent, /Held after a restart|Paused/);
-    assert.equal(rows[2].querySelector('button').dataset.budgetPaused, undefined);
+    assert.doesNotMatch(rows[0].textContent, /Held after a restart|Paused/);
+    assert.equal(rows[0].querySelector('button').dataset.budgetPaused, undefined);
 });
 
 test('Activity complete empty census differs from unknown and failed state preserves queue facts', async (t) => {
@@ -490,6 +528,79 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
+test('Logs reads oldest to newest, says why it is empty, and keeps one quiet tone until a filter narrows it', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
+    const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    let finishEvents;
+    routes.set(logUrl('events'), () => new Promise((resolve) => { finishEvents = resolve; }));
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    initLogs({ mount, ws, state });
+    const empty = mount.querySelector('[data-log-empty]');
+    assert.equal(empty.hidden, true, 'nothing is said about an empty list while its history loads');
+    ws.emit('log', { data: live });
+    finishEvents(response({ entries: [earlier] }));
+    await settle();
+    const entries = mount.querySelector('#log-entries');
+    // History that arrives after a live event takes its place by its own time (U035).
+    assert.deepEqual(entries.children.map((entry) => entry.dataset.logTime), [String(Date.parse(earlier.ts)), String(Date.parse(live.ts))]);
+    // The event's one line: Raw at its end as the quiet small capsule, never a row of its own (U027, U032).
+    const main = entries.children[0].querySelector('.log-main');
+    const raw = main.querySelector('.log-raw-toggle');
+    assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
+    assert.equal(entries.children[0].querySelector('.log-actions'), null);
+    await raw.fire('click');
+    assert.equal(entries.children[0].querySelector('.log-raw').hasAttribute('hidden'), false);
+    assert.equal(raw.getAttribute('aria-expanded'), 'true');
+    // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
+    const chips = mount.querySelectorAll('.filter-chip');
+    assert.ok(chips.length > 1);
+    assert.ok(chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true'));
+    await chips[0].fire('click');
+    assert.equal(chips[0].classList.contains('active'), false);
+    assert.equal(chips[0].getAttribute('aria-pressed'), 'false');
+    assert.ok(chips.slice(1).every((chip) => chip.classList.contains('active')));
+    for (const chip of chips.slice(1)) await chip.fire('click');
+    assert.equal(empty.hidden, false);
+    assert.match(empty.textContent, /The filters hide every event\./);
+    await empty.fire('click', { target: empty.querySelector('[data-log-show-all]') });
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'Show all brings every event back');
+    assert.equal(empty.hidden, true);
+    assert.ok(chips.every((chip) => !chip.classList.contains('active')));
+    // Clear says when, and that new events appear (U033).
+    await mount.querySelector('#btn-clear-logs').fire('click');
+    assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
+    ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
+    assert.equal(empty.hidden, true);
+});
+
+test('Logs prints an event\'s name once and names a task card by its short id without repeating its lineage', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
+    await settle();
+    ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:00Z' } });
+    const entries = mount.querySelector('#log-entries');
+    const plain = entries.children.find((node) => !node.dataset.taskGroup);
+    const headline = plain.querySelector('.log-headline').textContent;
+    const type = plain.querySelector('.log-type');
+    assert.ok(!type || type.textContent !== headline, 'the type is not printed again beside the same headline (U028)');
+    ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T12:00:02Z',
+        runtime_sec: 61 } });
+    const card = entries.children.find((node) => node.dataset.taskGroup === '55d180783850458f');
+    assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
+    const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
+    assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
+    assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
+    // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
+    const shownAt = card.querySelector('[data-task-ts]').textContent;
+    ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T11:59:00Z' } });
+    assert.equal(card.querySelector('[data-task-ts]').textContent, shownAt);
+    assert.equal(card.dataset.logTime, String(Date.parse('2026-09-16T12:00:02Z')));
+});
+
 test('Logs catches unavailable and malformed sources while retaining later live events', async (t) => {
     const { mount, routes, ws } = setup(t);
     routes.set(logUrl('events'), response(null));
@@ -521,18 +632,26 @@ test('an older failed backfill cannot overwrite a newer complete reconnect resul
     assert.equal(mount.querySelector('#log-entries').children.length, 1);
 });
 
-test('Costs numeric inputs have visible associated names and the task cap description', (t) => {
+test('Costs numeric inputs have visible associated names and one line of owner help each', (t) => {
     const { mount } = setup(t);
     initCosts({ mount, state: {} });
-    for (const [id, label] of [['s-budget', 'Total Budget ($)'], ['s-per-task-cost', 'Per-task Cost Cap ($)']]) {
+    for (const [id, label, help] of [['s-budget', 'Total budget ($)', /Paid work stops/],
+        ['s-per-task-cost', 'Per-task cost cap ($)', /A task and its helpers stop/]]) {
         const field = mount.querySelector(`#${id}`);
         assert.ok(field);
         assert.equal(mount.querySelector(`[for="${id}"]`).textContent, label);
         assert.equal(field.classList.contains('ui-control'), true);
+        const [own, note] = field.getAttribute('aria-describedby').split(' ');
+        const description = mount.querySelector(`#${own}`);
+        assert.match(description.textContent, help);
+        assert.doesNotMatch(description.textContent, /root task tree|auto-resume/, 'the mechanism lives under its disclosure');
+        assert.equal(note, 'costs-budget-help', 'the setup contract\'s one budget note describes both fields too');
     }
-    const input = mount.querySelector('#s-per-task-cost');
-    const description = mount.querySelector(`#${input.getAttribute('aria-describedby')}`);
-    assert.match(description.textContent, /whole root task tree/);
+    // The mechanism is one disclosure away, never under one field only: the setup contract's one budget note (Settings
+    // and onboarding say the same), its fallback until /api/settings answers.
+    const note = mount.querySelector('.costs-budget').querySelector('.ui-disclosure').querySelector('#costs-budget-help');
+    assert.ok(note);
+    assert.match(note.textContent, /root task tree/);
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {
@@ -818,7 +937,7 @@ test('Activity shows a row\'s own known outcome first and its unfinished finaliz
         'chip words come from the translation seam, so the overlay leaves them alone');
 });
 
-test('Activity says a pause in its word alone, with or without a work; reviews it lets finish stand beside it', async (t) => {
+test('Activity separates the pause word from confirmed work context and offers only declared controls', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);
     const paused = (id, extra = {}) => outcomeRow(id, 'completed', 'ok', 'budget_paused', 'paused', { pause_cause: 'owner', ...extra });
@@ -831,9 +950,20 @@ test('Activity says a pause in its word alone, with or without a work; reviews i
             pausedWork('by-mind', 'paused_by_mind', 'Ouroboros: pause before the update'),
             pausedWork('unconfirmed', 'paused_by_owner', 'You paused it', { confirmed: false })], works_complete: true }));
     await initActivity({ mount, ws }).refresh();
-    // Who paused is the work's line on its card, its row and the sidebar; a chip says the word alone.
-    for (const id of ['by-owner', 'by-mind', 'unnamed', 'unconfirmed']) assert.equal(chip(rowOf(mount, id)).secondary, 'Paused', id);
-    assert.doesNotMatch(section(mount, 'queue').textContent, /by you|by Ouroboros|You paused it/);
+    const rows = section(mount, 'queue').querySelectorAll('.activity-row');
+    assert.equal(rows.length, 5, 'rows without controls remain visible');
+    for (const text of ['You paused it', 'Ouroboros: pause before the update']) {
+        const matches = rows.filter((row) => row.textContent.includes(text));
+        assert.equal(matches.length, 1, text);
+        const [row] = matches;
+        assert.equal(chip(row).secondary, 'Paused', 'the chip keeps only the state word');
+        assert.equal(row.querySelector('[data-act="task-control"]'), null, 'empty controls invent no action');
+    }
+    for (const id of ['unnamed', 'unconfirmed']) {
+        const row = rowOf(mount, id);
+        assert.equal(chip(row).secondary, 'Paused', id);
+        assert.doesNotMatch(row.textContent, /You paused it|Ouroboros: pause before the update/);
+    }
     assert.equal(chip(rowOf(mount, 'reviewed')).secondary, 'Paused · Review work finishing');
 });
 
@@ -941,7 +1071,7 @@ const deferred = () => {
     handle.promise = new Promise((resolve, reject) => Object.assign(handle, { resolve, reject }));
     return handle;
 };
-const storageSummary = (mount) => mount.querySelector('[data-storage-summary]').textContent;
+const storageSummary = (mount) => `${mount.querySelector('[data-storage-summary]').textContent} ${mount.querySelector('[data-storage-status]').textContent}`;
 
 /** Timers by hand: the poll is a scheduled callback the test can see, fire or see cleared. */
 function manualTimers(t) {
@@ -978,7 +1108,8 @@ test('Storage opens with one passive read; only the button measures, then polls 
     start();
     await settle();
     assert.deepEqual(calls, [storageUrl]);
-    assert.match(storageSummary(mount), /Not counted yet/);
+    assert.match(storageSummary(mount), /Not measured yet/);
+    assert.match(storageSummary(mount), /This disk: .* free of/, 'the free space is read before any count');
     assert.equal(timers.polls(), 0, 'nothing runs, so nothing is polled');
     assert.equal(mount.querySelector('[data-storage-places]').textContent, '', 'no list before a finished count');
 
@@ -995,8 +1126,7 @@ test('Storage opens with one passive read; only the button measures, then polls 
     await timers.fire();
     await settle();
     assert.deepEqual(calls, [storageUrl, measureUrl, storageUrl]);
-    assert.match(storageSummary(mount), /Ouroboros uses/);
-    assert.match(storageSummary(mount), /1\.4 MB/);
+    assert.match(storageSummary(mount), /Space used by Ouroboros\s*1\.4 MB/);
     assert.equal(timers.polls(), 0, 'a finished count is not polled');
     assert.equal(mount.querySelector('[data-storage-panel]').hidden, false);
     assert.equal(mount.querySelector('[data-storage-action="stop"]').hidden, true);
@@ -1031,7 +1161,7 @@ test('Storage holds one count busy from the click to the finished walk, and name
     routes.set(storageUrl, response(measuredBody()));
     await timers.fire();
     await settle();
-    assert.equal(button.textContent, 'Measure again');
+    assert.equal(button.textContent, 'Refresh sizes');
     assert.equal(button.getAttribute('aria-disabled'), 'false');
     assert.equal(button.hasAttribute('aria-busy'), false);
 
@@ -1096,7 +1226,7 @@ test('Storage Stop asks the server to kill the count and keeps the saved count',
     assert.deepEqual(calls, [storageUrl, cancelUrl]);
     assert.match(storageSummary(mount), /1\.4 MB[\s\S]*Stopped before it finished\. Showing the count from/);
     assert.equal(stop.hidden, true);
-    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Measure again');
+    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Refresh sizes');
 });
 
 test('Storage drops a read answered after its tab was left, and does not poll for it', async (t) => {
@@ -1173,148 +1303,6 @@ test('Storage destroy aborts its read and ignores late answers, tab events and c
     await settle();
     assert.deepEqual(calls, [storageUrl]);
     assert.equal(timers.polls(), 0);
-});
-
-// ---------------------------------------------------------------------------
-// Dashboard -> Storage -> Temporary space: the tray's requests through the real controller.
-// ---------------------------------------------------------------------------
-
-const previewUrl = '/api/storage/free/preview';
-const freeUrl = '/api/storage/free';
-const freeCancelUrl = '/api/storage/free/cancel';
-const freeGroup = (id, bytes) => ({ id, count: 3, inside_wait: 2, in_use: 1, unreadable: 0, bytes, bytes_complete: true,
-    items: [{ id: `${id}:a`, name: 'Run the QA wave', bytes }] });
-const freeBody = (state, overrides = {}) => storageBody({ free: { state, plan: 'p1', started_at: '2026-10-05T11:00:00Z', finished_at: null,
-    done: 0, total: 0, groups: [], run: null, error: null, ...overrides } });
-const storageTray = (mount) => mount.querySelector('[data-storage-tray]');
-const trayButton = (mount, name) => storageTray(mount).querySelector(`[${name}]`);
-
-test('Storage tray previews on its door, polls while listing, and shows the checklist once ready', async (t) => {
-    const { mount, routes, calls, timers, start, document } = openStorage(t);
-    routes.set(storageUrl, response(storageBody()));
-    start();
-    await settle();
-    assert.match(storageTray(mount).textContent, /Copies and leftovers of finished work/);
-    routes.set(previewUrl, (_url, init) => {
-        assert.equal(init.method, 'POST');
-        return response(freeBody('listing', { total: 2, groups: [freeGroup('work_folders', null)], started: true }), 202);
-    });
-    const door = trayButton(mount, 'data-free-preview');
-    door.focus();
-    const measureButton = mount.querySelector('[data-storage-action="measure"]');
-    await storageTray(mount).fire('click', { target: door });
-    await settle();
-    assert.deepEqual(calls, [storageUrl, previewUrl]);
-    assert.match(storageTray(mount).textContent, /Checking what can go · 0 of 2 folders/);
-    assert.equal(measureButton.textContent, 'Measure now', 'a preview POST never reads as a count');
-    assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-stop', 'focus follows the door into the listing');
-    assert.equal(timers.polls(), 1, 'a listing is polled');
-    routes.set(storageUrl, response(freeBody('ready', { groups: [freeGroup('work_folders', 6.8e9), freeGroup('working_copies', 2.1e9)] })));
-    await timers.fire();
-    await settle();
-    assert.match(storageTray(mount).textContent, /8\.9 GB can be freed[\s\S]*Free 8\.9 GB/);
-    assert.equal(timers.polls(), 0, 'a ready list is not polled');
-    // Unchecking a group moves the sum; Cancel hides the list without a request.
-    const box = storageTray(mount).querySelector('[data-free-group="working_copies"]');
-    box.checked = false;
-    await storageTray(mount).fire('change', { target: box });
-    assert.match(storageTray(mount).textContent, /Free 6\.8 GB/);
-    const cancel = trayButton(mount, 'data-free-cancel');
-    cancel.focus();
-    await storageTray(mount).fire('click', { target: cancel });
-    assert.match(storageTray(mount).textContent, /Show what can go/);
-    assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-preview', 'focus lands on the door');
-    assert.deepEqual(calls, [storageUrl, previewUrl, storageUrl]);
-});
-
-test('Storage tray frees the checked groups under the plan after the shared confirm, then shows the result', async (t) => {
-    const { mount, routes, calls, timers, start, show, document } = openStorage(t);
-    routes.set(storageUrl, response(freeBody('ready', { groups: [freeGroup('work_folders', 6.8e9), freeGroup('working_copies', 2.1e9)] })));
-    start();
-    await settle();
-    const go = trayButton(mount, 'data-free-go');
-    assert.ok(go.className.includes('btn-danger'));
-    let posted = null;
-    routes.set(freeUrl, async (_url, init) => {
-        posted = JSON.parse(init.body);
-        return response(freeBody('running', { total: 6, run: { groups: posted.groups, selected: 6, done: 2, removed: 0, removed_bytes: 0,
-            deleting: 2, deleting_bytes: 1e9, deleting_bytes_unused: 0, kept: [], free_before: 140e9, free_after: null, stopped: false, error: null },
-            started: true }), 202);
-    });
-    const click = storageTray(mount).fire('click', { target: go });
-    await settle();
-    const dialog = document.body.querySelector('[role="dialog"]');
-    assert.ok(dialog, 'the shared confirm dialog opened');
-    assert.match(dialog.textContent, /Free temporary space\?[\s\S]*This removes 8\.9 GB for good/);
-    const ok = dialog.querySelector('[data-confirm-ok]');
-    assert.equal(ok.textContent, 'Free 8.9 GB');
-    await dialog.parentElement.fire('click', { target: ok });
-    await click;
-    await settle();
-    assert.deepEqual(posted, { plan: 'p1', groups: ['work_folders', 'working_copies'] });
-    assert.match(storageTray(mount).textContent, /Freeing space · 0 bytes removed · 2 of 6 folders/);
-    assert.match(storageTray(mount).textContent, /2 are still being deleted/);
-    assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-stop', 'focus moves to the running tray\'s Stop');
-    assert.equal(timers.polls(), 1);
-    routes.set(storageUrl, response(freeBody('done', { run: { groups: posted.groups, selected: 6, done: 6, removed: 5, removed_bytes: 8e9,
-        deleting: 1, deleting_bytes: 0.2e9, kept: [{ reason: 'results_pending', count: 0 }], free_before: 140e9, free_after: 148e9,
-        stopped: false, error: null } })));
-    await timers.fire();
-    await settle();
-    assert.match(storageTray(mount).textContent, /Removed 8\.0 GB \(5 folders\)\.\s*1 is still being deleted\. 140 GB free is now 148 GB\. The next count will show the new total\./);
-    assert.equal(timers.polls(), 1, 'the maintenance child is still deleting');
-    routes.set(storageUrl, response(freeBody('done', { run: { groups: posted.groups, selected: 6, done: 6, removed: 5, removed_bytes: 8e9,
-        deleting: 0, deleting_bytes: 0, stuck: 1, kept: [], free_before: 140e9, free_after: 148e9, stopped: false, error: null } })));
-    await timers.fire();
-    await settle();
-    assert.match(storageTray(mount).textContent, /Removed 8\.0 GB \(5 folders\)\.\s*1 could not be deleted yet; the app retries at its next maintenance run\./);
-    assert.equal(timers.polls(), 0, 'an entry the child reported stuck is not polled for');
-    assert.equal(mount.querySelector('[data-storage-live]').textContent, 'Not counted yet. Removed 8.0 GB (5 folders).', 'the live region carries one phase sentence');
-    routes.set(storageUrl, response(freeBody('done', { run: { groups: posted.groups, selected: 6, done: 6, removed: 5, removed_bytes: 8e9,
-        deleting: 1, deleting_bytes: 0.2e9, kept: [{ reason: 'results_pending', count: 0 }], free_before: 140e9, free_after: 148e9,
-        stopped: false, error: null } })));
-    show('storage');
-    await settle();
-    assert.equal(timers.polls(), 1, 'the entry changed, the tab was shown again: it is deleting again');
-    routes.set(storageUrl, response(freeBody('done', { run: { groups: posted.groups, selected: 6, done: 6, removed: 6, removed_bytes: 8.2e9,
-        deleting: 0, deleting_bytes: 0, kept: [], free_before: 140e9, free_after: 149e9, stopped: false, error: null } })));
-    await timers.fire();
-    await settle();
-    assert.match(storageTray(mount).textContent, /Removed 8\.2 GB \(6 folders\)\.\s*140 GB free is now 149 GB/);
-    assert.doesNotMatch(storageTray(mount).textContent, /still being deleted/);
-    assert.equal(timers.polls(), 0);
-    assert.deepEqual(calls, [storageUrl, freeUrl, storageUrl, storageUrl, storageUrl, storageUrl]);
-});
-
-test('Storage tray says why a run did not start and stops a run on Stop', async (t) => {
-    const { mount, routes, calls, start, toasts, document } = openStorage(t);
-    routes.set(storageUrl, response(freeBody('ready', { groups: [freeGroup('work_folders', 6.8e9)] })));
-    start();
-    await settle();
-    routes.set(freeUrl, response({ ...freeBody('ready', { groups: [freeGroup('work_folders', 6.8e9)] }), started: false, reason: 'preview_outdated' }, 202));
-    const go = trayButton(mount, 'data-free-go');
-    const click = storageTray(mount).fire('click', { target: go });
-    await settle();
-    const dialog = document.body.querySelector('[role="dialog"]');
-    await dialog.parentElement.fire('click', { target: dialog.querySelector('[data-confirm-ok]') });
-    await click;
-    await settle();
-    assert.deepEqual(toasts(), ['Nothing was removed. The list changed; check again.']);
-    routes.set(storageUrl, response(freeBody('running', { total: 3, run: { groups: ['work_folders'], selected: 3, done: 1, removed: 0, removed_bytes: 0,
-        deleting: 1, deleting_bytes: 1e9, kept: [], free_before: 1e12, free_after: null, stopped: false, error: null } })));
-    const storage = start();
-    await settle();
-    routes.set(freeCancelUrl, (_url, init) => {
-        assert.equal(init.method, 'POST');
-        return response(freeBody('stopped', { run: { groups: ['work_folders'], selected: 3, done: 1, removed: 0, removed_bytes: 0, deleting: 1,
-            deleting_bytes: 1e9, kept: [], free_before: 1e12, free_after: 1.001e12, stopped: true, error: null } }), 202);
-    });
-    const stop = mount.querySelectorAll('[data-free-stop]').at(-1);
-    await stop.parentElement.parentElement.fire('click', { target: stop });
-    await settle();
-    assert.ok(calls.includes(freeCancelUrl));
-    assert.match(mount.querySelectorAll('[data-storage-tray]').at(-1).textContent, /Removed 0 bytes, then stopped\. The rest was left as it was\./);
-    storage.destroy();
 });
 
 test('Activity keeps a held Continue blocker readable without offering Pause or Resume (#1721)', async (t) => {

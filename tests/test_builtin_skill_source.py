@@ -376,19 +376,15 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.3.9" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.3" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("name,source,old_version", [
     ("telegram", "7f71fe8d29c975e25b35a235e1c821e1b547674f", "1.3.1"),
     ("telegram", "6014e8896dabe371f5c06cf8adc5dc9902f53c2d", "1.3.2"),
     ("telegram", "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76", "1.3.3"),
-    ("unix_computer_use", "ec3fc6e5b5ae5ee99a746b5e1a0f6343a41926d4", "0.4.2"),
-    ("unix_computer_use", "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d", "0.4.3"),
-    ("unix_computer_use", "9e2bd962903044a6516917bcb10a933b2d1acafd", "0.5.0"),
 ])
 def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, old_version):
     """Full preceding payload from history: the re-seed delivers the bundled bytes,
@@ -429,6 +425,59 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
         assert (state / path).read_bytes() == payload
     assert read_install_record(drive, name)["release"]["digest"] == skill.content_hash
     assert skill.review.gate_for(skill.content_hash)["blocking_reason"] == "trusted_source"
+
+
+@pytest.mark.parametrize("name,previous_release,previous_version", [
+    (name, 'd51b09bd61944f2e4d000f2fcce5e9a890f209fc', '0.1.0')
+    for name in ('live_conversation', 'gemini_live', 'grok_realtime', 'openai_realtime')
+] + [('live_conversation', '96816f122', '0.1.1'),
+     ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
+@pytest.mark.parametrize("edited", [False, True])
+def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
+                                                                               previous_version, edited):
+    from ouroboros.skill_install_record import read_install_record
+    from ouroboros.skill_loader import compute_content_hash, save_enabled
+    from tests.test_builtin_skill_platforms import git_payload
+
+    # The Unix release applies on macOS/Linux only; pin a host it applies to.
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "linux")
+    seeds, drive = env
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    git_payload(previous_release, f"skills/{name}", seeds / name)
+    assert _install(name, seeds, drive)["ok"]
+    installed = drive / "skills" / "native" / name
+    assert f"version: {previous_version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    save_enabled(drive, name, False, actor="owner_ui")
+    state = drive / "state" / "skills" / name
+    (state / "config.json").write_text('{"provider":"grok_realtime:grok"}\n', encoding="utf-8")
+    retained = {path: (state / path).read_bytes() for path in ("enabled.json", "config.json")}
+    previous_record = read_install_record(drive, name)
+    if edited:
+        with (installed / "plugin.py").open("a", encoding="utf-8") as stream:
+            stream.write("\n# The owner's local change must survive an app update.\n")
+    previous_hash = compute_content_hash(installed)
+
+    assert _reseed(repo / "skills", drive) == int(not edited)
+
+    if edited:
+        assert compute_content_hash(installed) == previous_hash
+        assert read_install_record(drive, name) == previous_record
+    else:
+        version = {'live_conversation': '0.1.32', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+                   'unix_computer_use': '0.7.1'}.get(name, '0.1.1')
+        assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+        assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
+        assert compute_content_hash(installed) != previous_hash
+        # Pin the files that stayed stale on the stand, not just the manifest.
+        paths = ["plugin.py"]
+        if name == "live_conversation":
+            paths += ["driver.py", "ui/call_settings.js"]
+        elif name == "openai_realtime":
+            paths += ["live.py"]
+        for path in paths:
+            assert (installed / path).read_bytes() == (repo / "skills" / name / path).read_bytes()
+    assert all((state / path).read_bytes() == value for path, value in retained.items())
+    assert _reseed(repo / "skills", drive) == 0
 
 
 # --- the one-time conversion gives existing launcher seeds their install record ------

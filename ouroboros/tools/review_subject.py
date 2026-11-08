@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import logging
 import os
@@ -335,6 +336,19 @@ class ManagedReviewSubject:
             body = _tree_delta_diff(self.repo_dir, base, self.staged_tree, width)
             self._render_cache[width] = body
         return f"{self.header()}\n\n{body}"
+
+
+def managed_material(bodies: tuple) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a managed-update resolution's
+    disclosure header in these branches (a delta, an empty delta, M0 missing) on both surfaces' nouns, with a body
+    rendered below it or not (``bodies``: what the delivery sends). Trees, counters and paths are data."""
+    return [ManagedReviewSubject(
+        repo_dir="⟨repo⟩", m0_tree="⟨m0⟩", staged_tree="⟨tree⟩", m0_missing_reason=reason, pre_update_sha="⟨head⟩",
+        target_sha="⟨target⟩", conflict_paths=("⟨path⟩",), diff=diff, name_status=(("M", "⟨path⟩"),),
+        full_candidate_paths=None, resolution_paths=1, fallback_full_diff=fallback, surface=surface,
+    ).header(body_rendered=rendered)
+        for fallback, reason, diff in ((False, "", "⟨diff⟩"), (False, "", ""), (True, "⟨why⟩", "⟨diff⟩"), (True, "", "⟨diff⟩"))
+        for surface in ("gate", "advisory") for rendered in bodies]
 
 
 def managed_review_subject(
@@ -714,6 +728,13 @@ class FrozenSubject:
     # never the gate's subject (``is_gate_subject``).
     at_head: bool = True
 
+    @functools.cached_property
+    def review_words(self):
+        """Parse this immutable subject once; each seat renders it to its own budget."""
+        from ouroboros.review_words import words_for_diff
+
+        return words_for_diff(self.review_root, self.diff_text)
+
     @property
     def review_root(self) -> str:
         """Where the reviewers READ: the isolated checkout, else the live root."""
@@ -1067,16 +1088,17 @@ def review_round_sha(frozen: FrozenSubject, *, rebuttal_sha: str = "", questions
                         base=frozen.parent_sha, head=frozen.spec.head, since_review=since_review)
 
 
-def review_reuse_key(frozen: FrozenSubject, *, rules_sha: str, layer: str, assigned: Any, enforcement: str,
+def review_reuse_key(frozen: FrozenSubject, *, layer: str, assigned: Any, enforcement: str,
                      contract_fp: str, round_sha: str = "") -> str:
-    """Identity (a): the settled-record reuse key of one subject under one set of
-    rules, one composition and one contract, in one logical round (``round_sha``,
+    """Identity (a): the settled-record reuse key of one subject under one checklist
+    layer, one composition and one contract, in one logical round (``round_sha``,
     identity b): a new rebuttal, question, goal, scope or revision pair makes a NEW
-    key — one more paid review of the same bytes; the identical request reuses."""
+    key — one more paid review of the same bytes; the identical request reuses. An
+    edited governance text is never a new key (``review_ledger.reuse_key_digest``)."""
     from ouroboros.review_ledger import reuse_key_digest
 
     return reuse_key_digest(surface=frozen.spec.surface, kind=frozen.spec.kind, root=frozen.spec.root,
-                            diff_sha=frozen.diff_sha, tree_sha=frozen.tree_sha, rules_sha=rules_sha, layer=layer,
+                            diff_sha=frozen.diff_sha, tree_sha=frozen.tree_sha, layer=layer,
                             assigned=assigned, enforcement=enforcement, contract_fp=contract_fp,
                             round_sha=round_sha)
 

@@ -234,8 +234,9 @@ def pids_with_env_marker(marker: str, pgid: int = 0, since_ticks: int = 0) -> "O
 
 
 # A member can fork between scans and its child inherits the token, so one quiet scan proves little:
-# `reap` needs `_REAP_QUIET_SCANS` scans in a row with nothing live and nothing undeterminable, and
-# FAILS if that has not happened by `_REAP_DEADLINE_SEC`.
+# `reap` needs `_REAP_QUIET_SCANS` scans in a row with nothing live and nothing undeterminable. A
+# scan past `_REAP_DEADLINE_SEC` that still shows a member FAILS; the clock never fails a quiet tree,
+# whose scans may simply be slow: a quiet scan gets its confirming one however late it ran.
 _REAP_QUIET_SCANS = 2
 _REAP_DEADLINE_SEC = 10.0
 _REAP_SETTLE_SEC = 0.05
@@ -250,10 +251,7 @@ def _containment_leak_reason(alive: List[int], undetermined: List[int]) -> str:
     if undetermined:
         parts.append("liveness could not be determined (the attributed process environment could not be "
                      "read): " + ", ".join(str(pid) for pid in undetermined))
-    detail = "; ".join(parts) or ("no member was visible in the last scan, but two consecutive "
-                                  "quiet scans were never reached, so nothing is proven gone")
-    return (f"the contained tree could not be proven gone within {_REAP_DEADLINE_SEC:.0f}s — "
-            f"{detail}")
+    return f"the contained tree could not be proven gone within {_REAP_DEADLINE_SEC:.0f}s — {'; '.join(parts)}"
 
 
 class ProcessContainer:
@@ -285,24 +283,31 @@ class ProcessContainer:
         self._setup_error = ""
         # Unique per instance: a nested preflight and its outer run never claim each other's.
         self._token = f"{CONTAINMENT_ENV_PREFIX}{uuid.uuid4().hex}"
+        # The same name after ``reap`` consumed it: what a record of a kept tree can prove gone later.
+        self.token = self._token
         self._protect_owner = lifeline
         self._watch_overload = overload
         self._lifeline = self._watch = None
         self._birth = ""
         self._protection_error = ""
+        # ``reap``'s first answer; ``None`` until it starts.
+        self._teardown: Optional[str] = None
 
     def containment_env(self) -> "dict[str, str]":
         """Environment entries that make a process and its descendants members. ``spawn`` applies
         these; a caller building its own env for ``Popen`` + ``adopt`` must merge them in."""
         return {self._token: "1"}
 
-    def spawn(self, argv: List[str], **popen_kwargs) -> subprocess.Popen:
+    def spawn(self, argv: List[str], *, background: bool = False, **popen_kwargs) -> subprocess.Popen:
         """``Popen`` the process already inside the container, with no gap. The token is merged into
         the caller's ``env`` (defaulting to the inherited one) BEFORE the process exists, so no
         descendant can start outside the membership. On Windows the root is created SUSPENDED too:
-        a descendant preceding the job assignment would survive terminate/close. ``adopt`` resumes."""
+        a descendant preceding the job assignment would survive terminate/close. ``adopt`` resumes.
+        ``background`` puts the root in the host's background priority class, which its whole tree
+        inherits: POSIX nice +10 set on the root's new process group right after it exists (argv stays
+        the caller's, no fork hook runs in a threaded owner), Windows ``BELOW_NORMAL_PRIORITY_CLASS``."""
         kwargs = dict(popen_kwargs)
-        group_kwargs = dict(_pl.subprocess_new_group_kwargs())
+        group_kwargs = dict(_pl.subprocess_new_group_kwargs(background=background))
         flags = int(kwargs.pop("creationflags", 0)) | int(group_kwargs.pop("creationflags", 0))
         kwargs.update(group_kwargs)
         env = kwargs.get("env")
@@ -318,10 +323,11 @@ class ProcessContainer:
             self._suspended = True
         if flags:
             kwargs["creationflags"] = flags
-        if self._protect_owner and not _pl.IS_WINDOWS:
-            from ouroboros.process_lifeline import ProcessLifeline
-            self._lifeline = ProcessLifeline(self._token)
         try:
+            if self._protect_owner and not _pl.IS_WINDOWS:
+                from ouroboros.process_lifeline import ProcessLifeline
+                self._lifeline = ProcessLifeline()
+                self._lifeline.start(self._token)
             if self._watch_overload:
                 from ouroboros.process_overload import OverloadWatch
                 from ouroboros.test_parallelism import nested_workers
@@ -337,6 +343,8 @@ class ProcessContainer:
         self._root = int(getattr(proc, "pid", 0) or 0)
         pgid = _pl.process_group_id(self._root)
         self._pgid = pgid if pgid and pgid == self._root else 0
+        if background:  # the root is still starting: everything it forks from here inherits the group's priority
+            _pl.lower_tree_priority(self._root, self._pgid)
         self._start_ticks = _pl._proc_start_ticks(self._root)
         self.adopt(proc)
         try:
@@ -348,7 +356,10 @@ class ProcessContainer:
                 self._watch.start()
         except BaseException:
             self.reap()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._teardown = self._teardown or "the root did not exit after its reap"
             raise
         return proc
 
@@ -469,32 +480,43 @@ class ProcessContainer:
             time.sleep(0.1)
 
     def reap(self) -> str:
-        """Stop protection, reap, and only then release the independent guardian."""
-        if self._watch is not None:
-            watch, self._watch = self._watch, None
-            try:
-                self._protection_error = watch.stop() or self._protection_error
-            except Exception as exc:
-                self._protection_error = f"overload watch stop unconfirmed: {exc}"
+        """Stop protection, reap, and only then release the independent guardian.
+
+        The first call is the answer. It consumes the token, root and group a later scan would
+        need, so a later call (the owner's, after ``spawn``'s own) repeats it: an empty rescan of
+        nothing is not evidence. A first call that never finished stays unconfirmed, though an
+        interrupt while the watch stops still reaches the tree and guardian cleanup below."""
+        if self._teardown is not None:
+            return self._teardown
+        self._teardown = "the container's first reap did not finish, so nothing is proven gone"
         error = ""
         try:
-            if self._protect_owner or self._watch_overload:
+            if self._watch is not None:
+                watch, self._watch = self._watch, None
                 try:
-                    self.stop_tree()
+                    self._protection_error = watch.stop() or self._protection_error
                 except Exception as exc:
-                    error = f"contained tree stop unconfirmed: {exc}"
-            try:
-                error = "; ".join(part for part in (error, self._reap()) if part)
-            except Exception as exc:
-                error = "; ".join(part for part in (error, f"container reap unconfirmed: {exc}") if part)
+                    self._protection_error = f"overload watch stop unconfirmed: {exc}"
         finally:
-            if self._lifeline is not None:
-                lifeline, self._lifeline = self._lifeline, None
+            try:
+                if self._protect_owner or self._watch_overload:
+                    try:
+                        self.stop_tree()
+                    except Exception as exc:
+                        error = f"contained tree stop unconfirmed: {exc}"
                 try:
-                    error = lifeline.finish(released=not error) or error
+                    error = "; ".join(part for part in (error, self._reap()) if part)
                 except Exception as exc:
-                    error = "; ".join(part for part in (error, f"lifeline release unconfirmed: {exc}") if part)
-        return "; ".join(part for part in (self._protection_error, error) if part)
+                    error = "; ".join(part for part in (error, f"container reap unconfirmed: {exc}") if part)
+            finally:
+                if self._lifeline is not None:
+                    lifeline, self._lifeline = self._lifeline, None
+                    try:
+                        error = lifeline.finish(released=not error) or error
+                    except Exception as exc:
+                        error = "; ".join(part for part in (error, f"lifeline release unconfirmed: {exc}") if part)
+        self._teardown = "; ".join(part for part in (self._protection_error, error) if part)
+        return self._teardown
 
     def _reap(self) -> str:
         """SCAN the container; return "" only when nothing of it is left, else why not. Detection,
@@ -523,18 +545,13 @@ class ProcessContainer:
         known: "set[int]" = {root} if root > 0 else set()
         deadline = time.monotonic() + _REAP_DEADLINE_SEC
         alive, undetermined, error = self._scan(token, pgid, known, True, since)  # the ONE sweep
-        last, quiet = (alive, undetermined), 0
+        quiet = 0
         while not error:
-            if alive or undetermined:
-                quiet, last = 0, (alive, undetermined)
-            else:
-                quiet += 1
+            quiet = 0 if alive or undetermined else quiet + 1
             if quiet >= _REAP_QUIET_SCANS:
                 return ""
-            if time.monotonic() >= deadline:
-                # The last NON-EMPTY scan, not the current one: a scan coming back empty just as the
-                # deadline passes would name no pid, under a remediation that says to kill them.
-                return _containment_leak_reason(*last)
+            if not quiet and time.monotonic() >= deadline:
+                return _containment_leak_reason(alive, undetermined)
             time.sleep(_REAP_SETTLE_SEC)
             alive, undetermined, error = self._scan(token, pgid, known, False, since)
         return error

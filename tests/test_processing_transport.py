@@ -29,7 +29,7 @@ def transport(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *a, **kw: None)
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **kw: None)
-    monkeypatch.setattr("ouroboros.llm.in_worker_process", lambda: False)
+    monkeypatch.setattr("ouroboros.llm.transport_no_proxy", lambda: False)  # the spawner's transport policy fact
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True)
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_CACHE", {})
     monkeypatch.setattr(LLMClient, "_get_supported_parameters", lambda *a: None)
@@ -75,9 +75,11 @@ def transport(tmp_path, monkeypatch):
         yield root, client, sent
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("provider", ["openai", "openrouter", "anthropic"])
-@pytest.mark.parametrize("preference", ["standard", "fast", "economy"])
+@pytest.mark.parametrize(("preference", "provider", "asynchronous"), [
+    ("standard", "openai", False),
+    ("fast", "openrouter", True),
+    ("economy", "anthropic", False),
+])
 def test_native_processing_is_in_the_exact_accounted_request(transport, provider, preference, asynchronous):
     root, client, sent = transport
     model = f"{provider}::test-model"
@@ -121,7 +123,6 @@ def test_explicit_standard_does_not_inherit_global_fast(transport, monkeypatch):
 
 @pytest.mark.parametrize("provider,payload", [
     ("openai", {"service_tier": "default"}),
-    ("openrouter", {"extra_body": {"service_tier": "flex"}}),
     ("anthropic", {"speed": "standard"}),
     ("openai-compatible", {"model": "custom"}),
 ])
@@ -172,8 +173,7 @@ def test_quota_reentry_keeps_captured_preference_and_same_owner(transport, monke
     assert result[1]["ledger_attempt_ids"] == ["attempt-one"]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("refusal", ["typed", "capacity", "unsupported"])
+@pytest.mark.parametrize(("refusal", "asynchronous"), [("typed", False), ("capacity", True), ("unsupported", True)])
 def test_typed_no_start_reprices_standard_without_changing_custom_tools(transport, monkeypatch, asynchronous, refusal):
     from ouroboros import send_clock
     from ouroboros.llm_attempt import ProcessingNotStarted

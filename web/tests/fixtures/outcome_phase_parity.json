@@ -12,7 +12,7 @@
       "name": "single saved file follows author stop rationale",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The requested change is saved."}, "mutation_attribution": {"uncommitted_remainder": {"state": "known", "count": 1, "paths_omitted": 1}}}}},
       "phase": "done", "headline": "Done",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · The requested change is saved · 1 uncommitted file remains in the saved candidate.",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The requested change is saved · 1 uncommitted file remains in the saved candidate.",
       "exact_clause": true
     },
     {
@@ -20,6 +20,20 @@
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok", "mutation_attribution": {"uncommitted_remainder": {"state": "unknown", "count": null}}}}},
       "phase": "done", "headline": "Done",
       "acceptance_clause": "Uncommitted files in the saved candidate could not be checked.",
+      "exact_clause": true
+    },
+    {
+      "name": "what an evolution cleanup moved keeps Done and states the host's words",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "evolution_cleanup": {"status": "stashed_dirty", "line": "Evolution cleanup moved local changes to a Git stash", "stash_oids": ["abc123"]}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "Evolution cleanup moved local changes to a Git stash.",
+      "exact_clause": true
+    },
+    {
+      "name": "a late cleanup after a campaign Stop keeps Stopped beside its cancel cause",
+      "record": {"status": "cancelled", "reason_code": "cancelled", "cancel_origin": {"source": "evolution_stop", "reason": "disabled via owner chat"}, "outcome_axes": {"execution": {"status": "cancelled", "evolution_cleanup": {"status": "reset_failed", "line": "Evolution cleanup moved local changes to a Git stash, but the reset to the cycle's starting commit failed", "stash_oids": ["abc123"]}}}},
+      "phase": "cancelled", "headline": "Stopped",
+      "acceptance_clause": "evolution_stop · disabled via owner chat · Evolution cleanup moved local changes to a Git stash, but the reset to the cycle's starting commit failed.",
       "exact_clause": true
     },
     {
@@ -40,10 +54,10 @@
       "acceptance_clause": "A tool this task used failed and nothing recovered it · The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
     },
     {
-      "name": "receipt caveat and material grounding warning coexist without changing health",
+      "name": "a stored warning of the retired tool-count check stays legible beside the receipt caveat",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "warning": "receipt_absent", "warnings": ["receipt_absent", "expected_output_ungrounded"]}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran · The declared output has no recorded tool work or structured final answer to support it."
+      "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran · A retired check recorded no tool calls or structured answer; it does not assess the written result."
     },
     {
       "name": "partial result remains visible beside earlier approval",
@@ -290,7 +304,7 @@
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "acceptance reason review_degraded says its own sentence",
@@ -514,7 +528,7 @@
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "awaiting"}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Tool errors remain in the record and the result has not been evaluated."
+      "acceptance_clause": "Tool errors remain in the record."
     },
     {
       "name": "an awaited plan review does not hide missing artifacts",
@@ -528,7 +542,7 @@
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "source": "author_acceptance", "reason": "author_finish"}, "review": {"status": "awaiting", "eligibility": "review_in_flight", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "enforcement": "advisory", "author_action": "finish", "author_disposition": {"disposition": "accepted", "rationale": "Main submitted this complete response for delivery.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-20T00:00:00+00:00", "source": "author_final_response"}}}}},
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "an awaited acceptance panel with no author decision is still not a warning",
@@ -608,7 +622,7 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "current informed Advisory author finish preserves raw critic degraded",
@@ -644,7 +658,7 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "Blocking saved plan cap remains unfinished through host normalization, and the card says why it was held (a held task never reads as work that went on)",
@@ -692,14 +706,14 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted."
+      "acceptance_clause": "Ouroboros stopped with unfinished work."
     },
     {
       "name": "an explicit task-acceptance author stop is Failed and the row carries the agent's own reason beside the typed sentence (TZ-2 C4)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review", "reason": "author_stop", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_stop", "author_action": "stop", "enforcement": "advisory", "rationale": "reviewer prose that never reaches the row", "author_disposition": {"disposition": "", "action": "stop", "rationale": "Not ready: the export endpoint still fails on empty input.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-25T00:00:00+00:00", "source": "author"}}}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · Not ready: the export endpoint still fails on empty input."
+      "acceptance_clause": "Ouroboros stopped with unfinished work · Not ready: the export endpoint still fails on empty input."
     },
     {
       "name": "an author stop recorded after the review rounds ran out keeps its true terminal cause and still carries the agent's own reason",
@@ -756,6 +770,34 @@
       "phase": "warn",
       "headline": "Done with warnings",
       "acceptance_clause": "The plan review was never closed; the work went on with what the reviewers said."
+    },
+    {
+      "name": "an author's stop over a held plan objection names the stop and the review still open, never work that went on",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "objections_open", "task_completion": {"action": "stop", "rationale": "The objection stands; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
+      "phase": "cancelled",
+      "headline": "Stopped",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered."
+    },
+    {
+      "name": "an author's stop over an unreadable plan record names the stop and keeps the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "unreadable", "task_completion": {"action": "stop", "rationale": "The plan record cannot be read; stopping with the draft."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}},
+      "phase": "cancelled",
+      "headline": "Stopped",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The plan record cannot be read; stopping with the draft · The plan record could not be read, so the state of the plan review is unknown."
+    },
+    {
+      "name": "a rail over an unreadable plan record keeps its own cause and the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "round_limit", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "best_effort", "reason_code": "round_limit", "plan_review": "unreadable"}, "review": {"status": "skipped"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The task hit its round limit before it could finish cleanly · The plan record could not be read, so the state of the plan review is unknown."
+    },
+    {
+      "name": "a clean finish over an unreadable plan record (Cyber Pro) is Done and keeps the plan review's state unknown",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "unreadable"}, "review": {"status": "skipped"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "The plan record could not be read, so the state of the plan review is unknown."
     },
     {
       "name": "an open plan review is stated beside the deferred children that ended the task",
@@ -818,7 +860,7 @@
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "acceptance_incident": {"incident_id": "acceptance-preparation:1f2e3d4c", "status": "resolved", "stage": "preparation", "attempts": 1}}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
     },
     {
       "name": "the round-limit rail says its own sentence on a best-effort finish",
@@ -854,6 +896,27 @@
       "phase": "error",
       "headline": "Failed",
       "acceptance_clause": "The task outgrew its context before it could finish cleanly."
+    },
+    {
+      "name": "a window that cannot hold the task's context says its own sentence",
+      "record": {"status": "failed", "reason_code": "context_capacity", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "context_capacity"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "This route's window cannot hold the task's context."
+    },
+    {
+      "name": "an unreadable handbook the task itself requires says its own sentence",
+      "record": {"status": "failed", "reason_code": "required_reference_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "required_reference_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The handbook this task requires could not be read."
+    },
+    {
+      "name": "a helper the host could not start says why in words, not its code",
+      "record": {"status": "failed", "reason_code": "subagent_executor_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "subagent_executor_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "This helper could not start because its route was unavailable; it spent nothing."
     },
     {
       "name": "a reaped task names its absolute ceiling in owner words",
@@ -953,7 +1016,7 @@
       "headline": "Failed",
       "acceptance_clause": "The deep self-review stopped on an error."
     },
-    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · The export still fails on empty input."},
+    {"name": "generic unfinished stop states its own rationale without an acceptance decision", "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "cancelled", "headline": "Stopped", "acceptance_clause": "Ouroboros stopped with unfinished work · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger failure", "record": {"status": "failed", "reason_code": "provider_failure", "outcome_axes": {"execution": {"status": "infra_failed", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "error", "headline": "Failed", "acceptance_clause": "The model provider failed to answer, so the task could not finish · The export still fails on empty input."},
     {"name": "a generic stop preserves a stronger cancellation", "record": {"status": "cancelled", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "cancelled", "task_completion": {"action": "stop", "rationale": "The **export** still fails on empty input."}}, "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}, "review": {"status": "skipped"}}}, "phase": "cancelled", "headline": "Stopped", "acceptance_clause": "The export still fails on empty input."},
     {
@@ -1058,85 +1121,123 @@
       "name": "a residual warning names the failed data query, never its tool name or text",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "query_data", "status": "error", "exit_code": null, "signal": null, "result": "{\"code\":\"query_failed\",\"message\":\"selected bytes exceed max_bytes\"}"}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A data query failed; the result has not been evaluated."
+      "acceptance_clause": "A data query failed."
+    },
+    {
+      "name": "a failed read stays in the details: the clause names the failed command and counts no read",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "read_file", "status": "argument_error", "exit_code": null, "signal": null, "result": "", "read_only": true}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A command returned exit code 2."
     },
     {
       "name": "a cosmetic script exit is the subject when nothing stayed unresolved",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_script", "status": "non_zero_exit", "exit_code": 1, "signal": null, "result": "Traceback (most recent call last):"}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A script returned exit code 1; the result has not been evaluated."
+      "acceptance_clause": "A script returned exit code 1."
     },
     {
       "name": "an unresolved error is named before cosmetic ones, and the rest are counted",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "read_file", "status": "error", "exit_code": null, "signal": null, "result": ""}, {"tool": "list_files", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A file read failed, plus 2 more tool errors; the result has not been evaluated."
+      "acceptance_clause": "A file read failed, plus 2 more tool errors."
     },
     {
       "name": "one more error reads in the singular",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}, {"tool": "run_command", "status": "non_zero_exit", "exit_code": 1, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A command returned exit code 2, plus 1 more tool error; the result has not been evaluated."
+      "acceptance_clause": "A command returned exit code 2, plus 1 more tool error."
     },
     {
       "name": "a full list of twenty claims no exact count",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A command timed out, plus more tool errors; the result has not been evaluated."
+      "acceptance_clause": "A command timed out, plus more tool errors."
     },
     {
       "name": "a command stopped by a signal names the signal",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": null, "signal": 9, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A command was stopped by signal 9; the result has not been evaluated."
+      "acceptance_clause": "A command was stopped by signal 9."
     },
     {
       "name": "a tool outside the noun table reads as a tool step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "mcp_gitlab__get_commit", "status": "mcp_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A tool step failed; the result has not been evaluated."
+      "acceptance_clause": "A tool step failed."
     },
     {
       "name": "an invalid call names what was called",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "finish_task", "status": "argument_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A finish request was called with invalid arguments; the result has not been evaluated."
+      "acceptance_clause": "A finish request was called with invalid arguments."
     },
     {
       "name": "the list_files noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "list_files", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A folder listing failed; the result has not been evaluated."
+      "acceptance_clause": "A folder listing failed."
     },
     {
       "name": "the github_read noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_read", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A GitHub read failed; the result has not been evaluated."
+      "acceptance_clause": "A GitHub read failed."
     },
     {
       "name": "the query_code noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "query_code", "status": "argument_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A code search was called with invalid arguments; the result has not been evaluated."
+      "acceptance_clause": "A code search was called with invalid arguments."
     },
     {
       "name": "the search_code noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "search_code", "status": "timeout", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A code search timed out; the result has not been evaluated."
+      "acceptance_clause": "A code search timed out."
     },
     {
       "name": "the pr_merge noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "pr_merge", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A pull request merge failed; the result has not been evaluated."
+      "acceptance_clause": "A pull request merge failed."
     },
     {
       "name": "the review_change noun names its failed step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "review_change", "status": "argument_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "A review request was called with invalid arguments; the result has not been evaluated."
+      "acceptance_clause": "A review request was called with invalid arguments."
+    },
+    {
+      "name": "a historical explicit author stop keeps the non-FAIL acceptance decision cause",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {
+            "status": "ok",
+            "task_completion": {
+              "action": "stop",
+              "rationale": "Work remains."
+            }
+          },
+          "objective": {
+            "status": "fail",
+            "source": "task_completion",
+            "reason": "author_stop"
+          },
+          "review": {
+            "status": "skipped",
+            "acceptance_decision": {
+              "status": "finalized_unaccepted",
+              "reason": "open_obligations",
+              "enforcement": "advisory"
+            }
+          }
+        }
+      },
+      "phase": "cancelled",
+      "headline": "Stopped",
+      "acceptance_clause": "Ouroboros stopped with unfinished work · The answer was delivered with reviewer requests still open · Work remains."
     }
   ]
 }

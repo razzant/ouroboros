@@ -452,6 +452,109 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "carried_preparing": {
+   "works": [
+    {
+     "work_id": "cp",
+     "room": 1,
+     "name": "",
+     "episode": {
+      "task_id": "cp",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "preparing",
+     "because": [
+      {
+       "code": "turn_context_building",
+       "text": "Building context"
+      }
+     ],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "cp"
+      ],
+      "states": {
+       "cp": {
+        "activity": "working",
+        "transition": "none",
+        "call": "preparing",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "turn_context_building",
+          "text": "Building context"
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "direct",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "cp"
+      },
+      {
+       "action": "hurry",
+       "target": "cp"
+      },
+      {
+       "action": "pause",
+       "target": "cp"
+      },
+      {
+       "action": "stop",
+       "target": "cp",
+       "scope": "cascade"
+      }
+     ],
+     "client_message_id": "cm-carried"
+    }
+   ],
+   "rooms": {
+    "1": {
+     "activity": "working",
+     "transition": "none",
+     "call": "preparing",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "cp"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 0,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "direct_requested": {
    "works": [
     {
@@ -1124,7 +1227,7 @@
      "because": [
       {
        "code": "queued",
-       "text": "Waiting for a free worker"
+       "text": ""
       }
      ],
      "tails": [],
@@ -1149,7 +1252,7 @@
         "because": [
          {
           "code": "queued",
-          "text": "Waiting for a free worker"
+          "text": ""
          }
         ],
         "tails": []
@@ -1962,6 +2065,399 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "sleeping_on_paused_helper": {
+   "works": [
+    {
+     "work_id": "sw",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "sw",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until the task it chose finishes or a message arrives",
+       "wake": [
+        {
+         "kind": "tasks",
+         "count": 1
+        },
+        {
+         "kind": "mail"
+        }
+       ]
+      }
+     ],
+     "tails": [
+      {
+       "code": "awaited_helpers_mind",
+       "text": "1 helper it waits for is paused until Ouroboros resumes it",
+       "count": 1,
+       "ids": [
+        "sw-c"
+       ],
+       "kind": "helper",
+       "state": "held"
+      }
+     ],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "sw",
+       "sw-c"
+      ],
+      "states": {
+       "sw": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until the task it chose finishes or a message arrives",
+          "wake": [
+           {
+            "kind": "tasks",
+            "count": 1
+           },
+           {
+            "kind": "mail"
+           }
+          ]
+         }
+        ],
+        "tails": []
+       },
+       "sw-c": {
+        "activity": "paused",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "mind",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "awaiting_selection",
+          "text": "Waiting for Ouroboros or you to resume it"
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "sw"
+      },
+      {
+       "action": "hurry",
+       "target": "sw"
+      },
+      {
+       "action": "pause",
+       "target": "sw"
+      },
+      {
+       "action": "stop",
+       "target": "sw",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "sw"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "sleeping_on_named_helper": {
+   "works": [
+    {
+     "work_id": "sn",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "sn",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until Draft the release notes finishes or writes",
+       "wake": [
+        {
+         "kind": "task_or_writes",
+         "name": "Draft the release notes"
+        }
+       ]
+      }
+     ],
+     "tails": [
+      {
+       "code": "helpers_running",
+       "text": "1 helper still working",
+       "count": 1,
+       "ids": [
+        "sn-c"
+       ],
+       "kind": "helper",
+       "state": "live"
+      }
+     ],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "sn",
+       "sn-c"
+      ],
+      "states": {
+       "sn": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until Draft the release notes finishes or writes",
+          "wake": [
+           {
+            "kind": "task_or_writes",
+            "name": "Draft the release notes"
+           }
+          ]
+         }
+        ],
+        "tails": []
+       },
+       "sn-c": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "sn"
+      },
+      {
+       "action": "hurry",
+       "target": "sn"
+      },
+      {
+       "action": "pause",
+       "target": "sn"
+      },
+      {
+       "action": "stop",
+       "target": "sn",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "sn"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "sleeping_until_time": {
+   "works": [
+    {
+     "work_id": "st",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "st",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "sleeping",
+       "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+       "wake": [
+        {
+         "kind": "mail"
+        },
+        {
+         "kind": "time",
+         "at": "2026-10-17T18:05:00+00:00"
+        }
+       ]
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "st"
+      ],
+      "states": {
+       "st": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "sleeping",
+          "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+          "wake": [
+           {
+            "kind": "mail"
+           },
+           {
+            "kind": "time",
+            "at": "2026-10-17T18:05:00+00:00"
+           }
+          ]
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "stop",
+       "target": "st",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "st"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "unknown": {
    "works": [
     {
@@ -2382,6 +2878,10 @@
      "since": null,
      "controls": [
       {
+       "action": "pause",
+       "target": "x"
+      },
+      {
        "action": "stop",
        "target": "x",
        "scope": "cascade"
@@ -2660,6 +3160,512 @@
    },
    "works_complete": true,
    "works_gaps": []
+  },
+  "paused_resume_refused": {
+   "works": [
+    {
+     "work_id": "rr",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "rr",
+      "live": true
+     },
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "paused_by_owner",
+       "text": "You paused it",
+       "since": "2026-10-17T15:00:00Z",
+       "by": {
+        "actor": "owner",
+        "text": "",
+        "at": "2026-10-17T15:00:00Z"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "mind",
+     "stop": {
+      "state": "paused",
+      "by": {
+       "actor": "owner",
+       "text": "",
+       "at": "2026-10-17T15:00:00Z"
+      },
+      "requested_at": "2026-10-17T15:00:00Z",
+      "fence_id": "fence-rr",
+      "cause": "pause",
+      "release": "resume",
+      "ui_code": "owner_paused",
+      "scope": "tree"
+     },
+     "refusal": {},
+     "last_resume": {
+      "at": "2026-10-17T15:05:00Z",
+      "by": {
+       "actor": "owner"
+      },
+      "error": "predecessor_writers_unsettled",
+      "text": "task h1 is queued to run; task h2 is queued to run"
+     },
+     "members": {
+      "ids": [
+       "rr"
+      ],
+      "states": {
+       "rr": {
+        "activity": "paused",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "mind",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "paused_by_owner",
+          "text": "You paused it",
+          "since": "2026-10-17T15:00:00Z",
+          "by": {
+           "actor": "owner",
+           "text": "",
+           "at": "2026-10-17T15:00:00Z"
+          }
+         }
+        ],
+        "tails": [],
+        "last_resume": {
+         "at": "2026-10-17T15:05:00Z",
+         "by": {
+          "actor": "owner"
+         },
+         "error": "predecessor_writers_unsettled",
+         "text": "task h1 is queued to run; task h2 is queued to run"
+        }
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "pause",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "resume",
+       "target": "rr"
+      },
+      {
+       "action": "stop",
+       "target": "rr",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "pause",
+     "confirmed": true,
+     "works": [
+      "rr"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 0,
+     "paused": 1,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "saved_resume_refused": {
+   "works": [
+    {
+     "work_id": "sr",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "sr",
+      "live": true
+     },
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "saved_on_stop",
+       "text": "Saved when the app stopped",
+       "since": "2026-10-17T14:00:00Z"
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [
+      {
+       "kind": "action",
+       "task_id": "sr",
+       "code": "saved_on_stop"
+      }
+     ],
+     "release": "owner",
+     "stop": {
+      "reason": "saved_work_hold",
+      "release": "resume",
+      "held_at": "2026-10-17T14:00:00Z",
+      "by": {
+       "actor": "host",
+       "task_id": "",
+       "text": "",
+       "at": "2026-10-17T14:00:00Z"
+      },
+      "cause": "app_stop",
+      "ui_code": "saved_work_hold",
+      "scope": "member"
+     },
+     "refusal": {},
+     "last_resume": {
+      "at": "2026-10-17T15:05:00Z",
+      "by": {
+       "actor": "ouroboros"
+      },
+      "error": "predecessor_writers_unsettled",
+      "text": "task h1 is queued to run"
+     },
+     "members": {
+      "ids": [
+       "sr"
+      ],
+      "states": {
+       "sr": {
+        "activity": "paused",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "mind",
+        "confirmed": true,
+        "turn": [
+         {
+          "kind": "action",
+          "task_id": "sr",
+          "code": "saved_on_stop"
+         }
+        ],
+        "because": [
+         {
+          "code": "saved_on_stop",
+          "text": "Saved when the app stopped",
+          "since": "2026-10-17T14:00:00Z"
+         }
+        ],
+        "tails": [],
+        "last_resume": {
+         "at": "2026-10-17T15:05:00Z",
+         "by": {
+          "actor": "ouroboros"
+         },
+         "error": "predecessor_writers_unsettled",
+         "text": "task h1 is queued to run"
+        }
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "pause",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "resume",
+       "target": "sr"
+      },
+      {
+       "action": "stop",
+       "target": "sr",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "turn": [
+      {
+       "work_id": "sr",
+       "kind": "action",
+       "task_id": "sr",
+       "code": "saved_on_stop"
+      }
+     ],
+     "amber": true,
+     "mark": "pause",
+     "confirmed": true,
+     "works": [
+      "sr"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 0,
+     "paused": 1,
+     "unknown": 0
+    },
+    "turn": 1,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "paused_resume_refused_earlier": {
+   "works": [
+    {
+     "work_id": "re",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "re",
+      "live": true
+     },
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "paused_by_owner",
+       "text": "You paused it",
+       "since": "2026-10-17T15:00:00Z",
+       "by": {
+        "actor": "owner",
+        "text": "",
+        "at": "2026-10-17T15:00:00Z"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "mind",
+     "stop": {
+      "state": "paused",
+      "by": {
+       "actor": "owner",
+       "text": "",
+       "at": "2026-10-17T15:00:00Z"
+      },
+      "requested_at": "2026-10-17T15:00:00Z",
+      "fence_id": "fence-re",
+      "cause": "pause",
+      "release": "resume",
+      "ui_code": "owner_paused",
+      "scope": "tree"
+     },
+     "refusal": {},
+     "members": {
+      "ids": [
+       "re"
+      ],
+      "states": {
+       "re": {
+        "activity": "paused",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "mind",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "paused_by_owner",
+          "text": "You paused it",
+          "since": "2026-10-17T15:00:00Z",
+          "by": {
+           "actor": "owner",
+           "text": "",
+           "at": "2026-10-17T15:00:00Z"
+          }
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "pause",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "resume",
+       "target": "re"
+      },
+      {
+       "action": "stop",
+       "target": "re",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "paused",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "pause",
+     "confirmed": true,
+     "works": [
+      "re"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 0,
+     "paused": 1,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "continue_start_refused": {
+   "works": [
+    {
+     "work_id": "ps",
+     "room": 42,
+     "name": "Finish the saved release",
+     "episode": {
+      "task_id": "cs",
+      "live": true
+     },
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "start_refused",
+       "text": "Continue tries to start again by itself",
+       "since": "2026-10-17T15:05:00Z"
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "last_resume": {
+      "at": "2026-10-17T15:05:00Z",
+      "by": {
+       "actor": "host"
+      },
+      "error": "accounting_unavailable",
+      "text": "accounting unavailable"
+     },
+     "members": {
+      "ids": [
+       "cs"
+      ],
+      "states": {
+       "cs": {
+        "activity": "waiting",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "start_refused",
+          "text": "Continue tries to start again by itself",
+          "since": "2026-10-17T15:05:00Z"
+         }
+        ],
+        "tails": [],
+        "last_resume": {
+         "at": "2026-10-17T15:05:00Z",
+         "by": {
+          "actor": "host"
+         },
+         "error": "accounting_unavailable",
+         "text": "accounting unavailable"
+        }
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "stop",
+       "target": "cs",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "waiting",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "ps"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 0,
+     "waiting": 1,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
   }
  },
  "reasons": {
@@ -2713,6 +3719,9 @@
    "1": "Continue starts when the external run of the earlier attempt finishes",
    "3": "Continue starts when 3 external runs of the earlier attempt finish"
   },
+  "start_refused": {
+   "": "Continue tries to start again by itself"
+  },
   "helpers_running": {
    "1": "1 helper still working",
    "3": "3 helpers still working"
@@ -2734,7 +3743,7 @@
    "": "Waiting for Project verification"
   },
   "queued": {
-   "": "Waiting for a free worker"
+   "": ""
   },
   "review_work_finishing": {
    "": "Review work finishing"
@@ -2742,6 +3751,18 @@
   "external_runs_unconfirmed": {
    "1": "1 external run may still be running",
    "3": "3 external runs may still be running"
+  },
+  "awaited_helpers_mind": {
+   "1": "1 helper it waits for is paused until Ouroboros resumes it",
+   "3": "3 helpers it waits for are paused until Ouroboros resumes them"
+  },
+  "awaited_helpers_owner": {
+   "1": "1 helper it waits for is paused until you resume it",
+   "3": "3 helpers it waits for are paused until you resume them"
+  },
+  "awaited_helpers_paused": {
+   "1": "1 helper it waits for is paused",
+   "3": "3 helpers it waits for are paused"
   },
   "turn_admitted": {
    "": "Setting up the turn"
@@ -2754,6 +3775,210 @@
   },
   "turn_context_built": {
    "": "Context ready"
+  },
+  "stop_requested": {
+   "": "Stop requested: it ends at its next step"
+  }
+ },
+ "sleeps": {
+  "task": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "task_unnamed": {
+   "code": "sleeping",
+   "text": "Sleeping until the task it chose finishes",
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 1
+    }
+   ]
+  },
+  "tasks": {
+   "code": "sleeping",
+   "text": "Sleeping until one of 3 tasks finishes",
+   "wake": [
+    {
+     "kind": "tasks",
+     "count": 3
+    }
+   ]
+  },
+  "all_tasks": {
+   "code": "sleeping",
+   "text": "Sleeping until all 2 tasks it chose finish",
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    }
+   ]
+  },
+  "run": {
+   "code": "sleeping",
+   "text": "Sleeping until its external run finishes",
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 1
+    }
+   ]
+  },
+  "runs": {
+   "code": "sleeping",
+   "text": "Sleeping until one of 3 external runs finishes",
+   "wake": [
+    {
+     "kind": "runs",
+     "count": 3
+    }
+   ]
+  },
+  "service": {
+   "code": "sleeping",
+   "text": "Sleeping until a service it started stops",
+   "wake": [
+    {
+     "kind": "service"
+    }
+   ]
+  },
+  "reviewer": {
+   "code": "sleeping",
+   "text": "Sleeping until a reviewer answers",
+   "wake": [
+    {
+     "kind": "reviewer"
+    }
+   ]
+  },
+  "sender": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes writes",
+   "wake": [
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "sender_unnamed": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives",
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "mail": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives",
+   "wake": [
+    {
+     "kind": "mail"
+    }
+   ]
+  },
+  "time_only": {
+   "code": "sleeping",
+   "text": "Sleeping until 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "time": {
+   "code": "sleeping",
+   "text": "Sleeping until a message arrives or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "mail"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "task_and_time": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "task_and_sender": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or writes",
+   "wake": [
+    {
+     "kind": "task_or_writes",
+     "name": "Draft the release notes"
+    }
+   ]
+  },
+  "task_and_sender_and_time": {
+   "code": "sleeping",
+   "text": "Sleeping until Draft the release notes finishes or writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "task_or_writes",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "every_kind": {
+   "code": "sleeping",
+   "text": "Sleeping until all 2 tasks it chose finish or its external run finishes or a service it started stops or a reviewer answers or Draft the release notes writes or 2026-10-17T18:05:00+00:00",
+   "wake": [
+    {
+     "kind": "all_tasks",
+     "count": 2
+    },
+    {
+     "kind": "runs",
+     "count": 1
+    },
+    {
+     "kind": "service"
+    },
+    {
+     "kind": "reviewer"
+    },
+    {
+     "kind": "sender",
+     "name": "Draft the release notes"
+    },
+    {
+     "kind": "time",
+     "at": "2026-10-17T18:05:00+00:00"
+    }
+   ]
+  },
+  "unrecorded": {
+   "code": "sleeping",
+   "text": "Sleeping until it is woken"
   }
  }
 }

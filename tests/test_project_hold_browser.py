@@ -17,7 +17,7 @@ from tests.test_project_admission_refusal_browser import (
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "same-id-project-wait"
 WAIT = "Waiting for Project verification"
 
@@ -133,11 +133,15 @@ def test_project_hold_reload_reconnect_and_automatic_same_id_recovery(
                     record(label, {"detail": detail, "census": census, "panel": panel.inner_text(),
                                    "main": page.locator("#chat-messages").inner_text()})
                     page.screenshot(path=str(evidence / f"{label}.png"))
-                # The real queue view provides the explanation and existing Stop control.
+                # The real queue view provides the explanation and existing Stop control. Its row is titled by the run's
+                # name, the one its card shows (the census row's suggested_name), never by its whole order (#2886
+                # 2a1db3425, 95c39ab23, owner seed S2).
+                name = row["suggested_name"]
                 page.locator('[data-nav-page="dashboard"]').click()
                 page.locator('[data-dashboard-tab="activity"]').click()
-                held_row = page.locator(".activity-row").filter(has_text=text)
+                held_row = page.locator(".activity-row").filter(has=page.locator(".activity-name", has_text=name))
                 held_row.wait_for(state="visible")
+                assert held_row.locator(".activity-name").inner_text() == name
                 assert WAIT in held_row.inner_text()
                 assert held_row.locator('[data-act="task-control"]').is_visible()
                 record("activity", held_row.inner_text())

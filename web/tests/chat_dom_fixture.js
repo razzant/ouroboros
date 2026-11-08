@@ -110,6 +110,7 @@ export class ElementStub {
     after(node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertAdjacentElement(_position, node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as in a DOM: a node put before itself stays where it is
         if (node?.isDocumentFragment) {
             for (const child of [...node.children]) this.insertBefore(child, before);
             return node;
@@ -131,6 +132,13 @@ export class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
+    get previousElementSibling() { return this.#sibling(-1); }
+    get nextElementSibling() { return this.#sibling(1); }
+    #sibling(step) {
+        const list = (this.parentNode?.children || []).filter((child) => child.nodeType !== 3);
+        const index = list.indexOf(this);
+        return index < 0 ? null : list[index + step] || null;
+    }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
     get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
     get firstChild() { return this.children[0] || null; }

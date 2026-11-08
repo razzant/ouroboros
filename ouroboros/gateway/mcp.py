@@ -58,6 +58,8 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
     """POST /api/mcp/refresh — refresh one or all servers."""
     try:
         body: Dict[str, Any] = await request_json_or(request, {})
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         server_id = canonical_server_id(body.get("server_id") or "")
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
@@ -71,12 +73,66 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
         return json_error(f"{type(exc).__name__}: MCP refresh failed")
 
 
+def _request_base(request: Request) -> str:
+    """Where this browser reached the server (its Origin, the deployment prefix kept): the sign-in returns there."""
+    origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+    return origin.rstrip("/") + str(request.scope.get("root_path") or "")
+
+
+async def api_mcp_sign_in(request: Request) -> JSONResponse:
+    """POST /api/mcp/sign-in — one step of a remote server's sign-in (``mcp_oauth``); ``complete`` lists it."""
+    from ouroboros import mcp_oauth
+
+    body = await request_json_or(request, None)
+    if not isinstance(body, dict) or body.get("action") not in ("begin", "complete", "sign_out"):
+        return json_error("supply action begin, complete or sign_out", 400)
+    try:
+        if body.get("returned_url"):
+            body = {**body, **mcp_oauth.parse_return(body["returned_url"])}
+        state = str(body.get("state") or "")
+        server_id = (mcp_oauth.server_of(state) if body["action"] == "complete"
+                     else canonical_server_id(body.get("server_id") or ""))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    await asyncio.to_thread(_ensure_configured)
+    manager = get_manager()
+    cfg = manager.server_config(server_id)
+    if cfg is None or not mcp_oauth.applies(cfg):
+        return json_error(f"no remote MCP server {server_id!r} that signs in", 404)
+
+    def run(step):  # its own loop on a worker thread: the sign-in's file lock never blocks this one
+        return asyncio.to_thread(asyncio.run, step)
+
+    try:
+        if body["action"] == "begin":
+            result = await run(mcp_oauth.begin(cfg, return_base=_request_base(request),
+                                               client_id=str(body.get("client_id") or ""),
+                                               client_secret=str(body.get("client_secret") or "")))
+        elif body["action"] == "complete":
+            result = await run(mcp_oauth.complete(
+                cfg, state=state, code=str(body.get("code") or ""), iss=body.get("iss"),
+                error=str(body.get("error") or ""), error_description=str(body.get("error_description") or "")))
+            listing = await asyncio.to_thread(manager.refresh_server, cfg.id)
+            result["listing"] = {key: listing[key] for key in ("ok", "tool_count", "error") if key in listing}
+        else:
+            result = await run(mcp_oauth.sign_out(cfg))
+        return JSONResponse({"ok": True, **result})
+    except mcp_oauth.MCPAuthRequired as exc:
+        return JSONResponse({"ok": False, "server": cfg.id, "code": exc.code, "reason": exc.reason,
+                             "error": exc.detail or exc.reason})
+    except Exception as exc:
+        log.exception("api_mcp_sign_in failed")
+        return json_error(f"{type(exc).__name__}: MCP sign-in failed")
+
+
 async def api_mcp_test(request: Request) -> JSONResponse:
     """Probe the edited candidate with the same URL rehydration as Settings."""
     from ouroboros.gateway.secret_rows import MCPSecretIdentityAmbiguous, rehydrate_mcp_servers as _rehydrate_mcp_servers_payload
 
     try:
         body: Dict[str, Any] = await request_json_or(request, {})
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
         server_id = canonical_server_id(body.get("server_id") or "")
@@ -145,10 +201,11 @@ async def api_mcp_import_preview(request: Request) -> JSONResponse:
 
 
 def mcp_routes() -> list[Route]:
-    """The MCP family: saved status and refresh, the draft Test and the import preview."""
+    """The MCP family: saved status and refresh, a remote server's sign-in, the draft Test and the import preview."""
     return [
         Route("/api/mcp/status", endpoint=api_mcp_status, methods=["GET"]),
         Route("/api/mcp/refresh", endpoint=api_mcp_refresh, methods=["POST"]),
+        Route("/api/mcp/sign-in", endpoint=api_mcp_sign_in, methods=["POST"]),
         Route("/api/mcp/test", endpoint=api_mcp_test, methods=["POST"]),
         Route("/api/mcp/import/preview", endpoint=api_mcp_import_preview, methods=["POST"]),
     ]

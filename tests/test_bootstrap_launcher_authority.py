@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 
 class _GitOps:
     def __init__(self):
@@ -71,7 +73,10 @@ def test_bootstrap_legacy_launcher_metadata_keeps_managed_reset(monkeypatch, tmp
 
     repo = tmp_path / "managed"
     (repo / ".git").mkdir(parents=True)
-    (repo / ".git" / "ouroboros-managed.json").write_text("{}", encoding="utf-8")
+    # What a launcher older than v7.4.1 rewrites on every start: its bundle manifest, no repo path.
+    (repo / ".git" / "ouroboros-managed.json").write_text(json.dumps({
+        "schema_version": 1, "app_version": "7.4.0", "source_sha": "0" * 40,
+        "managed_remote_name": "managed", "managed_local_branch": "ouroboros"}), encoding="utf-8")
     git = _GitOps()
     monkeypatch.setattr(server, "REPO_DIR", repo)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path / "data")

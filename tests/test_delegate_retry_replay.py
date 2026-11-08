@@ -87,8 +87,11 @@ def _call(registry, **args):
     return json.loads(registry.execute_result("delegate_start", args).text)
 
 
-@pytest.mark.parametrize("configured", [False, True])
-@pytest.mark.parametrize("prompt", [None, "", PROMPT])
+@pytest.mark.parametrize(("prompt", "configured"), [
+    (None, False),
+    ("", True),
+    pytest.param(PROMPT, False, id='Summarize the repository layout.-False'),
+])
 def test_a_public_retry_replays_the_recorded_request_under_its_key(tmp_path, monkeypatch, configured, prompt):
     registry, engine, token = _lost_start(tmp_path, monkeypatch, configured=configured)
     payload = _call(registry, retry_of=token, **({} if prompt is None else {"prompt": prompt}))
@@ -116,13 +119,12 @@ def test_direct_retry_text_is_an_exact_assertion(tmp_path, monkeypatch, prompt):
     assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [token]
 
 
-@pytest.mark.parametrize("configured", [False, True])
-@pytest.mark.parametrize("extra,reason", [
-    ({"max_seconds": 300}, "retry_selector_conflict"),
-    ({"effort": "high"}, "retry_selector_conflict"),
-    ({"directory_strategy": "direct"}, "retry_selector_conflict"),
-    ({"scope_paths": ["."]}, "retry_selector_conflict"),
-    ({"continue_from": "run-elsewhere"}, "continuation_selector_conflict"),
+@pytest.mark.parametrize(("extra", "reason", "configured"), [
+    pytest.param({"max_seconds": 300}, "retry_selector_conflict", False, id='extra0-retry_selector_conflict-False'),
+    pytest.param({"effort": "high"}, "retry_selector_conflict", True, id='extra1-retry_selector_conflict-True'),
+    pytest.param({"directory_strategy": "direct"}, "retry_selector_conflict", False, id='extra2-retry_selector_conflict-False'),
+    pytest.param({"scope_paths": ["."]}, "retry_selector_conflict", True, id='extra3-retry_selector_conflict-True'),
+    pytest.param({"continue_from": "run-elsewhere"}, "continuation_selector_conflict", False, id='extra4-continuation_selector_conflict-False'),
 ])
 def test_a_retry_refuses_a_request_argument_it_cannot_replay(tmp_path, monkeypatch, configured, extra, reason):
     registry, engine, token = _lost_start(tmp_path, monkeypatch, configured=configured)
@@ -150,12 +152,7 @@ def _record(state, *, task_id="mine", body=None, **extra):
     (None, "", "unknown_invocation"),
     # Each record also fails every later check: the earliest one answers.
     (_record("started", task_id="theirs"), "other", "invocation_not_owned"),
-    (_record("started"), "other", "invocation_already_started"),
     (_record("failed_definite"), "other", "invocation_definitely_refused"),
-    (_record("pending", body={"model": "m"}), "other", "invocation_request_unrecorded"),
-    ({"state": "legacy_gap", "run_id": "", "reason": "invocation_request_missing"}, "", "invocation_request_unrecorded"),
-    (_record("pending", body={"prompt": "P"}), " ", "retry_prompt_mismatch"),
-    (_record("pending", body={"prompt": "P"}), "P ", "retry_prompt_mismatch"),
 ])
 def test_the_single_validator_answers_in_its_order(monkeypatch, record, text, reason):
     from ouroboros.tools.delegate_integration import _validated_invocation

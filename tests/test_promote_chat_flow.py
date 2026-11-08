@@ -128,6 +128,7 @@ def test_presence_promotion_preserves_ceiling_and_cannot_choose_new_scope(tmp_pa
         project_name="Injected",
         workspace_root="/tmp/foreign",
         source="https://example.invalid/repo.git",
+        destination="place",
 
     )
     assert out.startswith("OK: task")
@@ -191,6 +192,7 @@ def test_real_presence_promotion_rebases_root_and_materializes_all_attachments(
         expected_output="A grounded report",
         project_name="forbidden scope",
         workspace_root="/tmp/forbidden",
+        destination="place",
 
     )
     assert result.startswith("OK: task")
@@ -275,7 +277,7 @@ def test_real_presence_promotion_rejection_cleans_promoted_attachment_copy(
         },
         task_contract=presence_task["task_contract"],
     )
-    assert _start_task(tool_ctx, "Long work", title="Long work").startswith("OK: task")
+    assert _start_task(tool_ctx, "Long work", title="Long work", destination="place").startswith("OK: task")
     event = tool_ctx.pending_events[0]
 
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
@@ -551,8 +553,8 @@ def test_presence_unconfirmed_promotion_records_handoff_for_reconciliation(tmp_p
         lambda *_args, **_kwargs: {"status": "unconfirmed", "reason": "confirmation_timeout"},
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
-    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix")
-    assert out.startswith("Accepted, waiting to start:")
+    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix", destination="place")
+    assert out.startswith("Not confirmed yet:")
     assert len(ctx.pending_events) == 1
     assert ctx._swarm_handoff_attempt["task_id"] == ctx.pending_events[0]["task_id"]
     assert ctx._swarm_handoff_attempt["status"] == "unconfirmed"
@@ -582,7 +584,7 @@ def test_presence_rejected_promotion_records_handoff_without_event(tmp_path, mon
         lambda _ctx: "crash_storm",
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
-    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix")
+    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix", destination="place")
     assert out.startswith("⚠️ PROMOTE_REJECTED")
     assert ctx.pending_events == []
     assert ctx._swarm_handoff_attempt["status"] == "rejected"
@@ -1174,11 +1176,10 @@ def test_chat_history_tool_uses_canonical_budget_root_and_archive_pagination(tmp
 
 
 def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_rows(tmp_path):
-    """One mind, rooms by membership (memory view): the rows of a task bound to a Project are
-    that room's. Main keeps its own words verbatim and names the Project in one line of
-    ``## Live rooms`` (its rows one memory_read away); the Project task reads them in its own
-    room, and Main's words stay out of its view."""
+    """Main keeps its words and aggregates the quiet Project with an exact room directory;
+    the bound task reads its own room, with original rows available through memory_read."""
     from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.tools.chronicle import _memory_read
     from tests._memory_view_context import blocks, section
     from tests.test_cache_optimization import _make_env_and_memory
 
@@ -1187,25 +1188,25 @@ def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_row
     proj = create_project(root, "promoted", name="Promoted")
     pchat = int(proj["chat_id"])
     bind_task_to_project(root, "task-7", "promoted", pchat, origin={"absent": "system"})
-    rows = [
-        {"direction": "in", "text": "plain-main", "chat_id": 1, "ts": "2026-09-01T00:00:00+00:00"},
-        {"direction": "out", "text": "bound-task-row", "chat_id": 1, "task_id": "task-7",
-         "ts": "2026-09-01T00:01:00+00:00"},
-    ]
-    for row in rows:
-        dialogue_store.append(root, "chat", row)
+    dialogue_store.append(root, "chat", {"direction": "in", "text": "plain-main", "chat_id": 1, "ts": "2026-09-01T00:00:00+00:00"})
+    dialogue_store.append(root, "chat", {"direction": "out", "text": "bound-task-row", "chat_id": 1,
+                                        "task_id": "task-7", "ts": "2026-09-01T00:01:00+00:00"})
 
     _a, _b, main_ctx, _cap = blocks(env, mem, {"id": "main-turn", "chat_id": 1})
     assert "] plain-main" in section(main_ctx, "## This room (Main)")
     assert "bound-task-row" not in main_ctx
-    assert f"### Project Promoted [chat_id={pchat}] — open" in section(main_ctx, "## Live rooms")
+    others = section(main_ctx, "## Other conversations")
+    assert f"### Project Promoted [chat_id={pchat}]" in others and "; host; task task-7] " in others  # a task line
+    reader = types.SimpleNamespace(drive_root=root)
+    assert f"- Project Promoted [chat_id={pchat}];" in _memory_read(reader, room_id="*", start=0)
 
     _a, _b, proj_ctx, _cap = blocks(env, mem, {"id": "task-7", "chat_id": 1})  # bound: its room is the Project
     room = section(proj_ctx, f"## This room (Project Promoted [chat_id={pchat}])")
-    # An outgoing row with no delegation lineage before the lineage epoch is a host fact of its
-    # task (lane 2, never "Ouroboros" in lane 1): one line, its address one read away.
+    # A pre-lineage outgoing row is a host fact of its task, with its address one read away.
     assert "; host; task task-7] " in room and "get_task_result(task_id='task-7')" in room
-    assert "plain-main" not in proj_ctx
+    assert "plain-main" not in room and "] plain-main" in section(proj_ctx, "## Other conversations")  # Main's, there
+    history = _memory_read(reader, room_id=str(pchat), rows=True)
+    assert "bound-task-row" in history and "plain-main" not in history
 
 
 def test_restart_drain_defers_then_completes_without_sleeping(tmp_path, monkeypatch):

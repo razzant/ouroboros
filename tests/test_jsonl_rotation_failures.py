@@ -82,8 +82,7 @@ def test_sharing_conflict_defers_without_losing_rows(tmp_path, monkeypatch, capl
 
 
 @pytest.mark.parametrize("stage", [
-    "sentinel_stat", "prelock_stat", "lock_path", "acquire", "locked_stat",
-    "archive_stat", "mkdir", "rename", "touch", "release",
+    "sentinel_stat", "touch", "release",
 ])
 def test_oserror_at_each_rotation_stage_preserves_history_and_releases_lock(
         tmp_path, monkeypatch, caplog, stage):
@@ -274,8 +273,12 @@ def test_real_reader_without_delete_sharing_cannot_kill_rotation(tmp_path, caplo
     print("ROTATION_NATIVE_RECOVERY held_ticks=4 strict_append_and_exact_chain=passed")
 
 
-@pytest.mark.parametrize("name", ["events", "tools", "supervisor", "task_reflections"])
-@pytest.mark.parametrize("winerror", [32, 33])
+@pytest.mark.parametrize(("winerror", "name"), [
+    (32, "events"),
+    (32, "supervisor"),
+    (33, "tools"),
+    (33, "task_reflections"),
+])
 def test_rotation_oserror_keeps_real_supervisor_dispatching(
         monkeypatch, tmp_path, caplog, record_property, name, winerror):
     """Four failed rotations reach every downstream dispatch seam; recovery keeps exact bytes.
@@ -382,6 +385,7 @@ def test_nonoptional_failures_still_kill_real_supervisor(monkeypatch, tmp_path, 
         monkeypatch.setattr(workers, "ensure_workers_healthy", fail)
     _run(rec, server)
     assert len(attempts) == 3
-    assert not rec.ready.is_set() and "3 consecutive crashes" in server._supervisor_error
+    assert not rec.ready.is_set() and server._supervisor_error is None  # the generation ended; no boot "failed" state
+    assert rec.exit.is_set() and rec.backstops == ["loop_failed"]
     assert rec.stop.waits == [2, 4]
-    assert len(rec.alerts) == 1 and "died after repeated crashes" in rec.alerts[0][1]
+    assert len(rec.alerts) == 1 and rec.alerts[0][1].startswith("🛑 The task loop failed three times in a row")

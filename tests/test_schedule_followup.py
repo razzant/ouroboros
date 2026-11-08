@@ -332,7 +332,7 @@ def test_presence_followup_preserves_ceiling_and_return_context(tmp_path):
     ctx = _ctx(tmp_path)
     ctx.task_metadata["presence"] = {"binding_id": "b" * 32}
     ctx.task_contract = {"capability_ceiling": {"digest": "a" * 64}}
-    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, destination="place").startswith("FOLLOWUP_SCHEDULED")
     from supervisor import queue
 
     record = queue.list_scheduled_tasks(tmp_path / "data")["tasks"][0]
@@ -368,7 +368,7 @@ def test_presence_recurring_followup_uses_existing_cron_and_preserves_authority(
     payload = presence_ceiling_payload(ceiling)
     ctx.task_contract = {"objective": "presence turn", "capability_ceiling": payload}
 
-    out = _followup(ctx, cron="15 9 * * 1-5", timezone="Europe/Moscow")
+    out = _followup(ctx, cron="15 9 * * 1-5", timezone="Europe/Moscow", destination="place")
     assert out.startswith("FOLLOWUP_SCHEDULED")
     assert "recurring cron 15 9 * * 1-5 (Europe/Moscow)" in out
     from supervisor import queue
@@ -400,9 +400,9 @@ def test_a_bindings_root_follow_up_runs_its_own_objective_under_the_inherited_au
                          "success_criteria": ["All nine figures reviewed"],
                          "allowed_resources": {"network": True}, "capability_ceiling": ceiling}
 
-    assert _followup(ctx, objective="Revisit the Q2 figures", context="Q2 closes Friday").startswith(
-        "FOLLOWUP_SCHEDULED")
-    assert _followup(ctx, objective="Check the Q3 draft").startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, objective="Revisit the Q2 figures", context="Q2 closes Friday",
+                     destination="place").startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, objective="Check the Q3 draft", destination="place").startswith("FOLLOWUP_SCHEDULED")
 
     records = queue.list_scheduled_tasks(tmp_path / "data")["tasks"]
     scheduled = {row["task_contract"]["objective"]: row for row in map(queue._task_from_schedule, records)}

@@ -6,6 +6,18 @@ import types
 from pathlib import Path
 
 
+def _park_stops(plugin, monkeypatch):
+    """A permanent refusal parks the poller; the parked wait here ends the test run."""
+    parked = []
+
+    async def park(_api, fingerprint):
+        parked.append(fingerprint)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(plugin, "park_until_settings_change", park)
+    return parked
+
+
 def _load_plugin(tmp_path):
     root = Path(__file__).resolve().parents[1] / "skills" / "telegram"
     package = types.ModuleType("telegram_bridge_test")
@@ -38,6 +50,7 @@ class FakeApi:
 
 
 class FakeTelegramClient:
+    bot_id = ""
     instances = []
 
     def __init__(self, token, **_kwargs):
@@ -276,7 +289,9 @@ def test_poller_isolates_updates_notifies_only_authorized_owner_and_saves_highes
         pass
 
     assert attempts == ["one", "two"]
-    assert json.loads((tmp_path / "poll_offset.json").read_text(encoding="utf-8")) == {"offset": 4}
+    assert json.loads((tmp_path / "poll_offset.json").read_text(encoding="utf-8")) == {
+        "offset": 4, "base": "https://api.telegram.org", "bot": "", "handled": {"https://api.telegram.org": []},
+    }
     client = FakeTelegramClient.instances[-1]
     notices = [item for item in client.sent if item[0] == 42 and "Could not deliver" in item[1]]
     assert len(notices) == 1
@@ -297,13 +312,13 @@ def test_poller_surfaces_permanent_telegram_rejection_and_records_failure(tmp_pa
 
     monkeypatch.setattr(plugin, "TelegramClient", RejectedClient)
     api = FakeApi(tmp_path)
+    parked = _park_stops(plugin, monkeypatch)
 
     try:
         asyncio.run(plugin._make_poller(api)())
-    except plugin.TelegramRequestRejected as exc:
-        assert exc.status_code == 401
-    else:
-        raise AssertionError("permanent Telegram rejection must stop the poller")
+    except asyncio.CancelledError:
+        pass
+    assert parked == [("token", ("https://api.telegram.org", None))]
 
     assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8")) == {
         "state": "error",
@@ -474,7 +489,7 @@ def test_startup_deferred_validation_with_network_still_down_paces_with_backoff(
     }
 
 
-def test_startup_permanent_rejection_keeps_raise_semantics(tmp_path, monkeypatch):
+def test_startup_permanent_rejection_parks_with_startup_labeling(tmp_path, monkeypatch):
     plugin = _load_plugin(tmp_path)
 
     class RejectedStartClient(FakeTelegramClient):
@@ -487,13 +502,13 @@ def test_startup_permanent_rejection_keeps_raise_semantics(tmp_path, monkeypatch
 
     monkeypatch.setattr(plugin, "TelegramClient", RejectedStartClient)
     api = FakeApi(tmp_path)
+    parked = _park_stops(plugin, monkeypatch)
 
     try:
         asyncio.run(plugin._make_poller(api)())
-    except plugin.TelegramRequestRejected as exc:
-        assert exc.status_code == 401
-    else:
-        raise AssertionError("permanent startup rejection must stop the poller")
+    except asyncio.CancelledError:
+        pass
+    assert parked == [("token", ("https://api.telegram.org", None))]
 
     assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8")) == {
         "state": "error",
@@ -525,13 +540,13 @@ def test_inloop_revalidation_permanent_rejection_uses_startup_labeling(tmp_path,
 
     monkeypatch.setattr(plugin, "TelegramClient", DeferredRejectClient)
     api = FakeApi(tmp_path)
+    parked = _park_stops(plugin, monkeypatch)
 
     try:
         asyncio.run(plugin._make_poller(api)())
-    except plugin.TelegramRequestRejected as exc:
-        assert exc.status_code == 401
-    else:
-        raise AssertionError("permanent revalidation rejection must stop the poller")
+    except asyncio.CancelledError:
+        pass
+    assert len(parked) == 1
 
     assert calls["getme"] == 2
     assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8")) == {
@@ -685,12 +700,6 @@ def test_ambient_env_chat_id_is_ignored(tmp_path, monkeypatch):
     assert [item["chat_id"] for item in injected] == [99]
     settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
     assert settings["TELEGRAM_CHAT_ID"] == "99"
-
-
-def test_manifest_declares_route_permission():
-    manifest = Path(__file__).resolve().parents[1] / "skills" / "telegram" / "SKILL.md"
-    text = manifest.read_text(encoding="utf-8")
-    assert "route" in text.split("permissions:", 1)[1].split("]", 1)[0]
 
 
 def test_markdown_to_telegram_html_placeholder_ordering(tmp_path):

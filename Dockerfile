@@ -29,6 +29,18 @@ RUN apt-get update \
     && rm /tmp/python.tar.gz \
     && /opt/python-standalone/bin/python3 -c "import sqlite3,sys; version=sys.version.split()[0]; sqlite=tuple(int(part) for part in sqlite3.sqlite_version.split('.')); assert version=='3.10.22', version; assert sqlite>=(3, 51, 3), sqlite3.sqlite_version"
 
+# The browser tools' Chromium: the Chrome for Testing headless shell that
+# ouroboros/chromium_runtime.py pins, fetched here and verified and unpacked by that
+# module. The stage reads only the pin and its verifier, so releases reuse it.
+FROM python-standalone AS chromium
+WORKDIR /opt/chromium-pin
+COPY ouroboros/__init__.py ouroboros/version.py ouroboros/verified_download.py ouroboros/chromium_runtime.py ./ouroboros/
+RUN URL="$(/opt/python-standalone/bin/python3 -m ouroboros.chromium_runtime url)" \
+    && curl -fsSL "$URL" -o /tmp/chromium.zip \
+    && /opt/python-standalone/bin/python3 -m ouroboros.chromium_runtime install \
+        --browsers-path /ms-playwright --archive /tmp/chromium.zip \
+    && rm /tmp/chromium.zip
+
 FROM debian:trixie-slim AS runtime
 
 COPY --from=uv /uv /uvx /bin/
@@ -36,14 +48,17 @@ COPY --from=python-standalone /opt/python-standalone /opt/python-standalone
 
 # Browsers first, dependencies second, sources last: every release rewrites
 # pyproject.toml/uv.lock, so anything below the lock copy is rebuilt per
-# release while the apt packages and the Chromium/WebKit downloads above it
+# release while the apt packages and the WebKit/Chromium layers above it
 # are reused. The Playwright pin must equal the locked version so the
-# downloaded browser revisions match the venv's driver
+# downloaded WebKit revision matches the venv's driver
 # (tests/test_build_scripts.py::TestDockerfile). The installer runs from an
 # ephemeral uvx tool environment, so the image carries one Playwright: the
 # venv's. Browsers live in a shared path the runtime honors as-is
 # (ouroboros/tools/browser.py) — not inside the package tree, which the
-# per-release dependency layer would rebuild.
+# per-release dependency layer would rebuild. Chromium is only the pinned
+# headless shell, whose sandbox cannot start for this image's root user:
+# browser tools refuse Chromium until an administrator chooses a non-root,
+# sandbox-capable run or OUROBOROS_CHROMIUM_SANDBOX=off (docs/DEPLOYMENT.md).
 ARG PLAYWRIGHT_VERSION=1.62.0
 ENV PATH="/opt/python-standalone/bin:${PATH}" \
     LANG=C.UTF-8 \
@@ -61,7 +76,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git netbase tzdata \
     && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chromium webkit \
-    && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install chromium webkit
+    && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install webkit
+COPY --from=chromium /ms-playwright/ /ms-playwright/
 
 # Working directory
 ENV APP_HOME=/app \

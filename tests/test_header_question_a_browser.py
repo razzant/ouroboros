@@ -13,9 +13,10 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['chromium', 'webkit'])
@@ -45,6 +46,7 @@ def _pointer(block):
 
 def _seed(page):
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [PROJECT]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [PROJECT]))
     page.route('**/api/state', lambda r: r.fulfill(json={
         'sha': 'browser-fixture', 'supervisor_ready': True, 'active_chat_activities': [], 'projects': [PROJECT],
         'project_chat_ids': [42], 'current_questions': [_pointer(BLOCK)], 'current_questions_complete': True,
@@ -398,6 +400,19 @@ BOARD = [dict(skill='gate_skill', tab_id='cache', title='Cache Efficiency Snapsh
             {'type': 'markdown', 'text': '11 restricted · next reset Wed 21 Oct 09:00 · +0.24 if unused.'}]})
     for index in range(10)]
 
+# A route frame mounts under a route lease (docs/WIDGET_HOST_PROTOCOL.md "Route leases"; widget_module.js): the host
+# mints one, then the skill's page loads under the lease's own URL, never at the skill's route. Same token and shape as
+# tests/test_widgets_ui_browser_identity.py.
+LEASE = 'L' * 43
+
+
+def _lease(route):
+    """Mint, renew and revoke a route lease."""
+    revoke = route.request.url.endswith('/revoke')
+    route.fulfill(json={'ok': True} if revoke else {
+        'token': LEASE, 'base_url': f'/api/widget-resources/{LEASE}/', 'expires_in': 120, 'renew_after': 40})
+
+
 BOARD_EDGES = """() => {
     const page = document.querySelector('#page-widgets'), band = page.querySelector('.app-page-header');
     const list = page.querySelector('.widgets-scroll'), style = getComputedStyle(list);
@@ -441,7 +456,8 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
         page.unroute('**/api/widgets')
         page.route('**/api/widgets', lambda r: r.fulfill(json={'ui_tabs': BOARD}))
-        page.route('**/api/extensions/gate_skill/cache', frame_page)
+        page.route('**/api/widgets/asset-leases**', _lease)
+        page.route(f'**/api/widget-resources/{LEASE}/cache', frame_page)  # the lease's own URL of the skill's `cache` page
         _band(page)
         _goto(page, 'widgets')
         frame = page.locator('[data-widget-key="gate_skill:cache"] iframe')
@@ -615,16 +631,29 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         setup_browser.capture(page, f'files-sidebar-narrow-{engine}-{theme}')
         page.locator('#files-new-file').click()
         page.locator('.files-editor').fill('Draft kept while the sidebar and window change width.')
-        # Same nodes and focus when the column widens and when the window enters the phone layout.
-        page.locator('#files-new-file').focus()
-        page.set_viewport_size({'width': 1060, 'height': 801})
-        page.wait_for_function("document.querySelector('#page-files .app-page-header').hasAttribute('data-lead')")
-        page.set_viewport_size({'width': 390, 'height': 844})
-        page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
-        assert page.evaluate("""window.__filesNodes.every(el => el === document.getElementById(el.id))
-            && document.activeElement === window.__filesNodes[1]
-            && !!window.__filesNodes[0].closest('.files-browser-header')""")
+
+        def widen_then_phone():
+            page.set_viewport_size({'width': 1060, 'height': 801})
+            page.wait_for_function("document.querySelector('#page-files .app-page-header').hasAttribute('data-lead')")
+            page.set_viewport_size({'width': 390, 'height': 844})
+            page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
+
+        def kept(place):
+            return page.evaluate(f"""window.__filesNodes.every(el => el === document.getElementById(el.id))
+                && document.activeElement === {place}
+                && !!window.__filesNodes[0].closest('.files-browser-header')""")
+        # In a page this narrow a chosen file replaces the list (DESIGN "Page header"), `+ File` and the location with
+        # it: the owner's place is the draft. Same nodes and place when the column widens and when the window enters
+        # the phone layout.
+        widen_then_phone()
+        assert kept("document.querySelector('.files-editor')")
         assert page.locator('.files-editor').input_value() == 'Draft kept while the sidebar and window change width.'
+        # Back to the list, where `+ File` is shown: the same nodes and a focused action keep their place through the
+        # same two moves.
+        page.locator('[data-files-back]').click()
+        page.locator('#files-new-file').focus()
+        widen_then_phone()
+        assert kept('window.__filesNodes[1]')
     finally:
         setup_browser.capture(page, f'files-sidebar-final-{engine}-{theme}')
         page.close()

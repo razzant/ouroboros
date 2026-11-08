@@ -19,8 +19,7 @@ def _census(monkeypatch):
     monkeypatch.setattr(pipeline, "_is_root_post_task", lambda task: False)
     monkeypatch.setattr(llm_module, "LLMClient", lambda: object())
     monkeypatch.setattr(memory_module, "Memory", lambda **kwargs: object())
-    for name, label in (("_record_task_facts", "facts"), ("_run_memory_fallback_draft", "memory_fallback_draft"),
-                        ("_run_scratchpad_consolidation", "scratchpad_consolidation")):
+    for name, label in (("_record_task_facts", "facts"), ("_run_memory_fallback_draft", "memory_fallback_draft")):
         monkeypatch.setattr(pipeline, name, lambda *args, _label=label, **kwargs: calls.append(_label))
     monkeypatch.setattr(evolution, "maybe_promote", lambda *args, **kwargs: calls.append("maybe_promote"))
     return pipeline, calls
@@ -53,7 +52,6 @@ def test_presence_keeps_own_memory_but_skips_evolution_effects(tmp_path, monkeyp
     assert calls == [
         "facts",  # free, before every paid stage
         "memory_fallback_draft",
-        "scratchpad_consolidation",
     ]
     assert not (tmp_path / "memory").exists()
 
@@ -71,5 +69,5 @@ def test_ordinary_task_retains_global_post_task_effects(tmp_path, monkeypatch):
         on_reflection=lambda *args: calls.append("on_reflection"),
     )
 
-    assert calls == ["facts", "memory_fallback_draft", "scratchpad_consolidation", "maybe_promote", "on_reflection"]
+    assert calls == ["facts", "memory_fallback_draft", "maybe_promote", "on_reflection"]
     assert not (tmp_path / "memory").exists()

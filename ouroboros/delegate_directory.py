@@ -61,8 +61,10 @@ def in_place_refusal(authority, selector_root, workspace, mode, strategy, scope_
                  f"workspace='in_place' was refused: {reason}. Nothing was started.", definitely_unrun=True) if reason else None
 
 
-def in_place_start(adopted_copy, target_root):
-    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made."""
+def in_place_start(adopted_copy, target_root, service=None):
+    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made.
+    ``service`` makes its disposable scratch (``subagent_work_order.session_service_directories``),
+    called only once the start is accepted, so a refusal leaves nothing behind."""
     from ouroboros.delegate_shared import _fail
     from ouroboros.delegate_start_instructions import in_place_binding_instruction
 
@@ -72,7 +74,7 @@ def in_place_start(adopted_copy, target_root):
                   "use directory_strategy='direct'")
         return None, _fail("delegate_start", "workspace_in_place_unavailable",
                            f"workspace='in_place' was refused: {detail}. Nothing was started.", definitely_unrun=True), {}, ""
-    return None, "", in_place_ref(), in_place_binding_instruction(target_root)
+    return None, "", in_place_ref(), in_place_binding_instruction(target_root, service() if service else None)
 
 
 def in_place_block(entry):
@@ -273,6 +275,9 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
     A finished run whose engine reports no file work product is captured ready, never retried
     on later sweeps: as ``no_changes`` after success, otherwise as an absent work product whose
     changes, if any, were not captured (Apply applies nothing; Reject releases the copy).
+    One capture fetches each content identity (digest and size) once: every file side keeps
+    its own row, and a later side with the same identity names the first verified file.
+    Modes stay in the exact engine manifest; no retained file is chmodded.
     """
     if not entry.settled and entry.terminal_state not in custody.TERMINAL_STATES:
         raise ValueError("the directory run has not completed")
@@ -324,7 +329,7 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
         raise ValueError("engine directory strategy differs from the recorded request")
     if not direct and original.get("complete") is not True:
         raise ValueError("the selected execution copy was not completely captured")
-    records = [raw]
+    records, retained = [raw], {}  # retained: this capture's verified file per content identity
     for index, row in enumerate(original["entries"]):
         for side in ("before", "after"):
             state = row.get(side)
@@ -334,9 +339,11 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
                 if direct and side == "before":
                     continue
                 raise ValueError(f"file {side} has no complete reference: {row.get('path')}")
-            record = _download(gateway, entry.run_id, state["artifactPath"],
-                               cap_dir / f"{side}-{index}", state)
-            records.append({**record, "source_path": row["path"], "side": side})
+            identity = (state.get("sha256"), state.get("sizeBytes"))
+            if identity not in retained:
+                retained[identity] = _download(gateway, entry.run_id, state["artifactPath"],
+                                               cap_dir / f"{side}-{index}", state)
+            records.append({**retained[identity], "source_path": row["path"], "side": side})
     manifest = {
         "schema_version": 1, "capture_kind": "engine_directory", "status": "ready",
         "workspace_root": original["executionRoot"], "authority_target_root": entry.target_root,

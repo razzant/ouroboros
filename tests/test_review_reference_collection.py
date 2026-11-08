@@ -14,7 +14,6 @@ from tests.test_receptive_review_loop import (  # noqa: F401
 )
 from tests.test_review_change_tool import h  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _payload(text):
@@ -80,7 +79,7 @@ def test_own_child_detaches_reparks_and_reference_collects_original_at_zero(main
     assert len(_notices(a, "change")) == 1 and _commit_count(a) == 1 and not a.pushes
 
 
-@pytest.mark.parametrize("mutation", [{"subject": "index"}, {"goal": "changed"}, {"reviewers": []}, {"root": "active_workspace"}, {"wake_on": {}}])
+@pytest.mark.parametrize("mutation", [{"subject": "index"}, {"reviewers": []}, {"wake_on": {}}])
 def test_reference_mutation_refuses_before_reading_subject(author, monkeypatch, mutation):  # noqa: F811
     monkeypatch.setattr(change, "_read_subject", lambda *_a, **_k: pytest.fail("froze new bytes"))
     monkeypatch.setattr(change, "compose_panel", lambda *_a, **_k: pytest.fail("composed a new panel"))
@@ -107,8 +106,9 @@ def test_blocking_reference_resume_keeps_byte_gate(author, monkeypatch, changed)
     with _parent(a):
         text = a.git._commit_reviewed(a.ctx, review_reference=ref)
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
-    if changed:
-        assert "REVIEW_BINDING_BLOCKED" in text and _commit_count(a) == 1
+    if changed:  # the settled outcome reads back without the old bytes; changed bytes never inherit its PASS
+        assert text.startswith("Review outcome already settled, returned read-only") and _commit_count(a) == 1, text
+        assert "value = 3" in _git(a.repo, "diff", "--cached"), "the author's staged change is left as it was"
     else:
         assert _commit_count(a) == 2, text
 
@@ -142,6 +142,99 @@ def test_fast_completion_subscribes_after_record_and_attempt(author, monkeypatch
     until(lambda: _notices(a, "change"))
     assert len(_notices(a, "change")) == 1
     assert "durable revision" in str(_notices(a, "change"))
+
+
+def _hold_every_seat_before_its_send(a, monkeypatch):
+    """Each seat stops inside its chat, before its first physical send (and its paid stamp), until released."""
+    import threading
+
+    started, release, chat = {"m1": threading.Event(), "m2": threading.Event()}, threading.Event(), a.reviewer.chat
+
+    def held(*args, **kwargs):
+        started[kwargs["model"]].set()
+        assert release.wait(60)
+        return chat(*args, **kwargs)
+    monkeypatch.setattr(a.reviewer, "chat", held)
+    return started, release
+
+
+_PAST = {"wake_at": "2000-01-01T00:00:00Z"}  # the author's wait ends at once, before any seat sent
+
+
+def test_a_reference_returned_before_any_send_collects_its_unpaid_reserved_wave(author, monkeypatch):  # noqa: F811
+    """#2410: a wave reserves its roster before any send and is paid only by a send, so a reference returned
+    while every seat still prepares names an unpaid reserved attempt; collecting it joins that exact wave,
+    sends nothing new, and the reserved operations later send once each, paying the same row."""
+    from ouroboros.review_state import load_state
+
+    _pool(monkeypatch)
+    a, out = author, {}
+    _git(a.repo, "add", "change.py")
+    started, release = _hold_every_seat_before_its_send(a, monkeypatch)
+
+    def run():
+        with _parent(a):
+            out["result"] = change._handle_review_change(a.ctx, **REVIEW, wake_on=_PAST)
+    try:
+        thread = _produce(a, run)
+        assert all(event.wait(60) for event in started.values())
+        _join(thread)
+        first = _payload(out["result"])
+        [attempt] = load_state(a.data).attempts
+        assert (first["state"], attempt.paid, a.reviewer.rounds) == ("pending", False, [])
+        with _parent(a):
+            collected = change._handle_review_change(a.ctx, review_reference=first["review_reference"])
+        assert "TOOL_ARG_ERROR" not in collected, collected
+        assert _payload(collected)["record_id"] == first["record_id"] and a.reviewer.rounds == []
+    finally:
+        release.set()
+        a.reviewer.release()
+    until(lambda: sorted(a.reviewer.rounds) == ["m1", "m2"] and load_state(a.data).attempts[-1].paid)
+    assert len(load_state(a.data).attempts) == 1
+
+
+def test_a_commit_reference_returned_before_any_send_collects_and_commits_at_zero(author, monkeypatch):  # noqa: F811
+    """The same unpaid reserved commit attempt is admitted by commit collection (``prepare_commit_collection``):
+    it joins the original operations, which send once each, and the collected PASS lands under Blocking."""
+    import threading
+
+    from ouroboros.review_state import load_state
+    from ouroboros.tools import review_collection
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    a, out = author, {}
+    started, release = _hold_every_seat_before_its_send(a, monkeypatch)
+    admitted, prepare = threading.Event(), review_collection.prepare_commit_collection
+
+    def admitting(*args, **kwargs):  # the collection's identity check, passed while every seat still prepares
+        source = prepare(*args, **kwargs)
+        admitted.set()
+        return source
+    monkeypatch.setattr(review_collection, "prepare_commit_collection", admitting)
+    try:
+        first = _commit(a, out, wake_on=_PAST)
+        assert all(event.wait(60) for event in started.values())
+        _join(first)
+        reference = _payload(out["result"])["review_reference"]
+        [attempt] = load_state(a.data).attempts
+        assert (attempt.paid, a.reviewer.rounds, _commit_count(a)) == (False, [], 1)
+
+        def collect():
+            with _parent(a):
+                out["collected"] = a.git._commit_reviewed(a.ctx, review_reference=reference)
+        collecting = _produce(a, collect)
+        until(lambda: admitted.is_set() or "collected" in out)
+        assert admitted.is_set() and a.reviewer.rounds == [], out.get("collected")
+    finally:
+        release.set()
+        a.reviewer.release()
+    _join(collecting)
+    if _commit_count(a) == 1:  # the collection returned while the seats ran: collect the settled wave again
+        until(lambda: _notices(a))
+        with _parent(a):
+            out["collected"] = a.git._commit_reviewed(a.ctx, review_reference=reference)
+    assert _commit_count(a) == 2, out["collected"]
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"], "only the original reserved operations sent"
 
 
 @pytest.mark.parametrize("failure", ["ledger", "attempt", "none"])

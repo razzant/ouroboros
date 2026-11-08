@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from ouroboros import chat_chain
 from ouroboros import consciousness_authority as ca
@@ -133,7 +132,7 @@ def test_a_released_mark_is_a_change_that_names_who_released_it(tmp_path):
     assert observe(tmp_path, accepted).counts() == {}  # the marks stand before the accepted wake
     child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="kid-1", current_chat_id=1,
                         task_metadata={"delegation_role": "subagent", "parent_task_id": "t1"})
-    released = json.loads(_memory_mark(child, release_id=answer["id"], reason="Looked settled to me"))
+    released = json.loads(_memory_mark(child, release_ids=[answer["id"]], reason="Looked settled to me"))
     assert released["ok"] and released["operation"] == "mark_release"  # the helper's right is unchanged
     release = next(record for record in store.records() if record["kind"] == "mark_release")
     after_child = observe(tmp_path, accepted)
@@ -179,11 +178,12 @@ def test_without_a_journal_the_observation_is_the_bases(tmp_path, monkeypatch):
 # --- what a wake may write ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("level", ca.LEVELS)
-def test_every_level_keeps_chronicle_write(level):
-    assert "chronicle_write" not in ca.disabled_tools_for(level)
-    assert ca.observe_argument_refusal({"initiator": "consciousness", "consciousness_autonomy": level},
-                                       "chronicle_write", {"kind": "page"}) == ""
+def test_every_level_keeps_chronicle_write(subtests):
+    for level in ca.LEVELS:
+        with subtests.test(level=level):
+            assert "chronicle_write" not in ca.disabled_tools_for(level)
+            assert ca.observe_argument_refusal({"initiator": "consciousness", "consciousness_autonomy": level},
+                                               "chronicle_write", {"kind": "page"}) == ""
 
 
 def test_observe_seals_a_page_and_still_cannot_start_work(tmp_path, monkeypatch):

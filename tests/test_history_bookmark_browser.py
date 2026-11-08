@@ -16,7 +16,7 @@ from tests.test_chat_history_paging_browser import (
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
@@ -244,7 +244,7 @@ def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_ne
     when the saved row adopts it. Closed and opened again, the room reads only its newest page and
     is at its newest message (owner decisions 2026-10-05)."""
     from datetime import datetime, timedelta, timezone
-    from ouroboros.merge_receipts import card_row_text, review_coverage
+    from ouroboros.merge_receipts import card_row_text, coverage_reading, review_coverage
     from ouroboros.projects_registry import create_project
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
     from playwright.sync_api import sync_playwright
@@ -319,8 +319,10 @@ def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_ne
                 # A late, lower revision cannot roll back the visible receipt.
                 _emit_ws_frame(page, {**old, 'type': 'chat', 'is_progress': True,
                                      'card_row_revision': 2, 'ts': stamp(99), 'content': 'Stale queued receipt'})
-                # The retained source above is exact; the known host prefix is display-only.
-                assert text.startswith('⚠️ PR #1347 merge:') and 'no_host_observed_review_record' in text
+                # The retained source above is exact; the known host prefix is display-only. It warns in the
+                # receipt's own coverage words (label on the head, sentence below); codes stay in the receipt.
+                label, sentence = coverage_reading(receipt)
+                assert text.startswith('⚠️ PR #1347 merge:') and text.endswith(f' · {label}\n{sentence}')
                 assert all(part in line.inner_text() for part in text.removeprefix('⚠️ ').splitlines())
             else:
                 line.locator('[data-live-line-toggle]').click()

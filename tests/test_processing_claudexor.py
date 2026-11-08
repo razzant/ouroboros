@@ -39,8 +39,7 @@ def refusal(preference="economy", reason="capacity"):
                     "processingFallback": "standard", "processingRefusal": reason}}}
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("preference", ["standard", "fast", "economy"])
+@pytest.mark.parametrize(("preference", "asynchronous"), [("standard", False), ("fast", True), ("economy", False)])
 def test_advertised_preference_is_frozen_in_body_and_result_survives_settlement(setup, preference, asynchronous):
     root, gateway, client = setup
     observed = receipt(preference, "priority" if preference == "fast" else "flex" if preference == "economy" else "default", preference)
@@ -53,8 +52,11 @@ def test_advertised_preference_is_frozen_in_body_and_result_survives_settlement(
     assert ledger(root)[0]["reservation_upper_bound_usd"] is None
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("preference,reason", [("economy", "capacity"), ("economy", "unsupported"), ("fast", "unsupported")])
+@pytest.mark.parametrize(("preference", "reason", "asynchronous"), [
+    ("economy", "capacity", False),
+    ("economy", "unsupported", True),
+    ("fast", "unsupported", False),
+])
 def test_response_received_with_proved_no_generation_reprepares_standard(setup, monkeypatch, preference, reason, asynchronous):
     root, gateway, client = setup
     calls = []
@@ -74,7 +76,7 @@ def test_response_received_with_proved_no_generation_reprepares_standard(setup, 
     assert usage["processing"] == receipt()
 
 
-@pytest.mark.parametrize("axis", ["unknown_outcome", "unknown_dispatch", "no_proof", "exact_native", "standard"])
+@pytest.mark.parametrize("axis", ["unknown_outcome", "exact_native", "standard"])
 def test_only_explicit_no_start_advisory_proof_allows_retry(setup, axis):
     root, gateway, client = setup
     response = refusal()

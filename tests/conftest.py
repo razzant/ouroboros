@@ -5,6 +5,7 @@
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
 import functools
+import gc
 import json
 import os
 import pathlib
@@ -53,6 +54,10 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
         _PYTEST_ROOT, _PYTEST_ROOT / "data" / "repo", source={},
     )
     _environment["declare_scratch"](_PYTEST_ROOT, "pytest-session")
+    if _SAFE_TEMP_ROOT and os.environ.get("PYTHONPYCACHEPREFIX"):
+        # One bytecode prefix per RUN, the owner's, warmed once (ouroboros/test_bytecode.py) and read by
+        # every controller, worker and child of it; a session prefix of its own would start cold again.
+        _PYTEST_DEFAULTS["PYTHONPYCACHEPREFIX"] = os.environ["PYTHONPYCACHEPREFIX"]
     if not _SAFE_TEMP_ROOT:
         for _key in ("TMPDIR", "TEMP", "TMP", "PYTEST_DEBUG_TEMPROOT"):
             _PYTEST_DEFAULTS.pop(_key, None)
@@ -87,6 +92,7 @@ pytest_plugins = ["tests.browser_lane", "tests.ci_evidence", "tests.default_lane
 from tests._shared import (  # noqa: E402
     _PROVIDER_CATALOG_PRISTINE, _provider_catalog_snapshot, _restore_provider_catalog, offline_provider_catalog,
 )
+from tests import _test_folders  # noqa: E402
 
 
 def _provider_catalog_class():
@@ -173,12 +179,12 @@ def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
 
     def install(*, dump_after=90):
         trace_dir.mkdir(exist_ok=True)
-        original_probe = preflight_runner._install_worker_probe
+        original_probe = preflight_runner.install_worker_probe
         original_kill = preflight_runner._terminate_preflight_tree
 
-        def probe(temp_root):
-            module = original_probe(temp_root)
-            path = preflight_runner._probe_dir(temp_root) / (module + ".py")
+        def probe(temp_root, *args, **kwargs):
+            module = original_probe(temp_root, *args, **kwargs)
+            path = preflight_runner.probe_dir(temp_root) / (module + ".py")
             # GIL-held stack samples (tests/stack_samples.py says what they cannot see), each
             # process's in its own file beside its event log: one writer per file, whole lines.
             shutil.copyfile(stack_samples.__file__, path.with_name(module + "_samples.py"))
@@ -231,7 +237,7 @@ def pytest_testnodedown(node, error):
             finally:
                 original_kill(proc, temp_root)
 
-        monkeypatch.setattr(preflight_runner, "_install_worker_probe", probe)
+        monkeypatch.setattr(preflight_runner, "install_worker_probe", probe)
         monkeypatch.setattr(preflight_runner, "_terminate_preflight_tree", before_kill)
         return trace_dir
 
@@ -278,6 +284,7 @@ def _isolated_child_env(value) -> dict:
     # test child that changes its process group escapes the owner's token scan.
     child_env.update({key: value for key, value in os.environ.items()
                       if key.startswith(CONTAINMENT_ENV_PREFIX)})
+    child_env.update(_test_folders.child_env())
     child_env[NESTED_WORKERS_ENV] = str(nested_workers(child_env))
     child_env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = child_env[NESTED_WORKERS_ENV]
     return child_env
@@ -304,7 +311,8 @@ def _install_pytest_child_isolation() -> None:
             positional[0] = bounded_test_command(positional[0], env)
         elif "args" in kwargs:
             kwargs["args"] = bounded_test_command(kwargs["args"], env)
-        return _ORIGINAL_POPEN_INIT(self, *positional, **kwargs)
+        _ORIGINAL_POPEN_INIT(self, *positional, **kwargs)
+        _test_folders.note_child(self, positional, kwargs)
 
     subprocess.Popen.__init__ = isolated_init
     _PYTEST_POPEN_PATCHED = True
@@ -401,60 +409,77 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
     return out
 
 
-# Files whose tests spawn REAL OS processes / bind REAL ports / mutate process-global state.
-# Under `pytest -n` (xdist) they flake — or crash a worker, which (with --max-worker-restart=0)
-# fails that worker's WHOLE co-located batch, surfacing as spurious failures in unrelated files.
-# So CI **and the hermetic commit gate** (ouroboros/preflight_runner.py, v6.88.0) run them in a
-# SERIAL pass (`-m serial`) and exclude them from the parallel pass (`-m "not serial" -n auto`);
-# in the gate a crashed worker is a named hard block, not a retry. A NEW real-process/port/
-# global-state test should mark itself `@pytest.mark.serial` (preferred) or be added here.
-# See docs/DEVELOPMENT.md "Pytest marker lanes".
-_SERIAL_TEST_FILES = frozenset({
-    "test_workspace_executor.py",
-    # Themed siblings of test_workspace_executor.py; they spawn the same real
-    # processes, so the whole family stays in the serial lane.
-    "test_workspace_executor_services.py",
-    "test_workspace_executor_docker.py",
-    "test_workspace_executor_admission.py",
-    "test_workspace_executor_cleanup.py",
-    "test_process_custody.py",
-    "test_kill_process_tree_orphans.py",
-    "test_zombie_prevention.py",
-    "test_worker_crash_retry.py",
-    "test_process_resource_leaks.py",
-    "test_restart_reconnect.py",
+# `serial` names the host resource a test cannot isolate: `@pytest.mark.serial("<resource>")`. CI and the
+# hermetic commit gate (ouroboros/preflight_runner.py) run ONE xdist pass in which a resource's tests take
+# turns on one worker (`xdist_group("serial:<resource>")`) while the other resources and every parallel-safe
+# test run beside them; `serial("exclusive")` names the one resource that is the whole machine: a test proven
+# to harm live siblings (a reaper that kills xdist workers, a process-global another worker's test observes),
+# run alone in the short one-process pass after it. A bare `serial` is a collection error (DEVELOPMENT 14
+# "Parallel CI and the `serial` marker"). An owned child, a private root or port 0 is parallel-safe and marks
+# nothing (CHECKLISTS Self-Check 18). Whole-file marks below carry the reason each file recorded.
+_SERIAL_RESOURCES = {
     # spawns a real pytest subprocess via run_hermetic_pytest + its reaper kills whole process
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
-    "test_preflight_runner.py",
-    "test_preflight_process_containment.py",
-    # Imports/mutates the process-global server settings facade; when xdist
-    # reuses a worker after unrelated server tests, cached route/probe state can
-    # escape monkeypatch restoration and turn the mocked capability probe into
-    # a real network attempt. Keep the whole hot-reload contract in the serial
-    # lane, matching its process-global subject.
-    "test_settings_budget_hotreload.py",
-    # spawns real long-lived sleeper subprocesses via the legacy ouroboros.tools.services path
-    # AND mutates the module-global tools.services._SERVICES (NOT covered by the
-    # _isolate_workspace_executor_globals fixture, which isolates a different dict).
-    "test_services_tool_v2.py",
+    "test_preflight_runner.py": "exclusive",
+    "test_preflight_process_containment.py": "exclusive",
+    # Imports/mutates the process-global server settings facade; when xdist reuses a worker after
+    # unrelated server tests, cached route/probe state can escape monkeypatch restoration and turn
+    # the mocked capability probe into a real network attempt: it needs no live sibling.
+    "test_settings_budget_hotreload.py": "exclusive",
     # Its own autouse fixture documents that the writer fence "deliberately latches PROCESS-wide
     # state" (workers admission/survivor/blocker latches, update_merge/git_ops module globals);
     # under -n the replace-family no-side-effect pins (replace_env["calls"] == []) intermittently
-    # observe git calls leaked by co-located modules. Same module-global class -> serial lane.
-    "test_update_apply_routing.py",
-})
+    # observe git calls leaked by co-located modules: it needs no live sibling.
+    "test_update_apply_routing.py": "exclusive",
+}
+EXCLUSIVE = "exclusive"
+
+
+def serial_resource(item):
+    """The host resource an item's `serial` mark names: "" for a bare mark, None for no mark."""
+    marker = item.get_closest_marker("serial")
+    if marker is None:
+        return None
+    return str(marker.args[0]) if marker.args and marker.args[0] is not None else ""
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_collection(session):  # noqa: ARG001
+    """Collection imports every test module at once: with the cyclic collector paused it runs 2-3.5x faster
+    (opus_rework N3). One collection then frees what it dropped (a fifth of the tree's objects, a few seconds)
+    before the rest is frozen out of reach of the tests' own collections. A caller with many files names their
+    directory once: pytest re-collects it per named file, 4.3 GB for 803 while paused (test_bytecode walkers)."""
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+        gc.collect()
+        gc.freeze()
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
-    """Tag whole-file serial suites with the `serial` marker BEFORE pytest's own `-m`
-    deselection runs (tryfirst), so `-m "not serial"` / `-m serial` partition them correctly.
-    Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
+    """Tag whole-file serial suites BEFORE pytest's own `-m` deselection runs (tryfirst), derive `exclusive`
+    from `serial("exclusive")` so `-m "not exclusive"` / `-m exclusive` partition the two passes, then pin the
+    xdist groups. Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
+    bare = []
     for item in items:
-        if pathlib.Path(str(item.fspath)).name in _SERIAL_TEST_FILES:
-            item.add_marker(pytest.mark.serial)
-    _pin_lane_groups(items, config.getoption("--serial-shards"))
+        resource = _SERIAL_RESOURCES.get(pathlib.Path(str(item.fspath)).name)
+        if resource is not None and item.get_closest_marker("serial") is None:
+            item.add_marker(pytest.mark.serial(resource))
+        kind = serial_resource(item)
+        if kind == "":
+            bare.append(item.nodeid)
+        elif kind == EXCLUSIVE:
+            item.add_marker(pytest.mark.exclusive)
+    if bare:
+        raise pytest.UsageError(
+            f"a bare @pytest.mark.serial on {len(bare)} test(s), first {bare[0]}: name the host resource the test "
+            'cannot isolate, @pytest.mark.serial("<resource>"), or make it parallel-safe '
+            '(docs/development/14-build-and-ci.md, "Parallel CI and the `serial` marker")')
+    _pin_lane_groups(items, config)
 
 
 _BROWSER_LANE_MARKERS = ("ui_browser", "ui_browser_docker", "browser")
@@ -488,34 +513,80 @@ def pytest_collection_finish(session):
         setattr(Browser, name, functools.wraps(original)(dark_by_default))
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--serial-shards", type=int, default=0,
-        help="With `--dist loadgroup`: pin the serial tests to this many file-sharded xdist groups "
-             "so ONE run covers both lanes (scripts/run_tests.py). 0 leaves scheduling untouched.",
-    )
+_LANE_GROUP_SECONDS = "lane_group_seconds"
+_LANE_GROUP = pytest.StashKey()
 
 
-def _pin_lane_groups(items, shards: int) -> None:
-    """One-run lane scheduling for `scripts/run_tests.py`; inert (shards == 0) for CI and the gate.
+def _plain_id(nodeid: str) -> str:
+    """A node id without the group xdist reads off its end (`id@group`); an `@` inside a parameter stays."""
+    head, at, group = nodeid.rpartition("@")
+    return head if at and "]" not in group else nodeid
 
-    Under `--dist loadgroup` a serial FILE never splits across workers and never runs beside
-    another file of its own shard, so the shard count bounds how many serial files run at once.
-    Every other test keeps the scope `--dist loadscope` gives the two-pass recipe (file, or class
-    when there is one). Serial tests sort first so their long groups are handed out before the queue drains.
-    It runs inside the tryfirst hook because xdist reads `xdist_group` in the same hook.
-    """
-    if shards <= 0:
+
+class _GroupsInTheCollectionReport:
+    """xdist learns an item's group from its node id (`id@group`) when a worker reports its collection, and runs
+    tests by index afterwards. Nothing else may read the suffix: lane proofs, inventories, results, retries and
+    verdicts compare plain ids. So an id carries its group only for the length of that report."""
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_collection_finish(self, session):
+        grouped = [(item, item.nodeid) for item in session.items if _LANE_GROUP in item.stash]
+        for item, nodeid in grouped:
+            item._nodeid = f"{nodeid}@{item.stash[_LANE_GROUP]}"
+        try:
+            yield
+        finally:
+            for item, nodeid in grouped:
+                item._nodeid = nodeid
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_handlecrashitem(crashitem, report, sched):  # noqa: ARG001
+    """The controller names a crashed test by the id its worker reported: give the report the plain one."""
+    report.nodeid = _plain_id(report.nodeid)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    """Hand every worker of the one xdist pass ONE reading of the durations table, the controller's, for the
+    order of its groups: every session that ends rewrites the owner's table, and workers that had read two
+    versions would sort into two orders, which xdist refuses as different collections."""
+    config = node.config
+    if getattr(config.option, "dist", "") != "loadgroup":
         return
-    from tests.ci_verdicts import serial_group
+    if not hasattr(config, "_lane_group_seconds"):
+        from tests.ci_verdicts import platform_name, recorded_durations_table
 
+        table = recorded_durations_table()[0]
+        config._lane_group_seconds = dict(((table or {}).get("platforms") or {}).get(platform_name(sys.platform), {}))
+    node.workerinput[_LANE_GROUP_SECONDS] = config._lane_group_seconds
+
+
+def _pin_lane_groups(items, config) -> None:
+    """The one xdist pass's scheduling; inert outside `--dist loadgroup` (a plain `-n` run keeps its order).
+    Items are collected in xdist's workers, where `--dist` itself reads "no" and xdist keeps the mode in
+    `config.option.loadgroup` (xdist.remote.setup_config): that flag is the one read here.
+
+    A `serial("<resource>")` test joins its resource's group (`serial:<resource>`): the resource's tests take
+    turns on one worker while the other resources and every parallel-safe test run beside them. Every other
+    test keeps the scope `--dist loadscope` would give it (file, or class when there is one). The group rides
+    the item's id only in the collection report (`_GroupsInTheCollectionReport`). Groups are handed
+    out longest-first by their files' recorded seconds (the run's durations table as the controller read it,
+    `pytest_configure_node`), resource groups first among equals, so no long group starts after the queue drains.
+    """
+    if not getattr(config.option, "loadgroup", False):
+        return
+    recorded = getattr(config, "workerinput", {}).get(_LANE_GROUP_SECONDS, {})
+    groups, files = {}, {}
     for item in items:
-        path = item.nodeid.split("::", 1)[0]
-        serial = item.get_closest_marker("serial") is not None
-        # Serial: by FILE (the isolation unit). Others: the scope `--dist loadscope` uses (class when present).
-        group = serial_group(path, shards) if serial else item.nodeid.rsplit("::", 1)[0]
-        item.add_marker(pytest.mark.xdist_group(group))
-    items.sort(key=lambda item: item.get_closest_marker("serial") is None)
+        resource = serial_resource(item)
+        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        item.stash[_LANE_GROUP] = group
+        groups[item.nodeid] = group
+        files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])
+    weight = {group: sum(recorded.get(path, 0) for path in paths) for group, paths in files.items()}
+    order = {item.nodeid: index for index, item in enumerate(items)}
+    items.sort(key=lambda item: (-weight[groups[item.nodeid]], not serial_resource(item), order[item.nodeid]))
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -534,7 +605,10 @@ def pytest_cmdline_main(config):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
+    config.pluginmanager.register(_GroupsInTheCollectionReport(), "lane-groups-in-the-collection-report")
     config.addinivalue_line("markers", "scale: storage operation-count acceptance measurements")
+    config.addinivalue_line("markers", "exclusive: derived here from `serial(\"exclusive\")`, never written by hand: "
+                                       "the tests that run alone in the one-process pass after the xdist pass")
     config.addinivalue_line("markers", "starter_skills: the test runs the real starter-skill installer "
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
@@ -553,7 +627,8 @@ def _guard_test_tree_deletion(config) -> None:
 
     Tests start servers, workers and git in tmp_path, and a test's exit does not prove
     them gone. The "failed"/"none" retention policies delete tmp_path after passing
-    tests, and an explicit --basetemp is emptied before the session starts. pytest's
+    tests with no such proof (``_test_folders`` does, with it), and an explicit
+    --basetemp is emptied before the session starts. pytest's
     OWN numbered basetemp is never used either: its exit hook deletes earlier
     sessions' trees and, with tmp_path_retention_count=0, the current one — whatever
     the policy says — so every controller, bare or not, claims a fresh explicit one.
@@ -613,6 +688,7 @@ def pytest_sessionstart(session):  # noqa: ARG001
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
     session.config._ouroboros_session = session
+    _test_folders.number_once(session.config)
     # This process already owns its allocation. Test-created runners begin with
     # one slot; tests of real concurrency opt in by setting their child's key.
     os.environ[NESTED_WORKERS_ENV] = "1"
@@ -659,6 +735,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:  # xdist worker: hand the leak list to the controller
         workeroutput["thread_leaks"] = list(_THREAD_LEAKS)
+        workeroutput["test_folders"] = dict(_test_folders.counts)
     # The per-process session tree (unique mkdtemp per controller/worker) is RETAINED,
     # never deleted here: a finished session does not prove that every process its
     # tests started is gone, and nothing at this layer can prove it. The terminal
@@ -674,13 +751,36 @@ def pytest_unconfigure(config):  # noqa: ARG001
 _PHASE_EVENT_LOOPS = pytest.StashKey()
 
 
+_LAST_ITEM_RAN = pytest.StashKey()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtestloop(session):
+    """pytest-timeout's `--session-timeout` asks the session to stop after any test that ends past its deadline,
+    the last one too, and that stop request alone made the exit status 1. After the last test nothing is left to
+    stop, so the loop ends as a complete one: the exit status is the tests' and the session guards'. A CI shard
+    whose every test passed went red without this (run 42395824706, UI shard 2: 313 of 313 passed, the deadline
+    crossed in the last one), and scripts/ci_retry.py rightly refuses a red session that no test explains."""
+    try:
+        return (yield)
+    except session.Failed as stop:
+        last_ran = bool(session.items) and session.items[-1].stash.get(_LAST_ITEM_RAN, False)
+        if not (last_ran and str(stop).startswith("session-timeout: ")):
+            raise
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(f"{stop} in the last test: nothing was left to stop")
+        return True
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
-def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
+def pytest_runtest_protocol(item, nextitem):
     """Create both phase loops before fixtures can guard socket operations.
 
     Windows loop construction opens a local socket pair. Network guards must
     remain active throughout the test and its finalizers, so only construction
     precedes fixture setup. This owner closes both loops even if a phase fails.
+    It also notes that the session's last item ran (`pytest_runtestloop`).
     """
     loops = []
     try:
@@ -689,7 +789,10 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
         item.stash[_PHASE_EVENT_LOOPS] = loops
         if _SAFE_TEMP_ROOT:
             item.stash[_RETENTION_BEFORE_ITEM] = _basetemp_witness(item)
+        _test_folders.begin()
         yield
+        if nextitem is None:
+            item.stash[_LAST_ITEM_RAN] = True
     finally:
         # The call and teardown hooks close their loops and fail that phase if a close raises;
         # this pass only guarantees the close. A loop whose close already raised is left half
@@ -755,7 +858,7 @@ def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
     so do a returning stop's named queue and the launch/schedule process memory."""
     from ouroboros import delegate_recovery, launcher_bootstrap, server_control
-    from supervisor import queue, schedule_occurrence, worker_assignment
+    from supervisor import queue, schedule_occurrence, worker_assignment, worker_pool_lifecycle
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
@@ -764,6 +867,7 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
     monkeypatch.setattr(worker_assignment, "_COMMITTED_UNSENT", {})
+    monkeypatch.setattr(worker_pool_lifecycle, "_DEMAND_FORECAST", worker_pool_lifecycle._initial_forecast())
 
 
 @pytest.fixture(autouse=True)
@@ -1325,13 +1429,14 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     asyncio.get_event_loop() after a test that used asyncio.run(), they
     would raise RuntimeError because pytest_runtest_call already cleared
     the loop.  This hook installs a temporary loop for teardown and
-    closes it afterwards.
+    closes it afterwards. Last, a passed test's folder goes (``_test_folders``).
     """
     teardown_loop = item.stash[_PHASE_EVENT_LOOPS][1]
     asyncio.set_event_loop(teardown_loop)
     tmp = (getattr(item, "funcargs", None) or {}).get("tmp_path")
+    outcome = None
     try:
-        yield  # fixture finalizers and teardown run here
+        outcome = yield  # fixture finalizers and teardown run here
     finally:
         teardown_loop.close()
         asyncio.set_event_loop(None)
@@ -1341,6 +1446,8 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
         _fail_if_the_password_resolver_leaked(item)
         _fail_if_a_thread_leaked(item)
         _fail_if_retention_was_left(item, tmp)
+        if outcome is not None and outcome.excinfo is None:
+            _test_folders.release_passed(tmp, run_root=_SAFE_TEMP_ROOT, child_seam=_PYTEST_POPEN_PATCHED)
 
 
 _PRISTINE_PASSWORD_RESOLVER = None
@@ -1427,12 +1534,12 @@ def _fail_if_a_thread_leaked(item):
                 f"test it pollutes", pytrace=False)
 
 
-# ---- retention hygiene: name the test whose marker keeps the whole run (#1908) ----
+# ---- retention hygiene: name the test that leaves a marker behind (#1908) ----
 #
 # Under an owner that releases its scratch (scripts/safe_test.py, run_tests.py, the native
-# preflight) one retention marker anywhere beneath its root keeps all of it: 7-11 GB per full
-# battery. A test that manufactures one (an injected fault, a stubbed reap) retires it; one that
-# forgot kept every green battery's root and nothing named it. retain_tree touches the scratch
+# preflight) a retention marker keeps its test's folder past the run, and the run's root with it. A
+# test that manufactures one (an injected fault, a stubbed reap) retires it; one that forgot left
+# that root behind every green battery and nothing named it. retain_tree touches the scratch
 # declaration above the tree it marks, so one stat clears a test under an unmoved declaration.
 _RETENTION_BEFORE_ITEM = pytest.StashKey()
 _BASETEMP_DECLARATION: list = []  # this process's, looked up once
@@ -1459,8 +1566,8 @@ def _fail_if_retention_was_left(item, tmp):
     moved = _basetemp_witness(item) != item.stash[_RETENTION_BEFORE_ITEM]
     left = retention_left_in(tmp) if moved or (tmp / RETENTION_MARKER).exists() else ""
     if left:
-        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps the whole run root "
-                    f"{_SAFE_TEMP_ROOT} with every test's scratch: {left} — retire what this test "
+        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps that folder and the "
+                    f"run root {_SAFE_TEMP_ROOT} past the run: {left} — retire what this test "
                     "manufactured (an injected fault, a stubbed reap) with "
                     "tests._shared.retire_synthetic_retention; a real one means its teardown was never proven",
                     pytrace=False)
@@ -1470,6 +1577,7 @@ def _fail_if_retention_was_left(item, tmp):
 def pytest_testnodedown(node, error):  # noqa: ARG001
     # pytest-xdist controller: merge each worker's leak list (shipped via workeroutput below).
     _THREAD_LEAKS.extend(getattr(node, "workeroutput", {}).get("thread_leaks", []))
+    _test_folders.counts.update(getattr(node, "workeroutput", {}).get("test_folders", {}))
     if error is None:
         return
     session = getattr(node.config, "_ouroboros_session", None)
@@ -1507,11 +1615,13 @@ def _owned_run() -> bool:
     """An outer ProcessContainer will reap this run, so aborting live workers strands nothing.
 
     Without one (a bare pytest), xdist's own crash handling lets running tests finish and
-    clean up their children: nobody else would.
+    clean up their children: nobody else would. The token of the test that started this run
+    (tests/_test_folders.py) reaps nothing, so it does not count.
     """
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
-    return any(key.startswith(CONTAINMENT_ENV_PREFIX) for key in os.environ)
+    own = _test_folders.custody_prefix()
+    return any(key.startswith(CONTAINMENT_ENV_PREFIX) and not key.startswith(own) for key in os.environ)
 
 
 def _record_worker_crash(node, reason, scheduler):
@@ -1520,12 +1630,13 @@ def _record_worker_crash(node, reason, scheduler):
     node.config._ouroboros_worker_crash = {
         "worker": node.gateway.id, "reason": str(reason),
         "collection_available": collected is not None,
-        "unfinished": sorted(set(collected or []) - completed),
+        "unfinished": sorted({_plain_id(nodeid) for nodeid in collected or []} - completed),
     }
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_logreport(report):
+    _test_folders.custody.failed |= report.failed  # a subtest's report comes through here too
     outcome = yield
     node = getattr(report, "node", None)
     config = getattr(node, "config", None)
@@ -1558,6 +1669,7 @@ def pytest_terminal_summary(terminalreporter):
             f"{len(_THREAD_LEAKS)} test(s): {tests}")
     else:
         terminalreporter.write_line("thread hygiene: no leaked threads")
+    terminalreporter.write_line(_test_folders.summary())
     retained = [str(path) for path in (_PYTEST_ROOT, _PYTEST_REPO_FALLBACK) if path is not None]
     basetemp = getattr(getattr(terminalreporter.config, "_tmp_path_factory", None), "_basetemp", None)
     if basetemp is not None and not any(pathlib.Path(basetemp).is_relative_to(path) for path in retained):

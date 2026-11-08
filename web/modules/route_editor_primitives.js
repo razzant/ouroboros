@@ -5,6 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
+import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
@@ -38,7 +39,7 @@ export function processingSelectHtml(attrs, selected, { global = false } = {}) {
 
 /** Intent controls never change model/effort or claim the route served this mode. */
 export function processingDetailsHtml(attrs, selected, inherited = '') {
-    return `<details class="model-role-details" data-processing-details><summary>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></summary>
+    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></span></summary>
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected)}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div></details>`;
 }
@@ -90,18 +91,13 @@ export function composeModelSource(source, model) {
 export const API_PROVIDER_ORDER = ['openrouter', 'openai', 'anthropic', 'deepseek',
     'zai', 'minimax', 'cloudru', 'gigachat', 'openai-compatible'];
 
-// Fallback names for providers the setup contract does not describe (GigaChat
-// has no profile spec). The contract's label wins whenever it exists.
-const API_PROVIDER_LABELS = {
-    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
-    'openai-compatible': 'OpenAI-compatible endpoint',
-};
 
 // Credential shapes that make a provider usable, mirroring the runtime's
 // PROVIDER_CREDENTIAL_GROUPS: any ONE group whose every key is present counts.
 // Only the fields the transport cannot start without are listed here; optional
-// region/scope/base-url companions are not evidence of a missing key.
+// region/scope/base-url companions are not evidence of a missing key. The
+// compatible endpoint is `compatible_endpoint_configured`: its own address (key
+// optional), or the legacy address with the OpenAI key it travels with.
 const API_PROVIDER_CREDENTIALS = {
     openrouter: [['OPENROUTER_API_KEY']],
     openai: [['OPENAI_API_KEY']],
@@ -111,8 +107,22 @@ const API_PROVIDER_CREDENTIALS = {
     minimax: [['MINIMAX_API_KEY']],
     cloudru: [['CLOUDRU_FOUNDATION_MODELS_API_KEY']],
     gigachat: [['GIGACHAT_CREDENTIALS'], ['GIGACHAT_USER', 'GIGACHAT_PASSWORD']],
-    'openai-compatible': [['OPENAI_COMPATIBLE_BASE_URL'], ['OPENAI_BASE_URL']],
+    'openai-compatible': [['OPENAI_COMPATIBLE_BASE_URL'], ['OPENAI_BASE_URL', 'OPENAI_API_KEY']],
 };
+
+/**
+ * The built-in compatible connection's one pair, the twin of `provider_models.compatible_endpoint`:
+ * the dedicated address with its own key (blank = no auth), else the legacy `OPENAI_BASE_URL` with
+ * `OPENAI_API_KEY`. Neither pair borrows the other's key. `legacy` says which pair a draft reaches and
+ * `apiKeySetting` the setting its key is read from, which discovery names for a kept (masked) key.
+ * @returns {{baseUrl: string, apiKey: string, apiKeySetting: string, legacy: boolean}}
+ */
+export function compatibleEndpoint(settings = {}) {
+    const value = (key) => String(settings?.[key] ?? '').trim();
+    const legacy = !value('OPENAI_COMPATIBLE_BASE_URL');
+    const [url, key] = legacy ? ['OPENAI_BASE_URL', 'OPENAI_API_KEY'] : ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'];
+    return { baseUrl: value(url), apiKey: value(key), apiKeySetting: key, legacy };
+}
 
 /** Every settings key that can make an API provider selectable. */
 export const API_PROVIDER_CREDENTIAL_KEYS = [...new Set(
@@ -159,9 +169,20 @@ export function apiConnections(settings = {}, providerProfiles = {}) {
         });
     }
     const present = (key) => String(settings?.[key] ?? '').trim() !== '';
-    return API_PROVIDER_ORDER.map((id) => ({ id, kind: id, name: '', builtin: true, enabled: true,
+    let rows = settings.OUROBOROS_CONNECTIONS || [];
+    if (typeof rows === 'string') {
+        try { rows = JSON.parse(rows); } catch { rows = []; }
+    }
+    rows = Array.isArray(rows) ? rows : [];
+    return API_PROVIDER_ORDER.flatMap((id) => [{ id, kind: id, name: '', builtin: true,
+        enabled: !rows.some((row) => row?.kind === id && row.name === 'default' && row.enabled === false),
         configured: API_PROVIDER_CREDENTIALS[id].some((group) => group.every(present)), source: '',
-        label: apiProviderLabel(id, providerProfiles) }));
+        label: apiProviderLabel(id, providerProfiles) }, ...rows.filter((row) => row?.kind === id && row.name && row.name !== 'default')
+        .map((row) => ({ id: `${id}@${row.name}`, kind: id, name: row.name, builtin: false,
+            enabled: row.enabled !== false, configured: id === 'openai-compatible' ? Boolean(row.base_url?.trim())
+                : id === 'gigachat' ? Boolean(row.credentials?.trim() || (row.user?.trim() && row.password?.trim()))
+                    : Boolean(row.api_key?.trim()), source: '',
+            label: `${apiProviderLabel(id, providerProfiles)} · ${row.label || row.name}` }))]);
 }
 
 /** The sources the owner can send to: one per enabled connection that holds its credential. */
@@ -483,9 +504,10 @@ export function routeChoiceGroups({
     const savedChoice = String(currentChoice || '');
     if (savedChoice.startsWith('session:')
         && !sessionValues.some((option) => option.value === savedChoice)) {
+        // The saved harness keeps its display name (the catalog's own table), with the check's state after it.
         sessionValues.push({
             value: savedChoice,
-            label: undiscoveredLabel(savedChoice.slice('session:'.length), catalogKnown),
+            label: `${harnessPresentation(savedChoice.slice('session:'.length)).label} (agent) · ${catalogKnown ? 'not in discovery' : 'not checked'}`,
         });
     }
     const modelValues = modelSources.map((source) => ({
@@ -493,7 +515,7 @@ export function routeChoiceGroups({
     }));
     if (savedChoice.startsWith('subscription:')
         && !modelValues.some((option) => option.value === savedChoice)) {
-        modelValues.push({ value: savedChoice, label: `${savedChoice.slice(13)} (not checked)` });
+        modelValues.push({ value: savedChoice, label: `${harnessPresentation(savedChoice.slice(13)).label} (model) · not checked` });
     }
     // One entry per enabled connection that holds its key. A saved choice that
     // cannot send stays selectable and says why, so a save cannot silently
@@ -515,7 +537,7 @@ export function routeChoiceGroups({
                     ? 'No model sources listed — refresh Model Catalog'
                     : 'No model sources listed — connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
-                    : 'Model sources have not been read — use Refresh Model Catalog' }] }] : []),
+                    : 'Model sources have not been read — use Refresh model catalog' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
             ? { label: 'Agents · sessions', options: sessionValues }
