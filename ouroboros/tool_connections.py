@@ -85,8 +85,9 @@ def _header(server: str, facts: Dict[str, Any], count: int, tokens: int, *, on_d
     residency = "on demand" if on_demand else "loaded from task start"
     # A stdio server's process lifetime is its configured task_session (mcp_task_session); a remote server owns its own.
     lifetime = "" if facts.get("transport") != "stdio" else (
-        "one process for the whole task; " if facts.get("task_session")
-        else "a new process per call, so state such as open pages or logins does not carry over; ")
+        "calls in a task share one process; a call timeout, a Settings change or a server exit starts a new one; "
+        if facts.get("task_session")
+        else "a new process per call, so in-memory state such as open pages does not carry over; ")
     return (f"{label}: {count} tool{'' if count == 1 else 's'}, call schemas ≈{tokens} tokens, {residency}; "
             f"{lifetime}callable as mcp_{server}__<name>")
 

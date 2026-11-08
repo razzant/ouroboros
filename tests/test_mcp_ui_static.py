@@ -124,7 +124,8 @@ const host = { markup: '', get innerHTML() { return this.markup; }, set innerHTM
     querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
 globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
     querySelector: () => card, querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
-globalThis.fetch = async () => ({ ok: false });
+const fetched = [];  // every request the card sends; the section's Save is its only writer
+globalThis.fetch = async (url) => { fetched.push(String(url)); return { ok: false }; };
 initMcpSettings({ onChange: () => { changes += 1; } });
 const HELD = { id: 'held', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'],
     task_session: true, browser_policy: true };
@@ -155,19 +156,23 @@ applyMcpSettings({ MCP_SERVERS: [HELD, { ...HELD, id: 'policy-off', browser_poli
 assert.equal((host.innerHTML.match(/data-mcp-lifetime/g) || []).length, 2);  // a held stdio card says what it does
 assert.equal((host.innerHTML.match(/browser_policy:/g) || []).length, 1);
 const sessionTag = () => host.innerHTML.match(/<input\b[^>]*data-mcp-field="task_session"[^>]*>/)[0];
-applyMcpSettings({ MCP_SERVERS: [{ id: 'plain', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'] }] });
+applyMcpSettings({ MCP_SERVERS: [{ id: 'plain', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'],
+    env_from_settings: { TOKEN: 'CUSTOM_KEY' }, allowed_tools: ['read'] }] });
 assert.doesNotMatch(sessionTag(), /\b(checked|disabled)\b/);  // per-call stays the default
 assert.match(sessionTag(), /aria-describedby="mcp-0-lifetime"/);
 assert.match(host.innerHTML, /data-mcp-lifetime>Each tool call starts a new server process\./);
 assert.ok(!Object.hasOwn(collectMcpSettings().MCP_SERVERS[0], 'task_session'));
-const painted = paints, edits = changes;
+const painted = paints, edits = changes, sent = fetched.length;
 for (const [on, event] of [[true, 'input'], [false, 'change'], [true, 'change'], [false, 'input']]) {
     session.checked = on; handlers[`task_session:${event}`]();
-    assert.equal(collectMcpSettings().MCP_SERVERS[0].task_session, on, event);
+    const edited = collectMcpSettings().MCP_SERVERS[0];
+    assert.equal(edited.task_session, on, event);
+    assert.deepEqual([edited.env_from_settings, edited.allowed_tools], [{ TOKEN: 'CUSTOM_KEY' }, ['read']], event);
     assert.match(note.textContent, on ? /^One server process serves every call in a task\./ : /^Each tool call starts/);
     assert.equal(paints, painted, event);  // edited in place: the focused checkbox keeps its node
 }
 assert.equal(changes - edits, 4);  // each edit marks the Settings draft changed
+assert.ok(fetched.slice(sent).every((url) => url === '/api/mcp/status'), fetched.join());  // no edit saves by itself
 applyMcpSettings({ MCP_SERVERS: [{ ...HELD, task_session: 'TRUE', browser_policy: 'yes' }] });  // the loader's spellings
 assert.match(sessionTag(), /\bchecked\b/);
 assert.match(sessionTag(), /\bdisabled\b/);

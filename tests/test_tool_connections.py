@@ -105,18 +105,20 @@ def test_an_unpinned_server_starts_on_demand_in_every_mode_and_the_map_names_its
 
 
 def test_a_stdio_header_names_the_process_lifetime_its_configuration_gives(registry):
-    """#2914: a per-call stdio server starts a new process for every call, so a page it opened or a login is gone
-    by the next call; ``task_session`` keeps one process for the task. A remote server's lifetime is its own."""
+    """#2914: a per-call stdio server starts a new process for every call, so a page it opened is gone by the next
+    call; with ``task_session`` a task's calls share one process until a timeout, a Settings change or a server exit
+    replaces it. A remote server's lifetime is its own."""
     _servers(extra=[{"id": "files", "name": "Files", "enabled": True, "transport": "stdio", "command": "node"},
                     {"id": "browser", "enabled": True, "transport": "stdio", "command": "node", "task_session": True}])
     full, nano = connection_views(registry, helper=False)
     helper, _ = connection_views(registry, helper=True)
     for text, lead in ((full, "\n### "), (nano, "\n- "), (helper, "\n- ")):
         assert f"{lead}mcp_files (Files): 1 tool, call schemas ≈" in text
-        assert ("on demand; a new process per call, so state such as open pages or logins does not carry over; "
+        assert ("on demand; a new process per call, so in-memory state such as open pages does not carry over; "
                 "callable as mcp_files__<name>") in text
         assert f"{lead}mcp_browser: 1 tool," in text
-        assert "on demand; one process for the whole task; callable as mcp_browser__<name>" in text
+        assert ("on demand; calls in a task share one process; a call timeout, a Settings change or a server exit "
+                "starts a new one; callable as mcp_browser__<name>") in text
         assert "on demand; callable as mcp_gitlab__<name>" in text  # remote: no lifetime words
     assert full.count("process") == helper.count("process") == 2  # nor on the pinned remote slack
 
