@@ -574,7 +574,7 @@ def test_a_stopped_seat_thread_from_before_activation_stays_in_the_engine_and_ke
     h = plan_session
     _stop(h, h.make_ctx())
     engine = Engine()
-    assert _retention(h, engine) == {"activated": True}  # the code arrives after that run started
+    assert _retention(h, engine)["activated"]  # the code arrives after that run started (and walks: custody holds it)
     _row(h.drive, "task-1", "completed", tree="task-1")
     report = _retention(h, engine)
     assert report["holds"] == {"predates_activation": 1} and report["waiting"] == 0, report
