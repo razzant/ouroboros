@@ -12,8 +12,9 @@ from ouroboros import skill_source_catalog as catalog
 from ouroboros import skill_source_install as installer
 from ouroboros.skill_install_record import read_install_record, write_install_record
 from ouroboros.skill_loader import SkillReviewState, save_enabled, save_skill_grants, skill_state_dir
+from tests._extension_loader_shared import extension_tool_answer, version_plugin
 from tests._skill_source_fixtures import (
-    HubFixture, author_repo, builtin_repo, commit_all, git, join_source_refreshes, publish, write_skill,
+    HubFixture, author_repo, builtin_repo, commit_all, entry, git, join_source_refreshes, publish, write_skill,
 )
 
 
@@ -255,6 +256,127 @@ def test_update_detection_replace_keep_and_stale_candidates(drive, hub):
     result = installer.update_installed(drive, "weather", mode="replace", digest=new_digest, rows=rows)
     assert result["version"] == "0.4.0" and read_install_record(drive, "weather")["base_digest"] == new_digest
     assert (drive / "skills" / "ouroboroshub" / ".rollback" / "weather.previous" / "SKILL.md").is_file()
+
+
+# --- an accepted update and the running extension: the published tool, never the enabled bit, is the proof ---
+
+@pytest.fixture
+def live_extensions(monkeypatch):
+    from tests._shared import clean_extension_runtime_state
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+    clean_extension_runtime_state()
+    yield
+    clean_extension_runtime_state()
+
+
+_PINGER = ('---\nname: pinger\ndescription: pinger answers its release\nversion: {version}\ntype: extension\n'
+           'entry: plugin.py\nplugin_api: "2.0"\npermissions: [tool]\n{extra}---\nAbout it.\n')  # 2.0: acceptance needs it
+
+
+def _release_pinger(drive, hub, rows, version, *, plugin="", extra=""):
+    """``pinger`` ``version`` as an Official (trusted) extension of the hub, read by this install."""
+    folder = hub.work / "skills" / "pinger"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(_PINGER.format(version=version, extra=extra), encoding="utf-8")
+    (folder / "plugin.py").write_text(plugin or version_plugin(version), encoding="utf-8")
+    digest = catalog.tree_release_digest(folder)
+    hub.entries["pinger"] = entry("pinger", digest, version=version)
+    hub.official = [*[item for item in hub.official if item["name"] != "pinger"],
+                    {"name": "pinger", "digest": digest, "recommended": False}]
+    hub.commit(f"pinger {version}")
+    _refresh(drive, rows[1:2])
+    return digest
+
+
+def _owner(drive, action):
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.tools.registry import ToolContext
+
+    result = run_skill_action(ToolContext(repo_dir=drive, drive_root=drive), "pinger", action, _owner_actor="owner_ui")
+    assert result.get("ok") is not False, result
+
+
+def _choice(drive):
+    return (skill_state_dir(drive, "pinger") / "enabled.json").read_bytes()
+
+
+@pytest.mark.parametrize("turn_on_when_ready", [True, False])
+def test_an_accepted_update_brings_an_extension_that_is_on_back_at_its_new_release(drive, hub, live_extensions,
+                                                                                    turn_on_when_ready):
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installed = installer.install_item(drive, "ouroboros/pinger", rows=rows, turn_on_when_ready=turn_on_when_ready)
+    if not turn_on_when_ready:  # the install never asked to turn on: the owner's own Enable did
+        assert installed["acceptance"]["turn_on"] == "not_requested"
+        _owner(drive, "enable")
+    assert extension_tool_answer(drive, "pinger") == "1.0.0"
+    choice = _choice(drive)
+    _release_pinger(drive, hub, rows, "2.0.0")
+    acceptance = installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]
+    assert extension_tool_answer(drive, "pinger") == "2.0.0", acceptance  # no manual reconcile, no restart
+    assert acceptance["turn_on"] == ("already_on" if turn_on_when_ready else "not_requested")
+    assert acceptance["extension_action"] == "extension_loaded"
+    assert _choice(drive) == choice
+    assert read_install_record(drive, "pinger")["turn_on_when_ready"] is turn_on_when_ready
+
+
+@pytest.mark.parametrize(("held", "reason"), [("owner_off", "disabled"), ("new_key", "missing_grants")])
+def test_an_accepted_update_leaves_an_extension_held_off_where_it_stands(drive, hub, live_extensions, held, reason):
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installer.install_item(drive, "ouroboros/pinger", rows=rows)
+    if held == "owner_off":
+        _owner(drive, "disable")
+    choice = _choice(drive)
+    _release_pinger(drive, hub, rows, "2.0.0", extra="env_from_settings: [GITHUB_TOKEN]\n" if held == "new_key" else "")
+    acceptance = installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]
+    assert extension_tool_answer(drive, "pinger") is None
+    assert _choice(drive) == choice and read_install_record(drive, "pinger")["release"]["version"] == "2.0.0"
+    assert acceptance["extension_reason"] == reason and "setup_error" not in acceptance, acceptance
+
+
+def test_a_start_failure_after_an_accepted_update_keeps_the_files_and_the_owner_choice(drive, hub, live_extensions):
+    import asyncio
+    import time
+
+    from ouroboros.gateway.skill_sources import _start_job
+    from ouroboros.skill_lifecycle_queue import queue_snapshot
+
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installer.install_item(drive, "ouroboros/pinger", rows=rows)
+    choice = _choice(drive)
+    broken = _release_pinger(drive, hub, rows, "2.0.0",
+                             plugin="def register(api):\n    raise RuntimeError('cannot start 2.0.0')\n")
+    seen = {}
+
+    async def owner_update():  # the Skills page's Update: a lifecycle job whose one line the page shows
+        job_id = await _start_job("update", "pinger", "Updating pinger", lambda progress: seen.setdefault(
+            "result", installer.update_installed(drive, "pinger", mode="replace", rows=rows, progress=progress)))
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            events = [item for item in queue_snapshot()["events"] if item["id"] == job_id]
+            if events and events[-1]["status"] not in {"queued", "running"}:
+                return events[-1]
+            await asyncio.sleep(0.1)
+        pytest.fail("the update job did not finish")
+
+    event = asyncio.run(owner_update())
+    result = seen["result"]
+    assert result["ok"] and read_install_record(drive, "pinger")["release"]["digest"] == broken  # the files landed
+    assert event["status"] == "succeeded" and event["error"] == ""
+    assert event["message"].startswith("update pinger: done; It could not start: "), event
+    assert "cannot start 2.0.0" in event["message"]
+    acceptance = result["acceptance"]
+    assert acceptance["extension_action"] == "extension_load_error" and "cannot start 2.0.0" in acceptance["load_error"]
+    assert event["message"] == f"update pinger: done; {acceptance['setup_error']}"
+    assert extension_tool_answer(drive, "pinger") is None and _choice(drive) == choice  # still on: no revert
+    _release_pinger(drive, hub, rows, "3.0.0")  # so the fixed release starts without a new Enable
+    assert installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]["extension_action"] == (
+        "extension_loaded")
+    assert extension_tool_answer(drive, "pinger") == "3.0.0"
 
 
 def test_modified_left_source_and_withdrawn_states(drive, hub):
