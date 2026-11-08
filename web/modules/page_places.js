@@ -5,7 +5,7 @@
  * back when its page, Dashboard tab or room is shown again. A room's feed keeps its own reading place
  * (chat_reading_position.js) and the Logs list its own (logs.js), so those two are left alone. No storage: the place
  * lives as long as the page. */
-const OWN_PLACE = '.chat-messages, #chat-messages, #log-entries';
+const OWN_PLACE = '.chat-messages, #chat-messages, #page-logs';
 
 export function initPagePlaces({ doc = document, win = window } = {}) {
     const places = new Map();  // a scrolled box → where it was left

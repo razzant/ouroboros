@@ -21,7 +21,7 @@ from tests._room_browser_shared import (
     _seed_room,
     _wait_for,
 )
-from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
+from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
 pytestmark = [pytest.mark.ui_browser]

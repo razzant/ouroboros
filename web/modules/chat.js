@@ -3474,9 +3474,9 @@ export function createChatInstance({
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
-        // Room status carries the outage; only a reload onto changed code adds a restart notice, owed until shown by the
-        // room that heard the first connection. A room whose first open is a reconnect (a late Project) owes none.
-        if (isReconnect && !wsHasConnectedOnce) pendingRestartNotice = '';
+        // A changed-code reload owes one notice. Main exists from startup: if away at first open, it hears only
+        // resume's synthetic reconnect but still owes that notice. A Project mounted later owes none.
+        if (isReconnect && !wsHasConnectedOnce && !isMain) pendingRestartNotice = '';
         const restartNotice = pendingRestartNotice;
         wsHasConnectedOnce = true;
         updateMessagesPadding();

@@ -196,6 +196,55 @@ def test_first_open_after_a_reload_says_only_restart_complete_and_only_once(room
     assert rows(page, MAIN) == shown, "a later reconnect adds nothing and keeps what the reload said"
 
 
+@pytest.mark.parametrize("away", ["settings", "hidden"])
+def test_main_keeps_the_reload_notice_until_its_first_visible_return(room_ui, away):
+    """The socket can open before Main hears it: on another page or in a hidden window.
+
+    Headless browsers do not expose native tab hiding; only document visibility is substituted. The real
+    app, room suspension, socket and history consumers still handle the entire return.
+    """
+    page = room_ui["page"]
+    transport = Transport(page, history={1: rw.reading(2), 42: rw.reading(2, 0, "Project")}, projects=[rw.PROJECT])
+    if away == "hidden":
+        page.add_init_script("""(() => {
+            let hidden = true;
+            Object.defineProperty(Document.prototype, 'hidden', {configurable:true, get:() => hidden});
+            Object.defineProperty(Document.prototype, 'visibilityState',
+                {configurable:true, get:() => hidden ? 'hidden' : 'visible'});
+            window.showTestDocument = () => {hidden=false; document.dispatchEvent(new Event('visibilitychange'));};
+        })()""")
+    page.goto(f"{room_ui['url']}/?_ouro_refresh=1&_ouro_reason=sha-change#{'settings' if away == 'settings' else 'chat'}")
+    page.wait_for_selector("#page-chat .rw-trigger", state="attached")
+    for _ in range(100):
+        if transport.sockets:
+            break
+        page.wait_for_timeout(50)
+    assert transport.sockets, "the page never opened its socket"
+    settle(page)
+    assert page.locator(NOTICE).count() == 0, "Main is away: no hidden rendering"
+    if away == "hidden":
+        page.evaluate("window.showTestDocument()")
+    else:
+        page.locator('[data-nav-page="chat"]').first.click()
+    page.locator(f"{MAIN} {NOTICE}").wait_for()
+    settle(page)
+    shown = rows(page, MAIN)
+    assert shown[-1] == {"text": "Restart complete", "type": "reconnect", "ephemeral": True}
+    assert sum(row["type"] == "reconnect" for row in shown) == 1
+    rw.capture(page, f"restart-complete-main-return-{away}")
+    # A second return and a genuine reconnect do not duplicate the owed notice.
+    page.locator('[data-nav-page="settings"]').first.click()
+    page.locator('[data-nav-page="chat"]').first.click()
+    page.evaluate(HISTORY_LANDED)
+    transport.await_reconnect(transport.disconnect())
+    page.wait_for_function("() => window.historyLanded > 0")
+    settle(page)
+    assert rows(page, MAIN) == shown
+    rw.open_project(page, rw.PROJECT)
+    settle(page)
+    assert page.locator(f"{PROJECT} {NOTICE}").count() == 0, "late Project does not inherit Main's notice"
+
+
 def test_late_project_does_not_repeat_the_reload_notice_on_reconnect(room_ui):
     history = {1: rw.reading(2), 42: rw.reading(2, 0, "Project")}
     transport = Transport(room_ui["page"], history=history, projects=[rw.PROJECT])
