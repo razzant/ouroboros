@@ -72,6 +72,11 @@ def get_tools() -> list[ToolEntry]:
                        "Only an owner-door turn may confirm an owner account. A note is your human's only in such a "
                        "turn and only when its whole text is their exact words that reached this run; any other note is yours. "
                        "A folder is an address, not a fence. "
+                       "Use canonical account_id and conversation_id from the connector's tools, connection metadata or event route, "
+                       "not display labels; an actor ID is not necessarily a conversation ID. "
+                       "For connect, omitted or empty account_id leaves the account scope unrestricted; omitted or empty "
+                       "conversation_id covers all conversations in that scope. For confirm_owner_account/revoke_owner_account, "
+                       "omitted account_id inherits the place's account; empty targets only a confirmation with no account restriction. "
                        "Connect starts Silent using the installed connector's declaration; disconnect keeps room history.",
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["list", "inspect", "connect", "disconnect", "set_state",
