@@ -534,12 +534,21 @@ def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
 _HELD_WORDS = ("These words wait until a check judges them. Or ask your human privately, quoting the exact text and "
                "destination: their answer on that card lets an identical re-issue from a later step send it unjudged. "
                "Never route these words through another tool.")
+_HELD_CALL = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
+              "words. Retry it in a later step, or ask your human privately with this exact call on the card: {call}. "
+              "Their answer lets an identical re-issue from a later step run it unjudged. Never route it through "
+              "another tool.")
+
+
+def _exact_call(tool_name, arguments):
+    """An MCP call as my human's card quotes it: it declares no words or destination of its own, so the whole call."""
+    return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
 def _owner_yes(ctx, tool_name, arguments, effect, prior):
     """The quiz my human answered after these words were held, its card holding their exact text and every
-    destination; "" if none. The host checks facts only (bytes, destination, time): the mind's re-issue after reading
-    the answer is its judgment that the answer approves."""
+    destination (an MCP call: the exact call, ``_exact_call``); "" if none. The host checks facts only (bytes,
+    destination, time): the mind's re-issue after reading the answer is its judgment that the answer approves."""
     from datetime import datetime
     from ouroboros.place_guard import call_place_facts
     from ouroboros.tool_effects import argument_value
@@ -549,10 +558,14 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
             return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             return None
-    words, held = argument_value(arguments, effect.text or "text"), when(prior.get("held_at"))
-    facts = call_place_facts(ctx, tool_name, arguments) or {}
-    destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
-                    or [value for values in (facts.get("targets") or {}).values() for value in values])
+    held = when(prior.get("held_at"))
+    if effect.source == "mcp":  # no declared words or destination: the card holds the exact call
+        words, destinations = _exact_call(tool_name, arguments), [tool_name]
+    else:
+        words = argument_value(arguments, effect.text or "text")
+        facts = call_place_facts(ctx, tool_name, arguments) or {}
+        destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
+                        or [value for values in (facts.get("targets") or {}).values() for value in values])
     if not isinstance(words, str) or not words.strip() or not destinations or held is None:
         return ""
     for row in getattr(ctx, "_owner_directives", None) or []:
@@ -1385,9 +1398,11 @@ def check_safety(
     ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
     Speech, known before a verdict from declarations or marked by the verdict's ``speech``, follows the final
     assessment: DANGEROUS returns it unsent with the reason, the verdict's ``quote`` and the destination's notes, and
-    only an identical re-issue (request_id included) from a later model call sends it. A hold on speech, or on an MCP
-    call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
-    words and destination lets a later identical re-issue send it (``_owner_yes``)."""
+    only an identical re-issue (request_id included) from a later model call sends it; words only the verdict saw get
+    that re-issue in Cyber Pro alone, and an ordinary mode checks each of their issues again. A hold on speech, or on
+    an MCP call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
+    words and destination (an MCP call: the exact call) lets a later identical re-issue send it (``_owner_yes``); a
+    re-issue of words only the verdict saw meets the one-author guard first."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1441,6 +1456,10 @@ def check_safety(
     if prior.get("speech_refused"):  # host- or verdict-marked speech, flagged before
         if not call or call == prior.get("llm_call_id"):  # the flagged decision re-presented, not a later one
             return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
+        if not speech:  # words only the verdict saw still meet the one-author guard a message meets at dispatch
+            from ouroboros.place_guard import verdict_speech_refusal
+            if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp):
+                return False, refusal
         _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": prior["verdicts"],
                                        "flagged_in": prior.get("llm_call_id", ""), "sent_by": call,
@@ -1477,7 +1496,10 @@ def check_safety(
         marked = not speech and any(verdict.get("speech") is True for verdict in verdicts)  # words only the verdict saw
         speech = speech or marked
         flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
-        if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
+        # Declared speech may be sent by a later decision in every mode; words only the verdict saw keep an ordinary
+        # mode's refusal (each issue is checked again) and are refused once only in Cyber Pro, where the call would run.
+        reissue = flagged_speech and (cyber or not marked)
+        if not _remember(ctx, digest, tool_name, assessment, speech_refused=reissue):
             assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
             allowed, message = assessment
         else:
@@ -1489,7 +1511,7 @@ def check_safety(
                 return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
                                + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
                                + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
-                               + "\n" + _SEND_DESPITE)
+                               + ("\n" + _SEND_DESPITE if reissue else ""))
             if marked and allowed:  # the place guard a message meets at dispatch, before any verdict existed
                 from ouroboros.place_guard import verdict_speech_refusal
                 if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp):
@@ -1499,7 +1521,8 @@ def check_safety(
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         if not getattr(assessment, "verdicts", ()):
             _remember(ctx, digest, tool_name, assessment, held=True)
-        return False, message + "\n" + _HELD_WORDS
+        exits = _HELD_WORDS if speech else _HELD_CALL.format(call=_exact_call(tool_name, arguments))
+        return False, message + "\n" + exits
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

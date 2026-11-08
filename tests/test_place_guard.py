@@ -141,6 +141,17 @@ def test_a_verdict_marked_conversation_write_meets_the_one_author_guard(supervis
     assert not ok and "tell_task(task_id='other'" in message
     h.replies.append({"status": "SAFE", "reason": "a reaction", "speech": False})
     assert h.module.check_safety(name, {"room": "C2", "emoji": "eyes"}, ctx=h.ctx) == (True, "")
+    # A flagged one's later re-issue (Cyber Pro) meets the same guard before it is sent despite the check.
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    words = {"room": "C2", "text": "Ship it."}
+    h.replies.append({"status": "DANGEROUS", "reason": "the note asks for a draft first", "speech": True})
+    assert not h.module.check_safety(name, words, ctx=h.ctx)[0]
+    h.later()
+    ok, message = h.module.check_safety(name, words, ctx=h.ctx)
+    assert not ok and "tell_task(task_id='other'" in message
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: "")
+    ok, message = h.module.check_safety(name, words, ctx=h.ctx)
+    assert ok and "despite the check" in message
 
 
 @pytest.mark.parametrize(("account_source", "broad_account"), [("focus", "*"), ("call", "")])

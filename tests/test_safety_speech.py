@@ -54,9 +54,19 @@ def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, st
 
 def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
     """A built-in without declarations (github_write) gets speech semantics only from the verdict: flagged as speech
-    it returns unsent at first issue and sends on a later decision, in Cyber Pro too; the same verdict without the
-    mark stays advice there."""
+    in Cyber Pro it returns unsent at first issue and sends on a later decision; the same verdict without the mark
+    stays advice there. In an ordinary mode the mark quotes the words but keeps that mode's refusal: every issue is
+    checked again and none is sent by repetition."""
     h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "advanced")
+    secret = {"method": "comment", "repo": "razzant/ouroboros", "number": 1, "body": "token sk-live-1"}
+    for _ in range(2):
+        h.replies.append({"status": "DANGEROUS", "reason": "a credential to a public thread", "speech": True,
+                          "quote": "sk-live-1"})
+        ok, message = h.module.check_safety("github_write", secret, ctx=h.ctx)
+        assert not ok and '"sk-live-1"' in message and "repeat the identical call" not in message
+        h.later()
+    assert len(h.calls) == 2, "the re-issue was judged again, not sent by repetition"
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 2805, "body": "Taking it up."}
     h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": True,
@@ -65,7 +75,7 @@ def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
     assert not ok and "Message not sent" in message
     h.later()
     ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
-    assert ok and "despite the check" in message and len(h.calls) == 1
+    assert ok and "despite the check" in message and len(h.calls) == 3
     h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": False})
     ok, message = h.module.check_safety("github_write", {**comment, "body": "Other words."}, ctx=h.ctx)
     assert ok and "Cyber Pro leaves the decision to Ouroboros" in message

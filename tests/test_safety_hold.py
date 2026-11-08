@@ -47,10 +47,14 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
     else:
         monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
     held = "SAFETY_UNAVAILABLE" if cause == "outage" else "TOO_LARGE"
-    for words in ((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}),
-                  ("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"})):
+    for words, exit_named in (((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}), True),
+                              (("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"}), False)):
         ok, message = h.module.check_safety(*words, ctx=h.ctx)
         assert not ok and held in message, words[0]
+        # Words with a declared text and destination name my human's exit by them; an MCP call, which has neither,
+        # by its exact call.
+        assert ("quoting the exact text and destination" in message) is exit_named
+        assert ("This call waits" in message and "exact call on the card" in message) is not exit_named
     for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
         ok, message = h.module.check_safety(*other, ctx=h.ctx)
         assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
@@ -96,6 +100,33 @@ def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(su
     exits = [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
     assert [(event["quiz_id"], event["hold"]) for event in exits] == ([("q9", "UNAVAILABLE")] if sent else [])
     assert ("quiz q9" in message) is sent
+
+
+def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(supervisor, monkeypatch):
+    """An MCP call declares no words or destination, so its hold names the exact call for my human's card: an answer
+    after the hold whose card holds that exact call lets an identical re-issue from a later model call run it
+    unjudged; a card holding the call with any other argument decides nothing."""
+    from datetime import datetime, timedelta
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
+    name, call = "mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "Ship it on Friday."}
+    exact = h.module._exact_call(name, call)
+    for card, sent in ((exact.replace("Friday", "Monday"), False), (exact, True)):
+        h.replies.append(RuntimeError("provider_failed"))
+        ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+        assert not ok and f"on the card: {exact}." in message
+        held = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest(name, call)]["held_at"])
+        h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Run it", "quiz_id": "q7",
+                                    "ts": (held + timedelta(seconds=5)).isoformat(),
+                                    "reply_to": {"address": "quiz q7 of task work", "text": f"Run exactly this?\n{card}"}}]
+        h.later()
+        h.replies.append(RuntimeError("provider_failed"))
+        ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+        assert ok is sent and ("quiz q7" in message) is sent
+        h.later()
+    assert [event["quiz_id"] for event in h.events if event["type"] == "safety_sent_without_assessment"] == ["q7"]
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
