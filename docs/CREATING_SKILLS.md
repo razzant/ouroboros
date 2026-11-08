@@ -996,7 +996,7 @@ contributes:
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
   argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: your human's
   answer on a card holding those exact words as whole lines and every destination (the place's label and each declared
-  recipient value) sends the message in every mode, held, flagged or before any check (a call declaring neither,
+  recipient outside that place's own conversation) sends the message in every mode, held, flagged or before any check (a call declaring neither,
   such as an MCP tool, uses its exact call for that card); the host checks the card was answered, not the answer.
   Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.

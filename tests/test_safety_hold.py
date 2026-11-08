@@ -75,12 +75,12 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
-        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"targets": {"chat_id": ["-100"]}, "places": [
+        {"place_id": "p", "place_label": "Telegram · FusionBrain", "conversation_id": "-100"}]})  # its own conversation
     text = "Status of the tracks: Atlas passed 70 and 95."
     reply = {"place_id": "p", "text": text, "destination": {"conversation_id": "-100"}}
     words = "Status: all good." if card == "other words" else text
-    place = "" if card == "no destination" else " to Telegram · FusionBrain (-100)"
+    place = "" if card == "no destination" else " to Telegram · FusionBrain"
     answer = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
         "address": "quiz q9 of task work", "author": "Ouroboros, task work",
         "text": (f"Send exactly this{place}: {words} — fine?\n" if card == "inside a line"
@@ -95,7 +95,7 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
-    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain, -100" in message
+    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain on the card" in message
     assert "Never route these words through another tool" in message
     h.ctx._owner_directives = answer
     h.replies.append(RuntimeError("provider_failed"))
@@ -119,12 +119,12 @@ def test_my_humans_answer_that_started_a_fresh_head_sends_the_words_it_answered(
     holds the words (no card of mine), releases nothing: those words are checked."""
     from ouroboros import place_guard
     h = supervisor
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
-        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"targets": {"chat_id": ["-100"]}, "places": [
+        {"place_id": "p", "place_label": "Telegram · FusionBrain", "conversation_id": "-100"}]})
     text = "Atlas passed 70 and 95."
     h.ctx._owner_directives = [{"source": source, "content": "Да, отправляй", "reply_to": {
         "address": address, "author": "Ouroboros, task ended-head",
-        "text": f"Send this to Telegram · FusionBrain (-100)?\n{text}\n1. Send it\n2. Not now\n"
+        "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it\n2. Not now\n"
                 "(host record: my human pressed option 1)"}}]
     h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
     ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": text}, ctx=h.ctx)

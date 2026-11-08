@@ -93,7 +93,7 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     monkeypatch.setattr(tool_effects, "effect_of", lambda name, **kw: tool_effects.ToolEffect("message", declared=True)
                         if name == "connector_send" else tool_effects.BUILTIN)
     ok, message = h.module.check_safety("connector_send", {"text": text, "chat_id": "-100"}, ctx=h.ctx)
-    assert not ok and "flagged DANGEROUS in this work" in message and len(h.calls) == 2
+    assert not ok and "flagged DANGEROUS in this work for this place" in message and len(h.calls) == 2
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
         "address": "quiz q9 of task work", "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it"}}]
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)

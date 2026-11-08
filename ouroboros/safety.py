@@ -1511,10 +1511,10 @@ def check_safety(
     def released(quiz, words_by_verdict):  # my human's answered card holds these exact words: no new check
         if words_by_verdict and (refusal := one_author()):
             return False, refusal
+        said = "\nThe check had said:\n" + _reasons(basis) if any(v["status"] != "SAFE" for v in basis or ()) else ""
         return sent("safety_sent_despite_check" if flag or gated else "safety_sent_without_assessment",
                     f"Sent on your human's answer ({quiz}), without a new check. The host checked that they answered "
-                    "a card with these exact words, not what they answered." + (
-                        "\nThe check had said:\n" + _reasons(basis) if basis else ""),
+                    "a card with these exact words, not what they answered." + said,
                     quiz_id=quiz, **({"hold": prior["held"]} if prior.get("held") else {}))
 
     def sent(event, advice, **facts):
@@ -1541,7 +1541,8 @@ def check_safety(
         return sent("safety_sent_despite_check", "Identical re-issue from a later step; sent despite the check:\n"
                     + _reasons(prior["verdicts"]), detail="sent despite the check by a later model call")
     if gated and not cyber:
-        return False, _NOT_SENT["DANGEROUS"] + ": these words to this destination were flagged DANGEROUS in this work. " + exits
+        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
+                       f"recipient. {exits}")
 
     try:
         assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
