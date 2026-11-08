@@ -9,6 +9,9 @@ limits, unknown authority and prose stay refused; unsettled writers still hold.
 
 from __future__ import annotations
 
+import base64
+import json
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -321,3 +324,187 @@ def test_the_tool_description_says_what_the_door_admits():
     entry = next(row for row in mind_tool_entries() if row.name == "continue_task")
     text = entry.schema["description"]
     assert "finish_task action=stop" in text and "ordinary finished answer" in text and "owner Stop/Panic" in text
+
+
+# --- my human's image message that the loop read before its author stopped (#2941) ---------------------
+
+WORDS = "Keep this exact wording.\n[image: literal owner syntax]\nDo not publish yet."  # image-like words are words
+MID = "client-image-1:stop-root"  # the door's id for this message in this task
+REPLY = {"address": "row:7@2026-11-07T21:59:00+00:00#owner-earlier", "unresolved": True}
+FILES = {"one_image": ("a.png",), "two_images": ("a.png", "b.png"), "manifest_ref": ("notes.txt", "a.png"),
+         "pixels_unavailable": ("a.png",), "not_composed": ("a.png",)}
+
+
+def _continue_door():
+    """The real HTTP Continue door (``gateway/task_continue.py``) on its own route."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.task_continue import api_task_continue
+
+    return TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/continue", api_task_continue, methods=["POST"])]))
+
+
+def _image_author_end(tmp_path, monkeypatch, variant, tamper=None):
+    """The server door writes my human's image message before round one; the real loop reads it, its author stops,
+    and the real terminal collector, store and post-task phase settle the row. ``tamper`` edits the recorded
+    directive before the terminal captures it (a genuinely conflicting record)."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros import artifacts, loop_round_limits
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+    from tests._owner_image_mail import png_bytes, write_owner_images
+    from tests.test_agent_task_pipeline import _stubbed_stages
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    for index, name in enumerate(FILES[variant]):
+        (uploads / name).write_bytes(png_bytes(200 + index) if name.endswith(".png") else b"owner notes\n")
+    if variant == "manifest_ref":  # the image is only in the complete manifest, past the row's inline view
+        monkeypatch.setattr(artifacts, "_MAX_STAGED_ATTACHMENTS", 1)
+    staged = {}
+
+    def owner_mail(data):
+        staged["text"], staged["manifest"] = write_owner_images(
+            data, "stop-root", WORDS, [uploads / name for name in FILES[variant]], msg_id=MID,
+            client_message_id="client-image-1", reply_reference=REPLY)
+        if variant == "pixels_unavailable":  # the staged bytes change after their identity was captured
+            image = artifacts.task_artifact_dir_path(data, "stop-root") / staged["manifest"][0]["relpath"]
+            image.write_bytes(b"changed after staging")
+        if variant == "not_composed":
+            def broken(*_args, **_kwargs):
+                raise RuntimeError("decoder crashed")
+
+            monkeypatch.setattr(loop_round_limits, "build_incoming_user_content", broken)
+
+    run = _run_stop_loop(tmp_path, monkeypatch, [_stop_tool_call()], stop_services=False, before_loop=owner_mail)
+    assert run.trace["task_completion"]["action"] == "stop" and len(run.model_inputs) == 1
+    data = tmp_path / "data"
+    write_task_result(data, "stop-root", STATUS_RUNNING, chat_id=7, project_id="", billing_group=GROUP,
+                      origin_message_text="Ship the export endpoint.",
+                      origin_message_ref={"chat_id": 7, "client_message_id": "m-1"},
+                      title="Export endpoint", deadline_at="2099-01-01T00:00:00+00:00")
+    task = {"id": "stop-root", "type": "task", "chat_id": 7, "root_task_id": "stop-root", "delegation_role": "root",
+            "text": "Ship the export endpoint."}
+    for rel in ("logs", "memory", "repo"):
+        (data / rel).mkdir(parents=True, exist_ok=True)
+    env = SimpleNamespace(drive_root=data, repo_dir=data / "repo", drive_path=lambda rel: data / rel)
+    if tamper is not None:
+        tamper(next(row for row in run.ctx._owner_directives if row.get("msg_id") == MID), staged["text"])
+    evidence = pipeline._collect_review_evidence_bundle(env, run.ctx, task, data, [])
+    pipeline._store_task_result(env, task, run.result, run.usage, run.trace, review_evidence=evidence)
+    _stubbed_stages(monkeypatch, [])
+    pipeline._run_post_task_processing_async(env, task, run.usage, run.trace, data / "logs", blocking=True)
+    stored = load_task_result(data, "stop-root")
+    assert stored["status"] == "completed", stored.get("status")
+    return data, stored, staged, run
+
+
+def _own_images(data, row):
+    """(sha256, bytes in ROW's OWN store) of each staged image ROW declares."""
+    from ouroboros.artifacts import task_artifact_dir_path
+
+    store = task_artifact_dir_path(pathlib.Path(row.get("drive_root") or data), row["id"])
+    return [(image["sha256"], (store / image["relpath"]).read_bytes()) for image in row.get("attachment_images") or []]
+
+
+@pytest.mark.parametrize("variant", list(FILES))
+def test_an_owner_image_the_loop_read_continues_with_its_exact_words_and_files(tmp_path, monkeypatch, variant):
+    """#2941: a message of my human's with an image, read by the real loop before its author stopped, was refused
+    as ``owner_message_identity_conflict``: the terminal corpus kept the drain's rendering (the words, a generated
+    caption, an image reference) under the same id as the captured mailbox row's exact words. The recorded row now
+    keeps those ``words`` beside its rendering, so the HTTP door admits one successor whose corpus holds the exact
+    words once, under their id and reply target; each image is copied into the successor's own store and read
+    natively by its first request, and a second Continue still holds it after the first task's copies are gone. A
+    rendering error or a failed composition changes no words; bytes that changed stay a named gap."""
+    import hashlib
+    import shutil
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.context import _first_user_content
+    from ouroboros.owner_mailbox import _mailbox_path
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    data, stored, staged, run = _image_author_end(tmp_path, monkeypatch, variant)
+    text = staged["text"]
+    pixels = [(tmp_path / "uploads" / name).read_bytes() for name in FILES[variant] if name.endswith(".png")]
+    assert [json.loads(line)["text"] for line in stored["owner_mailbox"]["rows"]
+            if json.loads(line)["msg_id"] == MID] == [text]
+    if variant != "two_images":  # the settled mailbox goes: Continue reads the captured row alone
+        assert settle_task_mailbox(data, "stop-root", data) and not _mailbox_path(data, "stop-root").exists()
+    _queue, _state, workers = _install_queue(data, monkeypatch)
+    door = _continue_door()
+
+    first = door.post("/api/tasks/stop-root/continue", json={"action_nonce": NONCE})
+
+    assert first.status_code == 200 and first.json()["ok"] is True, first.text
+    [directive] = [row for row in run.ctx._owner_directives if row.get("msg_id") == MID]
+    [corpus] = [row for row in stored["review_evidence"]["task_inputs"]["owner_requirements_and_decisions"]
+                if row.get("msg_id") == MID]
+    assert directive["words"] == corpus["words"] == text and corpus["content"] != text, "the rendering stays beside"
+    if variant in {"one_image", "two_images", "manifest_ref"}:
+        assert corpus["content"].count("[image ref sha256:") == len(pixels), "reviewers keep the image references"
+        sent = [part for message in run.model_inputs[0] if isinstance(message.get("content"), list)
+                for part in message["content"] if part.get("type") == "image_url"]
+        assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in sent] == pixels
+    successor = next(row for row in workers.PENDING if row["id"] == first.json()["successor_task_id"])
+    mine = [row for row in successor["metadata"]["owner_corpus"] if row.get("msg_id") == MID]
+    assert mine == [{"source": "owner_mailbox", "content": text, "msg_id": MID,
+                     "reply_to": {"address": REPLY["address"], "author": "", "text": ""}}]
+    assert successor["text"].count(WORDS) == 1, "the exact words once, never beside a rendering of them"
+    again = door.post("/api/tasks/stop-root/continue", json={"action_nonce": NONCE})
+    assert again.status_code == 200 and again.json()["successor_task_id"] == successor["id"]
+    assert [row["id"] for row in workers.PENDING].count(successor["id"]) == 1, "the same press, one successor"
+    originals = [hashlib.sha256(raw).hexdigest() for raw in pixels]
+    if variant == "pixels_unavailable":
+        assert _own_images(data, successor) == []
+        assert [(row["status"], row["reason"], row["sha256"]) for row in successor["attachments"]] == [
+            ("rejected", "source_missing", originals[0])], "changed bytes are a named gap, never other pixels"
+    else:
+        assert _own_images(data, successor) == list(zip(originals, pixels)), "verified copies in its own store"
+        first_request = _first_user_content(successor, SimpleNamespace(drive_root=data))
+        native = [part for part in first_request if part.get("type") == "image_url"]
+        assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in native] == pixels
+        own = task_artifact_dir_path(data, successor["id"]).resolve()
+        assert all(pathlib.Path(part["_source_path"]).is_relative_to(own) for part in native)
+
+    shutil.rmtree(task_artifact_dir_path(data, "stop-root") / "attachments")  # the first task's copies are gone
+    workers.PENDING[:] = []
+    write_task_result(data, successor["id"], "cancelled", result="interrupted",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    second = door.post(f"/api/tasks/{successor['id']}/continue", json={"action_nonce": "second-press-2941"})
+
+    assert second.status_code == 200 and second.json()["ok"] is True, second.text
+    hop = next(row for row in workers.PENDING if row["id"] == second.json()["successor_task_id"])
+    assert [row for row in hop["metadata"]["owner_corpus"] if row.get("msg_id") == MID] == mine
+    assert _own_images(data, hop) == ([] if variant == "pixels_unavailable" else list(zip(originals, pixels)))
+    assert "continued_by" in load_task_result(data, successor["id"])
+
+
+@pytest.mark.parametrize("record, gap", [
+    ("rival_words", "owner_message_identity_conflict"),
+    ("peer_label", "owner_message_identity_conflict"),
+    ("malformed_words", "retained_owner_corpus_row_malformed"),
+])
+def test_a_genuine_rival_of_an_image_message_still_refuses_continue(tmp_path, monkeypatch, record, gap):
+    """The words beside a rendering exempt nothing: other words under the image message's id, the same words
+    labelled a task's (peer) message, or ``words`` that are not text refuse at the door before any claim or row."""
+    from ouroboros.task_results import load_task_result
+
+    def tamper(row, text):
+        if record == "rival_words":
+            row["words"] = text + "\nActually publish it now."
+        elif record == "peer_label":
+            row.update(source="principal_task_message", source_task_id="peer-task")
+        else:
+            row["words"] = ["not", "text"]
+
+    data, _stored, _staged, _run = _image_author_end(tmp_path, monkeypatch, "one_image", tamper=tamper)
+    _queue, _state, workers = _install_queue(data, monkeypatch)
+
+    refused = _continue_door().post("/api/tasks/stop-root/continue", json={"action_nonce": NONCE})
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["reason_code"] == "owner_source_missing" and refused.json()["gaps"] == [gap]
+    assert workers.PENDING == [] and "continued_by" not in load_task_result(data, "stop-root")
