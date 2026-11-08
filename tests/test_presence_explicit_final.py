@@ -44,6 +44,12 @@ SEND_SCHEMA = {"name": "bridge_send", "description": "Queue one provider send in
                    "foreign_task": {"type": "string"}, "request_id": {"type": "string"}}}}
 # The same transport under the connector's own declared surface name: ``records_room`` publishes its declaration.
 RECORDS_SEND = extension_surface_name("bridge", "send")
+# A Slack-shaped reaction door: it names the account, conversation and message, never the thread (``gesture_room``).
+RECORDS_REACT = extension_surface_name("bridge", "react")
+REACT_SCHEMA = {"name": RECORDS_REACT, "description": "React to one message.",
+                "parameters": {"type": "object", "properties": {
+                    "account_id": {"type": "string"}, "conversation_id": {"type": "string"},
+                    "message_id": {"type": "string"}, "emoji": {"type": "string"}}}}
 RECORD_NOTE = "[FOCUS_FINISH_IS_A_RECORD]"
 
 
@@ -72,6 +78,11 @@ class Transport:
                                                    message=message, thread_id=thread_id, origin="tool",
                                                    task_id=foreign_task or ctx.task_id, source=event["source_event_id"]))
         return json.dumps({"ok": True, "state": "queued", "request_id": request_id})
+
+    def react(self, ctx, conversation_id="", message_id="", emoji="", account_id=""):
+        """The provider reaction itself; a gesture is not speech and leaves no text."""
+        self.provider.append({"origin": "tool", "kind": "reaction", "text": "", "message_id": message_id, "emoji": emoji})
+        return json.dumps({"ok": True, "state": "delivered", "message_id": message_id})
 
     def deliver(self, identity, text, task_id, source):
         """One automatic send per output identity, reported through the real receipt route."""
@@ -162,6 +173,8 @@ def room(tmp_path, monkeypatch):
                                        timeout_sec=30, safety_policy="skip"))
         agent.tools.register(ToolEntry(name=RECORDS_SEND, schema={**SEND_SCHEMA, "name": RECORDS_SEND}, handler=transport.tool,
                                        timeout_sec=30, safety_policy="skip"))
+        agent.tools.register(ToolEntry(name=RECORDS_REACT, schema=REACT_SCHEMA, handler=transport.react,
+                                       timeout_sec=30, safety_policy="skip"))
         return agent
 
     app = create_host_service_app(data, presence_runner=lambda **kw: run_presence_turn(
@@ -185,9 +198,27 @@ def records_room(room, monkeypatch):
     return room
 
 
-def turn(room, event_id="chat:a:1", version=0, reporting=1, text="Please check the three services.", client=None):
+@pytest.fixture
+def gesture_room(room, monkeypatch):
+    """``records_room`` whose connector also declares a reaction door that names no thread."""
+    from ouroboros import extension_registry_state as registry
+
+    manifest = SimpleNamespace(raw_extra={"tools": [
+        {"name": "send", "effect": "message", "target": ["conversation_id"], "conversation": "conversation_id",
+         "thread": "thread_id"},
+        {"name": "react", "effect": "gesture", "target": ["account_id", "conversation_id"],
+         "conversation": "conversation_id", "message": "message_id"}]})
+    bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
+    for name in (RECORDS_SEND, RECORDS_REACT):
+        monkeypatch.setitem(registry._tools, name, {"skill": "bridge", "extension_generation": "g1"})
+    monkeypatch.setitem(registry._extensions, "bridge", bundle)
+    return room
+
+
+def turn(room, event_id="chat:a:1", version=0, reporting=1, text="Please check the three services.", client=None,
+         thread_id=""):
     payload = {"event": {"source_event_id": event_id, "provider": "chat", "account_id": "a",
-                         "conversation_id": "r", "thread_id": "", "conversation_key": "ignored-by-host",
+                         "conversation_id": "r", "thread_id": thread_id, "conversation_key": "ignored-by-host",
                          "actor": {"platform_actor_id": "person"}, "conversation": {},
                          "message": {"message_id": event_id}, "text": text, "facts": ["mention"]},
                **({"delivery_reporting_version": 1} if reporting else {}),
@@ -304,6 +335,39 @@ def test_a_send_riding_with_a_records_only_finish_is_accepted_and_a_failed_one_i
     assert "unobserved_tool_results" in rounds[1] and RECORD_NOTE not in rounds[1]  # the failed send is read, not a ride
     assert RECORD_NOTE in rounds[2], "then the wordy finish that sent nothing returns once"
     assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [RESULT]  # BOOM never left
+
+
+@pytest.mark.parametrize("place_thread", ["", "thread-3"])
+def test_a_threadless_gesture_on_the_waking_message_in_a_thread_rides_and_any_other_target_is_read_first(
+        gesture_room, place_thread):
+    """The reaction door names no thread, so its call addresses ``chat:a:r:0`` while the waking message lives in
+    thread ``thread-3``. Its exact message, conversation and account make it this turn's gesture, also where the Place
+    itself is that thread (a migrated legacy binding, ``places_migration``) and so no Place row claims the threadless
+    call. A reaction on another message, conversation or account is an ordinary result the finish must read first."""
+    from dataclasses import replace
+
+    room = gesture_room
+    if place_thread:
+        places._write(room.data, room.place.place_id, lambda row: replace(row, thread_id=place_thread))
+    react = call(RECORDS_REACT, {"conversation_id": "r", "message_id": "chat:a:1", "emoji": "eyes"}, "react")
+    room.h.script = [{"content": None, "tool_calls": [*react["tool_calls"], *finish(answer=FINAL, silent=True)["tool_calls"]]}]
+    view, stored = settle(room, turn(room, thread_id="thread-3"))
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.h.calls == 1, "a well-formed gesture pays no extra round"
+    assert [row["message_id"] for row in room.transport.provider] == ["chat:a:1"] and room.transport.texts() == [""]
+    rounds = json.dumps(room.h.inputs, ensure_ascii=False)
+    assert "unobserved_tool_results" not in rounds and RECORD_NOTE not in rounds
+    foreign = [{"conversation_id": "r", "message_id": "chat:a:other"},
+               {"conversation_id": "elsewhere", "message_id": "chat:a:3"},
+               {"conversation_id": "r", "message_id": "chat:a:4", "account_id": "b"}]
+    for number, target in enumerate(foreign, start=2):
+        elsewhere = call(RECORDS_REACT, {**target, "emoji": "eyes"}, "react")
+        room.h.script = [{"content": None, "tool_calls": [*elsewhere["tool_calls"], *finish(answer=FINAL, silent=True)["tool_calls"]]},
+                         finish(answer=FINAL, silent=True)]
+        seen, calls = len(room.h.inputs), room.h.calls
+        settle(room, turn(room, event_id=f"chat:a:{number}", thread_id="thread-3"), event_id=f"chat:a:{number}")
+        later = [json.dumps(messages, ensure_ascii=False) for messages in room.h.inputs[seen:]]
+        assert room.h.calls - calls == 2 and "unobserved_tool_results" in later[1], (target, later[-1][-400:])
+    assert [row["message_id"] for row in room.transport.provider] == ["chat:a:1", "chat:a:other", "chat:a:3", "chat:a:4"]
 
 
 def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room):

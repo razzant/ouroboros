@@ -27,7 +27,7 @@ def test_focus_and_arbitrary_place_arguments_are_not_destinations(supervisor, mo
     data = bundle(h, name, {"place_id": "target", "text": "unrelated work"})
     assert data["subject"]["place"] == {} and not data["standing_delegation"]["place_notes"]
     assert data["occasion"]["focus"]["place_id"] == "focus-room" and not reads
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a: {"places": [{"place_id": "target"}]})
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_k: {"places": [{"place_id": "target"}]})
     data = bundle(h, name, {"text": "resolved work"})
     assert data["subject"]["place"]["places"][0]["place_id"] == "target"
     assert data["standing_delegation"]["place_notes"][0]["standing_delegation"] is True
@@ -57,7 +57,7 @@ def test_destination_notes_use_canonical_root_and_keep_each_place(supervisor, mo
     monkeypatch.setattr(places, "load_places", lambda path: reads.append(path) or records)
     args = {"place_id": "a", "action": "inspect", "destination": {"conversation_id": "chat"}}
     if name == "remote_write":
-        monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a: {
+        monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_k: {
             "places": [{"place_id": p.place_id, "place_state": p.state} for p in records],
             "targets": {"to": ["a", "b"]}})
     data = bundle(h, name, args)

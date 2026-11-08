@@ -111,7 +111,7 @@ def project_contributions(skill: str, entries: list[dict], revision: str, label:
                     full_name = extension_surface_name(skill, tool["name"])
                 except ExtensionRegistrationError:
                     continue
-                row["tools"].append({**{k: copy.deepcopy(tool[k]) for k in ("effect", "target", "conversation", "thread") if k in tool},
+                row["tools"].append({**{k: copy.deepcopy(tool[k]) for k in ("effect", "target", "conversation", "thread", "message") if k in tool},
                                      "name": full_name})
         route = row.pop("route", "")
         if row.get("action", {}).get("verb") == "skill.request":
