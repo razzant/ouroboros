@@ -379,7 +379,11 @@ def _settle(root, scratch, task, status="completed", runs=1, parent="", thread="
 
 def _owe_import(root, task):
     """One managed import TASK owes the engine a release of, recorded as ``delegate_documents._import`` records it."""
-    from ouroboros.delegate_documents import DOCUMENT_IMPORT_OBSERVED, DOCUMENT_IMPORT_REQUESTED, DOCUMENT_IMPORT_SENDING
+    from ouroboros.delegate_documents import (
+        DOCUMENT_IMPORT_OBSERVED,
+        DOCUMENT_IMPORT_REQUESTED,
+        DOCUMENT_IMPORT_SENDING,
+    )
 
     sha, fact = "sha256:" + "a" * 64, {"task_id": task, "material": "brief", "import_key": "key-1"}
     request = {"expectedStoreId": "store-1", "kind": "file", "mime": "text/markdown", "name": "brief.md",
@@ -391,6 +395,37 @@ def _owe_import(root, task):
     assert delegate_custody.emit(root, DOCUMENT_IMPORT_SENDING, fact)
     assert delegate_custody.emit(root, DOCUMENT_IMPORT_OBSERVED, {**fact, "state": "ready", "resource": {
         "resourceId": "res-1", "sha256": sha, "sizeBytes": 3, "mime": "text/markdown", "name": "brief.md"}})
+
+
+def _unreadable(monkeypatch, *tasks):
+    """The documents of TASKS cannot be read (every reader of the task store raises for them) until undone."""
+    from ouroboros import task_store
+
+    read = task_store.read_document
+
+    def reader(root, task_id, *args, **kwargs):
+        if task_id in tasks:
+            raise OSError(f"document of {task_id} unreadable")
+        return read(root, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(task_store, "read_document", reader)
+    return lambda: monkeypatch.setattr(task_store, "read_document", read)
+
+
+def _answers(engine, failing):
+    """The engine's decision route with FAILING: run id -> the exception it raises, or the unsettled body it answers."""
+    take = engine.take_run_result
+
+    def answer(run_id, *, idempotency_key):
+        if run_id not in failing:
+            return take(run_id, idempotency_key=idempotency_key)
+        engine.decisions.append((run_id, idempotency_key))
+        if isinstance(failing[run_id], Exception):
+            raise failing[run_id]
+        return failing[run_id]
+
+    engine.take_run_result = answer
+    return lambda: setattr(engine, "take_run_result", take)
 
 
 @pytest.fixture
@@ -430,6 +465,7 @@ def backlog(tmp_path):
 def test_the_first_pass_walks_what_settled_before_it_and_the_walk_is_written_once(backlog, monkeypatch):
     backlog.settle("old-1")
     backlog.settle("old-2")
+    backlog.settle("live-1", status="running")  # a captured run of work still running: never walked
     listed, full = [], delegate_custody_current.runs
     monkeypatch.setattr(delegate_custody_current, "runs",
                         lambda root, where="", params=(): listed.append(where) or full(root, where, params))
@@ -438,7 +474,8 @@ def test_the_first_pass_walks_what_settled_before_it_and_the_walk_is_written_onc
     assert backlog.engine.decisions[0] == ("run-old-1", key) and backlog.sent() == ["run-old-1", "run-old-2"]
     assert backlog.record("run-old-1") == {"state": "taken", "at": backlog.record("run-old-1")["at"], "walk": True}
     walked = backlog.walked()
-    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 0, "done_at": walked["done_at"]}
+    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 0, "unknown": 0,
+                      "done_at": walked["done_at"]}
     assert report["observed"] == [{taken.WALK: {**walked, "tasks": 2}}], "one summary, never a line per run"
     assert report["activated"] and report["tasks"] == 0, "the first pass asked no task of its own"
     assert "" in listed and backlog.waiting() == [] and not taken.walk_open(backlog.row())
@@ -449,23 +486,28 @@ def test_the_first_pass_walks_what_settled_before_it_and_the_walk_is_written_onc
     assert "" not in listed, "a walk that is over never lists custody again"
 
 
-def test_a_first_pass_with_nothing_delegated_only_activates(backlog):
+def test_a_first_pass_with_nothing_delegated_closes_the_walk_before_it_begins(backlog):
     assert backlog.first() == {"activated": True}
+    walked = backlog.walked()
+    assert walked == {"taken": 0, "absent": 0, "refused": {}, "waiting": 0, "unknown": 0,
+                      "done_at": walked["done_at"]}
+    assert not taken.walk_open(backlog.row()) and backlog.engine.capability_reads == 0
+    backlog.settle("new-1")  # delegated after the first pass: the pass's own task, never the walk's
     backlog.run()
-    assert backlog.walked() is None and not taken.walk_open(backlog.row())
-    assert backlog.engine.capability_reads == 0, "nothing delegated: no walk begins and the engine is not asked"
-    backlog.settle("live-1", status="running")  # custody holds a run now; its task is still running
-    backlog.run()
-    assert backlog.engine.capability_reads == 1 and backlog.sent() == []
-    assert backlog.walked()["done_at"] and backlog.walked()["waiting"] == 0, "a running task is never walked"
+    assert backlog.sent() == ["run-new-1"] and backlog.walked() == walked
 
 
 def test_an_open_walk_whose_custody_holds_nothing_is_over(backlog):
-    assert backlog.first() == {"activated": True}
-    maintenance_jobs.record(backlog.root, JOB, **{taken.WALK: {"waiting": 2}})  # begun while custody held runs
+    from ouroboros.utils import utc_now_iso
+
+    maintenance_jobs.record(backlog.root, JOB, **{rt.JOB_FIELD: {"activated_at": utc_now_iso(), "counter": 0,
+                                                                 "waiting": []}})  # activated by an earlier body
+    assert taken.walk_open(backlog.row()), "an activated step without a finished walk record has it open"
+    maintenance_jobs.record(backlog.root, JOB, **{taken.WALK: {"waiting": 2, "unknown": 1}})  # begun with custody
     backlog.run()
     walked = backlog.walked()
-    assert walked == {"taken": 0, "absent": 0, "refused": {}, "waiting": 2, "done_at": walked["done_at"]}
+    assert walked == {"taken": 0, "absent": 0, "refused": {}, "waiting": 2, "unknown": 1,
+                      "done_at": walked["done_at"]}
     assert backlog.engine.capability_reads == 0 and not taken.walk_open(backlog.row())
 
 
@@ -486,12 +528,42 @@ def test_an_open_walk_is_taken_up_by_a_child_started_for_another_job(backlog, mo
     assert not retirement.due(backlog.root, backlog.row(), {}, child=True), "an ended walk rests"
 
 
+def test_a_lost_first_walk_write_still_leaves_the_walk_to_the_next_child(backlog, monkeypatch):
+    from ouroboros import claudexor_daemon
+
+    backlog.settle("old-1")
+    backlog.settle("old-2")
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda **_kw: backlog.engine)
+    record = maintenance_jobs.record
+
+    def lost(root, name, **fields):  # the first walk pass's own job-row write is lost after its decisions
+        if taken.WALK in fields:
+            raise OSError("database is locked")
+        return record(root, name, **fields)
+
+    monkeypatch.setattr(maintenance_jobs, "record", lost)
+    backlog.queue()  # a fresh census for the job's run
+    assert retirement.run(backlog.root, lambda: False)["state"] == "failed"  # the step's error, caught by the job
+    row = backlog.row()
+    assert backlog.sent() == ["run-old-1", "run-old-2"] and backlog.record("run-old-1")["walk"] is True
+    assert taken.WALK not in row and row[rt.JOB_FIELD]["waiting"] == [], "decided, with no walk record written"
+    assert taken.walk_open(row) and retirement.due(backlog.root, row, {}, child=True)
+    assert not retirement.due(backlog.root, row, {}, child=False), "never by itself a reason to start a child"
+    monkeypatch.setattr(maintenance_jobs, "record", record)
+    backlog.queue()
+    assert maintenance.run_job(backlog.root, "runtime_retirement") is not None  # a child started for another job
+    walked = backlog.walked()
+    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 0, "unknown": 0,
+                      "done_at": walked["done_at"]}, "counted from the walk's records"
+    assert backlog.sent() == ["run-old-1", "run-old-2"], "nothing sent twice"
+
+
 def test_walk_tasks_get_only_the_taken_duty_and_the_passs_own_tasks_are_never_walked(backlog, monkeypatch):
     backlog.settle("old-1")
     backlog.settle("new-1", status="running")
     backlog.engine.supported = False
-    backlog.first()  # the engine lacks ``taken``: the walk stays open, nothing is sent or left waiting
-    assert backlog.walked() == {"waiting": 0} and backlog.waiting() == []
+    backlog.first()  # the engine lacks ``taken``: the walk stays open, nothing is sent, written or left waiting
+    assert backlog.walked() is None and taken.walk_open(backlog.row()) and backlog.waiting() == []
     patch_document(backlog.root, "new-1", lambda current: {**current, "status": "completed"})  # the pass's own task
     monkeypatch.setattr(owner_keep, "is_kept", lambda _root, task: task == "new-1")
     steps, threads, documents = [], rt._Pass.task, rt._Pass.documents
@@ -504,6 +576,23 @@ def test_walk_tasks_get_only_the_taken_duty_and_the_passs_own_tasks_are_never_wa
     assert backlog.sent() == ["run-old-1"], "the walk task only its decision"
     assert report["holds"] == {"result_owner_keep": 1} and backlog.waiting() == ["new-1"]
     assert backlog.walked()["waiting"] == 0, "the kept task waits as the pass's own, never counted by the walk"
+
+
+def test_an_open_walk_that_changed_nothing_writes_nothing(backlog):
+    backlog.settle("old-1")
+    backlog.engine.supported = False
+    backlog.first()  # activation; the walk waits for ``taken``
+    row = backlog.row()
+    backlog.run()  # an engine without ``taken``
+    backlog.queue(ts="2000-01-01T00:00:00+00:00")
+    rt.retire_finished_review_threads(backlog.root, engine=backlog.engine)  # a census that proves nothing
+    backlog.engine.supported = True
+    stops = [False, True]  # the walk's start; before old-1
+    assert backlog.run(should_stop=lambda: stops.pop(0) if stops else False)["stopped"]
+    assert backlog.sent() == [] and taken.walk_open(row)
+    assert backlog.row() == row, "no job-row write (``updated_at`` included) while the open walk stands still"
+    backlog.run()
+    assert backlog.sent() == ["run-old-1"] and backlog.walked()["done_at"] and backlog.row() != row
 
 
 def test_the_pass_after_the_walk_treats_a_walked_task_as_any_terminal_write(backlog, monkeypatch):
@@ -539,10 +628,52 @@ def test_a_raising_walk_task_is_left_waiting_and_the_rest_are_still_walked(backl
     report = backlog.first()
     assert backlog.sent() == ["run-old-b"] and backlog.waiting() == ["old-a"]
     assert report["errors"] == ["old-a: OSError: keep state unreadable"]
-    assert backlog.walked()["done_at"] and backlog.walked()["waiting"] == 1
+    walked = backlog.walked()
+    assert walked["done_at"] and walked["waiting"] == 1 and walked["unknown"] == 0, "its document reads: waiting"
     monkeypatch.setattr(owner_keep, "is_kept", kept)
     backlog.run()  # the ordinary duty asks the waiting task again
     assert backlog.sent() == ["run-old-b", "run-old-a"] and backlog.waiting() == []
+
+
+def test_an_unreadable_task_counts_as_unknown_never_as_waiting_or_zero(backlog, monkeypatch):
+    backlog.settle("old-a", runs=2)
+    backlog.settle("old-b")
+    readable = _unreadable(monkeypatch, "old-a")
+    report = backlog.first()
+    assert backlog.sent() == ["run-old-b"] and backlog.waiting() == ["old-a"], "the others are still decided"
+    assert report["errors"] == ["old-a: OSError: document of old-a unreadable"]
+    walked = backlog.walked()
+    assert walked == {"taken": 1, "absent": 0, "refused": {}, "waiting": 0, "unknown": 2,
+                      "done_at": walked["done_at"]}
+    assert "2 runs could not be read and were left to the ordinary pass as well" in taken.receipt(walked)
+    readable()
+    backlog.run()  # readable again: the ordinary duty decides it, and the sealed counts stand
+    assert backlog.sent() == ["run-old-b", "run-old-a", "run-old-a-2"] and backlog.walked() == walked
+
+
+def test_an_unreadable_recount_owner_counts_as_unknown_never_by_its_earlier_records(backlog, monkeypatch):
+    for task in ("old-a", "old-b", "old-c"):
+        backlog.settle(task)
+    stops = [False, False, True]  # the walk's start; old-a; before old-b
+    backlog.first(should_stop=lambda: stops.pop(0) if stops else False)
+    assert backlog.sent() == ["run-old-a"] and backlog.walked() is None, "decided by the walk, then stopped"
+    settled, readable = taken._settled, []
+
+    def enumerated(root, owing):  # old-a, the pass's own task now, was asked; its document turns unreadable
+        readable.append(_unreadable(monkeypatch, "old-a"))
+        return settled(root, owing)
+
+    monkeypatch.setattr(taken, "_settled", enumerated)
+    report = backlog.run()
+    walked = backlog.walked()
+    assert backlog.sent() == ["run-old-a", "run-old-b", "run-old-c"] and not report["errors"]
+    assert backlog.waiting() == ["old-a"], "left to the ordinary duty, which re-reads it"
+    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 0, "unknown": 1,
+                      "done_at": walked["done_at"]}, "old-a's run is unknown: never waiting, never dropped"
+    readable[0]()
+    backlog.run()  # readable again: its record already answers, and the sealed counts stand
+    assert backlog.sent() == ["run-old-a", "run-old-b", "run-old-c"] and backlog.walked() == walked
+    assert backlog.waiting() == []
 
 
 def test_a_held_task_is_decided_by_a_later_ordinary_pass_once_its_hold_ends(backlog):
@@ -588,79 +719,69 @@ def test_a_stop_leaves_the_walk_open_and_a_later_pass_finishes_it(backlog, monke
     stops = [False, False, False, False, True]  # new-1; the walk's start; old-1; old-2; between old-2's decisions
     report = backlog.run(should_stop=lambda: stops.pop(0) if stops else False)
     assert report["stopped"] and backlog.sent() == ["run-new-1", "run-old-1", "run-old-2"]
-    assert backlog.walked() == {"waiting": 1}, "open; old-2's last run is left to the ordinary duty"
+    assert backlog.walked() == {"waiting": 1, "unknown": 0}, "open; old-2's last run is left to the ordinary duty"
     assert backlog.waiting() == ["old-2"]
     backlog.run()  # old-2's last run is that duty's to send; the walk counts its own records and is over
     assert backlog.sent() == ["run-new-1", "run-old-1", "run-old-2", "run-old-2-2"]
     walked = backlog.walked()
-    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 1, "done_at": walked["done_at"]}
-
-
-def test_the_counts_come_from_the_walks_records_when_a_count_write_is_lost(backlog, monkeypatch):
-    backlog.settle("old-1")
-    backlog.settle("old-2")
-    record = maintenance_jobs.record
-
-    def lost(root, name, **fields):  # the pass dies between its records and its own job-row write
-        if taken.WALK in fields:
-            raise OSError("database is locked")
-        return record(root, name, **fields)
-
-    monkeypatch.setattr(maintenance_jobs, "record", lost)
-    with pytest.raises(OSError):
-        backlog.first()
-    assert backlog.record("run-old-1")["walk"] is True and backlog.walked() is None
-    monkeypatch.setattr(maintenance_jobs, "record", record)
-    backlog.run()  # both are the pass's own tasks now: the walk counts what its records say
-    walked = backlog.walked()
-    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 0, "done_at": walked["done_at"]}
-    assert backlog.sent() == ["run-old-1", "run-old-2"]
+    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 1, "unknown": 0,
+                      "done_at": walked["done_at"]}
 
 
 def test_typed_refusals_and_absent_runs_are_counted_by_their_engine_code(backlog):
     for task in ("old-1", "old-2", "old-3"):
         backlog.settle(task)
-    typed = {"run-old-2": ClaudexorUnavailable("run_taken_not_patch", "no patch", status_code=409),
-             "run-old-3": ClaudexorUnavailable("not_found", "no such run", status_code=404)}
-    take = backlog.engine.take_run_result
-
-    def answer(run_id, *, idempotency_key):
-        if run_id in typed:
-            backlog.engine.decisions.append((run_id, idempotency_key))
-            raise typed[run_id]
-        return take(run_id, idempotency_key=idempotency_key)
-
-    backlog.engine.take_run_result = answer
+    _answers(backlog.engine, {"run-old-2": ClaudexorUnavailable("run_taken_not_patch", "no patch", status_code=409),
+                              "run-old-3": ClaudexorUnavailable("not_found", "no such run", status_code=404)})
     backlog.first()
     walked = backlog.walked()
-    assert walked == {"taken": 1, "absent": 1, "refused": {"run_taken_not_patch": 1}, "waiting": 0,
+    assert walked == {"taken": 1, "absent": 1, "refused": {"run_taken_not_patch": 1}, "waiting": 0, "unknown": 0,
                       "done_at": walked["done_at"]}
-    assert backlog.record("run-old-2")["code"] == "run_taken_not_patch" and backlog.record("run-old-3")["state"] == "absent"
+    assert backlog.record("run-old-2")["code"] == "run_taken_not_patch"
+    assert backlog.record("run-old-3")["state"] == "absent"
 
 
-def test_an_engine_that_stops_answering_ends_the_walks_pass_one_unanswered_run_does_not(backlog):
-    for task in ("old-1", "old-2", "old-3"):
-        backlog.settle(task)
-    take = backlog.engine.take_run_result
-
-    def answer(run_id, *, idempotency_key):
-        if run_id == "run-old-1":  # this run's answer is unknown: the walk goes on
-            backlog.engine.decisions.append((run_id, idempotency_key))
-            return {"accepted": False, "status": "pending"}
-        if run_id == "run-old-2":  # nobody answers: the rest waits for a later pass
-            backlog.engine.decisions.append((run_id, idempotency_key))
-            raise ClaudexorUnavailable("daemon_unreachable", "read timed out", status_code=0)
-        return take(run_id, idempotency_key=idempotency_key)
-
-    backlog.engine.take_run_result = answer
+@pytest.mark.parametrize("answer", [
+    ClaudexorUnavailable("delivery_failed", "engine error", status_code=500),
+    ClaudexorUnavailable("daemon_stopping", "shutting down", status_code=503),
+    ClaudexorUnavailable("daemon_unreachable", "read timed out", status_code=0),
+    {"accepted": False, "status": "pending"},
+], ids=["http_500", "daemon_stopping", "timeout", "unaccepted"])
+def test_an_unsettled_answer_leaves_its_task_waiting_and_ends_the_walks_pass(backlog, answer):
+    backlog.settle("old-1", runs=2)
+    backlog.settle("old-2")
+    backlog.settle("old-3")
+    _answers(backlog.engine, {"run-old-1": answer})  # this run never settles
     backlog.first()
-    assert backlog.sent() == ["run-old-1", "run-old-2"], "old-3 is not asked after the engine stopped answering"
-    assert backlog.waiting() == ["old-1", "old-2"] and backlog.walked() == {"waiting": 2}
-    backlog.engine.take_run_result = take
-    backlog.run()  # old-1 and old-2 are the ordinary duty's now; the walk asks old-3 and is over
-    assert sorted(backlog.sent()) == ["run-old-1", "run-old-1", "run-old-2", "run-old-2", "run-old-3"]
+    assert backlog.sent() == ["run-old-1"], "neither old-1's other run nor old-2 and old-3 are asked in this pass"
+    assert backlog.waiting() == ["old-1"] and backlog.walked() == {"waiting": 2, "unknown": 0}, "open: no done_at"
+    report = backlog.run()  # old-1 is the ordinary duty's now: it holds that one run and goes on; the walk moves past
+    assert backlog.sent() == ["run-old-1", "run-old-1", "run-old-1-2", "run-old-2", "run-old-3"]
+    assert report["holds"] == {"result_taken_unanswered": 1} and backlog.waiting() == ["old-1"]
     walked = backlog.walked()
-    assert walked == {"taken": 1, "absent": 0, "refused": {}, "waiting": 2, "done_at": walked["done_at"]}
+    assert walked == {"taken": 2, "absent": 0, "refused": {}, "waiting": 2, "unknown": 0,
+                      "done_at": walked["done_at"]}
+
+
+def test_the_last_owner_unanswered_leaves_the_walk_open(backlog):
+    backlog.settle("old-9")
+    restore = _answers(backlog.engine, {"run-old-9": ClaudexorUnavailable("daemon_unreachable", "down")})
+    backlog.first()
+    assert backlog.waiting() == ["old-9"] and backlog.walked() == {"waiting": 1, "unknown": 0}
+    assert taken.walk_open(backlog.row()), "an unsettled answer never seals the walk, last owner included"
+    restore()
+    backlog.run()  # the ordinary duty decides it; the walk, with nothing left, is over
+    assert backlog.sent() == ["run-old-9", "run-old-9"] and backlog.walked()["done_at"]
+
+
+def test_one_unanswered_decision_never_holds_the_ordinary_passs_others(backlog):
+    assert backlog.first() == {"activated": True}
+    backlog.settle("new-a")
+    backlog.settle("new-b")
+    _answers(backlog.engine, {"run-new-a": ClaudexorUnavailable("daemon_unreachable", "read timed out")})
+    report = backlog.run()
+    assert backlog.sent() == ["run-new-a", "run-new-b"] and backlog.record("run-new-b")["state"] == "taken"
+    assert backlog.waiting() == ["new-a"] and report["holds"] == {"result_taken_unanswered": 1}
 
 
 def test_a_timeout_retried_predecessor_is_walked_once_its_retry_settled(backlog):
@@ -682,21 +803,41 @@ def test_a_timeout_retried_predecessor_is_walked_once_its_retry_settled(backlog)
     assert backlog.sent() == ["run-pred", "run-pred2"]
 
 
-def test_a_queue_census_that_proves_nothing_leaves_the_walk_open(backlog):
-    backlog.settle("old-1")
-    backlog.queue(ts="2000-01-01T00:00:00+00:00")  # a stale snapshot: no tree can be proven over
+def test_a_queue_census_that_goes_stale_leaves_the_walk_open(backlog, monkeypatch):
+    for task in ("old-1", "old-2", "old-3"):
+        backlog.settle(task)
+    listed, full = [], delegate_custody_current.runs
+    monkeypatch.setattr(delegate_custody_current, "runs",
+                        lambda root, where="", params=(): listed.append(where) or full(root, where, params))
+    backlog.queue(ts="2000-01-01T00:00:00+00:00")  # stale before the walk starts: nothing is listed or asked
     backlog.first()
-    assert backlog.sent() == [] and backlog.walked() == {"waiting": 0} and backlog.waiting() == []
+    assert backlog.sent() == [] and backlog.walked() is None and taken.walk_open(backlog.row())
+    assert "" not in listed, "a census that proves nothing never lists custody"
+    take = backlog.engine.take_run_result
+
+    def answer(run_id, *, idempotency_key):  # the queue's heartbeat stops right after the first decision
+        backlog.queue(ts="2000-01-01T00:00:00+00:00")
+        return take(run_id, idempotency_key=idempotency_key)
+
+    backlog.engine.take_run_result = answer
+    backlog.run()
+    assert backlog.sent() == ["run-old-1"] and backlog.waiting() == [], "the rest is not handed over"
+    assert taken.walk_open(backlog.row())
+    backlog.engine.take_run_result = take
     backlog.run()  # a fresh census
-    assert backlog.sent() == ["run-old-1"] and backlog.walked()["done_at"]
+    walked = backlog.walked()
+    assert backlog.sent() == ["run-old-1", "run-old-2", "run-old-3"]
+    assert walked == {"taken": 3, "absent": 0, "refused": {}, "waiting": 0, "unknown": 0,
+                      "done_at": walked["done_at"]}
 
 
 def test_a_walk_that_fails_is_its_passs_error_never_the_passs_end(backlog, monkeypatch):
     backlog.settle("old-1")
     probe = delegate_custody_current.has_runs
     monkeypatch.setattr(delegate_custody_current, "has_runs", lambda _root: (_ for _ in ()).throw(OSError("unread")))
-    report = backlog.first()  # an unreadable probe walks; the walk fails and is left open, resumable
-    assert report["errors"] == ["taken walk: OSError: unread"] and backlog.walked() == {"waiting": 0}
+    report = backlog.first()  # an unreadable probe walks; the walk fails and stays open
+    assert report["errors"] == ["taken walk: OSError: unread"] and backlog.walked() is None
+    assert taken.walk_open(backlog.row())
     backlog.settle("new-1")  # the pass's own task
     pinned = backlog.row()[rt.JOB_FIELD]["counter"]
     report = backlog.run()
@@ -713,7 +854,8 @@ def owner_chat(monkeypatch, tmp_path):
     """One install on the real state, owner-chat, chat-row and notice-receipt writers; the maintenance child's
     server half with its spawn and report reading stubbed (``tests/test_legacy_memory_notice.py``'s boot)."""
     from ouroboros.startup_migrations import prepare_startup_state
-    from supervisor import message_bus as bus, state as ss
+    from supervisor import message_bus as bus
+    from supervisor import state as ss
 
     for name, path in {"DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
                        "STATE_LAST_GOOD_PATH": tmp_path / "state/state.last_good.json",
@@ -741,7 +883,7 @@ def owner_chat(monkeypatch, tmp_path):
 
 def test_the_walks_receipt_reaches_the_owners_chat_once_after_a_child_run(owner_chat):
     counts = {"taken": 4131, "absent": 12, "refused": {"run_taken_continuable": 2, "run_taken_not_patch": 1},
-              "waiting": 40}
+              "waiting": 40, "unknown": 2}
     owner_chat.walk(**counts)  # counted, not over yet
     owner_chat.child_ran()
     assert owner_chat.rows() == []
@@ -755,9 +897,10 @@ def test_the_walks_receipt_reaches_the_owners_chat_once_after_a_child_run(owner_
     assert row["direction"] == "system" and row["chat_id"] == 7
     assert obligations.members(owner_chat.root, "upgrade_notices")[f"7:{taken.NOTICE}"]["recorded"] is True
     text = row["text"]
-    for fact in ("one-time catch-up", "taken 4,131 runs", "ordinary retention window", "keeps its own copy",
-                 "refused 3 runs (2 still continuable in the engine, 1 not a patch result)",
-                 "no longer had 12 runs", "40 runs were left to the ordinary pass"):
+    for fact in ("One-time catch-up with the engine", "taken 4,131 runs", "ordinary retention window",
+                 "keeps its own copy", "refused 3 runs (2 still continuable in the engine, 1 not a patch result)",
+                 "no longer had 12 runs", "40 runs were left to the ordinary pass",
+                 "2 runs could not be read and were left to the ordinary pass as well"):
         assert fact in text, (fact, text)
     assert "run_taken" not in text, "known engine codes reach the owner in words"
     owner_chat.child_ran()
@@ -765,14 +908,27 @@ def test_the_walks_receipt_reaches_the_owners_chat_once_after_a_child_run(owner_
     assert len(owner_chat.rows()) == 1, "its landed row is its receipt: never repeated"
 
 
-def test_no_receipt_after_stop_and_none_for_a_walk_that_met_nothing(owner_chat):
-    assert taken.receipt({"taken": 0, "absent": 0, "refused": {}, "waiting": 0, "done_at": "x"}) == ""
-    one = taken.receipt({"taken": 1, "absent": 0, "refused": {"400": 1}, "waiting": 1, "done_at": "x"})
+def test_no_receipt_while_the_dialogue_cannot_answer_after_stop_or_for_a_walk_that_met_nothing(owner_chat,
+                                                                                               monkeypatch):
+    from ouroboros import dialogue_store
+
+    assert taken.receipt({"taken": 0, "absent": 0, "refused": {}, "waiting": 0, "unknown": 0, "done_at": "x"}) == ""
+    one = taken.receipt({"taken": 1, "absent": 0, "refused": {"400": 1}, "waiting": 1, "unknown": 1, "done_at": "x"})
     assert "taken 1 run," in one and "1 as an invalid request" in one and "1 run was left" in one
-    owner_chat.walk(taken=0, absent=0, refused={}, waiting=0, done_at="2026-11-08T00:00:00+00:00")
+    assert "1 run could not be read and was left" in one
+    owner_chat.walk(taken=0, absent=0, refused={}, waiting=0, unknown=0, done_at="2026-11-08T00:00:00+00:00")
     owner_chat.child_ran()
     assert owner_chat.rows() == [], "a walk that met nothing tells the owner nothing"
-    owner_chat.walk(taken=2, absent=0, refused={}, waiting=0, done_at="2026-11-08T00:00:00+00:00")
+    owner_chat.walk(taken=2, absent=0, refused={}, waiting=0, unknown=0, done_at="2026-11-08T00:00:00+00:00")
+    importing = dialogue_store.require_imported
+
+    def pending(*_a, **_kw):  # the archive import has not answered for the owner's chat yet
+        raise dialogue_store.StoreMigrating("chat history still importing")
+
+    monkeypatch.setattr(dialogue_store, "require_imported", pending)
+    owner_chat.child_ran()
+    assert owner_chat.rows() == [], "nothing is sent while the dialogue cannot say whether it was"
+    monkeypatch.setattr(dialogue_store, "require_imported", importing)
     owner_chat.stop["during"] = True  # Stop or Panic arrived while the child ran
     owner_chat.child_ran()
     assert owner_chat.rows() == [], "nothing is written after Stop"

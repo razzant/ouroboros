@@ -20,30 +20,32 @@ continue, a result that is no patch); or ``absent`` (the engine has no such run)
 A catalog without ``taken`` holds the task without a decision record; capability is read once per pass.
 An unknown answer also writes nothing and leaves the task
 waiting; the next pass repeats the same key. Interrupted delivery permits one fixed derived-key resend.
-An engine that does not answer at all (``DAEMON_BUSY_CODES``: unreachable, timed out, busy) is asked
-nothing more in that pass.
 
 A result whose task settled before the pass could ask (before its first pass, or before this decision
 shipped) gets the same duty from ``walk`` (owner, 05.11.2026), once: while the ``runtime_retirement``
-job row's ``taken_walk`` record has no ``done_at``, custody holds a run and this pass's capability read
-finds ``taken``, the pass also asks every other task owing a result whose row is settled, or
+job row holds no ``taken_walk`` record with ``done_at``, custody holds a run and this pass's capability
+read finds ``taken``, the pass also asks every other task owing a result whose row is settled, or
 ``interrupted`` with a retry whose effective result is (a timeout-retried predecessor). A task still
 running is the pass's own at its terminal write. The walk asks this duty alone, under its own per-task
 guard; its record is a terminal write, so the next pass treats the task as any terminal write (threads
 only for host runs after activation, owed imports under their own release rule). Every task it cannot
-decide (a hold of any kind, an unanswered or unreadable answer, an error, the task in hand at a stop) is
-left to the step's ``waiting`` set, where the ordinary duty asks it again, never proving ``taken`` from a
-read it could not make. The walk is over (``done_at``) once one pass asked its whole set. A stop, a stale
-queue census or an engine that cannot take a result before it starts, or an engine that stops answering
-midway, leave it open, and an open walk is work the step does whenever the maintenance child runs
-(``walk_open``), never by itself a reason to start one; the step's first pass walks as soon as custody
-holds a run (``walk_due``). Each record the walk writes says so (``walk``), and its counts come from those
-records when it is over: ``taken``, ``absent`` and ``refused`` by the engine's code. ``waiting`` counts
-the runs it left to the ordinary duty, written in the transaction that adds their tasks to ``waiting``.
-The step's report gets one summary of the walk, never a line per run. After a maintenance child run that Stop or Panic did not end, once the
-walk is over, the server tells the owner in Main once (``deliver_receipt``: a one-time notice whose landed
-row is its receipt). No timer, count or threshold decides any of it: the engine's capability and the
-record do.
+decide (a hold of any kind, an error, an unanswered decision, the task in hand at a stop) is left to the
+step's ``waiting`` set, where the ordinary duty asks it again, never proving ``taken`` from a read it
+could not make. The first answer that is not a settled record, whatever its code, also ends the walk for
+that pass, as do a stop and a queue census that goes stale; the next pass moves past the tasks now
+waiting, so one failing run costs one pass and a broken engine moves one task per pass. The walk is over
+(``done_at``) once one pass asked its whole set. Until then it is open, the step being activated without
+that record (``walk_open``): work the step does whenever the maintenance child runs, never by itself a
+reason to start one, so an engine without ``taken`` is contacted once per such run while custody holds a
+run. The step's first pass walks as soon as custody holds a run, and with none it closes the walk
+before it begins (``empty_walk``). Each record the walk writes says so (``walk``), and its counts come
+from those records when it is over: ``taken``, ``absent`` and ``refused`` by the engine's code.
+``waiting`` counts the runs it left to the ordinary duty, and ``unknown`` the runs of a task whose
+document it could not read (never counted as waiting, and never as zero), both written in the
+transaction that adds their tasks to ``waiting``. The step's report gets one summary of the walk, never
+a line per run. After a maintenance child run that Stop or Panic did not end, once the walk is over, the
+server tells the owner in Main once (``deliver_receipt``: a one-time notice whose landed row is its
+receipt). No timer, count or threshold decides any of it: the engine's capability and the record do.
 """
 from __future__ import annotations
 
@@ -89,9 +91,8 @@ def owed(entry: Any) -> str:
 
 def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
     """A keyed decision, with one derived-key resend for interrupted delivery; only a settled answer (``state``)
-    records. ``{"engine": code}``: the engine itself did not answer (``DAEMON_BUSY_CODES``); ``{}``: this run's
-    answer is unknown."""
-    from ouroboros.gateways.claudexor import DAEMON_BUSY_CODES, ClaudexorUnavailable
+    records, and ``{}`` is any other answer, whatever its code."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     key = hashlib.sha256(f"taken:{run_id}".encode()).hexdigest()
     retry_key = hashlib.sha256(f"{key}:interrupted".encode()).hexdigest()
@@ -107,7 +108,7 @@ def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
             if status == 409 and exc.code == "delivery_interrupted" and attempt_key == key:
                 continue  # the engine answers taken again if the first delivery already landed
             log.info("Taken decision for %s unanswered: %s", run_id, exc)
-            return {"engine": exc.code} if exc.code in DAEMON_BUSY_CODES else {}
+            return {}
         if isinstance(answer, dict) and answer.get("accepted") is True and answer.get("status") == "taken":
             return {"state": "taken"}
         return {}
@@ -115,8 +116,7 @@ def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
 
 
 def _unavailable(run: Any) -> str:
-    """This pass's one capability read: an unsupported or unreadable catalog keeps the duty waiting, and so does
-    an engine that stopped answering earlier in the pass (``_tell``)."""
+    """This pass's one capability read: an unsupported or unreadable catalog keeps the duty waiting."""
     if not hasattr(run, "_taken_unavailable"):
         engine = run.engine()
         try:
@@ -134,9 +134,10 @@ def tell_engine(run: Any, task_id: str) -> str:
     return _tell(run, task_id)[0]
 
 
-def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str, Dict[str, Any]]]:
-    """``tell_engine``'s verdict and the task's decision records after it. For the walk, each record it writes says
-    so (``walk``) and its answers reach the step's report only as the walk's summary."""
+def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str, Dict[str, Any]], bool]:
+    """``tell_engine``'s verdict, the task's decision records after it, and whether a decision got an answer that was
+    not a settled record. For the walk, each record it writes says so (``walk``), its answers reach the step's report
+    only as the walk's summary, and the first unsettled answer ends its decisions."""
     from ouroboros.delegate_custody_current import runs
     from ouroboros.owner_keep import is_kept
     from ouroboros.review_thread_retention import DONE, WAIT, tree_hold
@@ -146,25 +147,25 @@ def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str,
     document = read_document(run.root, task_id) or {}
     recorded = dict(document[RECORDS]) if isinstance(document.get(RECORDS), dict) else {}
     if not any(owed(entry) for rid, entry in runs(run.root, "task_id=?", (task_id,)).items() if rid not in recorded):
-        return DONE, recorded
+        return DONE, recorded, False
     if is_kept(run.root, task_id):  # the owner keeps this task's materials: its engine copies stay too
         run.hold("result_owner_keep")
-        return WAIT, recorded
+        return WAIT, recorded, False
     why, tree_runs = tree_hold(run.root, task_id, document, live=run.live, census=run.census())
     states = {rid: owed(entry) for rid, entry in tree_runs.items() if rid not in recorded}
     if why or "wait" in states.values():
         run.hold(f"result_{why or 'collection_owed'}")
-        return WAIT, recorded
+        return WAIT, recorded, False
     take = sorted(rid for rid, state in states.items() if state == "take")
     if not take:
-        return DONE, recorded
+        return DONE, recorded, False
     why = _unavailable(run)
     if why:
         run.hold(why)
-        return WAIT, recorded
+        return WAIT, recorded, False
     engine = run.engine()
     answers: Dict[str, Dict[str, Any]] = {}
-    verdict, done = DONE, 0
+    verdict, done, unsettled = DONE, 0, False
     for rid in take:
         if done and run.stop():  # the rest waits for the next pass
             run.stopped, verdict = True, WAIT
@@ -173,9 +174,8 @@ def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str,
         record = _decision(engine, rid)
         if "state" not in record:
             run.hold("result_taken_unanswered")
-            verdict = WAIT
-            if record.get("engine"):  # nobody answers: every later decision of this pass waits too
-                run._taken_unavailable = "result_engine_unavailable"
+            verdict, unsettled = WAIT, True
+            if walk:
                 break
             continue
         answers[rid] = {**record, "at": utc_now_iso(), **({"walk": True} if walk else {})}
@@ -186,28 +186,39 @@ def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str,
         if not walk:  # the walk's answers reach the report as its one summary
             for rid, record in answers.items():
                 run.report["observed"].append({"task_id": task_id, "run_id": rid, "taken": record["state"]})
-    return verdict, recorded
+    return verdict, recorded, unsettled
 
 
 # ---- the one-time walk and its receipt -------------------------------------------------------------------------
 
 
-def walk_due(root: Any) -> bool:
-    """Whether the step's first pass walks too: custody holds a run (with none, there is nothing to walk). An
-    unreadable custody probe walks: the guarded walk answers it."""
+def _over(counts: Dict[str, Any], waiting: int = 0, unknown: int = 0) -> Dict[str, Any]:
+    """The job-row fields of a walk that is over: its counts, its leftovers and ``done_at``."""
+    from ouroboros.utils import utc_now_iso
+
+    return {WALK: {**counts, "waiting": waiting, "unknown": unknown, "done_at": utc_now_iso()}}
+
+
+def empty_walk(root: Any) -> Dict[str, Any]:
+    """The fields the step's first pass writes with its activation when custody holds no run: with nothing delegated,
+    the walk is over before it begins (``{}`` otherwise, an unreadable probe included: the guarded walk answers)."""
     from ouroboros.delegate_custody_current import has_runs
 
     try:
-        return has_runs(root)
+        return {} if has_runs(root) else _over(_counted(()))
     except Exception:
-        return True
+        return {}
 
 
 def walk_open(row: Dict[str, Any]) -> bool:
-    """Whether the job ROW holds a walk left open (begun, not over): work the step does whenever the maintenance
-    child runs, never by itself a reason to start one (``maintenance_retirement.due``)."""
-    record = row.get(WALK)
-    return isinstance(record, dict) and not record.get("done_at")
+    """Whether the job ROW shows the step activated and the walk not over (no record with ``done_at``; a record never
+    written is open): work the step does whenever the maintenance child runs, never by itself a reason to start one
+    (``maintenance_retirement.due``)."""
+    from ouroboros.review_thread_retention import JOB_FIELD
+
+    state = row.get(JOB_FIELD) if isinstance(row.get(JOB_FIELD), dict) else {}
+    record = row.get(WALK) if isinstance(row.get(WALK), dict) else {}
+    return bool(state.get("activated_at")) and not record.get("done_at")
 
 
 def walk(run: Any, visited: Iterable[str], row: Dict[str, Any], waiting: List[str]) -> Dict[str, Any]:
@@ -223,69 +234,83 @@ def walk(run: Any, visited: Iterable[str], row: Dict[str, Any], waiting: List[st
     except Exception as exc:
         run.report["errors"].append(f"taken walk: {type(exc).__name__}: {exc}"[:300])
         log.warning("The taken walk failed; it stays open for the step's next pass", exc_info=True)
-        return {} if record else {WALK: {"waiting": 0}}
+        return {}
     waiting.extend(handed)
     if asked or (fields.get(WALK) or {}).get("done_at"):
-        run.report["observed"].append({WALK: {**(fields.get(WALK) or record), "tasks": asked}})
+        run.report["observed"].append({WALK: {**record, **(fields.get(WALK) or {}), "tasks": asked}})
     return fields
+
+
+def _records(root: Any, task_id: str) -> Any:
+    """The task's decision records, ``None`` when its document cannot be read."""
+    from ouroboros.task_store import read_document
+
+    try:
+        document = read_document(root, task_id) or {}
+    except Exception:
+        log.warning("The taken walk could not read the records of task %s", task_id, exc_info=True)
+        return None
+    return dict(document[RECORDS]) if isinstance(document.get(RECORDS), dict) else {}
 
 
 def _walk(run: Any, visited: Set[str], record: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any], int]:
     """``(tasks left to the ordinary duty, job-row fields, tasks asked)`` for one pass of the walk."""
     from ouroboros.delegate_custody_current import has_runs, runs
     from ouroboros.review_thread_retention import WAIT
-    from ouroboros.task_store import read_document
-    from ouroboros.utils import utc_now_iso
 
     handed: List[str] = []
-    waiting = int(record.get("waiting") or 0)  # the runs earlier passes left to the ordinary duty
+    waiting, unknown = int(record.get("waiting") or 0), int(record.get("unknown") or 0)  # what earlier passes left
 
-    def still_open(left: int = 0) -> Dict[str, Any]:  # the open record, written only when it changes
-        return {} if record and not left else {WALK: {"waiting": waiting + left}}
+    def still_open(left: int, unread: int) -> Dict[str, Any]:  # the open record, written only when it changes
+        return {WALK: {"waiting": waiting + left, "unknown": unknown + unread}} if left or unread else {}
 
-    if not has_runs(run.root):  # nothing was ever delegated here: no walk to begin, an open one is over
-        return handed, ({WALK: {**_counted(()), "waiting": waiting, "done_at": utc_now_iso()}} if record else {}), 0
+    if not has_runs(run.root):  # nothing (left) delegated here: the walk is over
+        return handed, _over(_counted(()), waiting, unknown), 0
     if run.stopped or run.stop():
         run.stopped = True
-        return handed, still_open(), 0
+        return handed, {}, 0
     if run.census() is None or _unavailable(run):  # no tree can be proven over, or nobody can be told: later
-        return handed, still_open(), 0
+        return handed, {}, 0
     owing: Dict[str, List[str]] = {}
     for rid, entry in runs(run.root).items():
         if entry.task_id and owed(entry):
             owing.setdefault(entry.task_id, []).append(rid)
     owners = _settled(run.root, owing)
     seen: Dict[str, Dict[str, Any]] = {}
-    left = asked = 0  # the runs this pass leaves to the ordinary duty; the tasks it asked
+    left = unread = asked = 0  # the runs this pass leaves waiting, and unread; the tasks it asked
     for task_id in sorted(owners - visited):
         if run.stop():
             run.stopped = True
-            return handed, still_open(left), asked
-        if _unavailable(run):  # the engine stopped answering: the rest waits for a later pass
-            return handed, still_open(left), asked
+            return handed, still_open(left, unread), asked
+        if run.census() is None:  # the census went stale: no tree can be proven over now, the rest waits
+            return handed, still_open(left, unread), asked
         asked += 1
         try:
-            verdict, records = _tell(run, task_id, walk=True)
-            seen[task_id] = records
-        except Exception as exc:  # one unreadable task never stops the walk: the ordinary duty asks it again
+            verdict, records, unsettled = _tell(run, task_id, walk=True)
+        except Exception as exc:  # one failing task never stops the walk: the ordinary duty asks it again
             run.report["errors"].append(f"{task_id}: {type(exc).__name__}: {exc}"[:300])
             log.warning("The taken walk could not ask task %s", task_id, exc_info=True)
-            verdict, records = WAIT, {}
-        if verdict == WAIT:
+            verdict, records, unsettled = WAIT, _records(run.root, task_id), False
+        if records is None:  # its records cannot be read: its runs are unknown, never waiting or zero
             handed.append(task_id)
-            left += sum(1 for rid in owing[task_id] if rid not in records)
-        if run.stopped:
-            return handed, still_open(left), asked
+            unread += len(owing[task_id])
+        else:
+            seen[task_id] = records
+            if verdict == WAIT:
+                handed.append(task_id)
+                left += sum(1 for rid in owing[task_id] if rid not in records)
+        if run.stopped or unsettled:  # a stop, or an answer that was not a settled record: the rest waits
+            return handed, still_open(left, unread), asked
     for task_id in owners & visited:  # this pass's own tasks: a record the walk wrote may be theirs now
-        try:
-            document = read_document(run.root, task_id) or {}
-        except Exception:
-            log.warning("The taken walk could not count the records of task %s", task_id, exc_info=True)
-            continue
-        seen[task_id] = document[RECORDS] if isinstance(document.get(RECORDS), dict) else {}
+        records = _records(run.root, task_id)
+        if records is None:  # unreadable: unknown, and left to the ordinary duty
+            handed.append(task_id)
+            unread += len(owing[task_id])
+        else:
+            seen[task_id] = records
     counts = _counted(answer for records in seen.values() for answer in records.values()
                       if isinstance(answer, dict) and answer.get("walk") is True)
-    return handed, {WALK: {**counts, "waiting": waiting + left, "done_at": utc_now_iso()}}, asked
+    return handed, _over(counts, waiting + left, unknown + unread), asked
 
 
 def _settled(root: Any, owing: Dict[str, List[str]]) -> Set[str]:
@@ -333,19 +358,25 @@ def receipt(record: Dict[str, Any]) -> str:
     def plural(count: int) -> str:
         return f"{count:,} run" + ("" if count == 1 else "s")
 
+    def left(count: int) -> str:
+        return "was" if count == 1 else "were"
+
     refused = {str(code): number(n) for code, n in sorted((record.get("refused") or {}).items()) if number(n)}
-    taken, absent, waiting = (number(record.get(key)) for key in ("taken", "absent", "waiting"))
-    clauses = [f"it now knows Ouroboros has taken {plural(taken)}, so their engine copies follow its ordinary "
+    taken, absent, waiting, unknown = (number(record.get(key)) for key in ("taken", "absent", "waiting", "unknown"))
+    clauses = [f"the engine now knows Ouroboros has taken {plural(taken)}, so their engine copies follow its ordinary "
                "retention window while Ouroboros keeps its own copy of each"] if taken else []
     if refused:
         detail = ", ".join(f"{n:,} {_refusal(code)}" for code, n in refused.items())
-        clauses.append(f"it refused {plural(sum(refused.values()))} ({detail})")
+        clauses.append(f"the engine refused {plural(sum(refused.values()))} ({detail})")
     if absent:
-        clauses.append(f"it no longer had {plural(absent)}")
+        clauses.append(f"the engine no longer had {plural(absent)}")
     if waiting:
-        clauses.append(f"{plural(waiting)} {'was' if waiting == 1 else 'were'} left to the ordinary pass, which tells "
-                       "the engine about each once its work allows")
-    return "The engine's one-time catch-up on earlier delegated results: " + "; ".join(clauses) + "." if clauses else ""
+        clauses.append(f"{plural(waiting)} {left(waiting)} left to the ordinary pass")
+    if unknown:
+        clauses.append(f"{plural(unknown)} could not be read and {left(unknown)} left to the ordinary pass as well")
+    if not clauses:
+        return ""
+    return "One-time catch-up with the engine on earlier delegated results: " + "; ".join(clauses) + "."
 
 
 def deliver_receipt(root: Any) -> None:

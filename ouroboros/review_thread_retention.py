@@ -939,7 +939,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
     that changed neither the cursor, the waiting tasks, the engine's hold nor the walk's record writes nothing."""
     from ouroboros import maintenance_jobs, store
-    from ouroboros.delegate_result_taken import tell_engine, walk, walk_due
+    from ouroboros.delegate_result_taken import empty_walk, tell_engine, walk
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
     from ouroboros.task_store import terminal_writes_since
@@ -954,8 +954,9 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
         floor = state.get("floor")  # a managed document import owed since (``maintenance_retirement.release_opened``)
         pin = min(counter, floor) if type(floor) is int else counter
         state = {"activated_at": utc_now_iso(), "counter": pin, "waiting": state.get("waiting") or []}
-        maintenance_jobs.record(root, JOB, **{JOB_FIELD: state})
-        if pin == counter and not state["waiting"] and not walk_due(root):
+        over = empty_walk(root)  # nothing delegated yet: the one-time ``taken`` walk is over before it begins
+        maintenance_jobs.record(root, JOB, **{JOB_FIELD: state}, **over)
+        if pin == counter and not state["waiting"] and over:
             return {"activated": True}
         # Process the preserved import interval, or walk, now: pinning a cursor is not scheduling a second pass.
     written = terminal_writes_since(root, int(state.get("counter") or 0))
