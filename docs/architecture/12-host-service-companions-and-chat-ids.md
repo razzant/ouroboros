@@ -67,7 +67,7 @@ Receipt negotiation: `CREATING_SKILLS.md` â€œReporting actual Presence deliveryâ
 
 Reviewed descriptors reconcile on lifecycle/restart, stop on disable/unload/panic. `state/extension_generation.json` publishes the live set; workers adopt once at start, name miss or stale descriptor. Timeout, handler, guards and Safety share one descriptor and its declaration; replaced out-of-process calls refuse. Workers write `state/extension_reconcile/` requests, never own server children; pickup reconciles each skill once (PERSISTENCE.md), naming the answering process.
 
-Aggregate/Skills health uses the server observation; worker health only qualifies it, so failed handoff cannot advance `last_known_good`. Restart-budget exhaustion persists until successful start. Companions run from the reviewed payload; edits stale review before reload. Projection: `state/extension_companions.json`.
+Skills health uses server facts; workers only qualify them, never advance `last_known_good` on failed handoff. Exhaustion ends on successful start. `refresh_companion_process` replaces changed `env_from_settings` after observed death and strict read. Delayed restarts require the current descriptor under lock; stop forgets pending ones. Reviewed payload; snapshot: `state/extension_companions.json`.
 
 ### Chat-id delivery
 

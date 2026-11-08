@@ -63,9 +63,11 @@ def test_capability_available_per_mode():
     assert available_capabilities(ExecutionMode.IN_PROCESS) == MATRIX_CAPABILITIES
     oop = available_capabilities(ExecutionMode.OUT_OF_PROCESS)
     assert oop == MATRIX_CAPABILITIES - OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES
-    # Realtime providers and the call feature hold sockets and tasks for a call's lifetime.
+    # Realtime providers and the call feature hold sockets and tasks for a call's lifetime; a companion
+    # refresh belongs to the server process that supervises it, never a per-call child.
     assert OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES == {
         "subscribe_event", "register_supervised_task", "register_realtime_provider", "register_live_conversation",
+        "refresh_companion_process",
     }
     assert {"on_unload", "send_ws_message", "register_companion_process"} <= oop
 
@@ -173,3 +175,47 @@ def test_status_for_runtime_state():
         {"desired_live": True, "reason": "load_error"}
     ) == "broken"
     assert extension_health.status_for_runtime_state({"desired_live": False, "reason": "disabled"}) == "inactive"
+
+
+def test_a_per_call_childs_settings_state_is_as_strict_as_the_servers(tmp_path, monkeypatch):
+    """The production child reader (``_load_child_extension``) keeps the document's values and the operator's
+    overlay, says ``unknown`` for a present document that cannot be read (never ``ok`` with defaults), and an
+    opted-in catalog keeps reading its declared snapshot."""
+    import json
+    import pathlib
+
+    from ouroboros import config as cfg
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_registry_state import _extensions
+    from tests._extension_loader_shared import _prepare_extension
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
+    key = "TOTAL_BUDGET"
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "oop_state", "def register(api):\n    pass\n", permissions=["read_settings"],
+        env_from_settings=[key], extra_frontmatter='plugin_api: "2.0"\n')
+    here = pathlib.Path(__file__).resolve().parents[1]
+
+    def child(**kwargs):
+        extension_loader.unload_extension(loaded.name)
+        runner._load_child_extension(loaded.name, drive_root, here, repo_root, **kwargs)
+        return _extensions[loaded.name].api_instances[0]
+
+    cfg.SETTINGS_PATH.write_text(json.dumps({key: 77}), encoding="utf-8")
+    api = child()
+    assert api.get_settings_state([key]) == {"status": "ok", "values": {key: api.get_settings([key])[key]},
+                                            "missing": []}
+    assert api.get_settings([key])[key] in (77, 77.0)
+    cfg.SETTINGS_PATH.write_text("{\"TOTAL_BUDGET\": ", encoding="utf-8")  # present, torn for good
+    assert api.get_settings_state([key]) == {"status": "unknown", "values": {}, "missing": []}
+    assert key in api.get_settings([key])  # the ordinary read still falls back to defaults
+    overlay = child(operator_settings={key: "55"})
+    assert overlay.get_settings_state([key])["status"] == "unknown"  # an overlay never hides an unknown document
+    cfg.SETTINGS_PATH.unlink()
+    assert overlay.get_settings_state([key]) == {"status": "ok", "values": {key: overlay.get_settings([key])[key]},
+                                                "missing": []}
+    cfg.SETTINGS_PATH.write_text("not json", encoding="utf-8")
+    catalog = child(catalog_settings={key: 12})
+    assert catalog.get_settings_state([key]) == {"status": "ok", "values": {key: 12}, "missing": []}
+    extension_loader.unload_extension(loaded.name)

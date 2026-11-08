@@ -70,9 +70,13 @@ test('the built-in compatible source sends one pair, never borrowing the other p
 test('provider names come from the setup contract, with a name for the ones it omits', () => {
     assert.equal(apiProviderLabel('openai', contract.providerProfiles), 'OpenAI');
     assert.equal(apiProviderLabel('cloudru', contract.providerProfiles), 'Cloud.ru Foundation Models');
-    // GigaChat has no profile spec; it is still a real provider with a real name.
-    assert.equal(contract.providerProfiles.gigachat, undefined);
     assert.equal(apiProviderLabel('gigachat', contract.providerProfiles), 'GigaChat');
+    const profiles = structuredClone(contract.providerProfiles);
+    profiles.gigachat.label = 'Configured GigaChat';
+    assert.equal(apiProviderLabel('gigachat', profiles), 'Configured GigaChat');
+    // Exercise an omitted profile explicitly, without pinning the setup contract's membership.
+    delete profiles.gigachat;
+    assert.equal(apiProviderLabel('gigachat', profiles), 'GigaChat');
     assert.equal(apiProviderLabel('openai-compatible'), 'OpenAI-compatible endpoint');
     assert.equal(apiProviderLabel('later-provider'), 'later-provider');
 });

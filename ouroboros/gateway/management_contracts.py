@@ -58,6 +58,9 @@ class InstalledSkill(TypedDict, total=False):
     dispatch_live: bool
     review_findings: List[Dict[str, Any]]
     skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}
+    # Declared secret fields (manifest ``secret_fields``) and whether each holds a value now, never the value:
+    # {fields: [{id, key, state: configured | missing | unknown}]}; null for a skill that declares none.
+    secret_config: Optional[Dict[str, List[Dict[str, str]]]]
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
     published: Optional[Dict[str, Any]]
     published_malformed: bool

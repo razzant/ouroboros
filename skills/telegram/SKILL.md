@@ -1,10 +1,10 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.4
+version: 1.4.5
 type: extension
 entry: plugin.py
-plugin_api: "2.0"
+plugin_api: "2.4"
 runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants or connects nothing. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -97,7 +97,7 @@ batch unconfirmed at the upgrade may repeat a turn.
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can
 ask for the bot token with `showSecretHitl('telegram', ['botToken'])`: the owner types it
 into Ouroboros's protected form in the web or desktop app, it goes to Settings, and the
-agent learns only that it was saved. Saving grants, enables and connects nothing. Another
+agent learns only that it was saved. Saving grants, enables and resumes nothing. Another
 secret request mirrored here arrives as a short note saying where to enter it, without
 buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice message, a
 slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
@@ -156,10 +156,10 @@ and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
 without private exception text; its 8 MiB message limit is unchanged. It is enabled
 by default after owner binding and can be turned off without stopping the text bridge. Disabling the skill destroys process-memory Mini App
 sessions, stops public exposure, and best-effort restores the prior Telegram
-menu button. The bot token can be replaced while the skill is enabled, but the
-running poller keeps polling with the token it started with until it restarts,
-while every send already uses the new one; rotate it with the skill disabled, or
-disable and re-enable the skill right after the change.
+menu button. While the skill is on, a token saved, replaced or cleared applies within
+seconds, without Disable/Enable: nothing new goes out with the old token, a long send stops
+after the parts already taken, and the Mini App restarts once the old process has died. No
+token is a quiet wait, never a crash; unreadable settings keep the last token.
 
 Delegated task cards lead with the executor's latest words (marked earlier
 when retained), followed by problems and compact activity counts. These are

@@ -40,6 +40,7 @@
  * @property {boolean=} dispatch_live
  * @property {Object[]=} review_findings
  * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
+ * @property {?{fields: {id: string, key: string, state: ('configured'|'missing'|'unknown')}[]}=} secret_config  // declared secret fields and whether each is set now (never a value); null when none are declared
  * @property {Object=} grants
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed

@@ -794,16 +794,17 @@ def serialize_settings(settings: dict) -> str:
     return json.dumps(settings, ensure_ascii=False, indent=2)
 
 
-def load_settings(*, migrate: bool = False) -> dict:
-    """A read takes no lock file and writes nothing; ``migrate`` (boot, onboarding) persists the compatibility upgrades."""
+def load_settings(*, migrate: bool = False, strict: bool = False) -> dict:
+    """A read takes no lock file and writes nothing; ``migrate`` (boot, onboarding) persists the compatibility upgrades;
+    ``strict``: a present document that is not one readable object is ``SettingsDocumentUnknown``, never defaults."""
     fd = _acquire_settings_lock() if migrate else None
     try:
-        return load_settings_lock_held(_settings_lock_held=fd is not None)
+        return load_settings_lock_held(_settings_lock_held=fd is not None, strict=strict)
     finally:
         _release_settings_lock(fd)
 
 
-def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
+def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = False) -> dict:
     """The same read, for a caller that ALREADY holds the (not re-entrant) settings lock: a write
     precondition needs the effective settings as of NOW. Only under that lock (a writer, or a
     ``load_settings(migrate=True)`` that acquired it) are the raw compatibility upgrades persisted: the
@@ -812,10 +813,13 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
     from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
     loaded: dict = {}
     try:
-        raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH, behind_writer=not _settings_lock_held)
-    except SettingsIntegrityError:
+        reader = _settings_integrity.read_settings_json_strict if strict else _settings_integrity.read_settings_json_verified
+        raw = reader(SETTINGS_PATH, behind_writer=not _settings_lock_held)
+    except (SettingsIntegrityError, _settings_integrity.SettingsDocumentUnknown):
         raise
     except Exception:
+        if strict:  # an unexpected read failure is unknown too, never defaults
+            raise _settings_integrity.SettingsDocumentUnknown("settings document could not be read")
         raw = None
     if isinstance(raw, dict):
         raw = _migrate_consciousness_safety(raw, lock_held=_settings_lock_held)

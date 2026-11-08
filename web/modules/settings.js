@@ -294,6 +294,12 @@ export async function readExtensionFormValues(skill, route) {
     }
 }
 
+/** A form or action whose fields are all read-only: it reports a status, and its submit is a check, not a save. */
+export function isStatusForm(component = {}) {
+    const fields = Array.isArray(component.fields) ? component.fields : [];
+    return fields.length > 0 && fields.every((field) => Boolean(field?.disabled));
+}
+
 export async function renderExtensionSettingsSections(root, sections, { isCurrent = () => true } = {}) {
     const host = root.querySelector('#extension-settings-sections');
     if (!host) return;
@@ -337,6 +343,8 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             // Fieldless actions are never read, so they keep `ok`.
             const { values = {}, read = 'ok' } = hydrated.get(formKey) || {};
             const disabled = Boolean(component.disabled);
+            // Every field read-only: the form shows what its route reports, and its submit checks again.
+            const check = isStatusForm(component);
             const unread = read === 'unsupported' && !disabled;
             const failed = read === 'failed';
             const fieldOptions = {
@@ -350,7 +358,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                     ${unread ? `<div class="settings-inline-status" data-extension-settings-read data-tone="${normalizeTone('warn')}">${escapeHtml(EXTENSION_VALUES_UNAVAILABLE)}</div>` : ''}
                     <div class="form-grid two">${fields.map((field) => renderSafeField(field, values, fieldOptions)).join('')}</div>
                     <div class="settings-extension-actions ui-action-row">
-                        <button class="btn${type === 'form' ? ' btn-save' : ''}"${type === 'form' ? '' : ' data-primary'} type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
+                        <button class="btn${check ? ' btn-default' : type === 'form' ? ' btn-save' : ''}"${type === 'form' || check ? '' : ' data-primary'} type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
                         ${unread ? '<button class="btn btn-default" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
                         <div class="ui-result" data-extension-settings-status${failed ? ` data-tone="${normalizeTone('warn')}"` : ''}>${failed ? escapeHtml(EXTENSION_VALUES_UNREADABLE) : ''}</div>
                     </div>
@@ -406,11 +414,12 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             const button = form.querySelector('button[type="submit"]');
             const idleLabel = spec.submit_label || spec.label || 'Save';
             pendingExtensionSettings.add(requestKey);
+            const busy = spec.busy_label || 'Saving…';
             if (button) {
                 button.disabled = true;
-                button.textContent = spec.busy_label || 'Saving…';
+                button.textContent = busy;
             }
-            setResult(status, { text: 'Saving…', tone: 'muted' });
+            setResult(status, { text: busy, tone: 'muted' });
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
@@ -423,9 +432,20 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 if (!resp.ok || data.error) {
                     throw Object.assign(new Error(data.error || `HTTP ${resp.status}`), { status: resp.ok ? undefined : resp.status, body: data });
                 }
+                // A read-only field shows what the route answered just now, from the same source as its
+                // first render; an editable one keeps what the owner typed.
+                for (const field of spec.fields || []) {
+                    const name = String(field?.name || '');
+                    const input = field?.disabled && name && Object.prototype.hasOwnProperty.call(data, name)
+                        ? form.elements?.namedItem?.(name) : null;
+                    if (!input) continue;
+                    if (input.type === 'checkbox') input.checked = Boolean(data[name]);
+                    else input.value = String(data[name] ?? '');
+                }
                 const outcome = extensionActionStatus(data);
                 setResult(status, { ...outcome, ends: outcome.tone === 'ok' });
-                if (data.ok !== false) globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
+                // A check saves nothing, so it announces no settings change to other pages.
+                if (data.ok !== false && !isStatusForm(spec)) globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
                     detail: { reason: 'extension settings saved', source: 'settings', skill, route },
                 }));
             } catch (err) {

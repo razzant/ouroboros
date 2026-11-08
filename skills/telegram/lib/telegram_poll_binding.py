@@ -37,14 +37,17 @@ def saved_server(api) -> tuple[str, str | None]:
     return telegram_api_base(state_dir), telegram_files_dir(state_dir)
 
 
-def server_fingerprint(api):
+def server_fingerprint(api, token: str | None = None):
     """The token and saved server a client is built from: local reads, no request.
 
-    None when either is unavailable: a host that is closing answers ``{}`` for the token,
-    which says nothing about the saved token.
+    ``token`` is the bridge's accepted token (lib/telegram_token.py); without it the saved one is
+    read once. None without a token or a readable saved server: neither says the settings changed.
     """
     try:
-        token = str(api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN") or "").strip()
+        if token is None:
+            from .telegram_token import TOKEN_KEY, read_token_state
+
+            token = str((read_token_state(api).get("values") or {}).get(TOKEN_KEY) or "").strip()
         return (token, saved_server(api)) if token else None
     except Exception:
         return None
@@ -56,21 +59,35 @@ def bot_id(token: str) -> str:
     return head if head.isdigit() else ""
 
 
-async def park_until_settings_change(api, fingerprint) -> None:
+_NO_READING = {  # why a parked poller has nothing to compare; logged when the reason changes
+    "missing": ("info", "Telegram bot token was cleared while polling waits; still waiting for a saved one."),
+    "unreadable": ("warning", "Telegram settings could not be read while polling waits; still waiting."),
+}
+_TOKENLESS = {"missing": "missing", "unknown": "unreadable"}  # a binding holding no token, by its state
+
+
+async def park_until_settings_change(api, fingerprint, binding=None) -> None:
     """After a permanent rejection ask that origin nothing more until a Save changes it.
 
     Parking instead of raising keeps the supervised poller alive: its restarts would run
-    out, and a corrected Save would then find no poller. A failed read says nothing about
-    the settings, so only a successful read that differs from ``fingerprint`` ends the wait.
+    out, and a corrected Save would then find no poller. ``binding`` is the bridge's token
+    binding (lib/telegram_token.py): its accepted token is compared, and its state tells a
+    cleared token from settings that cannot be read. Neither says the settings changed, so
+    only a successful read that differs from ``fingerprint`` ends the wait. A line is logged
+    when the reason changes; the same reason again, even after an unchanged reading, stays quiet.
     """
-    read_failed = False
+    said = ""
     while True:
-        current = server_fingerprint(api)
+        token = None if binding is None else binding.snapshot()[0]
+        current = server_fingerprint(api, token)
         if current is not None and current != fingerprint:
             break
-        if current is None and not read_failed:
-            read_failed = True
-            api.log("warning", "Telegram settings could not be read while polling waits; still waiting.")
+        # No token in force says why by the binding's state (a closing one says nothing); a token
+        # without a reading means the saved settings could not be read.
+        reason = "" if current is not None else _TOKENLESS.get(binding.state, "") if token == "" else "unreadable"
+        if reason and reason != said:
+            said = reason
+            api.log(*_NO_READING[reason])
         await asyncio.sleep(_PARK_CHECK_SEC)
     api.log("info", "Telegram settings changed after a rejection; polling resumes.")
 

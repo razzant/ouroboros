@@ -53,6 +53,12 @@ export function renderSafeField(field = {}, savedValues = {}, options = {}) {
     const span = Math.max(1, Math.min(maxSpan, Number(field.span) || 1));
     const spanClass = options.spanClassPrefix ? ` ${escapeHtmlAttr(options.spanClassPrefix)}${span}` : '';
     const help = field.help ? `<small class="${helpClass}">${escapeHtmlAttr(field.help)}</small>` : '';
+    if (type === 'textarea' && field.disabled) {
+        // A multiline value the schema declares read-only (a status) is text, never an inert control: whole at any width,
+        // selectable and reachable by keyboard, in the value's ink. `<output>` keeps its name in form.elements and its
+        // text as `.value`, so collecting the form and refreshing the field in place work as for the control.
+        return `<label class="${fieldClass}${spanClass}"><span>${label}</span><output class="ui-control ui-control-readonly" name="${name}"${accessible} tabindex="0">${value}</output>${help}</label>`;
+    }
     if (type === 'textarea') {
         return `<label class="${fieldClass}${spanClass}"><span>${label}</span><textarea class="ui-control" name="${name}"${accessible}${placeholder}${required}${disabled}>${value}</textarea>${help}</label>`;
     }

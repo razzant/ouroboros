@@ -182,9 +182,9 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
     function cardStatus(form, state, outcome) {
         const fields = list(outcome.fields || form.request.fields.map((field) => field.id));
         if (state === 'answered' && outcome.event === 'secret_replaced')
-            return fmt('Replaced in Settings: {fields}. Enabled skills may keep the old value until you disable and re-enable them.', { fields });
+            return fmt('Replaced in Settings: {fields}. Enabled skills may use it at their next call; some keep the old value until disabled and re-enabled.', { fields });
         if (state === 'answered' && outcome.event === 'secret_filled')
-            return fmt('Saved to Settings: {fields}. Saving connects nothing and grants nothing.', { fields });
+            return fmt('Saved to Settings: {fields}. Access and enablement are unchanged.', { fields });
         if (state === 'closed' && outcome.interrupted_save)
             return tr('secret.cancel_interrupted', 'An earlier save was never confirmed; whether its value reached Settings is unknown.');
         if (form.pending) return tr('secret.saving', 'Saving…');

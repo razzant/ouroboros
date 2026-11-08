@@ -255,7 +255,7 @@ def test_without_a_saved_base_every_call_stays_on_the_cloud_origin(tmp_path, mon
     state, api = _state(tmp_path)
 
     async def scenario():
-        client, server, *_rest = await plugin._start_poller(api)
+        client, _generation, server, *_rest = await plugin._start_poller(api)
         assert server == (_CLOUD, None)
         assert await client.get_updates(0) == []
         assert await client.download_file("doc-1") == store_bytes

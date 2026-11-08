@@ -63,6 +63,28 @@ test('field rendering escapes values and preserves secret/non-secret semantics',
     assert.match(checkbox, / checked/);
 });
 
+test('a read-only multiline value is whole, selectable text that collection still reaches; editable ones stay controls', () => {
+    const long = "Restoring the previous owner's menu button: Telegram did not confirm the restored menu button.";
+    const field = { name: 'miniapp_status', label: 'Mini App', type: 'textarea', disabled: true };
+    const html = portable.renderSafeField(field, { miniapp_status: long });
+    assert.equal(html, '<label class="ui-field widget-field"><span>Mini App</span><output class="ui-control ui-control-readonly" '
+        + 'name="miniapp_status" aria-label="Mini App" tabindex="0">Restoring the previous owner&#39;s menu button: Telegram '
+        + 'did not confirm the restored menu button.</output></label>');
+    assert.doesNotMatch(html, /<textarea|disabled|rows=/, 'no inert control, no fixed rows, no disabled ink');
+    const hostile = portable.renderSafeField({ name: 's', type: 'textarea', disabled: true }, { s: '</output><script>x</script>' });
+    assert.doesNotMatch(hostile, /<script>/);
+    assert.match(hostile, /&lt;\/output&gt;&lt;script&gt;/);
+    // An editable textarea, and one disabled only for a while (a busy widget, an unread form until Edit anyway), stay controls.
+    assert.match(portable.renderSafeField({ name: 'notes', type: 'textarea' }), /<textarea class="ui-control" name="notes"/);
+    assert.match(portable.renderSafeField({ name: 'notes', type: 'textarea' }, {}, { disabled: true }),
+        /<textarea class="ui-control" name="notes"[^>]* disabled><\/textarea>/);
+    // A disabled single-line field keeps its input: only the multiline read-only value changed.
+    assert.match(portable.renderSafeField({ name: 'proxy', type: 'text', disabled: true }), /<input class="ui-control" type="text" name="proxy"[^>]* disabled>/);
+    // The output keeps the field's name and its text as `.value`, so the form collects what it shows.
+    const form = { elements: { namedItem: (name) => (name === 'miniapp_status' ? { type: 'output', value: long } : null) } };
+    assert.deepEqual(portable.collectSafeFieldValues(form, [field]), { miniapp_status: long });
+});
+
 test('collection follows field type and never silently persists passwords when excluded', () => {
     const inputs = { enabled: { checked: false, value: 'on' }, n: { value: '2' }, key: { value: 'secret' } };
     const form = { elements: { namedItem: name => inputs[name] } };
