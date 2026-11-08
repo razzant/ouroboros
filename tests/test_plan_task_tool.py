@@ -580,7 +580,7 @@ def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(ha
     assert "sk-live-x" not in packets
     read, _result = _call(ctx)
     for shown in (asked, read):
-        assert (f"  evidence omitted: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
+        assert (f"  evidence not attached: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
                 and shown.count(DENIED_ATTACH_HINT) == 1), shown
     assert "| live_data/settings.json | denied_path |" in packets and DENIED_ATTACH_HINT in packets
     assert DENIED_ATTACH_HINT.startswith("Settings and runtime files outside your own task stores cannot be attached "
@@ -908,3 +908,133 @@ def test_the_deadline_rail_states_facts_and_never_advises_a_plan_of_its_own(harn
     assert text.startswith("PLAN_TASK_SKIPPED_DEADLINE:") and "remaining time 0s" in text
     assert "This call dispatched no reviewer" in text and "The plan record keeps its state" in text
     assert "no plan review is open" not in text and "proceed with your own" not in text.lower()
+
+
+def test_an_asks_mixed_evidence_reaches_every_seat_and_every_author_view_apart(harness, monkeypatch):
+    """One ask attaching mixed evidence, through the real handler, preparation, record and readers: own
+    ``artifact_store`` and ``task_drive`` files, a helper's saved result and a workspace selection attach (the
+    artifact twice, the large drive file as its head); the settings file is refused and a link is never fetched.
+    Packet, session and native seats are prepared the same bytes and the same named absences. The author sees,
+    in the ask's result, the free read, the review history and the context index's plan-record reader, what
+    attached (whole or in part) apart from what did not, each with its reason: a cut or a repeat beside content
+    that attached is never counted as missing. A revision's ask keeps its own evidence; an ask an older writer
+    stored without these fields reads as not recorded, never as nothing attached, and one that kept what attached
+    but not why says its reasons are not recorded."""
+    from dataclasses import replace
+
+    from ouroboros import config as cfg
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, current_plan_history, review_context_updates
+    from ouroboros.tools import control_task_results
+    from ouroboros.tools.plan_evidence import EVIDENCE_PER_ITEM_BYTES
+    from tests._store_shared import seed_result
+
+    live = harness.workspace / "live_data"
+    live.mkdir()
+    (live / "settings.json").write_text('{"OPENROUTER_API_KEY": "sk-live-x"}', encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", live, raising=False)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", live / "settings.json", raising=False)
+    ctx = harness.make_ctx()
+    art, drv = _own_store(ctx, "artifact_store"), _own_store(ctx, "task_drive")
+    brief_bytes = b"BRIEF-4K: keep the existing Plan details.\n"
+    (art / "brief.md").write_bytes(brief_bytes)
+    big = b"".join(f"{n:06d} drive log line\n".encode() for n in range(EVIDENCE_PER_ITEM_BYTES // 20 + 400))
+    (drv / "long-log.md").write_bytes(big)
+    seed_result(harness.drive, "helper-1", {"status": "completed", "result": "HELPER-RESULT-7Z: three call sites."})
+    [api, sess, native] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"), ("nat1", "m/native"))
+    harness.state["slots"] = [api, sess, replace(native, subagent_id="native-reader", native_retrieval_override=True)]
+    sub = harness.install({})
+    brief, log = str(art / "brief.md"), str(drv / "long-log.md")
+    url = "https://example.com/spec"
+    attach = [brief, log, "task:helper-1", brief, "live_data/settings.json", url, "notes.md::lines=1-1"]
+    asked, _result = _write(ctx, ask="council", message="Mixed evidence.", attach=attach)
+
+    ask = _record(harness)["asks"][0]
+    assert ask["attach"] == attach
+    assert [row["locator"] for row in ask["attached"]] == [brief, log, "task:helper-1", "notes.md::lines=1-1"]
+    assert ask["omissions"] == [{"locator": log, "reason": f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}"},
+                                {"locator": brief, "reason": "duplicate_locator"},
+                                {"locator": "live_data/settings.json", "reason": "denied_path"},
+                                {"locator": url, "reason": "url_not_fetched"}]
+    # Every seat is prepared the same evidence: the artifact once, the drive head, the helper's result, and the
+    # absences in its table; the settings bytes reach none.
+    request = sub.calls[0]["request"]
+    deliveries = {"api1": _user_text(request.slot_messages["api1"][-1]["content"]),
+                  "sess1": str(request.slot_session_tasks["sess1"]), "nat1": str(request.slot_session_tasks["nat1"])}
+    for seat, delivery in deliveries.items():
+        assert delivery.count(f"----- BEGIN {brief} -----\nBRIEF-4K") == 1, seat
+        assert big[:EVIDENCE_PER_ITEM_BYTES].decode() in delivery and "HELPER-RESULT-7Z" in delivery, seat
+        for row in ask["omissions"]:
+            assert f"| {row['locator']} | {row['reason']} |" in delivery, (seat, row)
+        assert "sk-live-x" not in delivery, seat
+    assert ask["participants"][2]["slot"]["delivery"] == "native"
+
+    whole = (f"  evidence attached (prepared for the participants): {brief} (source {len(brief_bytes)} bytes; "
+             f"duplicate_locator); {log} (in part; source {len(big)} bytes; truncated_to_{EVIDENCE_PER_ITEM_BYTES}); task:helper-1 "
+             f"(source {ask['attached'][2]['bytes']} bytes); notes.md::lines=1-1 (source 11 bytes)\n"
+             f"  evidence not attached: live_data/settings.json (denied_path); {url} (url_not_fetched)\n")
+    summary = ("Evidence prepared for the participants: 3 of 6 attached whole, 1 in part, 2 not attached; "
+               "the ask below lists each locator and every reason.")
+    assert summary in asked and whole in asked, asked
+
+    # A revision's ask carries its own evidence; the earlier ask keeps what it carried.
+    _call(ctx, plan="Outline, then the story.", ask=["api1", "sess1", "nat1"], attach=["task:helper-1", url, "absent.md"])
+    revised = sub.calls[1]["request"]
+    for seat in ("api1", "sess1", "nat1"):
+        delivery = (_user_text(revised.slot_messages[seat][-1]["content"]) if seat == "api1" else str(revised.slot_session_tasks[seat]))
+        assert "HELPER-RESULT-7Z" in delivery and f"| {url} | url_not_fetched |" in delivery and "| absent.md | missing |" in delivery
+        assert "BRIEF-4K" not in delivery.split("## YOUR PANEL SEAT")[-1], seat
+    # Asks an older writer stored: one without any evidence field, one that kept what attached but not the reasons.
+    notes = {"locator": "notes.md", "sha256": "e" * 64, "bytes": 11}
+    for row in ({"ask_id": "a3", "message": "older writer"},
+                {"ask_id": "a4", "message": "older partial writer", "attach": ["notes.md", "b.md"], "attached": [notes]}):
+        plan_record.append_ask(harness.drive, "task-1", {**row, "ts": "2026-11-07T12:00:00+00:00", "revision": 2, "participants": []})
+    read, _result = _call(ctx)
+    a1, a2, a3, a4 = (read.index(f"- ask {ask_id} on revision") for ask_id in ("a1", "a2", "a3", "a4"))
+    assert a1 < read.index(whole) < a2, read
+    second = ("\n  evidence attached (prepared for the participants): task:helper-1 "
+              f"(source {ask['attached'][2]['bytes']} bytes)\n  evidence not attached: {url} (url_not_fetched); absent.md (missing)\n")
+    assert a2 < read.index(second) < a3, read
+    assert read[a3:a4].endswith("\n  evidence: not recorded for this ask\n"), read[a3:a4]
+    assert ("\n  evidence attached (prepared for the participants): notes.md (completeness not recorded; source 11 bytes)\n  evidence not attached: b.md\n"
+            "  evidence cuts and absences: not recorded for this ask\n") in read[a4:], read[a4:]
+    assert "evidence omitted" not in read and read.count("cannot be attached directly") == 1  # the deny hint, once
+
+    # The review history and the plan family's current history carry each ask's fields as recorded; the older ask
+    # gains no empty list.
+    record = _record(harness)
+    history, _operative = current_plan_history(ctx)
+    rounds = {row["plan_ask"]: row for row in history["rounds"]}
+    assert rounds == {row["plan_ask"]: row for row in plan_record.record_history(harness.drive, "task-1", record)["rounds"]}
+    for stored in record["asks"][:2]:
+        assert {key: rounds[stored["ask_id"]][key] for key in ("attach", "attached", "omissions")} == {
+            key: stored[key] for key in ("attach", "attached", "omissions")}
+    assert not {"attach", "attached", "omissions"} & set(rounds["a3"])
+    assert (rounds["a4"]["attach"], rounds["a4"]["attached"], "omissions" in rounds["a4"]) == (["notes.md", "b.md"], [notes], False)
+    # The context index addresses the plan record for these facts; its named reader returns them exactly.
+    updates, _identities = review_context_updates(ctx, families={"plan": ""})
+    [index] = [row for row in updates if REVIEW_CONTEXT_INDEX_KEY in row]
+    current = json.loads(index["content"].split("\n", 1)[1])["current"]
+    [address] = [row for row in current["addresses"].values() if row["what"].startswith("this task's plan record")]
+    assert "each locator cut or not attached with its reason" in address["what"]
+    assert address["read"] == {"tool": "get_task_result", "arguments": {"task_id": "task-1", "include_authority": True}, "field": "plan_record"}
+    authority = json.loads(control_task_results._get_task_result(ctx, **address["read"]["arguments"]))["authority"]
+    assert authority[address["read"]["field"]]["asks"] == record["asks"]
+
+
+@pytest.mark.parametrize("fields,state", [
+    ({"attached": [], "omissions": []}, "unknown"),
+    ({"attached": [{"locator": "unresolved.md", "bytes": 9}]}, "attached_unknown"),
+])
+def test_incomplete_preparation_facts_stay_visible(harness, fields, state):
+    ctx = harness.make_ctx()
+    _write(ctx)
+    plan_record.append_ask(harness.drive, "task-1", {
+        "ask_id": "a1", "ts": "2026-11-07T12:00:00+00:00", "revision": 1,
+        "message": "incomplete record", "participants": [], "attach": ["unresolved.md"], **fields,
+    })
+    ask = _record(harness)["asks"][0]
+    evidence = plan_record.ask_evidence(ask)
+    assert len(evidence["items"]) == 1 and evidence["items"][0]["state"] == state
+    assert evidence["counts"]["whole"] == 0
+    rendered, _ = _call(ctx)
+    assert "unresolved.md" in rendered and "not recorded" in rendered

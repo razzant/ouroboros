@@ -296,17 +296,20 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     leaf_scope_note = ""
     if route_kind == "agent_session" and not write_surface:
         selected = emission.get("input_files")
-        selected_note = " Selected input_files are retained; preparation is not a read." if selected else ""
+        selected_note = (" Selected input_files replace automatic folderless lineage copies; they are retained, "
+                         "and preparation is not a read." if selected else "")
         workspace = str(emission.get("workspace_root") or "").strip()
         if workspace:
             leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
         else:
             intent = emission.get("resource_intent") or {}
-            source = ("folderless task/artifact lineage and selected files" if intent.get("kind") == "explicit_none"
+            source = (("folderless selected files" if selected else "folderless task/artifact lineage")
+                      if intent.get("kind") == "explicit_none"
                       else "inherited repository/folder")
             leaf_scope_note = f"\nagent_session selected source: {source}."
         leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
-                            "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
+                            "are not a leaf-access guarantee. Native/nanny tools are not automatically leaf session "
+                            "tools. Prompt-only paths are not prepared." + selected_note)
     if write_surface in {"self_worktree", "genesis"}:
         write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
     elif not write_surface:

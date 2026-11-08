@@ -164,10 +164,17 @@ _ACCESS_PRECEDENCE = (
     "means the same relative path from there."
 )
 
+READONLY_SOURCE_SCOPE = (
+    "The starting folder is a location, not a read boundary. Task-authorized sources remain within the parent's existing read authority, "
+    "subject to explicit narrower constraints and this run's tools; naming a path copies "
+    "nothing and widens no authority. Credentials and harness runtime state are outside that scope "
+    "unless specifically authorized. "
+)
+
 ACCESS_INSTRUCTIONS = {
     "readonly": (
-        " ACCESS: you may read and run read-only commands inside this root, and make no "
-        "edits or writes; " + _ACCESS_PRECEDENCE
+        " ACCESS: " + READONLY_SOURCE_SCOPE + "Read-only commands are allowed when the effective tools provide "
+        "them. Make no edits or writes; " + _ACCESS_PRECEDENCE
     ),
     "workspace_write": (
         " ACCESS: you may edit inside this root, and outside it write only disposable process state "
@@ -193,16 +200,15 @@ INVESTIGATION_INSTRUCTION = (
 
 
 def access_instruction(access: str, *, investigation: bool = False) -> str:
-    """The ONE canonical sentence for a run's typed access profile, or "".
+    """The one instruction for a run's typed access profile, or "".
 
     A parent's prose ban ("Read-only no edits/commands...") in a work order once
     duplicated and contradicted the profile the host had already derived, and the
     run died unable to reach its own read surface. `DelegatedRunShape.access` is
-    the authority, so the host states it in exactly one sentence and says which
-    text wins. Deliberately not a paragraph and not a list of prohibitions: a
-    longer rule becomes prose competing with the typed profile, which is the
-    defect. The parent's prose is never parsed, only outranked. An unrecognized
-    profile renders nothing rather than inventing a rule.
+    the authority: this instruction explains its read/write scope and precedence,
+    rather than adding a second access policy in the work order. Naming a source
+    does not copy it or widen authority. The parent's prose is never parsed.
+    An unrecognized profile renders nothing rather than inventing a rule.
     """
     line = ACCESS_INSTRUCTIONS.get(str(access or "").strip(), "")
     if line and access != "readonly":
