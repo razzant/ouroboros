@@ -47,14 +47,13 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
     else:
         monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
     held = "SAFETY_UNAVAILABLE" if cause == "outage" else "TOO_LARGE"
-    for words, exit_named in (((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}), True),
+    for words, held_words in (((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}), True),
                               (("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"}), False)):
         ok, message = h.module.check_safety(*words, ctx=h.ctx)
         assert not ok and held in message, words[0]
-        # Words with a declared text and destination name my human's exit by them; an MCP call, which has neither,
-        # by its exact call.
-        assert ("quoting the exact text and destination" in message) is exit_named
-        assert ("This call waits" in message and "exact call on the card" in message) is not exit_named
+        # Held words say so; an MCP call, which declares no words or destination, names its exact call for the card.
+        assert ("These words wait" in message) is held_words
+        assert ("This call waits" in message and "exact call on the card" in message) is not held_words
     for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
         ok, message = h.module.check_safety(*other, ctx=h.ctx)
         assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
@@ -81,7 +80,8 @@ def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(su
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
-    assert "quoting the exact text and destination" in message and "Never route these words through another tool" in message
+    assert "these exact words, unprefixed, and the destination Telegram · FusionBrain on the card" in message
+    assert "Never route these words through another tool" in message
     held_at = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest("place_reply", reply)]["held_at"])
     words = "Status: all good." if card == "other words" else text
     place = "" if card == "no destination" else " to Telegram · FusionBrain"

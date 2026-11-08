@@ -472,8 +472,8 @@ def _subject_digest(tool_name, arguments):
 
 
 # A flag is overridden by a decision, never by bytes re-presented: the re-issue must come from a later model call.
-_SEND_DESPITE = ("To send despite this flag, repeat the identical call, request_id included, in a later step; "
-                 "any changed argument is checked again.")
+_SEND_DESPITE = ("To send despite this flag, repeat the identical call (its request_id too, if it has one) in a "
+                 "later step; any changed argument is checked again.")
 
 
 def _authoring_call(ctx):
@@ -526,18 +526,25 @@ def _needs_checker(ctx):
 def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
     _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
     marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
-    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked: that is no verdict. Retry later.",
+    then = "Retry later." if status != "TOO_LARGE" else "A smaller call may fit."
+    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked: that is no verdict. {then}",
                        status=status)
 
 
-# Words no check could judge wait in every mode; the exits are named, never a route around the hold.
-_HELD_WORDS = ("These words wait until a check judges them. Or ask your human privately, quoting the exact text and "
-               "destination: their answer on that card lets an identical re-issue from a later step send it unjudged. "
-               "Never route these words through another tool.")
-_HELD_CALL = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
-              "words. Retry it in a later step, or ask your human privately with this exact call on the card: {call}. "
-              "Their answer lets an identical re-issue from a later step run it unjudged. Never route it through "
-              "another tool.")
+def _held_exits(ctx, tool_name, arguments, effect):
+    """What a hold on words, or on an MCP call without a verdict, tells the mind: it waits in every mode, never a
+    route around it, and my human's exit names exactly what their card must hold (``_exit_subject``), or no exit
+    where the host could not check one."""
+    words, destinations = _exit_subject(ctx, tool_name, arguments, effect)
+    if effect.source == "mcp":
+        return ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
+                "words. Retry it in a later step, or ask your human privately with this exact call on the card: "
+                f"{words}. Their answer lets an identical re-issue from a later step run it unjudged. Never route it "
+                "through another tool.")
+    exit_line = (" Or ask your human privately with these exact words, unprefixed, and the destination "
+                 f"{', '.join(destinations)} on the card: their answer lets an identical re-issue from a later step "
+                 "send it unjudged." if words else " Retry in a later step.")
+    return f"These words wait until a check judges them.{exit_line} Never route these words through another tool."
 
 
 def _exact_call(tool_name, arguments):
@@ -545,28 +552,34 @@ def _exact_call(tool_name, arguments):
     return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
+def _exit_subject(ctx, tool_name, arguments, effect):
+    """What my human's card must hold for a held call: its exact words and every destination (an MCP call, which
+    declares neither: the exact call, ``_exact_call``); ``("", [])`` when the host cannot tell either."""
+    from ouroboros.place_guard import call_place_facts
+    from ouroboros.tool_effects import argument_value
+
+    if effect.source == "mcp":
+        return _exact_call(tool_name, arguments), [tool_name]
+    words = argument_value(arguments, effect.text or "text")
+    facts = call_place_facts(ctx, tool_name, arguments) or {}
+    destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
+                    or [value for values in (facts.get("targets") or {}).values() for value in values])
+    return (words, destinations) if isinstance(words, str) and words.strip() and destinations else ("", [])
+
+
 def _owner_yes(ctx, tool_name, arguments, effect, prior):
     """The quiz my human answered after these words were held, its card holding their exact text and every
     destination (an MCP call: the exact call, ``_exact_call``); "" if none. The host checks facts only (bytes,
     destination, time): the mind's re-issue after reading the answer is its judgment that the answer approves."""
     from datetime import datetime
-    from ouroboros.place_guard import call_place_facts
-    from ouroboros.tool_effects import argument_value
 
     def when(stamp):
         try:
             return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             return None
-    held = when(prior.get("held_at"))
-    if effect.source == "mcp":  # no declared words or destination: the card holds the exact call
-        words, destinations = _exact_call(tool_name, arguments), [tool_name]
-    else:
-        words = argument_value(arguments, effect.text or "text")
-        facts = call_place_facts(ctx, tool_name, arguments) or {}
-        destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
-                        or [value for values in (facts.get("targets") or {}).values() for value in values])
-    if not isinstance(words, str) or not words.strip() or not destinations or held is None:
+    (words, destinations), held = _exit_subject(ctx, tool_name, arguments, effect), when(prior.get("held_at"))
+    if not words or held is None:
         return ""
     for row in getattr(ctx, "_owner_directives", None) or []:
         card = str(((row.get("reply_to") if isinstance(row, dict) else None) or {}).get("text") or "")
@@ -1521,8 +1534,7 @@ def check_safety(
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         if not getattr(assessment, "verdicts", ()):
             _remember(ctx, digest, tool_name, assessment, held=True)
-        exits = _HELD_WORDS if speech else _HELD_CALL.format(call=_exact_call(tool_name, arguments))
-        return False, message + "\n" + exits
+        return False, message + "\n" + _held_exits(ctx, tool_name, arguments, effect)
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

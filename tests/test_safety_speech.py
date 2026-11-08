@@ -29,7 +29,7 @@ def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, st
     args = {"text": "hello", "destination": "room", "request_id": "r-1"}
     h.replies.append({"status": status, "reason": "owner has not delegated this"})
     ok, message = h.module.check_safety(name, args, ctx=h.ctx)
-    assert ok is False and "repeat the identical call, request_id included, in a later step" in message
+    assert ok is False and "repeat the identical call (its request_id too, if it has one) in a later step" in message
     assert len(h.calls) == 1
     # The same model call re-presenting the bytes (the host republishing a held reply) decides nothing new.
     ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)

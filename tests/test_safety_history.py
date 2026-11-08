@@ -70,7 +70,7 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
             break
     else:
         raise AssertionError("Flagged history must hold when decisive evidence does not fit")
-    assert "quoting the exact text and destination" in message  # held words name their exits
+    assert "These words wait until a check judges them" in message and "Never route these words" in message  # held
     count = len(h.calls)
     h.replies.append({"status": "DANGEROUS", "reason": "Decisive flagged evidence" * 3})
     assert not h.module.check_safety("place_reply", {"text": f"flag-{n}"}, ctx=h.ctx)[0]
