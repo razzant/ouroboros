@@ -589,8 +589,9 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
             later = answered is not None and answered > held
         except TypeError:  # an answer time without an offset is not comparable: not a fact this exit can use
             later = False
+        # The words as whole lines of the card and each destination as a whole token, never a part of a longer one.
         if (row.get("source") == "owner_quiz_answer" and later and f"\n{words.strip()}\n" in f"\n{card}\n"
-                and all(d in card for d in destinations)):  # the words as whole lines of the card, never part of one
+                and all(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", card) for d in destinations)):
             return str(row.get("quiz_id") or row.get("msg_id") or "")
     return ""
 

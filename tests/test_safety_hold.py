@@ -134,7 +134,8 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
 
 def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor, monkeypatch, published_tool):
     """A connector's declared send into a room that is no place of it is held with its declared target named for the
-    card: my human's answer naming that target sends it on a later decision, one naming another target does not."""
+    card: my human's answer naming that target sends it on a later decision, one naming another target, or a longer
+    one it is a part of, does not."""
     from datetime import datetime, timedelta
     from ouroboros import place_guard
     h = supervisor
@@ -144,7 +145,7 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
     name, _tool = published_tool("write", target=[], sends={"when": {"path": "chat.postMessage"},
                                                              "target": "body.channel", "text": "body.text"})
     call = {"path": "chat.postMessage", "body": {"channel": "C1", "text": "Ship it on Friday."}}
-    for room, sent in (("C2", False), ("C1", True)):
+    for room, sent in (("C2", False), ("C12", False), ("C1", True)):
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
         assert not ok and "the destination C1 on the card" in message
