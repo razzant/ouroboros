@@ -109,8 +109,10 @@ CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed account in a place: provenance, whole
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
-# relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
+# relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
+# identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
+PLACE_ROW_IDS = ("conversation_id", "message_id")  # a confirmed place row's provider identity, read again at a cite
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", *PLACE_ROW_IDS)
 
 
 def row_identity(row: Dict[str, Any]) -> str:
@@ -565,8 +567,9 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                         if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
                 later.append({"source": source, "content": text, "msg_id": msg_id, **ids,
                               **({"card": card} if card else {}), **({"words": words} if "words" in row else {})})
-            elif source in CORPUS_PLACE_SOURCES:  # carried to the successor whole, with its id and reply target
+            elif source in CORPUS_PLACE_SOURCES:  # carried whole, with its ids, provider identity and reply target
                 confirmed.append({"source": source, "content": text, "msg_id": msg_id,
+                                  **{key: row[key] for key in PLACE_ROW_IDS if row.get(key)},
                                   **({"reply_to": row["reply_to"]} if isinstance(row.get("reply_to"), dict) else {})})
             elif source in CORPUS_TASK_SOURCES:
                 peers.append({"msg_id": msg_id, "ts": "", "source_task_id": str(row.get("source_task_id") or ""),
@@ -740,7 +743,8 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
                          **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
     for row in sources.get("confirmed_place") or []:  # provenance rows ride beside the owner's, outside the owner sources
         if isinstance(row, dict) and str(row.get("content") or "").strip():
-            rows.append({"source": "place_confirmed", "content": row["content"], **{key: row[key] for key in ("msg_id", "reply_to") if row.get(key)}})
+            rows.append({"source": "place_confirmed", "content": row["content"],
+                         **{key: row[key] for key in ("msg_id", *PLACE_ROW_IDS, "reply_to") if row.get(key)}})
     return rows
 
 

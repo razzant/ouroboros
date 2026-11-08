@@ -5,8 +5,20 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 
 
+@pytest.mark.parametrize(("status", "sent"), [("SUSPICIOUS", True), ("DANGEROUS", False)])
+def test_speech_follows_the_final_assessment(supervisor, monkeypatch, status, sent):
+    """SUSPICIOUS speech sends at once with its warning, as for any other call; DANGEROUS returns it unsent."""
+    h = supervisor
+    from ouroboros import tool_effects
+    monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
+    h.replies.append({"status": status, "reason": "the audience is wider than the note allows"})
+    ok, message = h.module.check_safety("connector_send", {"text": "hello", "to": "room"}, ctx=h.ctx)
+    assert ok is sent and "the audience is wider than the note allows" in message
+    assert message.startswith("⚠️ SAFETY_WARNING") is sent and ("Message not sent" in message) is not sent
+
+
 @pytest.mark.parametrize(("name", "status", "mode"), [
-    ("place_reply", "SUSPICIOUS", "advanced"),
+    ("place_reply", "DANGEROUS", "advanced"),
     ("connector_send", "DANGEROUS", "cyber_pro"),
 ])
 def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, name):
@@ -14,19 +26,59 @@ def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, st
     from ouroboros import tool_effects
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
-    args = {"text": "hello", "destination": "room"}
+    args = {"text": "hello", "destination": "room", "request_id": "r-1"}
     h.replies.append({"status": status, "reason": "owner has not delegated this"})
-    assert h.module.check_safety(name, args, ctx=h.ctx)[0] is False
+    ok, message = h.module.check_safety(name, args, ctx=h.ctx)
+    assert ok is False and "repeat the identical call (its request_id too, if it has one) in a later step" in message
     assert len(h.calls) == 1
+    # The same model call re-presenting the bytes (the host republishing a held reply) decides nothing new.
+    ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
+    assert not ok and "flagged in this same step" in message and len(h.calls) == 1
+    assert all(event["type"] != "safety_sent_despite_check" for event in h.events)
+    h.later()
     ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
     assert ok and "despite the check" in message
     assert len(h.calls) == 1
     assert h.events[-1]["type"] == "safety_sent_despite_check"
+    assert (h.events[-1]["flagged_in"], h.events[-1]["sent_by"]) == ("llm-round-1", "llm-round-2")
     assert h.module.check_safety(name, {**args, "text": "changed"}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 2
+    # request_id is part of the message's identity: the same words under a new id are checked again (Joi/Eva, 05.11).
+    h.replies.append({"status": status, "reason": "owner has not delegated this"})
+    assert h.module.check_safety(name, {**args, "request_id": "r-2"}, ctx=h.ctx)[0] is False
+    assert len(h.calls) == 3
     h.ctx.task_id = "different-root"
     h.module.check_safety(name, args, ctx=h.ctx)
-    assert len(h.calls) == 3
+    assert len(h.calls) == 4
+
+
+def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
+    """A built-in without declarations (github_write) gets speech semantics only from the verdict: flagged as speech
+    in Cyber Pro it returns unsent at first issue and sends on a later decision; the same verdict without the mark
+    stays advice there. In an ordinary mode the mark quotes the words but keeps that mode's refusal: every issue is
+    checked again and none is sent by repetition."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "advanced")
+    secret = {"method": "comment", "repo": "razzant/ouroboros", "number": 1, "body": "token sk-live-1"}
+    for _ in range(2):
+        h.replies.append({"status": "DANGEROUS", "reason": "a credential to a public thread", "speech": True,
+                          "quote": "sk-live-1"})
+        ok, message = h.module.check_safety("github_write", secret, ctx=h.ctx)
+        assert not ok and '"sk-live-1"' in message and "repeat the identical call" not in message
+        h.later()
+    assert len(h.calls) == 2, "the re-issue was judged again, not sent by repetition"
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 2805, "body": "Taking it up."}
+    h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": True,
+                      "quote": "Taking it up."})
+    ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
+    assert not ok and "Message not sent" in message
+    h.later()
+    ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
+    assert ok and "despite the check" in message and len(h.calls) == 3
+    h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": False})
+    ok, message = h.module.check_safety("github_write", {**comment, "body": "Other words."}, ctx=h.ctx)
+    assert ok and "Cyber Pro leaves the decision to Ouroboros" in message
 
 
 def test_writes_keep_binding_and_effective_mode(supervisor, monkeypatch):

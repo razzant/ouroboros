@@ -48,7 +48,9 @@ class PlanEngine:
         self.calls.append((path, body, key))
         if path == "/v2/threads":
             tid = f"thread-{len(self.threads) + 1}"
-            self.threads[tid] = {"thread": {"id": tid, "headRunId": ""}, "turns": []}
+            scope = body.get("scope") or {}  # the engine projects its stored repo root (control-api thread-projection.ts)
+            self.threads[tid] = {"thread": {"id": tid, "headRunId": "", "repoRoot": scope.get("root")
+                                            if scope.get("kind") == "project" else None}, "turns": []}
             return {"id": tid}
         pending = custody.invocation_record(self.root, key)
         assert pending and pending["state"] == "pending", "Physical starts require durable intent first"

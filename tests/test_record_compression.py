@@ -883,3 +883,33 @@ def test_real_compression_keeps_what_every_reader_of_a_retained_source_reads(dat
     assert not os.lstat(base / source["path"]).st_flags & stat.UF_COMPRESSED, "a shared file is never unshared"
     row = maintenance_jobs.job(data, job.JOB)
     assert row["last"]["skipped"] == {"shared": 1} and row["totals"]["evidence"]["compressed"] == 2
+
+
+# ---- in_scope: the places a pass looks, asked by a copier before it clones (#2945) ------------------------------
+
+def test_in_scope_names_by_place_exactly_what_a_pass_offers_whatever_its_task_state(data, recorded):
+    """``delegate_readonly_inputs`` streams what this names: an APFS clone would leave the source ``shared`` for good."""
+    done = _evidence(data, "done")
+    sources = _sources(data, "done-sources")
+    _home, seat = _seat(data, "done", "op-1")
+    journal = _write(data / "task_results" / "artifacts" / "done" / job.WIRE_JOURNAL, b"{}\n")  # small today; it grows
+    assert _run(data)["state"] == "done"
+    offered = {path for path, _owned in recorded}
+    finished = [*done.values(), *sources.values(), *seat.values(), journal]
+    assert {path for path in finished if job.in_scope(data, path)} == offered, "exactly what a pass offers"
+    # By place, not state: a live task's records and a home still holding its copy are named before they are offered.
+    live = _evidence(data, "live", status="running", live_files=False)
+    _copy_home, held = _seat(data, "live", "op-2", area=True)
+    assert all(job.in_scope(data, path) for path in (*live.values(), held["evidence"], held["test"]))
+    publishing = journal.parent / "source_handles" / "tool_results" / ".call-x.txt.tmp.1.2.abcdef12"
+    assert job.in_scope(data, publishing), "a record being published there is one by its place"
+    headless = data / "state" / "headless_tasks" / "h" / "data" / "task_results" / "artifacts" / "h"
+    for path in (held["area"], data / "task_drives" / "done" / "notes.log", data / "task_results" / "artifacts" / "done",
+                 headless / "source_handles" / "tool_results" / "x.txt",  # no pass walks a child drive
+                 journal.parent / "source_handles" / "delegated_readonly_inputs" / "inv" / "inputs" / "x.log",
+                 data.parent / "elsewhere" / "task_results" / "artifacts" / "x" / job.WIRE_JOURNAL):
+        assert not job.in_scope(data, path), path
+    if sys.platform != "win32":  # a directory link without Windows' privilege
+        alias = data.parent / "alias"
+        alias.symlink_to(data, target_is_directory=True)
+        assert job.in_scope(data, alias / done["test"].relative_to(data)), "the place is the resolved one"

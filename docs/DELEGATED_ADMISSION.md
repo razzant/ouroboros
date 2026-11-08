@@ -154,11 +154,13 @@ it is saved. The Git copy shares the source repository's refs, stash, hooks and
 configuration (the former independent clone failed on shallow and partial
 sources). A Git-subdirectory starting folder copies the enclosing worktree and
 starts in the matching folder;
-a folderless Project's engine copy is made from this invocation's staged lineage
+a folderless Project's engine copy (a second, engine-made one) is made from this invocation's staged lineage
 inputs (`delegate_readonly_inputs`, `resource_ref.source_root`), never from the
 live scratch. Folderless readonly and investigation starts stage every permitted
 lineage file, a scheduled origin's whole `task_drive`/`artifact_store` included
-(`tool_access_reads.scheduled_origin`): the copy grows with that scratch, and one
+(`tool_access_reads.scheduled_origin`), bytes only (`artifacts.copy_artifact_file`): an APFS or reflink clone
+taken at one instant, else a bounded stream. An uncompressed record in `record_compression.in_scope` where compression is supported,
+a store file and an immutable or append-only source always stream. Thus non-clone paths still write full copies. One
 unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`);
 explicit `input_files` are separate (3b). A folder no private copy serves (a data-drive subfolder, an
 ignored starting folder) refuses typed, naming `access='readonly'`. A read-only child
@@ -344,7 +346,7 @@ start (`input_files_unavailable`, `definitely_unrun`, from the pre-check or the 
 result row per entry; no failed row reads `prepared`. Only a nonempty selection refuses a writable start
 (`input_files_readonly_only`) or an acting `write_surface`. Omitted, null and `[]` send the same
 request as before, and only `[]` reports an empty receipt (`input_files: []`). There is no count
-or size cap. Retention and folderless restaging stream and hash each file. Preparation may
+or size cap. Retention and folderless restaging copy and hash each file. Preparation may
 outlive the ordinary tool wait and finish as a late start result; a tool timeout proves no
 non-dispatch, so inspect that start before requesting another.
 
@@ -370,8 +372,10 @@ harness's native read reach, which the instruction says without promising it. Th
 sha256 and size, never the automatic lineage inputs. Preparation is not reading. `retry_of` refuses
 a new selection, replays the recorded body and paths without rereading or recopying, and returns
 the recorded receipt. `continue_from` retains only its own new selection and restates its map in
-the continuation prompt, even an empty one. A plan-thread turn keeps its thread's original folder (the
-engine drops a new scope), so its copies are named outside it (`outside_scope_path`).
+the continuation prompt, even an empty one. A plan-thread turn runs in its thread's original folder, as the
+engine's thread record names it (`repoRoot`; the engine drops a turn's scope): it stages no new lineage tree, records and
+registers that folder and names its copies outside it (`outside_scope_path`); a folderless turn whose record
+names none is refused unrun (`readonly_inputs_unavailable`).
 
 `schedule_subagent` retains before queueing under `scheduled-<child>` and saves the receipt as
 `prepared_input_files`, scheduling intent (`SUBAGENT_INTENT_FIELDS`) that crosses admission, the
