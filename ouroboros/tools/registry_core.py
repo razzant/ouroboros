@@ -692,6 +692,7 @@ class ToolRegistry:
             # One verdict per skill in this enumeration; the next call reads anew.
             live = {}
             rows = []
+            seen = {name: extension_dispatch._descriptor_generation(tool) for name, tool in _ext_tools.items()}
             for tool in _ext_tools.values():
                 key = (str(tool.get("skill") or ""), str(tool.get("skills_repo_path") or "") or None)
                 if key not in live:
@@ -699,6 +700,18 @@ class ToolRegistry:
                 if (live[key] and _presence_tool_allowed(self._ctx, tool["name"])
                         and (grants is None or tool["name"] in grants)):
                     rows.append(dict(tool))
+        if not all(live.values()):
+            # A registered descriptor that is not live may belong to a previous published generation (#2933),
+            # which no dispatch miss adopts. Probe once; enumerate again only when the registry now holds other
+            # generations than this enumeration saw (a reload, once per generation, by this or any caller).
+            try:
+                extension_dispatch._adopt_extension_generation(self._ctx)
+            except Exception:
+                pass
+            with _ext_lock:
+                changed = seen != {name: extension_dispatch._descriptor_generation(tool) for name, tool in _ext_tools.items()}
+            if changed:
+                return self._extension_rows(record=record)
         return self._visible_dynamic_tools("extensions", rows) if record else _partition_shadowed_tools(rows, self._entries)[0]
 
     def _mcp_rows(self, *, record: bool) -> List[Dict[str, Any]]:
@@ -919,16 +932,12 @@ class ToolRegistry:
                 self._capability_omissions.append({"surface": "extensions", "reason": "resource_blocked", "resource": "network=false"})
                 return None
             try:
-                from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
-                ext_tool = _ext_get_tool(name)
-                meta = getattr(self._ctx, "task_metadata", {})
-                capability_root = pathlib.Path((meta.get("budget_drive_root") if isinstance(meta, dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
+                # Named discovery resolves as dispatch does: a miss or a
+                # descriptor from a previous generation adopts before answering.
+                ext_tool, _unavailable = extension_dispatch._extension_dispatch_candidate(self._ctx, name)
             except Exception:
                 ext_tool = None
-            if (
-                ext_tool
-                and _ext_is_live(str(ext_tool.get("skill") or ""), capability_root, repo_path=str(ext_tool.get("skills_repo_path") or "") or None)
-            ):
+            if ext_tool:
                 return _dynamic_tool_schema(ext_tool)
         try:
             from ouroboros.mcp_client import (
@@ -1054,8 +1063,10 @@ class ToolRegistry:
             _ext_parse_name = None
         if _ext_parse_name and _ext_parse_name(name):
             try:
-                from ouroboros.extension_loader import get_tool as _ext_get_tool
-                ext_tool = _ext_get_tool(name)
+                # Resolve (and adopt a newer published generation) BEFORE the
+                # outer timeout is chosen; inside the caller's call scope the
+                # dispatch consumes this same descriptor.
+                ext_tool, _unavailable = extension_dispatch.timeout_dispatch_candidate(self._ctx, name)
             except Exception:
                 ext_tool = None
             if ext_tool:
@@ -1222,7 +1233,7 @@ class ToolRegistry:
         acting_protected_grant = acting_subagent and bool(getattr(task_constraint, "protected_paths_grant", False))
         acting_tool_grants = self._acting_tool_grants() if acting_subagent else set()
         entry = self._entries.get(name)
-        ext_tool, extension_unavailable = extension_dispatch._extension_dispatch_candidate(self._ctx, name) if entry is None else (None, False)
+        ext_tool, extension_unavailable = extension_dispatch.bound_dispatch_candidate(self._ctx, name) if entry is None else (None, False)
         if entry is None and ext_tool is None:
             from ouroboros.mcp_client import is_mcp_tool_name
 
