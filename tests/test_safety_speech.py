@@ -71,8 +71,10 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     is not spent by work of the same root capped to an ordinary mode."""
     from ouroboros import place_guard
     h = supervisor
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
-        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
+    # As production resolves them: the finish names its place alone; a send names the place's own conversation.
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda ctx, name, args, **kw: {
+        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain", "conversation_id": "-100"}],
+        "targets": {} if name == "place_reply" else {"chat_id": [args["chat_id"]]}})
     text = "Atlas passed 70 and 95."
     reply = {"place_id": "p", "text": text, "request_id": "r-1"}
     h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart", "quote": text})
@@ -93,11 +95,13 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     ok, message = h.module.check_safety("connector_send", {"text": text, "chat_id": "-100"}, ctx=h.ctx)
     assert not ok and "flagged DANGEROUS in this work" in message and len(h.calls) == 2
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
-        "address": "quiz q9 of task work", "text": f"Send this to Telegram · FusionBrain (-100)?\n{text}\n1. Send it"}}]
+        "address": "quiz q9 of task work", "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it"}}]
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert ok and "(q9)" in message and len(h.calls) == 2
     assert (h.events[-1]["type"], h.events[-1]["quiz_id"]) == ("safety_sent_despite_check", "q9")
     assert h.events[-1]["verdicts"][0]["status"] == "DANGEROUS"  # the release keeps the verdict it overrode
+    ok, message = h.module.check_safety("place_reply", {**reply, "request_id": "r-7"}, ctx=h.ctx)  # the gated words too
+    assert ok and h.events[-1]["type"] == "safety_sent_despite_check" and h.events[-1]["verdicts"] and len(h.calls) == 2
     h.ctx._owner_directives = []
     eva = {**reply, "text": "Eva starts on Monday.", "request_id": "r-4"}
     h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})

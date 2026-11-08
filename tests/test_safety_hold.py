@@ -171,9 +171,12 @@ def test_my_humans_card_reaches_an_unjudged_mcp_call_never_a_judged_action(super
     h.later()
     h.replies.append({"status": "DANGEROUS", "reason": "deletes a project", "speech": False})
     assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 2
+    h.later()
+    h.replies.append(RuntimeError("provider_failed"))  # with the checker down the judged action still keeps its level
+    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 3
     h.ctx._owner_directives = card(other)
     ok, message = h.module.check_safety(name, other, ctx=h.ctx)
-    assert ok and "(q3)" in message and len(h.calls) == 2
+    assert ok and "(q3)" in message and len(h.calls) == 3
 
 
 def test_my_humans_card_releases_an_unjudged_undeclared_call(supervisor):
@@ -217,24 +220,26 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
         h.later()
 
 
-@pytest.mark.parametrize("named,sent", [(["Internal team", "team@example.test"], False),
-                                         (["Internal team", "team@example.test", "outsider@example.test"], True)])
-def test_my_humans_card_must_name_every_recipient(supervisor, monkeypatch, named, sent):
-    """A send to a place's recipient and to another one beside it leaves on my human's card only when the card names
-    every recipient: one naming the place alone never covers a Cc outside it, whose words are then checked."""
+@pytest.mark.parametrize("cc,named,sent", [
+    ("", ["Internal team"], True),  # the place's own conversation is named by its label
+    ("outsider@example.test", ["Internal team", "team@example.test"], False),  # a Cc outside it is never covered
+    ("outsider@example.test", ["Internal team", "outsider@example.test"], True)])
+def test_my_humans_card_must_name_every_recipient(supervisor, monkeypatch, cc, named, sent):
+    """My human's card names a place by its label, which covers that place's own conversation; any other recipient
+    beside it must be named on the card too, or the words are checked."""
     from ouroboros import place_guard, tool_effects
     h = supervisor
     monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
-        "places": [{"place_id": "p", "place_label": "Internal team"}],
-        "targets": {"to": ["team@example.test"], "cc": ["outsider@example.test"]}})
-    call = {"to": "team@example.test", "cc": "outsider@example.test", "text": "The release moves to Friday."}
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda ctx, name, args, **kw: {
+        "places": [{"place_id": "p", "place_label": "Internal team", "conversation_id": "team@example.test"}],
+        "targets": {"to": [args["to"]], **({"cc": [args["cc"]]} if args.get("cc") else {})}})
+    call = {"to": "team@example.test", **({"cc": cc} if cc else {}), "text": "The release moves to Friday."}
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "quiz_id": "q2", "content": "1. Send", "reply_to": {
         "address": "quiz q2 of task work", "text": f"Send to {', '.join(named)}?\nThe release moves to Friday.\n1. Send"}}]
     h.replies.append({"status": "DANGEROUS", "reason": "an outsider on the Cc"})
     ok, message = h.module.check_safety("connector_send", call, ctx=h.ctx)
     assert ok is sent and len(h.calls) == (0 if sent else 1)
-    assert "outsider@example.test" in message or sent
+    assert sent or "the destination Internal team, outsider@example.test on the card" in message
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
