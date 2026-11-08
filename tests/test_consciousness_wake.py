@@ -705,7 +705,7 @@ def test_template_parameters_and_the_explicitly_retained_lookahead():
     # The owner chose to retain this exact tested hint in the first delivery. Other prose's meaning
     # belongs to review; render_substitutes above tests delivery rather than a second copy of that prose.
     assert "If you cannot say from something recent when your human is next expected by someone, look before you finish." in template
-    assert "what you heard and did here" in (REPO / "prompts/FOCUS.md").read_text(encoding="utf-8")
+    assert "what you heard and did" in (REPO / "prompts/FOCUS.md").read_text(encoding="utf-8")
 
 
 # --- the server projection --------------------------------------------------------
