@@ -84,11 +84,13 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
 
 
 @pytest.mark.parametrize("status", ["SUSPICIOUS", "SAFE"])
-def test_a_reply_sent_with_a_warning_leaves_it_in_the_room(focus, monkeypatch, checker, status):
-    """A SUSPICIOUS reply is posted with its warning, which stays in the room's record beside it, where the next
-    round in this place reads it; a SAFE reply leaves no note."""
+def test_a_flagged_reply_returns_once_and_its_later_send_leaves_a_note(focus, monkeypatch, checker, status):
+    """A SUSPICIOUS reply returns unsent; the mind's finish from a later model call posts it, and that decision with
+    the check's reason stays in the room's record beside it, where the next round in this place reads it. A SAFE
+    reply is posted at once and leaves no note."""
     from ouroboros import dialogue_store, safety
-    from ouroboros.place_reply import _reply_digest, reply_carrier
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.place_reply import _reply_digest, prepare_focus_reply, reply_carrier
     from ouroboros.places import conversation_chat_id
 
     def call(**kwargs):
@@ -96,7 +98,16 @@ def test_a_reply_sent_with_a_warning_leaves_it_in_the_room(focus, monkeypatch, c
         return {"content": json.dumps({"status": status, "reason": "names a colleague the note keeps out"})}, {}
     monkeypatch.setattr(safety, "_safety_model_call", call)
     root, _place, _admission, _event = focus
-    ctx, _bundle, _prompt = _reply_bundle(root, monkeypatch, checker)
+    task, content = _focus_task(root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _current_llm_call_meta={"llm_call_id": "round-1"})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": content}])
+    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
+    ok, message = prepare_focus_reply(ctx, "A short reply")
+    assert ok is (status == "SAFE") and ("Message not sent" in message) is (status == "SUSPICIOUS")
+    if status == "SUSPICIOUS":
+        ctx._current_llm_call_meta = {"llm_call_id": "round-2"}
+        assert prepare_focus_reply(ctx, "A short reply")[0] and len(checker) == 1
     carrier = reply_carrier(ctx.task_metadata)
     client_id = f"place-notice:{ctx.task_id}:{_reply_digest(carrier, 'A short reply')}:safety-note"
     rows = dialogue_store.rows_by_client_id(root, client_id, chat_id=conversation_chat_id(carrier["conversation_key"]))

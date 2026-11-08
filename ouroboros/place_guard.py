@@ -255,7 +255,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     """Host facts about where a call lands, for the Supervisor's bundle.
 
     ``{"effect", "declared", "targets": {arg: [values]}, "attributable", "places": [{"place_id",
-    "place_label", "place_state", "conversation_key", ...}]}``; ``{}`` when no place is involved.
+    "place_label", "place_state", "conversation_id" (its own, if any), "conversation_key", ...}]}``; ``{}`` when no
+    place is involved.
     A place's notes are standing delegation: the bundle carries them once, beside the owner's rules.
     """
     try:
@@ -283,6 +284,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         sending = (identity or {}).get("sends_as")
         keys = _conversation_keys(place, effect, targets, account_id=account)
         rows.append({"place_id": place.place_id, "place_label": place.label, "place_state": place.state,
+                     **({"conversation_id": place.conversation_id} if place.conversation_id else {}),
                      **({"sends_as": dict(sending), "sends_as_owner": (sending.get("kind") == "user" and bool(focus.get("identity_owner")))
                          if same_focus else places.writes_as_owner(place, identity, account,
                                                                    _counted_accounts(ctx).get(place.place_id))}

@@ -533,6 +533,11 @@ def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
             "text": "\n".join(lines)}
 
 
+def is_answered_card(reply: Any) -> bool:
+    """Whether a corpus row's ``reply_to`` is a card my human answered (``answered_card_reply``), not a chat message."""
+    return str(_mapping(reply).get("address") or "").startswith("quiz ")
+
+
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
     """The whole message my human's words reply to, under its author, by the address the door resolved: one
     sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words. Its
