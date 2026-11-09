@@ -475,7 +475,7 @@ def _owner_turn(main, text="First request"):
     "superseded_attempt", "readmitted_while_staging", "settled", "settles_before_append", "stop_pending",
     "project_bound", "detached", "other_chat", "constrained_message",
 ])
-def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_owner_turn(main, monkeypatch, case):
+def test_a_main_message_is_its_own_turn_unless_exactly_one_owner_turn_reads(main, monkeypatch, case):
     """Only owner turns are candidates, none is chosen among several; absence of the fact is never preparation."""
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.conversation_lease import _intake_path, open_author_intake
@@ -557,7 +557,8 @@ def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_own
     before = {meta["task"]["id"] for meta in _turns()}
     _say(main.bridge, main.ctx, "One more thing", "cm-follow", **message)
     if case in {"pooled_root_beside", "wake_beside"}:  # no other candidate beside the one owner turn: the words join it
-        assert [ack["target"] for ack in _delivered(main.bridge, "cm-follow")] == [turn] and not _turns("One more thing")
+        joined = [ack["target"] for ack in _delivered(main.bridge, "cm-follow")]
+        assert joined == [turn] and not _turns("One more thing")
         return
     assert not _delivered(main.bridge, "cm-follow")
     started = [meta for meta in _turns("One more thing") if meta["task"]["id"] not in before]

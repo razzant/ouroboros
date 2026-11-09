@@ -149,9 +149,10 @@ def _refuse_steering_while_cancelling(
     # A cancel-pending refusal is a live notice to the OWNER who asked; a task
     # that spoke for itself reads its typed refusal in the tool result instead.
     # An act that wears an owner message shows its cause on that message's
-    # receipt line once its ACK is handed over; an UNLABELLED owner act (a
-    # synthetic receipt id), or one whose ACK was not, needs the standalone
-    # sentence — the same rule as the other refusals (``_notice_row_owed``).
+    # receipt line once its ACK is handed over; an UNLABELLED act of my human's
+    # words (a quote without a client id), or one whose ACK was not, needs the
+    # standalone sentence; a note of the mind (``_mind_note``) none — the same rule
+    # as the other refusals (``_notice_row_owed``).
     if notify and _notice_row_owed(evt, carrier, paired=True):
         _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending", carrier)
     return carrier
@@ -360,11 +361,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = ""
     if refusal:
         # Fail visibly: the chosen task is not a steerable running task here.
-        # The receipt carries the cause; an OWNER turn whose act wears no owner
-        # message (a synthetic receipt id), or whose ACK was not handed over,
-        # also gets the chat sentence, because nothing else in its chat can show
-        # the refusal. A task that spoke for itself reads the typed refusal in
-        # its tool result and its Logs row.
+        # The receipt carries the cause; an owner act of my human's words that
+        # wears no owner message (a quote without a client id), or whose ACK was
+        # not handed over, also gets the chat sentence, because nothing else in
+        # its chat can show the refusal. A task that spoke for itself, and a note
+        # of the mind (``_mind_note``), read the typed refusal in the tool result.
         carrier = str(_steer_receipt(
             ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
         ).get("routing_notice_carrier") or "")
@@ -483,7 +484,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             direct_lock.release()
     if refused is not None:
         # Only the cancel refusal keeps an unlabelled act's paired web row here; any
-        # refusal whose ACK was not handed over tells its cause in this row.
+        # refusal whose ACK was not handed over tells its cause in this row (never a
+        # note of the mind's: ``_mind_note``).
         status, reason, carrier = refused
         if _notice_row_owed(evt, carrier, paired=reason == "cancel_pending"):
             _refusal_row(ctx, evt, target, target_label, status, reason, carrier)
