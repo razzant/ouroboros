@@ -1,4 +1,4 @@
-"""Role-based GitHub remote provisioning for Ouroboros repositories."""
+"""Git remotes: any repository's fetch URLs as Git resolves them, and role-based GitHub provisioning for Ouroboros."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 OFFICIAL_REPO = "razzant/ouroboros"
 PERSONAL_REMOTE_NAME = "origin"
@@ -57,6 +57,36 @@ def is_legacy_official_repo(value: str) -> bool:
 def follow_former_official_home(url: str) -> str:
     """The source an install follows: a former official home is the official repository."""
     return f"https://github.com/{OFFICIAL_REPO}" if is_legacy_official_repo(url) else str(url or "")
+
+
+def _stdout(out: Any) -> str:
+    return out.decode("utf-8", errors="replace") if isinstance(out, bytes) else str(out or "")
+
+
+def remote_fetch_urls(git: Callable[..., Any]) -> List[Tuple[str, str]]:
+    """``(name, fetch URL)`` of every remote that has one, sorted by name: what ``git remote -v`` lists.
+
+    ``git(*args)`` runs one read-only git command in the repository and returns its stdout (text or
+    bytes), or ``None`` when git answered non-zero; how it fails otherwise (raise or ``None``) stays the
+    caller's. The ``remote.<name>.url`` entries of every scope Git reads, NUL-separated and in Git's
+    order, decide which remotes have a fetch URL: an empty value clears the earlier ones, as Git applies
+    it, and a name beginning with ``/`` is no remote, as Git skips it. Git then gives each remote's first
+    URL with ``url.<base>.insteadOf`` applied (``ls-remote --get-url``, offline). Display text such as a
+    partial clone's ``[blob:none]`` never takes part, and a remote without a URL never reaches the fallback
+    in which Git answers its name as the URL.
+    """
+    has_url: Dict[str, bool] = {}
+    for entry in _stdout(git("config", "-z", "--get-regexp", r"^remote\..+\.url$")).split("\0"):
+        key, _newline, value = entry.partition("\n")  # a key holds no newline; a value may
+        name = key.removeprefix("remote.").removesuffix(".url")
+        if name and not name.startswith("/") and key == f"remote.{name}.url":
+            has_url[name] = bool(value)  # the last entry decides: an empty one ends the list
+    remotes = []
+    for name in sorted(name for name, present in has_url.items() if present):
+        url = _stdout(git("ls-remote", "--get-url", "--", name)).rstrip("\r\n")
+        if url:
+            remotes.append((name, url))
+    return remotes
 
 
 def _git_output(repo_dir: pathlib.Path, args: list[str]) -> tuple[int, str, str]:

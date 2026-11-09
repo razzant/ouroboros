@@ -498,6 +498,34 @@ def test_an_unstaged_worktree_change_is_read_in_its_isolated_checkout_by_every_d
     assert shared.git(project, "diff", "--cached") == "" and shared.git(project, "worktree", "list").count("\n") == 0
 
 
+def test_a_filtered_clone_of_the_update_source_is_reviewed_under_the_body_layer(tmp_path, monkeypatch):
+    """#3004: a project cloned from the install's update source with a partial-clone filter, whose remote reads
+    ``<url> (fetch) [blob:none]`` in ``git remote -v``, is the body by its fetch URL without ``treat_as_body``:
+    the record names that fact, the seats judging the change get the body layer of the checklist and the retrieving
+    seats the serving constitution."""
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    serving, source = Path(ctx.system_repo_dir), "https://example.invalid/razzant/ouroboros.git"
+    (serving / "BIBLE.md").write_text(f"# Constitution\n\n{SERVING_RULE}\n", encoding="utf-8")
+    shared.git(serving, "add", "BIBLE.md")
+    shared.git(serving, "commit", "-q", "-m", "constitution")
+    shared.git(serving, "remote", "add", "managed", source)  # a source install's update remote
+    shared.git(project, "remote", "set-url", "origin", source)
+    shared.git(project, "config", "remote.origin.partialclonefilter", "blob:none")
+    (project / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    briefs: list[dict] = []
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
+
+    result = run_review_change(ctx, subject="worktree", goal="Bump the value", scope="app.py only")
+
+    assert result["state"] == "settled" and result["aggregate"] == "PASS", result
+    assert result["subject"]["root"] == str(project)
+    assert result["checklist"] == {"layer": "body", "body_fact": "true", "how": "managed_remote", "treat_as_body": False}
+    texts = {brief["slot_id"]: _brief_text(brief) for brief in briefs}
+    assert sorted(texts) == ["s1", "t1", "t2"]
+    assert all("| 10 | bible_compliance |" in texts[slot] for slot in ("t1", "t2")), texts
+    assert all(SERVING_RULE in texts[slot] for slot in ("t2", "s1")), texts
+
+
 def test_an_index_against_another_base_delivers_the_frozen_delta_not_the_live_index(tmp_path, monkeypatch):
     """``index`` with ``base`` ≠ HEAD: the subject is parent→index-tree, which also
     carries the commits between the base and HEAD. A recapture of the live index

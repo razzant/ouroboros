@@ -20,6 +20,7 @@ from ouroboros.reference_books import (
     book_source_sizes,
     compose_book,
     composed_size,
+    contribution_base,
     load_reference_book,
     render_book_balance,
     ruled_text_of,
@@ -152,6 +153,32 @@ def test_committed_growth_can_be_paid_in_the_worktree(tmp_path, suffix):
     (balance,) = book_balances(repo, [CHAPTER])
     assert balance.vs_head < 0 and balance.vs_upstream <= 0 and balance.owed == 0
     assert "nothing owed" in book_balance_note(repo, [CHAPTER])
+
+
+def test_the_first_official_remote_by_name_is_the_base_whatever_git_shows_beside_its_url(tmp_path, monkeypatch):
+    """#3004: a partial clone's remote reads ``<url> (fetch) [blob:none]`` in ``git remote -v``. The target is the
+    first remote by name whose fetch URL, as Git resolves it (here through ``url.<base>.insteadOf``), is official."""
+    repo = _book_repo(tmp_path / "repo", official=False)
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "remote", "add", "a.partial", "gh:razzant/ouroboros")
+    _git(repo, "config", "url.https://github.com/.insteadOf", "gh:")
+    _git(repo, "config", "remote.a.partial.partialclonefilter", "blob:none")
+    _git(repo, "update-ref", "refs/remotes/a.partial/ouroboros", base)
+    _git(repo, "remote", "add", "b-plain", "https://github.com/razzant/ouroboros.git")
+    _git(repo, "update-ref", "refs/remotes/b-plain/ouroboros", _git(repo, "commit-tree", "HEAD^{tree}", "-m", "elsewhere"))
+    assert "a.partial\thttps://github.com/razzant/ouroboros (fetch) [blob:none]" in _git(repo, "remote", "-v")
+    assert contribution_base(repo) == ("refs/remotes/a.partial/ouroboros", base)
+    (balance,) = book_balances(repo, [CHAPTER])
+    assert balance.upstream == "refs/remotes/a.partial/ouroboros" and balance.vs_upstream == 0
+    real_run = subprocess.run
+
+    def resolving_fails(argv, *args, **kwargs):
+        if argv[1:2] == ["ls-remote"]:
+            raise subprocess.TimeoutExpired(argv, 30)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", resolving_fails)
+    assert contribution_base(repo) == ("", "")  # unavailable, never raised
 
 
 @pytest.mark.parametrize("url", [

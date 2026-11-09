@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from ouroboros.markdown_source import MarkdownSource, SourceRange, parse_markdown_source
-from ouroboros.repo_remotes import OFFICIAL_REPO
+from ouroboros.repo_remotes import OFFICIAL_REPO, remote_fetch_urls
 from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
 
 
@@ -374,10 +374,8 @@ def _official_contribution_target(root: Path) -> str:
     Git supplies shared remotes/refs for linked worktrees too. If multiple official
     remotes have this ref, the first by name wins and is shown in every measurement.
     """
-    remotes = (_git_bytes(root, "remote", "-v") or b"").decode("utf-8", errors="replace")
-    for row in sorted(remotes.splitlines()):
-        name, _, location = row.partition("\t")
-        if location.endswith(" (fetch)") and _official_fetch_url(location[:-8]):
+    for name, url in remote_fetch_urls(lambda *args: _git_bytes(root, *args)):
+        if _official_fetch_url(url):
             ref = f"refs/remotes/{name}/{UPDATE_CHANNEL_BRANCHES['development']}"
             if _git_bytes(root, "rev-parse", "--verify", f"{ref}^{{commit}}"):
                 return ref

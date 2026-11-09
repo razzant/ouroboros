@@ -454,14 +454,19 @@ def _ungoverned(request):
 
 def _sibling(env, kind):
     """A second copy of the body outside the task's folder and its candidate (#2918), recognized only by its own Git
-    identity: a linked worktree of the serving repository, a clone with a local origin, or a linked worktree of a clone
-    whose one remote is the serving repository's ``managed`` URL. Its own BIBLE and ARCHITECTURE carry markers no
-    reviewer may be given: the pack is always the serving checkout's."""
+    identity: a linked worktree of the serving repository, a clone with a local origin, a linked worktree of a clone
+    whose one remote is the serving repository's ``managed`` URL, or a clone of that URL with a partial-clone filter.
+    Its own BIBLE and ARCHITECTURE carry markers no reviewer may be given: the pack is always the serving checkout's."""
     if kind == "worktree":
         root = env.tmp / "sibling-worktree"
         git(env.serving, "worktree", "add", "-q", "--detach", str(root))
     elif kind == "clone":
         root = env.clone
+    elif kind == "partial":  # #3004: the filter makes its remote read `<url> (fetch) [blob:none]` in `git remote -v`
+        root = env.tmp / "partial-clone"
+        git(env.tmp, "clone", "-q", str(env.serving), str(root))
+        git(root, "remote", "set-url", "origin", MANAGED_URL)
+        git(root, "config", "remote.origin.partialclonefilter", "blob:none")
     else:
         mirror = env.tmp / "managed-mirror"
         git(env.tmp, "clone", "-q", str(env.serving), str(mirror))
@@ -502,7 +507,8 @@ def _policy_values(request):
     return policy
 
 
-@pytest.mark.parametrize("kind, how", [("worktree", "git_common_dir"), ("clone", "remote_chain"), ("managed", "managed_remote")])
+@pytest.mark.parametrize("kind, how", [("worktree", "git_common_dir"), ("clone", "remote_chain"), ("managed", "managed_remote"),
+                                       ("partial", "managed_remote")])
 def test_a_folderless_plan_in_a_second_body_copy_is_a_body_plan_and_moves_nothing(env, kind, how):
     """A folderless task binds candidate A, then declares only absolute paths inside another copy B of the body. B's
     own Git identity makes it body work, and nothing else moves: A stays the subject, the task's folder and read roots
