@@ -597,7 +597,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "suppress_bubble",
         "ts", "project_name", "target_task_ids", "target_titles"
     }
-    # The notice carrier is one literal pair in both mirrors: an ACK and its paired System row read the same words.
+    # The notice carrier is one literal pair in both mirrors: an ACK and the System row beside it read the same words.
     for cls in (MessageAnnotationOutbound, ChatOutbound):
         carrier = get_type_hints(cls, include_extras=True)["routing_notice_carrier"]
         assert get_args(get_args(carrier)[0]) == ("routing_ack", "system"), cls.__name__

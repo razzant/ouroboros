@@ -96,9 +96,10 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
 def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
     """What an ACK sent from these receipt fields says of the act's owner notice: ``{}`` for a quiet ACK; else the
     carrier the receipt selects. That is the ACK itself, with the owner message it answers, when its id names one.
-    An ACK whose id names none annotates no chat row, so it is never the carrier: it names the System row its act's
-    path writes (``system``), the one notice every client shows. Neither field is a row field, and neither proves
-    that a transport delivered anything."""
+    An ACK whose id names none annotates no chat row, so it is never the carrier: it names ``system``, the System
+    row its act's path writes where the host owns the notice (a host-issued act, a steer of my human's words) and
+    every client shows; a tool act tied to no owner message writes none, and the model narrates its tool result.
+    Neither field is a row field, and neither proves that a transport delivered anything."""
     if not _routing_notice_carried(fields["status"], str(fields.get("cause") or ""), fields.get("options"),
                                    fields.get("attachment_manifest")):
         return {}
@@ -257,8 +258,8 @@ def _emit_routing_receipt(
         receipt["attachment_manifest"] = _events()._routing_attachments(attachment_manifest) or []
     # The carrier SELECTED for the act's owner notice (never proof that a transport
     # delivered it): the ACK when one carrying it was handed over and answers a chat row;
-    # for a known refusal without such an ACK, the System row its path writes; "" when
-    # there is nothing to say.
+    # for a known refusal without such an ACK, the System row its path writes, if any (a
+    # tool act's writes none: its tool result tells the model); "" when nothing to say.
     receipt["routing_notice_carrier"] = "system" if fields.get("cause") and publish else ""
     if annotation_status == "failed":
         # Fail closed: no ACK outruns its durable row, so a landed act reads unconfirmed
@@ -809,7 +810,7 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
                            "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
-        log.debug("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)
+        log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)
 
 
 def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any]:

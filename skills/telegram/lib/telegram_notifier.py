@@ -246,8 +246,7 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
     """A routing receipt's owner notice as ONE message, and whether it asks for a choice.
 
     The refused act's target and cause, as the host wrote them (unless the host chose the
-    System row as this notice's carrier, as for an ACK that answers no chat row: that row
-    then comes here alone); then the picker when the host asks for a target, a
+    System row as this notice's carrier); then the picker when the host asks for a target, a
     numbered list the owner answers in plain words (the router reads it from history, P5) or
     on the web picker card; then the files it could not attach. A landed act says nothing,
     and a picker gets a reason line only when the host sent a cause, never an invented one.

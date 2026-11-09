@@ -521,7 +521,7 @@ def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(
     assert mapping._reply_reference(b.api, "", 42, 102) == "task:episode-2"
 
 
-def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_when_no_ack_carried_it(bridge):
+def test_relay_success_silent_failure_one_line_and_its_system_row_only_when_no_ack_carried_it(bridge):
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, routing_refusal_cause
 
     b = bridge
