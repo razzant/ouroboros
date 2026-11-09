@@ -25,8 +25,8 @@ from ouroboros import store
 MAX_BYTES = 8 * 1024 * 1024
 HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
-# db=current READ admits these tables; the authorizer and the failed-statement hint share the one list
-# (task bodies and cards are documents: op=json kind=task_result).
+# db=current READ admits rows of these tables (plus the table-valued forms of the PRAGMAS below); the
+# authorizer and the failed-statement hint share the one list (task bodies and cards: op=json kind=task_result).
 CURRENT_TABLES = ("tasks", "sqlite_master", "sqlite_schema")
 # pragma_table_info('t') and its siblings read exactly what the admitted PRAGMAs read.
 _PRAGMA_TABLES = frozenset("pragma_" + name for name in PRAGMAS)
@@ -89,8 +89,8 @@ def schema_hint(db: str) -> str:
     """How a failed statement's author learns the real schema, with reads the authorizer already admits
     (a fact of the whole class "this SQL failed", never read from SQLite's message)."""
     if db == "current":
-        return (f"db=current SQL reads {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks); "
-                "task bodies and cards: op=json kind=task_result")
+        return (f"db=current SQL reads rows of {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks) "
+                "or SELECT * FROM pragma_table_info('tasks'); task bodies and cards: op=json kind=task_result")
     return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
 
 

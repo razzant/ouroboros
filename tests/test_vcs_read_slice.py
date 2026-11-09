@@ -213,6 +213,9 @@ def test_historical_protected_file_blocks_file_blame_show_and_diff(world):
         assert "RESOURCE_POLICY_BLOCKED" in output and "historical secret" not in output
     assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", path="private", ref=old)
     assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", ref=old)
+    for summary in ({"stat": True}, {"name_only": True}):  # the owner's show summaries keep plain show's block
+        assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", ref=old, **summary)
+        assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", path="private", ref=old, **summary)
     assert "historical secret" not in read_ok(ctx, action="log")
     from ouroboros.tools.git_vcs_ops import _git_diff
     from ouroboros.tools.tool_resolution import _build_builtin_target_binding
@@ -546,6 +549,12 @@ def test_registered_log_and_show_do_not_invoke_signature_verifier(world, tmp_pat
     ({"action": "refs", "ref": "heads/"}, "ref='heads/': for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/"),
     ({"action": "show", "ref": " "}, "ref=' ': a nonempty local Git revision"),
     ({"action": "log", "ref": ["HEAD"]}, "ref=['HEAD']: a local Git revision, written as text"),
+    # Presence, not truthiness: a falsey value that is not text was said, so it is named, not served as omitted.
+    ({"action": "status", "base": False},
+     "base=False: base and head apply to diff and merge_base; action=status takes no revision; omit base and head"),
+    ({"action": "refs", "ref": []}, "ref=[]: for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/"),
+    ({"action": "diff", "base": 0.0}, "base=0.0: a local Git revision, written as text"),
+    ({"action": "log", "ref": {}}, "ref={}: a local Git revision, written as text"),
 ])
 def test_an_argument_refusal_names_the_field_its_value_and_the_repair(world, args, named):
     """One phrase for every violated constraint was retried unchanged: the refusal names the field, the
@@ -582,6 +591,8 @@ def test_the_served_shapes_beside_those_refusals_keep_reading(world):
         output = read(ctx, root="system_repo", **args)
         assert "TOOL_ARG_ERROR" not in output and "GIT_ERROR" not in output, (args, output)
     assert read(ctx, root="system_repo", action="rev_parse", ref="HEAD").split("\n")[0].strip() == head
+    git(system, "tag", "7")  # an integer revision is read as text, as diff always did
+    assert read_ok(ctx, root="system_repo", action="log", ref=7, max_count=1).startswith("commit " + head)
     assert read(ctx, root="system_repo", action="merge_base", base="HEAD", head="HEAD").split("\n")[0].strip() == head
 
 

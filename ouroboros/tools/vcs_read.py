@@ -110,7 +110,8 @@ def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref") -> s
     except RuntimeError as exc:
         # Which argument did not resolve and where to look, with Git's whole answer beside it: an absent,
         # ambiguous or other-typed object and an unsafe repository read alike from the outside.
-        raise RuntimeError(f"{field}={ref!r} did not resolve to a {kind} here (git: {exc}); nothing was read; "
+        article = "an" if kind[:1] in "aeiou" else "a"
+        raise RuntimeError(f"{field}={ref!r} did not resolve to {article} {kind} here (git: {exc}); nothing was read; "
                            "list revisions with action=refs or action=log") from exc
     if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
         raise ValueError("Git did not resolve one exact object")
@@ -235,6 +236,9 @@ def _argument_problems(action: str, *, path: str, ref: object, base: object, hea
     problems = []
     if action not in _ACTIONS:
         return [f"action={action!r}: use one of {', '.join(sorted(_ACTIONS))}"]
+
+    def given(value: object) -> bool:  # presence, not truthiness: False, 0.0, [] and {} were said, not omitted
+        return value is not None and value != ""
     if not isinstance(max_count, int) or not 1 <= max_count <= 200:
         problems.append(f"max_count={max_count!r}: an integer from 1 to 200 (the number of commits log reads)")
     if not isinstance(max_chars, int) or max_chars < 0:
@@ -243,29 +247,29 @@ def _argument_problems(action: str, *, path: str, ref: object, base: object, hea
         problems.append(f"path={path!r} applies to {', '.join(sorted(_PATH_ACTIONS))}; action={action} takes no path")
     if action in {"file", "blame"} and not path:
         problems.append(f"action={action} requires path (the file's repository-relative path)")
-    if (base or head) and action not in _PAIR_ACTIONS:
-        given = ", ".join(f"{name}={value!r}" for name, value in (("base", base), ("head", head)) if value)
+    if (given(base) or given(head)) and action not in _PAIR_ACTIONS:
+        named = ", ".join(f"{name}={value!r}" for name, value in (("base", base), ("head", head)) if given(value))
         repair = (f"for action={action} name the revision with ref" if action in _REVISION_ACTIONS
                   else "action=refs filters with ref=refs/..." if action == "refs"
                   else f"action={action} takes no revision; omit base and head")
-        problems.append(f"{given}: base and head apply to diff and merge_base; {repair}")
-    if action == "merge_base" and not (base and head):
+        problems.append(f"{named}: base and head apply to diff and merge_base; {repair}")
+    if action == "merge_base" and not (given(base) and given(head)):
         problems.append("action=merge_base requires both base and head")
-    if action == "diff" and head and (not base or staged):
+    if action == "diff" and given(head) and (not given(base) or staged):
         problems.append(f"head={head!r} compares two trees: diff needs base beside it and staged=false")
     for name, value, actions in (("staged", staged, {"diff"}), ("stat", stat, _SUMMARY_ACTIONS),
                                  ("name_only", name_only, _SUMMARY_ACTIONS)):
         if value and action not in actions:
             problems.append(f"{name}=true applies only to {' and '.join(sorted(actions))}; for action={action} omit {name}")
-    if ref and action in _NO_REF_ACTIONS:
+    if given(ref) and action in _NO_REF_ACTIONS:
         repair = f"{action} takes base and head" if action in _PAIR_ACTIONS else "omit ref"
         problems.append(f"ref={ref!r} does not apply to action={action}; {repair}")
-    elif ref and action == "refs" and (not isinstance(ref, str) or not ref.startswith("refs/")
+    elif given(ref) and action == "refs" and (not isinstance(ref, str) or not ref.startswith("refs/")
                                        or any(c in ref for c in "\x00\n\r :*?[\\")):
         problems.append(f"ref={ref!r}: for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/")
     taken = {"ref": action in _REVISION_ACTIONS, "base": action in _PAIR_ACTIONS, "head": action in _PAIR_ACTIONS}
     for name, value in (("ref", ref), ("base", base), ("head", head)):
-        if not taken[name] or value in ("", None):
+        if not taken[name] or not given(value):
             continue
         if not isinstance(value, str):
             problems.append(f"{name}={value!r}: a local Git revision, written as text")

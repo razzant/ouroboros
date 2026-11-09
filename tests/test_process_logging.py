@@ -300,14 +300,14 @@ def test_the_launcher_routes_its_uncaught_exceptions_through_the_shared_hooks():
     imports = {alias.name: node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                and node.module == "ouroboros.process_logging" for alias in node.names}
     assert set(imports) == {"install_exception_hooks", "copy_capped_output", "utc_log_formatter"}
-    # Every launcher handler (file and console) carries the shared UTC formatter: basicConfig's own
-    # local-time default never reaches a handler.
-    formatter_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                       and isinstance(node.func, ast.Name) and node.func.id == "utc_log_formatter"]
-    assert len(formatter_calls) == 1
-    basic = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Attribute) and node.func.attr == "basicConfig")
-    assert {keyword.arg for keyword in basic.keywords} == {"level", "handlers"}
+    # Every launcher handler (file and console) gets the shared UTC formatter in the same guarded block
+    # that imports it, so a broken import leaves basicConfig's local-time fallback and never the launcher.
+    guarded = next(node for node in tree.body if isinstance(node, ast.Try)
+                   and imports["utc_log_formatter"] in ast.walk(node))
+    loop = next(node for node in ast.walk(guarded) if isinstance(node, ast.For)
+                and isinstance(node.iter, ast.Name) and node.iter.id == "_handlers")
+    assert [call for call in ast.walk(loop) if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name) and call.func.id == "utc_log_formatter"]
     start_agent = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_agent")
     assert imports["copy_capped_output"] in start_agent.body  # Unguarded, before the server is spawned.
 

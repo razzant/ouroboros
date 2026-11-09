@@ -760,7 +760,8 @@ def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_
     monkeypatch.setattr(query_data_sql, "run_sql", lambda *a, **kw: next(answers))
     failed = call(ctx, op="sql", query="SELECT id FROM tasks")
     assert (failed["code"], failed["message"]) == ("query_failed", "no such column: id")
-    assert failed["schema"] == ("db=current SQL reads tasks, sqlite_master, sqlite_schema only; columns: PRAGMA table_info(tasks); "
+    assert failed["schema"] == ("db=current SQL reads rows of tasks, sqlite_master, sqlite_schema only; columns: "
+                                "PRAGMA table_info(tasks) or SELECT * FROM pragma_table_info('tasks'); "
                                 "task bodies and cards: op=json kind=task_result")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
