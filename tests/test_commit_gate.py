@@ -326,7 +326,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tm
     assert ctx._coupling_review_history == {}
     assert recorded == [{"status": "reviewed", "phase": "review_only"}]
     assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
+    assert reset_calls == [(("git", "reset", "-q", "HEAD", "--", ":/"), "/tmp/repo")]  # a path reset keeps a staged merge
 
 
 def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_path):
@@ -358,7 +358,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_
     assert outcome["status"] == "blocked"
     assert outcome["block_reason"] == "critical_findings"
     assert released == ["lock-token"]
-    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
+    assert reset_calls == [(("git", "reset", "-q", "HEAD", "--", ":/"), "/tmp/repo")]  # a path reset keeps a staged merge
 
 
 def test_repo_commit_push_uses_shared_reviewed_stage_cycle():
