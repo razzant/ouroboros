@@ -415,7 +415,9 @@ def test_an_unreadable_tick_is_a_typed_host_failure_never_an_answer(tmp_path, mo
     assert (state["observation"]["answered"], state["observation_failure"]) == (False, "observation_malformed")
     assert [text.startswith("Delegation daemon unreachable") for text in notes] == [True], notes
     replay = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: pytest.fail("replayed"))
-    assert replay.code == "TOOL_REPORTED_FAILURE" and json.loads(replay.text) == payload
+    shown = json.loads(replay.text)  # the recorded refusal, labelled as a replay (#2992)
+    assert replay.code == "TOOL_REPORTED_FAILURE" and shown.pop("replay_of")["fresh_observation"] is False
+    assert shown == payload
 
 
 def test_an_observed_failed_leaf_stays_an_answered_observation(tmp_path, monkeypatch):
@@ -458,7 +460,10 @@ def test_a_recorded_legacy_fault_wake_replays_as_it_was_recorded(tmp_path):
     state["pending_wake"] = {"wake_id": "wake-legacy", "attempt_key": "1", "payload": legacy}
     delegate_supervision._save_state(ctx, state)
     replay = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: pytest.fail("replayed"))
-    assert replay.code == "OK" and json.loads(replay.text) == legacy
+    shown = json.loads(replay.text)
+    marker = shown.pop("replay_of")  # a replay label, no invented time for a record that kept none (#2992)
+    assert replay.code == "OK" and shown == legacy and marker["fresh_observation"] is False
+    assert "published_at" not in marker
 
 
 @pytest.mark.parametrize("control", ["deadline", "cancellation_intent"])

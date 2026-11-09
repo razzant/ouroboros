@@ -91,7 +91,7 @@ test('server status alone owns the headline even with finished or active rows in
     assert.equal(liveWake({ recentWakes: [wake('214a31b6')] }), null);
     for (const [status, detail] of [['due', 'Due; the wake-up has not started yet.'],
         ['wake_failed', 'The last wake-up failed.'], ['wake_rejected', 'The last wake-up was refused.'],
-        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', 'Background consciousness is off.'],
+        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', 'Off: no own wakes; 2 places only hear.'],
         ['waiting_for_first_conversation', 'No owner chat is bound yet; the first conversation binds it.']]) {
         assert.deepEqual(headlineView({ ...full(), status, detail }), { text: detail, moving: false });
     }

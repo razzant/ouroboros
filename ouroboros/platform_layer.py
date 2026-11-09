@@ -102,13 +102,20 @@ def is_container_env() -> bool:
 
 
 def bootstrap_process_path() -> list[str]:
-    """Add existing common user tool directories to this process PATH once."""
-
+    """Add existing common user tool directories to this process PATH once, ahead of its entries."""
     global _PATH_BOOTSTRAPPED
     if _PATH_BOOTSTRAPPED:
         return []
     _PATH_BOOTSTRAPPED = True
+    path = os.environ.get("PATH", "")
+    if added := common_tool_directories(path):
+        os.environ["PATH"] = PATH_SEP.join([*added, *[part for part in path.split(PATH_SEP) if part]])
+    return added
 
+
+def common_tool_directories(search_path: str) -> list[str]:
+    """The existing common user tool directories (package managers, per-user installs) that the PATH value
+    ``search_path`` lacks, in policy order: a GUI launch can inherit a system PATH without them. Changes nothing."""
     candidates: list[pathlib.Path] = []
     home = pathlib.Path.home()
     if IS_MACOS or IS_LINUX:
@@ -141,7 +148,7 @@ def bootstrap_process_path() -> list[str]:
         if user_profile:
             candidates.append(user_profile / ".cargo" / "bin")
 
-    existing = [part for part in os.environ.get("PATH", "").split(PATH_SEP) if part]
+    existing = [part for part in search_path.split(PATH_SEP) if part]
     existing_norm = {str(pathlib.Path(part)).lower() if IS_WINDOWS else str(pathlib.Path(part)) for part in existing}
     added: list[str] = []
     for candidate in candidates:
@@ -156,8 +163,6 @@ def bootstrap_process_path() -> list[str]:
             added.append(text)
         except OSError:
             continue
-    if added:
-        os.environ["PATH"] = PATH_SEP.join([*added, *existing])
     return added
 
 

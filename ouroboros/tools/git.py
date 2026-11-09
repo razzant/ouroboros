@@ -82,9 +82,8 @@ log = logging.getLogger(__name__)
 
 
 def _repair_managed_merge_head(ctx: ToolContext) -> None:
-    """Re-establish MERGE_HEAD for an authorized managed resolver after a
-    refusal's index reset, so the resolution is not stranded (same repair the
-    blocked-review path performs in ``_repo_commit_push``)."""
+    """Keep the authorized managed resolver's recovery path for older interrupted
+    attempts; current index-only unstaging preserves its merge state."""
     try:
         from supervisor.update_merge import managed_assisted_tx_for, reestablish_merge_head
 
@@ -910,10 +909,12 @@ def _prepare_review_commit_worktree(
     ctx: ToolContext,
     managed_tx: Optional[Dict[str, Any]],
 ) -> tuple[bool, str]:
-    """Select the commit branch without orphaning detached work.
+    """Select the commit branch without orphaning detached work or a staged merge.
 
-    Returns ``(came_from_detached_checkout, error_message)``. Managed assisted
-    merges keep their live MERGE_HEAD and only run the existing transaction
+    Returns ``(came_from_detached_checkout, error_message)``. A successful checkout clears
+    MERGE_HEAD, MERGE_MODE and MERGE_MSG, so a staged merge would commit with one parent: the
+    current branch is never checked out again, and no switch runs while a merge is in progress.
+    Managed assisted merges keep their live MERGE_HEAD and only run the existing transaction
     precommit verification.
     """
     if managed_tx:
@@ -921,7 +922,6 @@ def _prepare_review_commit_worktree(
 
         verified, error_message = managed_assisted_precommit_verify(managed_tx)
         return False, "" if verified else error_message
-    came_from_detached_checkout = False
     try:
         current_branch = run_cmd(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
@@ -934,40 +934,36 @@ def _prepare_review_commit_worktree(
             f"⚠️ GIT_BRANCH_UNAVAILABLE: cannot verify local branch {ctx.branch_dev!r}. "
             f"Current branch, index and files were preserved. {_sanitize_git_error(str(exc))}"
         )
+    if current_branch != ctx.branch_dev:
+        try:
+            merge_path = ctx.repo_dir / run_cmd(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=ctx.repo_dir)
+            try:
+                merge_path.stat()
+                merging = True
+            except FileNotFoundError:
+                merging = False
+        except Exception as exc:
+            return False, f"⚠️ GIT_ERROR (checkout): Could not verify merge state: {_sanitize_git_error(str(exc))}"
+        if merging:
+            return False, (
+                f"⚠️ GIT_MERGE_IN_PROGRESS_BLOCKED: a merge is in progress on {current_branch!r}, and switching "
+                f"to {ctx.branch_dev!r} would drop it. Nothing was switched, staged or reviewed: commit or abort "
+                "that merge where it is, or redo it on the commit branch.")
+        try:
+            run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"] if current_branch == "HEAD"
+                    else ["git", "checkout", "--no-guess", ctx.branch_dev, "--"], cwd=ctx.repo_dir)
+        except Exception as exc:
+            return False, f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(exc))}"
+        return current_branch == "HEAD", ""
+    # Git's checkout refused an unmerged index; without one, the conflicts are refused here, never staged as resolved.
     try:
-        if current_branch == "HEAD":
-            run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"], cwd=ctx.repo_dir)
-            came_from_detached_checkout = True
-        else:
-            run_cmd(["git", "checkout", "--no-guess", ctx.branch_dev, "--"], cwd=ctx.repo_dir)
+        unmerged = run_cmd(["git", "diff", "--name-only", "--diff-filter=U"], cwd=ctx.repo_dir).strip()
     except Exception as exc:
-        error_message = _sanitize_git_error(str(exc))
-        try:
-            already_on_target = run_cmd(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
-            ).strip() == ctx.branch_dev
-        except Exception:
-            already_on_target = False
-        if not already_on_target:
-            return came_from_detached_checkout, f"⚠️ GIT_ERROR (checkout): {error_message}"
-        try:
-            unmerged = run_cmd(
-                ["git", "diff", "--name-only", "--diff-filter=U"], cwd=ctx.repo_dir
-            ).strip()
-        except Exception as status_exc:
-            return came_from_detached_checkout, (
-                "⚠️ GIT_ERROR (checkout): "
-                f"{error_message}\n\nCould not verify index state after checkout failure: "
-                f"{_sanitize_git_error(str(status_exc))}"
-            )
-        if unmerged:
-            return came_from_detached_checkout, (
-                "⚠️ GIT_ERROR (checkout): "
-                f"{error_message}\n\nRepository has unmerged paths; refusing to treat "
-                "the checkout failure as an incidental dirty-tree no-op.\n"
-                f"{unmerged}"
-            )
-    return came_from_detached_checkout, ""
+        return False, f"⚠️ GIT_ERROR (checkout): Could not verify index state: {_sanitize_git_error(str(exc))}"
+    if unmerged:
+        return False, ("⚠️ GIT_ERROR (checkout): Repository has unmerged paths; resolve them or abort the "
+                       f"merge before committing.\n{unmerged}")
+    return False, ""
 
 
 def _task_attributed_commit_paths(
@@ -1182,7 +1178,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=refusal))
     _commit_start = time.time()
     if not commit_message.strip():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty.")))
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty." + (" Its review's attempt left the recent review history and the ledger record it was read back from keeps no commit message, so name one." if continuation and getattr(ctx, "_author_commit_source", None) is not None and not ctx._author_commit_source.commit_message else ""))))
     ctx._current_review_commit_message = commit_message
     if _managed_block:
         _record_commit_attempt(ctx, commit_message, "blocked",
@@ -1249,9 +1245,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             require_release_tag=not bool(_managed_tx), preflight_reviewer=preflight_reviewer, panel=panel)
         if outcome.get("status") != "passed":
             if _managed_tx:
-                # A blocked review's index reset can clear the live MERGE_HEAD; re-establish it so
-                # the agent can fix the flagged issues and re-commit (precommit_verify needs it),
-                # rather than stranding the resolution until the watchdog / boot rollback.
+                # Retain managed recovery for interrupted older attempts; current unstaging
+                # preserves MERGE_HEAD. Precommit verification still needs the managed parent.
                 try:
                     from supervisor.update_merge import reestablish_merge_head
 
@@ -1472,7 +1467,7 @@ def get_tools() -> List[ToolEntry]:
         "reason": {"type": "string", "default": "", "description": "Why these reviewers; required when an Advisory panel is narrowed. Missing reason refuses at $0 before staging."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."},
         "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by the panel's coupling questions to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Without a goal it is the intended transformation the panel's coupling questions judge the change against (completeness, forgotten adjacent surfaces)."},
-        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git, sending nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
+        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task, or of the predecessor its recorded Continue continues, returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git when the index holds exactly its reviewed bytes, else read its outcome back without staging; it sends nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
         "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference and no author_disposition: " + CONTINUE_SEATS_SCHEMA["description"]},
         "author_disposition": AUTHOR_DISPOSITION_SCHEMA,
         "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS, finding or obligation carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},

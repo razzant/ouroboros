@@ -96,12 +96,14 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # lead pays its custom-tool budget), #2593; before them
 # delegate_start 5e25716838978044 / 1326e91ef42b3cea, schedule_subagent e17e74235ea913fd / ec6b3c08c33ac3fa.
 # query_data: + kind "update_material" (the offered update range); before it f790f964764d75b7.
+# query_data: - kind "chat_log" (logs/chat.jsonl froze at the dialogue-store cutover; a call naming it is
+# told where the conversation lives), #2998; before it afe57ddd5ee0c17c.
 # wait_tasks: + view, sleep_mode, wake_after_sec, wake_at and no timeout_sec default (an omitted
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 # schedule_subagent: + memory_view (the fields a parent may widen a child's view by), #2924; its lead pays the
 # custom-tool budget again; before it 3d5b8e7b8e317503 / 2e04edea50ceb1b6.
 _STRUCTURE = {
-    "query_data": {"full": "afe57ddd5ee0c17c", "readonly": "afe57ddd5ee0c17c", "acting": "afe57ddd5ee0c17c"},
+    "query_data": {"full": "3b64a3753e957063", "readonly": "3b64a3753e957063", "acting": "3b64a3753e957063"},
     "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
     "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},

@@ -195,25 +195,6 @@ def test_a_selector_the_actor_cannot_call_is_never_recommended(tmp_path, monkeyp
     assert ("list_available_tools" in miss) is ("list_available_tools" not in disabled)
 
 
-def test_a_low_or_max_diagnostic_keeps_its_role_and_is_not_told_to_call_the_selector(tmp_path, monkeypatch):
-    from ouroboros import provider_models
-    from ouroboros.tool_capabilities import TASK_DIAGNOSTIC_TOOL_NAMES
-
-    monkeypatch.setattr("ouroboros.work_diagnostics.context_ref", lambda ctx: {"task_id": "observed"})
-    registry = _child(tmp_path, monkeypatch, "local_readonly_subagent", "max")
-    resident = initial_tool_schemas(registry, context_mode="max")
-    assert set(_names(resident)) <= TASK_DIAGNOSTIC_TOOL_NAMES and "enable_tools" not in _names(resident)
-    assert "compact_context" in _names(resident)  # its own fold, without the selector
-    assert registry.execute_result("compact_context", {"inspect": True}).status != "blocked"
-    monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", len(resident) - 2)
-    loop._setup_dynamic_tools(registry, resident, [], context_mode="max")
-    fitted = _round(registry, resident)
-    assert loop_model_call._fit_route_tool_ceiling(fitted)
-    notice = fitted.messages[-1]["content"]
-    assert "enable_tools" not in notice and "list_available_tools marks them not loaded." in notice
-    assert registry.execute_result("enable_tools", {"tools": "read_file"}).status == "blocked"
-
-
 @pytest.mark.parametrize("profile", PROFILES)
 def test_a_cold_continuation_keeps_the_loaded_late_schema_and_a_callable_selector(
         tmp_path, monkeypatch, extensions, profile):

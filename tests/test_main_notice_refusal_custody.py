@@ -9,8 +9,9 @@ from tests.test_local_refusal_custody import _world, _pause_and_resume
 
 @pytest.mark.parametrize(("next_action", "case", "chat", "args", "status", "code", "text"), [
     pytest.param("pause", "empty", 1, {"text": ""}, "error", "TOOL_ARG_ERROR", "⚠️ Empty message.", id='pause-empty'),
-    pytest.param("pause", "main", 1, {"text": "Hello", "destination": "main"}, "blocked", "ACCESS_BLOCKED", "⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: this root is neither bound to a registered "
-     "Project nor started by the owner. Nothing was sent; destination='current' still writes this work's own room.", id='pause-main'),
+    pytest.param("pause", "main", 1, {"text": "Hello", "destination": "main"}, "blocked", "ACCESS_BLOCKED", "⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: this root already runs in Main, its current room, "
+     "so destination='current' reaches your human there; 'main' is for a Project or owner-started root, and this one is neither. "
+     "Nothing was sent.", id='pause-main'),
     pytest.param("continue", "no_chat", None, {"text": "Hello"}, "unavailable", "CAPABILITY_UNAVAILABLE", "⚠️ No active chat — cannot send proactive message.", id='continue-no-chat'),
     pytest.param("continue", "destination", 1, {"text": "Hello", "destination": "elsewhere"}, "error", "TOOL_ARG_ERROR", "⚠️ SEND_USER_MESSAGE_DESTINATION: destination='elsewhere' is not a destination; use 'current' "
      "(this room) or 'main' (the owner's main chat). Nothing was sent.", id='continue-destination'),

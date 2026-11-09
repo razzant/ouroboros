@@ -418,7 +418,7 @@ def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
     assert readmitted.facts == ("mention", "signal.words")
     with pytest.raises(PresenceTurnError) as refused:
         presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
-    assert refused.value.code == "presence_event_invalid"
+    assert refused.value.code == "presence_payload_invalid"
 
 
 def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admission(lane, monkeypatch):

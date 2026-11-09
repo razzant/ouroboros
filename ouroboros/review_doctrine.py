@@ -476,7 +476,8 @@ def enrich_author_commit(author: Dict[str, Any], *, actors: Any, prior_decision:
     return body
 
 
-_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta")
+_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta",
+                "decided_by_task")  # the task that decided, distinct from the record's (a recorded Continue successor)
 
 
 def decision_for_ledger(decision: Any, record_id: str) -> Dict[str, Any]:

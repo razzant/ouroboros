@@ -2080,7 +2080,8 @@ export function createChatInstance({
         const childInfo = subagentChildParents.get(taskId);
         if (childInfo && eventType === 'task_done') return routeSubagentTerminalToCard(taskId, evt);
         const summary = summarizeChatLiveEvent(evt);
-        if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall) return false;
+        // Settled children ignore new work, but their money may arrive after the outcome.
+        if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
         // Root/child fold: metrics, terminal and replay.
         let changed = evt.tool_evidence || Number.isInteger(evt.rounds) || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)
             ? noteToolMetrics(taskId, evt, rawTs) : false;

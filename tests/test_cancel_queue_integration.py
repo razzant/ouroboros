@@ -403,9 +403,9 @@ def test_steering_is_refused_while_a_cancel_intent_is_active(tmp_path, monkeypat
 
     ci.request_cancel(tmp_path, "steerme", reason="tearing down")
     receipts: list = []
-    monkeypatch.setattr(
+    monkeypatch.setattr(  # no bridge hands an ACK over, so the receipt selects the System row
         events_mod, "_emit_routing_receipt",
-        lambda ctx, evt, **kw: receipts.append(kw) or {},
+        lambda ctx, evt, **kw: receipts.append(kw) or {"routing_notice_carrier": "system"},
     )
     sent: list = []
     ctx = types.SimpleNamespace(

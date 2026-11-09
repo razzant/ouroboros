@@ -82,7 +82,8 @@ def test_child_terminal_transition_coalesces_with_leaf_wake_and_replays_until_ac
             AssertionError("the unacknowledged child wake must replay before polling the leaf")
         ),
     ).text)
-    assert replay == first
+    # #2992: a replay says it is one (no fresh observation); its wake facts are the published ones.
+    assert replay.pop("replay_of")["fresh_observation"] is False and replay == first
     assert acknowledge_pending_wake(ctx, replay)
     assert calls == [1]
     events = [
@@ -207,7 +208,9 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
             AssertionError("pending live facts must replay without recomputation")
         ),
     )
-    assert replay == raw
+    shown = json.loads(replay.text)  # #2992: the recorded facts exactly, labelled as a replay
+    assert shown.pop("replay_of")["fresh_observation"] is False
+    assert (replay.status, replay.code, replay.meta, shown) == (raw.status, raw.code, raw.meta, json.loads(raw.text))
 
 
 def test_child_terminal_before_first_sleep_is_not_lost_as_cursor_baseline(tmp_path):
@@ -441,7 +444,11 @@ def test_delegate_wait_entry_never_acks_an_undelivered_pending_wake(tmp_path, mo
         ),
     )
 
-    assert delegate_wait_entry(ctx, "run-1") == first
+    replay = delegate_wait_entry(ctx, "run-1")
+    shown = json.loads(replay.text)  # the same pending wake, labelled as a replay (#2992)
+    assert shown.pop("replay_of")["fresh_observation"] is False
+    assert (replay.status, replay.code, replay.meta, shown) == (first.status, first.code, first.meta,
+                                                               json.loads(first.text))
 
 
 def test_supervision_loop_holds_one_handshaken_gateway_and_drops_it_on_a_failed_tick(

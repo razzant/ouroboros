@@ -2,9 +2,10 @@
 
 ``residual_tool_errors_without_review`` read one sentence whatever had failed. The record already
 holds the failures (``outcome_axes.execution.unresolved_tool_errors`` first, else
-``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first that is not a
-failed read (owner 06.11, A: those stay in the details) in plain words: a noun for the step and what happened to it, never a tool name, its result text or a
-path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
+``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first LOUD one — not a
+failed read (``read_only``, owner 06.11 A) and not a details-only leftover (``details_only``, owner 09.11 A: a
+command that ran and failed, a call refused before running; both stay in the details) — in plain words: a noun for
+the step and what happened to it, never a tool name, its result text or a path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
 ``web/modules/task_reason_words.js`` (``residualToolErrorsPhrase``); the cases of
 ``web/tests/fixtures/outcome_phase_parity.json`` pin both.
 """
@@ -26,6 +27,17 @@ _TOOL_NOUNS = {
     "pr_merge": "A pull request merge",
     "review_change": "A review request",
     "finish_task": "A finish request",
+    # The effects the main view names once command failures stay in the details (owner 09.11, A).
+    "write_file": "A file write",
+    "edit_text": "A file edit",
+    "edit_batch": "A file edit",
+    "apply_patch": "A file edit",
+    "github_write": "A GitHub write",
+    "send_user_message": "A message send",
+    "schedule_subagent": "A helper start",
+    "commit_reviewed": "A commit",
+    "vcs_commit_reviewed": "A commit",
+    "skill_exec": "A skill run",
 }
 _LISTED = 20  # outcomes keeps at most this many errors per list
 
@@ -39,13 +51,17 @@ def _int(value: Any) -> Any:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _loud(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The errors the main view names: a failed read (owner 06.11, A) and a details-only leftover (owner 09.11, A)
+    stay in the details. Twin of ``_outcome_tool_errors.warns_without_review``."""
+    return [error for error in errors if not (error.get("read_only") or error.get("details_only"))]
+
+
 def residual_tool_errors_phrase(execution: Any) -> str:
-    """The clause naming the first recorded tool error that is not a failed read, or "" when the record names none."""
+    """The clause naming the first recorded loud tool error, or "" when the record names none."""
     execution = execution if isinstance(execution, dict) else {}
     listed_unresolved, listed_cosmetic = _errors(execution, "unresolved_tool_errors"), _errors(execution, "cosmetic_tool_errors")
-    # A failed read stays in the details (owner 06.11, A): the sentence names effects and commands.
-    unresolved = [error for error in listed_unresolved if not error.get("read_only")]
-    cosmetic = [error for error in listed_cosmetic if not error.get("read_only")]
+    unresolved, cosmetic = _loud(listed_unresolved), _loud(listed_cosmetic)
     errors = unresolved or cosmetic
     if not errors:
         return ""
@@ -65,7 +81,10 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     else:
         subject = f"{noun} failed"
     more = len(unresolved) + len(cosmetic) - 1
-    capped = len(listed_unresolved) >= _LISTED or len(listed_cosmetic) >= _LISTED
+    # "More" is asserted only when a list the producer capped is loud through and through; otherwise the retained
+    # loud errors are counted exactly (details-only entries never stand in for an unseen loud one).
+    capped = any(len(listed) >= _LISTED and len(loud) == len(listed)
+                 for listed, loud in ((listed_unresolved, unresolved), (listed_cosmetic, cosmetic)))
     tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
     return f"{subject}{tail}."

@@ -1248,13 +1248,13 @@ def restore_assisted_resolution_after_commit_error(tx: Dict[str, Any]) -> bool:
 
 
 def reestablish_merge_head(target_sha: str) -> None:
-    """Re-write ``.git/MERGE_HEAD`` so a BLOCKED managed-merge review can be fixed and re-committed
-    — the review's index reset (``git reset HEAD``) clears the in-progress merge state, after which
-    ``managed_assisted_precommit_verify`` would fail on the agent's retry. Best-effort."""
+    """Recover the parent needed by ``managed_assisted_precommit_verify`` for older
+    interrupted attempts whose pathless index reset cleared merge state. Current
+    review unstaging preserves it; this managed recovery remains best-effort."""
     if not target_sha:
         return
     try:
-        (_g._git_dir() / "MERGE_HEAD").write_text(target_sha + "\n", encoding="utf-8")
+        (_g._git_dir() / "MERGE_HEAD").write_bytes((target_sha + "\n").encode("utf-8"))
     except Exception:
         _g.log.warning("reestablish_merge_head failed", exc_info=True)
 

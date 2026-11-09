@@ -58,7 +58,7 @@ from ouroboros.review_session_custody import (
     checkpoint_pending_invocation,
     owned_started_review_custody,
     recorded_review_shape,
-    review_recovery_facts, continuation_send_admitted,
+    review_recovery_facts, continuation_send_admitted, prepare_continuation_send,
     continuation_generation_end, continuation_send, join_recorded_review_continuation, stopped_review_failure,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
@@ -595,6 +595,7 @@ def _retire_orphaned_review_registration(
     custody: Any, gateway: Any, custody_drive: Any, project_id: str, *,
     definite_refusal: bool, reason: str, invocation_id: str = "",
     surface: str = "", slot_id: str = "",
+    task_id: str = "", root_task_id: str = "", parent_task_id: str = "",
 ) -> bool:
     """Retire a registration this start created but never bound to a run.
 
@@ -622,6 +623,7 @@ def _retire_orphaned_review_registration(
     custody.emit(custody_drive, custody.START_FAILED, {
         "run_id": "", "project_id": project_id, "project_retired": retired,
         "reason": reason, "invocation_id": invocation_id,
+        "task_id": task_id, "root_task_id": root_task_id, "parent_task_id": parent_task_id,
         "definite": bool(definite_refusal), "surface": surface, "slot_id": slot_id,
         "project_retention_reason": (
             "" if (retired or definite_refusal) else "start_outcome_unknown_run_may_exist"
@@ -709,6 +711,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             raise ReviewRouteUnavailable("delegated retry token has no durable invocation; refusing a second paid run",
                                          code="review_custody_lost")
         if recovering:
+            prepare_continuation_send(invocation, custody_drive, record, run_id)  # every continuation POST, replays too
             generation_end = continuation_generation_end(invocation, record, run_id)
             source_request = record.get("work_order_source_request") or {}
             delivery_facts.update(source_request)
@@ -934,7 +937,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 _retire_orphaned_review_registration(
                     custody, gateway, custody_drive, project_id if not existing_project else "",
                     definite_refusal=definite, reason=str(getattr(exc, "code", type(exc).__name__)),
-                    invocation_id=invocation_id, surface=surface, slot_id=slot_id)
+                    invocation_id=invocation_id, surface=surface, slot_id=slot_id,
+                    task_id=task_id, root_task_id=root_task_id, parent_task_id=parent_task_id)
             except Exception:
                 log.warning("Review start cleanup failed for %s", invocation_id, exc_info=True)
             if definite:

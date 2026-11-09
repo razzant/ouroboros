@@ -118,6 +118,9 @@ def save_round(limit_ctx: Any, boundary: str) -> bool:
     if boundary not in BOUNDARIES:
         raise ValueError(f"unknown working checkpoint boundary: {boundary!r}")
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
+    if boundary == "pre_effect" and ctx is not None:  # what the batch may say is recorded before any of it runs
+        from ouroboros.place_reply import note_possible_sends
+        note_possible_sends(ctx, getattr(limit_ctx, "llm_trace", None), limit_ctx.messages)
     if ctx is None or not str(getattr(ctx, "task_id", "") or "") or not (
             getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)) or not _root(ctx).is_dir():
         return False  # no durable task root: nothing here could be recovered from it
@@ -915,6 +918,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
     usage["_task_attempt"] = getattr(ctx, "task_attempt", None)
     ctx.working_recovery = None
     plan, mode = rebind_restored_route(tools, state, messages)
+    from ouroboros.place_reply import note_possible_sends
+    note_possible_sends(ctx, trace, messages, interrupted=True)  # before synthetic rows close unanswered calls
     pending = close_unanswered_calls(messages, "interruption")
     try:
         from ouroboros import delegate_custody as custody

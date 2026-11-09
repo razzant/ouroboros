@@ -822,7 +822,7 @@ class ChronicleStore:
         record = {"kind": "mark", "room_id": str(room_id), "target_ref": target_ref, "text": text,
                   "author": author, "scope": scope, "quote": quote, "visibility": "full"}
         if anchor is not None:
-            record["anchor"] = anchor  # an action the mark meets me at (``mark_anchors``)
+            record["anchor"] = anchor  # the action whose first result in a task carries the mark's words (``mark_anchors.anchored_note``)
         if record_id:
             record["id"] = str(record_id)
         return self.publish([record])

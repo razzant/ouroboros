@@ -34,6 +34,19 @@ def autonomous_tasks() -> list[str]:
                                  and is_autonomous_work(task.get("metadata"))))
 
 
+def live_task_rows(task_ids) -> dict[str, dict]:
+    """The pool's own rows of these live tasks, from memory: each one's ``title`` and ``metadata`` (what names them
+    when the switch ends them); nothing is read from a store."""
+    from supervisor import queue as q
+
+    wanted = {str(task_id) for task_id in task_ids}
+    with q._queue_lock:
+        tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
+        return {str(task["id"]): {"title": str(task.get("title") or task.get("suggested_name") or ""),
+                                  "metadata": dict(task["metadata"]) if isinstance(task.get("metadata"), dict) else {}}
+                for task in tasks if str(task.get("id") or "") in wanted}
+
+
 def _cited_quote(corpus) -> str:
     """The span a run cited from my human's place words (``cited``; older rows hold only the span as ``content``)."""
     return next((str(row.get("cited") or row.get("content") or "") for row in corpus or []

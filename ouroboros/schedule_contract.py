@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 _SCHEDULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
 RESERVED_TEMPLATE_FIELDS = frozenset({
-    "work_diagnostic",
     "work_kind", "owner_ingress", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
     "workspace_root", "workspace_mode", "memory_mode", "drive_root",
     "child_drive_root", "budget_drive_root", "parent_task_id",

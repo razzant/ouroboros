@@ -1043,6 +1043,154 @@ def _materialize_checkout(root: str, checkout_root: pathlib.Path, checkout: path
                                     f"subject tree {frozen.tree_sha[:12]}")
 
 
+_DRIVE_POINTER = r"\.review-drive/([A-Za-z0-9_.-]+)/([0-9a-f]{64})\.txt"
+
+
+def readonly_scope_root(body: Dict[str, Any]) -> str:
+    """The project root a read-only seat's original START read, existing or released, else ``""``: a writable seat
+    checks in its own held copy, never replaced by a pristine one. Whether it is an isolated review checkout whose
+    subject the record can put back is ``released_subject``'s question."""
+    scope = body.get("scope") or {}
+    if str(body.get("access") or "readonly") in {"workspace_write", "full"} or scope.get("kind") != "project":
+        return ""
+    return str(scope.get("root") or "")
+
+
+def _source_ref(data_root: Any, task_id: str, digest: str, recorded: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """The exact store ref of one ``.review-drive/<task>/<sha>.txt`` view: the turn page the invocation recorded
+    (``turn_sources``), else the content-addressed source of that task named by its digest (a brief page or evidence
+    file whose ref no record keeps, loose or packed), verified by size and sha256. ``{}`` when no longer held."""
+    import pathlib
+
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.evidence_packs import _task_handles
+
+    named = recorded.get(digest)
+    base = task_artifact_dir_path(data_root, task_id, create=False)
+    found = [(str(named["path"]), named.get("size"))] if named and named.get("path") else []
+    found += [(path.relative_to(base).as_posix(), path.stat().st_size)
+              for path in (base / "source_handles").glob(f"*/*-{digest}.*") if path.is_file()]
+    try:
+        found += [(str(member.get("path") or ""), member.get("size")) for _pack, member in _task_handles(
+            pathlib.Path(data_root), task_id) if pathlib.PurePosixPath(str(member.get("path") or "")).stem.endswith(f"-{digest}")]
+    except Exception:  # an unreadable pack index proves no absence; the names above still answer
+        pass
+    for path, size in found:
+        ref = {"kind": "task_source", "root": "artifact_store", "path": path, "size": size, "sha256": digest}
+        try:
+            read_actor_source_bytes(data_root, task_id, ref)
+        except (OSError, ValueError, TypeError):
+            continue
+        return ref
+    return {}
+
+
+def released_subject(data_root: Any, record: Dict[str, Any], root: str, invocation: Dict[str, Any],
+                     owner: str) -> Dict[str, Any]:
+    """What a released read-only checkout held, from records only, never today's index or worktree (#2796): the
+    subject its review record names (recorded parent and tree; their patch must give the recorded diff) and the exact
+    ref of every ``.review-drive`` view the seat's original request names, transitively (a paged turn names the paged
+    brief, which names the paged diff and evidence). The mapping rides the successor's START row (``review_continuation.RESTORE_KEY``),
+    so every send of it, a crash replay included, restores from these refs alone (``restore_released_subject``).
+    ``owner``: the task deciding the continuation. Raises ``ValueError``."""
+    import json
+    import pathlib
+    import re
+
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.task_results import validate_task_id
+    subject, checkout = record.get("subject") or {}, pathlib.Path(root)
+    repo, parent, tree = (str(subject.get(key) or "") for key in ("root", "base", "tree_sha"))
+    home = (pathlib.Path(data_root) / "state" / CHECKOUT_SUBDIR).resolve(strict=False)
+    if not (repo and parent and tree) or checkout.parent.parent.resolve(strict=False) != home or (
+            subject.get("checkout") and str(subject["checkout"]) != root):
+        raise ValueError("its review record does not name the checkout this seat read")
+    try:
+        _patch_bytes, diff_sha = _patch(repo, parent, tree)
+    except Exception as exc:
+        raise ValueError(f"the reviewed parent and tree are not readable in {repo} ({exc})") from exc
+    if subject.get("diff_sha") and diff_sha != subject["diff_sha"]:
+        raise ValueError("the recorded parent and tree no longer give the reviewed diff")
+    turns = ((invocation.get("work_order_source_request") or {}).get("turn_sources") or {}).values()
+    recorded = {str(ref.get("sha256") or ""): ref for ref in turns if isinstance(ref, dict)}
+    sources: Dict[str, Dict[str, Any]] = {}
+    pending = [json.dumps(invocation.get("request") or {}, ensure_ascii=False)]
+    while pending:
+        for task, digest in re.findall(_DRIVE_POINTER, pending.pop()):
+            relative = f".review-drive/{task}/{digest}.txt"
+            if relative not in sources:
+                ref = _source_ref(data_root, validate_task_id(task), digest, recorded)
+                if not ref:
+                    raise ValueError(f"the retained source {relative} its request names is no longer held")
+                sources[relative] = {**ref, "task_id": task}
+                pending.append(read_actor_source_bytes(data_root, task, ref).decode("utf-8", "replace"))
+    return {"root": root, "owner_task": str(owner or record.get("task_id") or ""),
+            "subject": {"root": repo, "base": parent, "tree_sha": tree, "diff_sha": diff_sha},
+            "sources": [{"relative": relative, **ref} for relative, ref in sorted(sources.items())]}
+
+
+def restore_released_subject(data_root: Any, mapping: Dict[str, Any]) -> bool:
+    """Put back at ``mapping["root"]`` exactly what it recorded (``released_subject``): the frozen subject through the
+    isolated checkout's own materialization (``write-tree`` equals the recorded tree), then every recorded view, read
+    by its exact ref. Under ``task_custody_lock`` of the checkout's current marker owner and of the deciding task, the
+    locks the checkout pass's removal takes (``owner_keep.gate``), and with a marker naming the deciding task, so a
+    pass that already judged the old checkout re-reads that marker under its gate and keeps it
+    (``review_checking_prune._remove_unless_kept``). Every call takes those locks and rewrites that marker (``used_at``),
+    an intact checkout included: a pass that judged it before this send re-reads a changed marker and keeps it; an intact
+    tree another seat reads is never rebuilt. Returns whether it put back a tree or a view; raises ``ValueError``."""
+    import contextlib
+    import json
+
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.task_custody import task_custody_lock
+    from ouroboros.utils import atomic_write_json, utc_now_iso, write_bytes_atomic
+
+    checkout, subject = pathlib.Path(str(mapping.get("root") or "")), mapping.get("subject") or {}
+    owner, views = str(mapping.get("owner_task") or ""), list(mapping.get("sources") or [])
+
+    def marked() -> str:
+        try:
+            return str(json.loads((checkout.parent / CHECKOUT_MARKER).read_text(encoding="utf-8")).get("task_id") or "")
+        except (OSError, ValueError, AttributeError):
+            return ""
+
+    def intact() -> bool:
+        return _retained_checkout_at(checkout, str(subject.get("tree_sha") or "")) and all(
+            (checkout / view["relative"]).is_file() and hashlib.sha256((checkout / view["relative"]).read_bytes()).hexdigest()
+            == view["sha256"] for view in views)
+    wrote = False
+    try:
+        with contextlib.ExitStack() as held:
+            for task in sorted({marked(), owner} - {""}):
+                if not held.enter_context(task_custody_lock(data_root, task, timeout_sec=30.0)):
+                    raise ValueError(f"task {task}'s custody lock stayed busy (a checkout pass may be removing it)")
+            if intact():  # the tree another seat may read stays; re-owned and marked used under the locks
+                atomic_write_json(checkout.parent / CHECKOUT_MARKER, {"task_id": owner, "created_at": utc_now_iso(),
+                                                                       "used_at": utc_now_iso(), "schema_version": 1})
+                return False
+            if not _retained_checkout_at(checkout, str(subject["tree_sha"])):
+                patch, diff_sha = _patch(str(subject["root"]), str(subject["base"]), str(subject["tree_sha"]))
+                if diff_sha != subject.get("diff_sha"):
+                    raise ValueError("the recorded parent and tree no longer give the reviewed diff")
+                frozen = FrozenSubject(spec=ReviewSubjectSpec(root_kind="", root=str(subject["root"]), kind=""), diff_text="",
+                                       diff_sha=diff_sha, tree_sha=str(subject["tree_sha"]), parent_sha=str(subject["base"]),
+                                       checkout=str(checkout), patch=patch)
+                _materialize_checkout(frozen.spec.root, checkout.parent, checkout, frozen, task_id=owner)
+            else:  # the tree is there, a view is not: the marker is re-owned as above
+                atomic_write_json(checkout.parent / CHECKOUT_MARKER, {"task_id": owner, "created_at": utc_now_iso(),
+                                                                       "used_at": utc_now_iso(), "schema_version": 1})
+            for view in views:
+                target, raw = checkout / view["relative"], read_actor_source_bytes(data_root, view["task_id"], view)
+                if not target.is_file() or target.read_bytes() != raw:
+                    write_bytes_atomic(target, raw)
+            wrote = True
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"the reviewed checkout could not be materialized again ({type(exc).__name__}: {exc})") from exc
+    return wrote
+
+
 def checkout_token(retry_key: str, *, task_id: str = "") -> str:
     """The isolated checkout's name for one task's custody of one round (identity c,
     ``review_retry_key``, and the task that keys attempt rows): the same round of the

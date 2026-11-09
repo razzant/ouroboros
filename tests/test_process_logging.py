@@ -299,9 +299,43 @@ def test_the_launcher_routes_its_uncaught_exceptions_through_the_shared_hooks():
     assert len(calls) == 1
     imports = {alias.name: node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                and node.module == "ouroboros.process_logging" for alias in node.names}
-    assert set(imports) == {"install_exception_hooks", "copy_capped_output"}
+    assert set(imports) == {"install_exception_hooks", "copy_capped_output", "utc_log_formatter"}
+    # Every launcher handler (file and console) gets the shared UTC formatter in the same guarded block
+    # that imports it, so a broken import leaves basicConfig's local-time fallback and never the launcher.
+    guarded = next(node for node in tree.body if isinstance(node, ast.Try)
+                   and imports["utc_log_formatter"] in ast.walk(node))
+    loop = next(node for node in ast.walk(guarded) if isinstance(node, ast.For)
+                and isinstance(node.iter, ast.Name) and node.iter.id == "_handlers")
+    assert [call for call in ast.walk(loop) if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name) and call.func.id == "utc_log_formatter"]
     start_agent = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_agent")
     assert imports["copy_capped_output"] in start_agent.body  # Unguarded, before the server is spawned.
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Moscow", "America/Los_Angeles"])
+def test_text_log_records_carry_the_json_logs_clock(monkeypatch, zone):
+    """A text line and an events.jsonl row of one moment read the same instant: UTC, zone written.
+    Both directions: the time is UTC with ``Z`` under any process zone, and the rest of the record
+    (level, logger, message) renders as before."""
+    import time
+    from ouroboros import process_logging
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("the process zone cannot be changed on this platform")
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        record = logging.LogRecord("probe", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
+        record.created, record.msecs = 1762648451.032, 32.0
+        text = process_logging.utc_log_formatter().format(record)
+        local_hour = time.strftime("%H", time.localtime(1762648451))  # read while that zone holds
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(1762648451))
+    assert text == f"{utc}.032Z [WARNING] probe: hello world"
+    if zone != "UTC":  # that zone's local clock reads another hour: a zone-less local time would have lied
+        assert local_hour != utc[11:13]
 
 
 def test_the_module_loads_only_the_standard_library():

@@ -1271,7 +1271,11 @@ preference when it opens and on every reconnect; there is no file watcher.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
   collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
-  report: its cause leads the line, the host's notice to its parent stays in details. The root keeps primary title
+  report: its cause leads the line, the host's notice to its parent stays in details. Helpers' outcomes are their
+  root's Details: under a finished, collapsed root a finished helper folds away (the disclosure's accessible name
+  still counts them, `N children`), a helper still running or holding a running helper stays in view, and an open
+  root shows every helper as before. A helper folds at the root's settle, at its own when it finishes later, or when the last running helper it
+  holds finishes: the exception to "a state change never moves a neighbour", named here. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
@@ -1411,7 +1415,9 @@ Each room's bar has one status, right after its title: the short word in its
 status ink (a turn still preparing adds the start step it stands at, `Preparing ·
 Building context`, and nothing reads `Thinking` before a model call is sent),
 then one mark, as on the sidebar's rows; no frame at rest, a neutral
-tint on hover and while open, a caret when it opens. A work is one request with
+tint on hover and while open, a caret when it opens. A working work the host dated as silent
+says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
+new mark), until its own progress. A work is one request with
 its Continue episodes and whatever of them still lives (helpers, delegated
 runs still working, post-answer upkeep); the server gives each work and each room
 one status, and every surface (bar, work list, sidebar, cards, tray) words that
@@ -1697,11 +1703,12 @@ Anatomy, top to bottom:
    green/meta flat treatment in light. Its accessible name identifies it; dark also shows `Your choice`.
    Recommendation is separate from the owner's answer. Options are capped by the shared Python↔JS constant
    (`MAX_QUIZ_OPTIONS`); with none, the free answer is the whole answer.
-5. **Free answer** — while the card is open, one always-visible frame (the field's
-   hairline and focus idiom) holds the words, named `Your answer`, and at its trailing
-   bottom edge the `Send my answer` crimson capsule at the composer's height, enabled
-   and standing only once something is typed; a narrow card gives Send its own line in
-   the frame. It is a message field: its words grow to one cap, then scroll; Enter sends and
+5. **Free answer** — while the card is open, the always-visible `Your answer` field
+   owns its hairline and focus idiom. The `Send my answer` crimson capsule is a
+   separate action row immediately below the field, aligned to its trailing edge,
+   enabled and standing only once something is typed. Keeping the action below the
+   field gives a multiline answer its full readable measure; the shared DOM wrapper
+   still owns drafts, feedback and settlement. It is a message field: its words grow to one cap, then scroll; Enter sends and
    Shift+Enter breaks the line (§3 "Controls and editable choices"). No option
    ever has to be the least wrong one: the text rides with an option click as
    the owner's remark, or goes alone as the owner's own answer. It uses the
@@ -2081,7 +2088,8 @@ no circle exists). An open circle shows its words whole in their author's voice 
 the owner's only), Edit (name, words, Delete), Add a place and its rows; Delete names how many
 places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
 
-A row: mark, the place's own name, service, state word, readiness only when not simply on, the
+A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
+leaves a place that is not Paused only hearing), readiness only when not simply on, the
 last captured event (“no captured event”, never “no activity”) and the optional description,
 ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
@@ -2135,6 +2143,9 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
+While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
+only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.”, and the
+conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
@@ -2239,10 +2250,13 @@ lifecycle.
 A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
-ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
-errors warn unless the failed tool is a known pure read: a failed read or search stays in the details,
-while an effect or command that failed, or a tool of unknown kind, warns. They name the first such failure in plain words (a noun for the step and
-what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
+ending's own summary replaces the last narration (owner 01.11 10:52, A). The badge means "look at this": a
+residual tool error warns only when it is loud — an effect that did not land, a send or command Safety stopped, a
+tool of unknown kind that ran and failed (MCP and extension tools included), a command killed by a signal or whose declared output never registered. A
+failed read named in `PURE_READ_TOOLS`, a command that ran and failed or timed out, and a call the tool refused for
+its arguments or because it named no tool stay in the details, in the evidence row below. The clause names the first loud failure in plain words (a noun for the step and
+what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
+flags keeps its stored word. Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
@@ -2323,8 +2337,9 @@ unknown as a number: `$0.00` only where priced rows evidenced that zero,
 of the same scope has no price (`Tracked: up to $1.20` when that subtotal is
 inexact too), `Cost pending` while accounting is open without a tracked amount,
 and `Cost not priced` once settled usage has no tracked price. An
-empty, intact ledger has no money line; an empty view with an integrity gap
-stays unknown; neither proves a free result. The chip's short word (`Sending`,
+empty, intact ledger clears an earlier money line; a newer start may show
+`Cost pending` again. An integrity gap or a run settled without its cost record
+reads `Cost unknown`; neither proves a free result. The chip's short word (`Sending`,
 `Queued`) and `Tracked:` are explained in the card's details (exact phase;
 `some steps have no price`), not a tooltip; real ` · ` text separates meta parts
 for copies and assistive technology. The host's `_is_direct_chat` fact keeps its
@@ -2360,7 +2375,7 @@ states the cause in the owner's words, the failed call stays the error row
 inside the block, and the tool result carries the typed reason (with the cause
 and repair in `detail` where the producer holds one) so the model narrates; no
 host bubble interrupts a narrating turn. When the host itself issued the act (a
-skill-card repair, a picker click), or a refused owner steer
+skill-card repair, a picker click), or a refused steer of my human's words
 carries no owner-message receipt, the host states the refusal as ONE typed
 System row (`task_not_started`, `task_start_unconfirmed` for unconfirmed
 admission, or `steer_not_delivered` for steering) in the issuing chat, keyed to
@@ -3150,7 +3165,9 @@ finger's docked column) while a Project's one-line name is still cut, where the 
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
-“Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both), `Dashboard ›`
+“Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both; a place's row is a
+door to that place's sheet (Active · Silent · Paused there), read from the places at the press: a
+failed read says so on that line, a place gone since disables its row), `Dashboard ›`
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:

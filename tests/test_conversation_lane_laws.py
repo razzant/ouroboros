@@ -256,7 +256,7 @@ def test_the_saved_receipt_names_the_turn_by_its_own_name_or_by_none(main, named
 
 
 _CARRIER = r"""
-import json, sys
+import json, os, sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 from ouroboros import conversation_lease, task_custody
@@ -266,7 +266,7 @@ from supervisor.worker_chat_lane import CarrierTurn
 root, task = sys.argv[1], json.load(open(sys.argv[2], encoding="utf-8"))
 say = lambda line: print(line, flush=True)
 turn = None
-say("ready")
+say(f"ready {os.getpid()}")  # the interpreter's own pid: on Windows a venv's python.exe launches it as a child
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -330,7 +330,7 @@ class _Carrier:
                                          stdout=subprocess.PIPE, stderr=errors, text=True)
         self.lines = stdqueue.Queue()
         _THREAD(target=lambda: [self.lines.put(line.strip()) for line in self.proc.stdout], daemon=True).start()
-        self.send("", "ready")
+        self.pid = int(self.send("", "ready"))  # the pid an intake fact it writes names, not the launcher's
 
     def send(self, command, expect=None):
         if command:
@@ -364,7 +364,7 @@ def test_the_carrier_takes_the_fact_and_its_locked_final_close_orders_a_racing_a
     try:
         assert carrier.send("take", "taken") == "owner:1"
         taken = _intake(main.root, turn)
-        assert taken["pid"] == carrier.proc.pid and taken["pid"] != os.getpid() and taken["accepting"] is True
+        assert taken["pid"] == carrier.pid and taken["pid"] != os.getpid() and taken["accepting"] is True
         _say(main.bridge, main.ctx, "The workshop group", "cm-early")
         assert _delivered(main.bridge, "cm-early") and [meta["task"]["id"] for meta in _turns()] == [turn]
 
@@ -475,8 +475,8 @@ def _owner_turn(main, text="First request"):
     "superseded_attempt", "readmitted_while_staging", "settled", "settles_before_append", "stop_pending",
     "project_bound", "detached", "other_chat", "constrained_message",
 ])
-def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_owner_turn(main, monkeypatch, case):
-    """Every reader counts first, none is chosen among several, and absence of the fact is never preparation."""
+def test_a_main_message_is_its_own_turn_unless_exactly_one_owner_turn_reads(main, monkeypatch, case):
+    """Only owner turns are candidates, none is chosen among several; absence of the fact is never preparation."""
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.conversation_lease import _intake_path, open_author_intake
     from ouroboros.owner_mailbox import drain_owner_entries
@@ -556,7 +556,10 @@ def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_own
         message = {"task_constraint": {"mode": "normal", "extra_allowlist": ["web_search"]}}
     before = {meta["task"]["id"] for meta in _turns()}
     _say(main.bridge, main.ctx, "One more thing", "cm-follow", **message)
-
+    if case in {"pooled_root_beside", "wake_beside"}:  # no other candidate beside the one owner turn: the words join it
+        joined = [ack["target"] for ack in _delivered(main.bridge, "cm-follow")]
+        assert joined == [turn] and not _turns("One more thing")
+        return
     assert not _delivered(main.bridge, "cm-follow")
     started = [meta for meta in _turns("One more thing") if meta["task"]["id"] not in before]
     assert len(started) == 1, (case, [meta["task"].get("text") for meta in _turns()])
@@ -700,8 +703,8 @@ def test_a_follow_up_waits_for_the_turns_mail_lock_outside_q_and_refuses_what_mo
                                   "other_conversation", "closed_beside_wake"])
 def test_only_its_own_closed_fact_for_its_attempt_takes_a_finishing_owner_turn_out_of_the_count(main, fact):
     """Proof that A stopped reading is its own fact for this chat and its current attempt, closed. No fact, an
-    unreadable or foreign one, or an open one leaves A and B two readers (the words are their own turn); and beside
-    B a wake still makes two, among which the owner's turn is never chosen."""
+    unreadable or foreign one, or an open one leaves A and B two owner turns (the words are their own turn); a wake
+    beside B is no owner turn, so once A is closed B alone takes the words."""
     from ouroboros.conversation_lease import _intake_path, follow_loop_admission
 
     first = _owner_turn(main, "Send it to the group")["task"]["id"]
@@ -726,7 +729,7 @@ def test_only_its_own_closed_fact_for_its_attempt_takes_a_finishing_owner_turn_o
         _admitted(_seed("Own clock", {"wake_cause": "own_clock", "initiator": "consciousness"}), reply_expected=False)
     _say(main.bridge, main.ctx, "And mention the deadline", "cm-third")
 
-    if fact == "closed":
+    if fact in {"closed", "closed_beside_wake"}:  # a wake beside the one reading owner turn is no candidate
         assert [ack["target"] for ack in _delivered(main.bridge, "cm-third")] == [second]
         assert not _turns("And mention the deadline")
     else:
