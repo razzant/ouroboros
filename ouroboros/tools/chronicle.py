@@ -924,12 +924,12 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
     covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
     stamped = [entry for entry in (record.get("host_stamp") or {}).get("tasks") or [] if isinstance(entry, dict)]
     if kind == "page":
-        task_ids = [str(task) for task in covers.get("task_ids") or []]
-        unstamped = [task for task in task_ids if task not in {str(entry.get("task_id")) for entry in stamped}]
+        task_ids, held = [str(task) for task in covers.get("task_ids") or []], {str(e.get("task_id")) for e in stamped}
+        unstamped = [task for task in task_ids if task not in held]  # the ids no stamp line after the text names
         sections.append(f"covers ({covers.get('mode')}): {covers.get('count')} rows, "
                         f"{_address_text(covers.get('first'))} – {_address_text(covers.get('last'))}; "
                         f"tasks: {len(task_ids)}" + (" (one stamp line each, after the text)" if stamped else "")
-                        + (f", without a stamp: {', '.join(unstamped)}" if unstamped and stamped else "") + "; "
+                        + (f", without a stamp: {', '.join(unstamped)}" if unstamped else "") + "; "
                         f"notes: {', '.join(covers.get('note_ids') or []) or 'none'}")
     elif kind == "part":
         sections.append("members: " + ", ".join(covers.get("member_ids") or []))
@@ -1487,7 +1487,7 @@ def chronicle_tools() -> List[ToolEntry]:
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record with its text first, then its corrections and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",

@@ -310,6 +310,15 @@ def test_one_stamp_summary_counts_pages_and_parts_and_a_large_stamp_keeps_the_wo
     assert len(header) < 400 and "t0000" not in header and "not_recorded 3000" in header
     assert "text:\nTHE WORDS OF THIS PAGE." in first and "tasks: 3000 (one stamp line each, after the text)" in first
     assert "stamp t0000: status=not_recorded" in first  # the lists follow the words, on later pages as they fill
+    assert "without a stamp" not in first  # every covered id stands on its stamp line
+    # A page whose covered tasks no stamp names keeps their ids in its coverage line.
+    other = {**row, "text": "Unstamped work.", "client_message_id": "bare", "ts": "2026-10-26T11:01:00+00:00"}
+    ds.append(tmp_path, "chat", other)
+    bare = store.publish_page(room_id="1", text="Unstamped.", covers={
+        "rows": [chat_chain.source_row_id(other)], "stream_span": [2, 2], "task_ids": ["x1", "x2"]},
+        author={"kind": "mind", "task_id": "root0001", "focus": {"role": "root", "task_id": "root0001"}})
+    assert bare.ok, bare
+    assert "tasks: 2, without a stamp: x1, x2; " in chronicle._memory_read(ctx, node_id=bare.record["id"])
     # A window always advances, even under a header larger than the page.
     page = chronicle._window("h" * 200, "abcdef", 0, 100, lambda n: f"next {n}")
     assert "next_start=1 " in page.split("\n")[1]

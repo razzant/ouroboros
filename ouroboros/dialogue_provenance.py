@@ -1287,6 +1287,7 @@ __all__ = [
     "private_contact",
     "private_contact_text",
     "recorded_finality",
+    "stamp_summary",
     "recorded_person",
     "recorded_speaker",
     "render_memory_row",
