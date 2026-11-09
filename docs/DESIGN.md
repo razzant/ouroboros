@@ -1274,8 +1274,8 @@ preference when it opens and on every reconnect; there is no file watcher.
   report: its cause leads the line, the host's notice to its parent stays in details. Helpers' outcomes are their
   root's Details: under a finished, collapsed root a finished helper folds away (the disclosure's accessible name
   still counts them, `N children`), a helper still running or holding a running helper stays in view, and an open
-  root shows every helper as before. A helper folds at the root's settle, or at its own when it finishes later: the exception to "a state change
-  never moves a neighbour", named here. The root keeps primary title
+  root shows every helper as before. A helper folds at the root's settle, at its own when it finishes later, or when the last running helper it
+  holds finishes: the exception to "a state change never moves a neighbour", named here. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
