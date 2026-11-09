@@ -147,6 +147,38 @@ def test_the_table_valued_form_of_an_admitted_pragma_reads_the_same_schema(ctx):
     assert run(ctx, "SELECT body FROM task_bodies")["status"] == "error"
 
 
+def test_declaring_the_pragma_tables_passes_over_only_a_missing_one(monkeypatch):
+    """SQLite 3.40 and older refuse that form unless the pragma tables are declared before the authorizer.
+    A table this SQLite lacks is passed over; the deadline's interrupt landing there still stops the read."""
+    monkeypatch.setattr(sql, "_PRAGMA_TABLES", sql._PRAGMA_TABLES | {"pragma_no_such_pragma"})
+    request = {"db": "current", "query": "SELECT * FROM pragma_table_info('tasks')", "max_rows": 10,
+               "max_bytes": 1 << 20}
+    for interrupt in (False, True):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE tasks (id TEXT)")
+            pending = {"interrupt": interrupt, "declaring": False}
+
+            def trace(statement):
+                pending["declaring"] = statement.endswith(" LIMIT 0")
+
+            def progress():  # the deadline's conn.interrupt(), landing in the first declaration
+                fire = pending["interrupt"] and pending["declaring"]
+                pending["interrupt"] = pending["interrupt"] and not fire
+                return fire
+
+            conn.set_trace_callback(trace)
+            conn.set_progress_handler(progress, 1)
+            if interrupt:
+                with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+                    sql._fetch(conn, request)
+                assert not pending["interrupt"]
+            else:
+                assert sql._fetch(conn, request)["rows"] == [[0, "id", "TEXT", 0, None, 0]]
+        finally:
+            conn.close()
+
+
 def test_heap_is_limited_only_in_child(ctx):
     with sqlite3.connect(":memory:") as parent:
         before = parent.execute("PRAGMA hard_heap_limit").fetchone()
