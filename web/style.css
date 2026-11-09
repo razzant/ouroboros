@@ -3249,6 +3249,15 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     display: none;
 }
 
+/* Helpers' outcomes belong to their root's Details (owner 09.11, A): under a FINISHED root that is collapsed, a finished
+   helper card folds away (the Details disclosure's accessible name still counts "N children"); a helper still running
+   stays in view (the live picture of the work), and an open root shows every helper under its facts and timeline as
+   before. The same rule holds at every depth. The fold happens as the root settles, when its chip, line and actions
+   already change. */
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents > .chat-live-card.subagent[data-finished="1"] {
+    display: none;
+}
+
 /* The one narrow-column rule: any chat column of 620px or less (a phone, a
    narrow Project panel) gives bubbles and root cards its full width, without the
    wide-screen gutters. It is owned by the COLUMN, not the viewport, and stays

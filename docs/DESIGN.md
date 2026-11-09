@@ -1271,7 +1271,11 @@ preference when it opens and on every reconnect; there is no file watcher.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
   collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
-  report: its cause leads the line, the host's notice to its parent stays in details. The root keeps primary title
+  report: its cause leads the line, the host's notice to its parent stays in details. Helpers' outcomes are their
+  root's Details (owner 09.11, A): once the root has finished, its finished helpers fold away while it is collapsed
+  (the disclosure's accessible name still counts them, `N children`), a helper still running stays in view, and an
+  open root shows every helper as before; the fold is part of the settle, the one moment the card's own chip, line and actions change
+  (the exception to "a state change never moves a neighbour", named here). The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
@@ -2222,10 +2226,14 @@ lifecycle.
 A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
-ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
-errors warn unless the failed tool is a known pure read: a failed read or search stays in the details,
-while an effect or command that failed, or a tool of unknown kind, warns. They name the first such failure in plain words (a noun for the step and
-what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
+ending's own summary replaces the last narration (owner 01.11 10:52, A). The badge means "look at this"
+(owner 09.11, A): a residual tool error warns only when it is loud — an effect that did not land, a send Safety
+stopped, a tool of unknown kind that ran and failed, a command killed by a signal or whose declared output never
+registered. A failed read (named in `PURE_READ_TOOLS` or declared a read by its connector), a command the task went
+past and a call the tool refused for its arguments or because it named no tool stay in the details, in the evidence
+row below. The clause names the first loud failure in plain words (a noun for the step and
+what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
+flags keeps its stored word. Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`

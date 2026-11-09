@@ -1124,7 +1124,7 @@
       "acceptance_clause": "A data query failed."
     },
     {
-      "name": "a failed read stays in the details: the clause names the failed command and counts no read",
+      "name": "a record written before the flags: a failed read stays in the details, the clause names the old command error and counts no read",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "read_file", "status": "argument_error", "exit_code": null, "signal": null, "result": "", "read_only": true}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command returned exit code 2."
@@ -1142,7 +1142,7 @@
       "acceptance_clause": "A file read failed, plus 2 more tool errors."
     },
     {
-      "name": "one more error reads in the singular",
+      "name": "one more error reads in the singular (records written before the flags stay loud)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}, {"tool": "run_command", "status": "non_zero_exit", "exit_code": 1, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command returned exit code 2, plus 1 more tool error."
@@ -1154,7 +1154,7 @@
       "acceptance_clause": "A command timed out, plus more tool errors."
     },
     {
-      "name": "a command stopped by a signal names the signal",
+      "name": "a command stopped by a signal names the signal (a record written before the flags)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": null, "signal": 9, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command was stopped by signal 9."
@@ -1238,6 +1238,67 @@
       "phase": "cancelled",
       "headline": "Stopped",
       "acceptance_clause": "Ouroboros stopped with unfinished work · The answer was delivered with reviewer requests still open · Work remains."
+    },
+    {
+      "name": "a command the task went past is a quiet leftover: Done, no clause, the error stays in the details",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 1, "signal": null, "result": "", "quiet": true}]}, "objective": {"status": "not_evaluated"}, "review": {"status": "skipped"}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "",
+      "exact_clause": true
+    },
+    {
+      "name": "a stored warning with no error lists keeps its generic sentence",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "Tool errors remain in the record.",
+      "exact_clause": true
+    },
+    {
+      "name": "a failed effect beside quiet leftovers names the effect and counts only loud errors",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}, {"tool": "edit_batch", "status": "argument_error", "exit_code": null, "signal": null, "result": "", "quiet": true}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": "", "quiet": true}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "two loud effects count the second",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}, {"tool": "github_write", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed, plus 1 more tool error.",
+      "exact_clause": true
+    },
+    {
+      "name": "a send Safety stopped is loud and names the step",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_write", "status": "safety_violation", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A GitHub write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "a command whose declared output never registered is loud",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "artifact_output_error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A command failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "a signal-killed command is loud and names the signal",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": -9, "signal": "SIGKILL", "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A command was stopped by signal SIGKILL.",
+      "exact_clause": true
+    },
+    {
+      "name": "a helper set to run as a coding session that finished without one says so in words",
+      "record": {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "incomplete"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one."
+    },
+    {
+      "name": "a helper whose coding-session run is unknown says so in words",
+      "record": {"status": "completed", "reason_code": "configured_actor_unknown", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_unknown"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "unknown"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "This helper was set to run as a coding session; whether that run succeeded is unknown."
     }
   ]
 }

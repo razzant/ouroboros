@@ -5,7 +5,7 @@ import copy
 import pytest
 
 from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes
-from ouroboros.tool_capabilities import PURE_READ_TOOLS
+from ouroboros.tool_effects import record_mcp_annotations
 from tests._cases import plain_rows
 
 
@@ -42,11 +42,13 @@ def test_tool_errors_do_not_decide_delivery_or_acceptance(subtests):
                     elif "delivery_candidate" in extra and review is None:
                         judged = "degraded"
                     assert axes["objective"]["status"] == judged
-                    # A failed read stays in the details (owner 06.11, A); a command warns when nothing judged it.
-                    loud = tool_error["tool"] not in PURE_READ_TOOLS
+                    # A failed read (owner 06.11, A) and a command the task went past (owner 09.11, A) stay in the
+                    # details; a signal-killed command warns when nothing judged the result.
+                    loud = bool(tool_error.get("signal"))
                     assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated" and loud)
                     errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
                     assert errors[0]["status"] == tool_error["status"]
+                    assert bool(errors[0].get("read_only") or errors[0].get("quiet")) == (not loud)
                     if tool_error.get("signal"):
                         assert errors[0]["signal"] == "SIGKILL"
                         assert errors[0]["exit_code"] == -9
@@ -68,30 +70,56 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     assert axes["objective"]["warning"] == "residual_tool_errors_without_review"
 
 
-@pytest.mark.parametrize(("call", "loud"), [
-    pytest.param({"tool": "read_file", "status": "argument_error"}, False, id="failed-read"),
-    pytest.param({"tool": "search_code", "status": "error"}, False, id="failed-search"),
-    pytest.param({"tool": "browse_page", "status": "error"}, False, id="failed-page-read"),
-    pytest.param({"tool": "github_read", "status": "error"}, False, id="failed-github-read"),
-    pytest.param({"tool": "write_file", "status": "error"}, True, id="unfulfilled-write"),
-    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, True, id="failed-command"),
-    pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, id="unknown-kind"),
+@pytest.mark.parametrize(("call", "loud", "flag"), [
+    pytest.param({"tool": "read_file", "status": "argument_error"}, False, "read_only", id="failed-read"),
+    pytest.param({"tool": "search_code", "status": "error"}, False, "read_only", id="failed-search"),
+    pytest.param({"tool": "browse_page", "status": "error"}, False, "read_only", id="failed-page-read"),
+    pytest.param({"tool": "github_read", "status": "error"}, False, "read_only", id="failed-github-read"),
+    pytest.param({"tool": "mcp_docs__read_page", "status": "mcp_error"}, False, "read_only", id="declared-mcp-read"),
+    pytest.param({"tool": "write_file", "status": "error"}, True, "", id="unfulfilled-write"),
+    pytest.param({"tool": "github_write", "status": "safety_violation"}, True, "", id="send-stopped-by-safety"),
+    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, False, "quiet", id="failed-command"),
+    pytest.param({"tool": "run_script", "status": "timeout"}, False, "quiet", id="timed-out-script"),
+    pytest.param({"tool": "run_command", "status": "artifact_output_error"}, True, "", id="command-output-unregistered"),
+    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": -9, "signal": "SIGKILL"}, True, "",
+                 id="signal-killed-command"),
+    pytest.param({"tool": "edit_batch", "status": "argument_error"}, False, "quiet", id="rejected-write-call"),
+    pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "quiet", id="call-named-no-tool"),
+    pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
+    pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
 ])
-def test_only_an_unfulfilled_effect_a_failed_command_or_an_unknown_tool_warns_without_review(call, loud):
-    """Owner 06.11 («A — изменения и команды»): with no review, Done turns into Done with warnings only for an
-    effect or command that failed or a tool of unknown kind; a failed read or search is still recorded, in the details."""
+def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
+    """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with
+    warnings only for a loud leftover — an effect that did not land, a Safety-stopped send, a signal-killed command, a
+    command whose declared output never registered, or a tool of unknown kind that ran and failed. A failed read
+    (``read_only``), a command the task went past and a call the tool refused before running (``quiet``) are still
+    recorded, in the details."""
+    record_mcp_annotations("docs", [{"name": "read_page", "annotations": {"readOnlyHint": True}}])
     axes = derive_loop_outcome("Delivered answer.", {}, {"tool_calls": [{**call, "is_error": True, "args": {}}]})["outcome_axes"]
     assert axes["objective"]["status"] == "not_evaluated" and axes["execution"]["status"] == "ok"
     assert bool(axes["objective"].get("warning")) == loud
     stored = normalize_outcome_axes({"status": "completed", "outcome_axes": axes})  # a stored result read back
     assert bool(stored["objective"].get("warning")) == loud
     [error] = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
-    assert error["tool"] == call["tool"] and bool(error.get("read_only")) == (not loud)
+    assert error["tool"] == call["tool"]
+    assert {key for key in ("read_only", "quiet") if error.get(key)} == ({flag} if flag else set())
+
+
+def test_a_record_written_before_the_flags_stays_loud():
+    """A stored error without ``read_only`` or ``quiet`` (written before either flag) keeps the warning: the
+    presentation never guesses that an old command error was harmless."""
+    from ouroboros.outcomes import normalize_outcome_axes
+
+    legacy = {"status": "completed", "outcome_axes": {
+        "execution": {"status": "ok", "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}]},
+        "objective": {"status": "not_evaluated", "source": "none"},
+    }}
+    assert normalize_outcome_axes(legacy)["objective"]["warning"] == "residual_tool_errors_without_review"
 
 
 @pytest.mark.parametrize(("extra", "execution", "reason", "exit_code", "signal", "bucket"), [
     pytest.param({}, "ok", "final_message", -9, "SIGKILL", "unresolved_tool_errors", id='extra0-ok-final_message--9-SIGKILL-unresolved_tool_errors'),
-    pytest.param({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair", 1, "", "cosmetic_tool_errors", id='extra1-degraded-invalid_delivery_control_after_repair-1--cosmetic_tool_errors'),
+    pytest.param({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair", -9, "SIGKILL", "unresolved_tool_errors", id='extra1-degraded-invalid_delivery_control_after_repair--9-SIGKILL-unresolved_tool_errors'),
     pytest.param({"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred", -9, "SIGKILL", "unresolved_tool_errors", id='extra2-degraded-child_results_deferred--9-SIGKILL-unresolved_tool_errors'),
 ])
 def test_persisted_unjudged_objective_keeps_warning_after_normalization(

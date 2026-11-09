@@ -279,19 +279,53 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
             record[extra] = item.get(extra)
     if recovered_by is not None:
         record["recovered_by_call_index"] = recovered_by
-    from ouroboros.tool_capabilities import PURE_READ_TOOLS
-
-    if record["tool"] in PURE_READ_TOOLS:
-        record["read_only"] = True  # a known pure read: its failure stays in the details (warns_without_review)
+    if _is_known_read(record["tool"]):
+        record["read_only"] = True  # a known pure read: its failure stays in the details
     return record
 
 
+# Owner 09.11 («Q1: A»): the badge means "look at this". Of the leftovers the record keeps, these stay in the
+# card's details and neither warn nor are named on the main view: a call the tool refused for its arguments or
+# because it named no tool (the mind saw the refusal at once; what it did next is its answer's to say), and a
+# command the task went past. Loud, as before: every other unrecovered error — an effect that did not land, a
+# Safety-stopped send, a tool of unknown kind that ran and failed — and two command endings the record itself
+# proves: a kill by a signal (D7: a kernel, OOM or external kill is the install acting; the 43-SIGKILL incident
+# once hid as "cosmetic") and a declared output that never registered (a promised file is missing).
+_UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
+_LOUD_COMMAND_STATUSES = frozenset({"artifact_output_error"})
+
+
+def _is_known_read(tool: str) -> bool:
+    """A known pure read: named in PURE_READ_TOOLS, or declared one by its connector (an extension's
+    ``effect: read``, an MCP server's ``readOnlyHint: true`` — ``tool_effects``, the one effect SSOT)."""
+    from ouroboros.tool_capabilities import PURE_READ_TOOLS
+    from ouroboros.tool_effects import EFFECT_READ, effect_of
+
+    if tool in PURE_READ_TOOLS:
+        return True
+    declared = effect_of(tool)
+    return declared.declared and declared.effect == EFFECT_READ
+
+
+def _is_quiet_leftover(record: Dict[str, Any]) -> bool:
+    """The classifier's verdict, stamped on the record as ``quiet``: a call the tool refused before running, or a
+    command the task went past (not killed by a signal, its declared outputs registered). A known read is quiet
+    through ``read_only`` instead."""
+    if record.get("status") in _UNEXECUTED_STATUSES:
+        return True
+    return (record.get("tool") in _COSMETIC_TOOL_NAMES and record.get("status") not in _LOUD_COMMAND_STATUSES
+            and not _is_signal_death(record))
+
+
 def warns_without_review(*bundles: Any) -> bool:
-    """Owner 06.11 («A — изменения и команды»): a leftover tool error warns that no review checked the result only
-    when it is not a known pure read (``read_only`` on its record, from PURE_READ_TOOLS). An effect that did
-    not happen, a failed command and a tool of unknown kind (MCP, extensions) stay loud; a failed read or search is
-    recorded in the details. A record written before the flag existed stays loud."""
-    return any(isinstance(error, dict) and not error.get("read_only") for errors in bundles for error in errors or [])
+    """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review of the result, a leftover
+    tool error turns Done into Done with warnings only when it is loud — neither a known pure read (``read_only``)
+    nor a quiet leftover (``quiet``: a command the task went past, a call refused before running). An effect that
+    did not land, a signal-killed command, a command whose declared output never registered and a tool of unknown
+    kind that ran and failed stay loud. A record written before the flags existed stays loud; the twin of this
+    predicate for the card's words is ``tool_error_words``."""
+    return any(isinstance(error, dict) and not (error.get("read_only") or error.get("quiet"))
+               for errors in bundles for error in errors or [])
 
 
 def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -406,6 +440,9 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             policy_denials.append(_tool_error_record(item))
             continue
         unresolved.append(_tool_error_record(item))
+    for record in (*unresolved, *cosmetic_items):  # only the leftovers the badge reads carry the verdict
+        if not record.get("read_only") and _is_quiet_leftover(record):
+            record["quiet"] = True  # a command the task went past, or a call refused before running: details too
     return {
         "unresolved": unresolved,
         "recovered": recovered_items,

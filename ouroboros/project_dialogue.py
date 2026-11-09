@@ -807,10 +807,10 @@ TASK_CAUSE_PHRASES = {
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
+    "configured_actor_incomplete": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
+    "configured_actor_unknown": "This helper was set to run as a coding session; whether that run succeeded is unknown.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
-    # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
-    # (task_finalization.terminal_result_fields), a standing limitation of the
-    # answer rather than the thing that ended the task.
+    # The one non-reason-code key: the task-result FIELD terminal_plan_review_open (task_finalization.terminal_result_fields), a standing limitation of the answer, not what ended the task.
     "terminal_plan_review_open": "The plan review was still open when this answer was delivered",
     "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
     "tool_failure": "A tool this task used failed and nothing recovered it",
