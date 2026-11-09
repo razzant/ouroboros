@@ -25,6 +25,9 @@ from ouroboros import store
 MAX_BYTES = 8 * 1024 * 1024
 HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
+# db=current READ admits these tables; the authorizer and the failed-statement hint share the one list
+# (task bodies and cards are documents: op=json kind=task_result).
+CURRENT_TABLES = ("tasks", "sqlite_master", "sqlite_schema")
 # Executor lifecycle allowances, never SQL phase budgets. After the operation deadline the parent
 # waits FINISH_SEC while the child may still hold its source, so a stuck reader is reaped promptly;
 # once the child has released it, RESPONSE_SEC lets a contended host deliver the typed answer.
@@ -78,6 +81,15 @@ def database_path(root: Path, db: str) -> Path:
     from ouroboros import evidence_packs
     return {"current": store.store_path(root), "money": root / "state" / "usage.sqlite",
             "packs": evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME}[db]
+
+
+def schema_hint(db: str) -> str:
+    """How a failed statement's author learns the real schema, with reads the authorizer already admits
+    (a fact of the whole class "this SQL failed", never read from SQLite's message)."""
+    if db == "current":
+        return (f"db=current SQL reads {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks); "
+                "task bodies and cards: op=json kind=task_result")
+    return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
 
 
 @contextlib.contextmanager
@@ -146,7 +158,7 @@ def _authorizer(db):
     def authorize(action, first, second, database, origin):
         allowed = action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE}
         if action == sqlite3.SQLITE_READ:
-            allowed = db != "current" or first in {"tasks", "sqlite_master", "sqlite_schema"}
+            allowed = db != "current" or first in CURRENT_TABLES
         elif action == sqlite3.SQLITE_FUNCTION:
             allowed = str(second).lower() != "load_extension"
         elif action == sqlite3.SQLITE_PRAGMA:

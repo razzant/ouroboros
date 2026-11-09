@@ -29,6 +29,9 @@ READ_DESCRIPTION = (
 
 _CONTENT_ACTIONS = frozenset({"show", "file", "blame"})
 _ACTIONS = frozenset({"status", "diff", "log", "show", "file", "blame", "refs", "rev_parse", "merge_base", "identity"})
+_PATH_ACTIONS = frozenset({"status", "diff", "log", "show", "file", "blame"})
+_PAIR_ACTIONS = frozenset({"merge_base", "diff"})  # the two that compare revisions: base/head, never ref
+_NO_REF_ACTIONS = frozenset({"merge_base", "identity", "status", "diff"})
 _CAPTURE_BYTES = 1024 * 1024
 _CONFIG_LOCATIONS = frozenset({"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"})
 
@@ -97,10 +100,16 @@ def _run_read_git(repo: pathlib.Path, args: list[str], *, preserve_output: bool 
     return text
 
 
-def _object(repo: pathlib.Path, ref: str, kind: str) -> str:
+def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref") -> str:
     if not ref.strip() or "\x00" in ref or "\n" in ref:
-        raise ValueError("ref must be a nonempty local Git revision")
-    oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
+        raise ValueError(f"{field} must be a nonempty local Git revision")
+    try:
+        oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
+    except RuntimeError as exc:
+        # The fact the caller can act on: which argument named nothing here and where to look; Git's
+        # own line ("fatal: Needed a single revision") stays beside it (42 such reads in 05–08.11).
+        raise RuntimeError(f"{field}={ref!r} does not name a {kind} in this repository ({exc}); nothing was read; "
+                           "list revisions with action=refs or action=log") from exc
     if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
         raise ValueError("Git did not resolve one exact object")
     return oid
@@ -216,6 +225,40 @@ def _identity(repo: pathlib.Path) -> str:
     }, ensure_ascii=False, sort_keys=True)
 
 
+def _argument_problems(action: str, *, path: str, ref: str, base: str, head: str, staged: bool, stat: bool,
+                       name_only: bool, max_count: object, max_chars: object) -> list[str]:
+    """Every constraint one call violates, each naming field, value and repair (DEVELOPMENT "LLM-first
+    affordances"): one phrase for all of them was retried unchanged (37 refusals of 39 tasks in 05–08.11).
+    Only what the call says about itself is judged here; Git's answers stay Git's."""
+    problems = []
+    if action not in _ACTIONS:
+        problems.append(f"action={action!r}: use one of {', '.join(sorted(_ACTIONS))}")
+    if not isinstance(max_count, int) or not 1 <= max_count <= 200:
+        problems.append(f"max_count={max_count!r}: an integer from 1 to 200 (log only)")
+    if not isinstance(max_chars, int) or max_chars < 0:
+        problems.append(f"max_chars={max_chars!r}: 0 (no limit) or a positive integer")
+    if path and action not in _PATH_ACTIONS:
+        problems.append(f"path={path!r} applies to {', '.join(sorted(_PATH_ACTIONS))}; action={action} takes no path")
+    if action in {"file", "blame"} and not path:
+        problems.append(f"action={action} requires path (the file's repository-relative path)")
+    if (base or head) and action not in _PAIR_ACTIONS:
+        problems.append(f"base/head apply to diff and merge_base; for action={action} name the revision with ref")
+    if action == "merge_base" and not (base and head):
+        problems.append("action=merge_base requires both base and head")
+    for name, value in (("staged", staged), ("stat", stat), ("name_only", name_only)):
+        if value and action != "diff":
+            problems.append(f"{name}=true applies only to action=diff; for action={action} omit {name}")
+    if ref and action in _NO_REF_ACTIONS:
+        where = "diff and merge_base take base/head" if action in _PAIR_ACTIONS else f"{action} takes no revision"
+        problems.append(f"ref={ref!r} does not apply to action={action}; {where}")
+    elif ref and action == "refs" and (not ref.startswith("refs/") or any(c in ref for c in "\x00\n\r :*?[\\")):
+        problems.append(f"ref={ref!r}: for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/")
+    for name, value in (("ref", ref), ("base", base), ("head", head)):
+        if value and (not value.strip() or "\x00" in value or "\n" in value):
+            problems.append(f"{name}={value!r}: a nonempty local Git revision")
+    return problems
+
+
 def _vcs_read(
     ctx,
     action: str,
@@ -233,15 +276,11 @@ def _vcs_read(
     """Read Git objects using only the prepared repository and path binding."""
     max_count, max_chars = (int(value) if isinstance(value, str) and value.strip().isdigit() else value
                             for value in (max_count, max_chars))
-    if (action not in _ACTIONS or not isinstance(max_count, int)
-            or not isinstance(max_chars, int) or not 1 <= max_count <= 200 or max_chars < 0
-            or (path and action not in {"status", "diff", "log", "show", "file", "blame"})
-            or ((base or head) and action not in {"merge_base", "diff"})
-            or ((staged or stat or name_only) and action != "diff")
-            or (ref and action in {"merge_base", "identity", "status", "diff"})):
+    if problems := _argument_problems(action, path=path, ref=ref, base=base, head=head, staged=staged, stat=stat,
+                                      name_only=name_only, max_count=max_count, max_chars=max_chars):
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
-            text="⚠️ TOOL_ARG_ERROR (vcs_read): invalid action, limit, or argument for this action.",
+            text="⚠️ TOOL_ARG_ERROR (vcs_read): " + "; ".join(problems) + ". Nothing was read.",
             meta={"operation_outcome": "completed_no_effect"},
         ))
     try:
@@ -293,14 +332,13 @@ def _vcs_read(
                 output = _run_read_git(repo, ["cat-file", "blob", f"{_object(repo, ref or 'HEAD', 'commit')}:{literal}"], preserve_output=True)
             elif action == "blame":
                 output = _run_read_git(repo, ["blame", "--no-ext-diff", "--no-textconv", _object(repo, ref or "HEAD", "commit"), "--", literal])
-            elif action == "refs":
-                if ref and (not ref.startswith("refs/") or any(c in ref for c in "\x00\n\r :*?[\\")):
-                    raise ValueError("refs filter must be a literal refs/ prefix")
+            elif action == "refs":  # the filter's shape was judged with the other arguments above
                 output = _run_read_git(repo, ["for-each-ref", "--format=%(refname) %(objectname) %(objecttype)", *( [ref] if ref else [] )])
             elif action == "rev_parse":
                 output = _object(repo, ref or "HEAD", "object")
             else:
-                output = _run_read_git(repo, ["merge-base", _object(repo, base, "commit"), _object(repo, head, "commit")])
+                output = _run_read_git(repo, ["merge-base", _object(repo, base, "commit", field="base"),
+                                              _object(repo, head, "commit", field="head")])
         from ouroboros.tools.git_vcs_ops import _limit_git_output, _vcs_result
 
         return _publish_tool_result(ctx, ToolResult(
@@ -330,9 +368,9 @@ def get_tools():
                     "description": "Local revision (default HEAD), or a literal refs/ prefix for refs."},
             "base": {"type": "string", "default": "", "description": "First revision for merge_base, or diff base resolved once to a tree."},
             "head": {"type": "string", "default": "", "description": "Second revision for merge_base or diff; diff requires base and staged=false."},
-            "staged": {"type": "boolean", "default": False, "description": "Diff the index (--staged)."},
-            "stat": {"type": "boolean", "default": False, "description": "Diff summary (--stat)."},
-            "name_only": {"type": "boolean", "default": False, "description": "Diff file names only; takes precedence over stat."},
+            "staged": {"type": "boolean", "default": False, "description": "Diff the index (--staged); diff only."},
+            "stat": {"type": "boolean", "default": False, "description": "Diff summary (--stat); diff only."},
+            "name_only": {"type": "boolean", "default": False, "description": "Diff file names only (diff only); takes precedence over stat."},
             "max_count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20,
                           "description": "Maximum commits returned by log."},
             "max_chars": {"type": "integer", "minimum": 0, "default": 0,

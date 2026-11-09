@@ -44,6 +44,7 @@ if __name__ == "__main__":
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
+from ouroboros.process_logging import utc_log_formatter
 from ouroboros.config import (
     AGENT_SERVER_PORT,
     DATA_DIR,
@@ -134,7 +135,6 @@ _DEPS_RETRY_DELAY_SEC = 5
 # before any child starts; any other explicit caller prefix is kept.
 os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(DATA_DIR, os.environ.get("PYTHONPYCACHEPREFIX", ""))
 
-_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_dir = DATA_DIR / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -144,11 +144,12 @@ _file_handler = RotatingFileHandler(
     backupCount=2,
     encoding="utf-8",
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
 _handlers: list[logging.Handler] = [_file_handler]
 if not getattr(sys, "frozen", False):
     _handlers.append(logging.StreamHandler())
-logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
+for _handler in _handlers:
+    _handler.setFormatter(utc_log_formatter())  # the JSON logs' clock: UTC with its zone, on the file and the console
+logging.basicConfig(level=logging.INFO, handlers=_handlers)
 # Shared SSOTs: redaction filter, uncaught exceptions into these handlers; quiet request-URL lines (credentials).
 try:
     from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
