@@ -346,16 +346,21 @@ def test_an_accepted_act_stays_quiet_with_or_without_its_ack(phone, monkeypatch,
 
 
 def test_a_paired_row_that_cannot_be_written_leaves_the_cause_with_the_ack(phone, monkeypatch):
-    """The ACK is handed over before its paired row: a row lost on the way never takes the cause with it. The
-    paired row stands beside a handed-over ACK only for the cancel refusal of an act that names no owner message
-    (a legacy producer without a receipt id)."""
+    """The ACK is handed over before its paired row: a row lost on the way never takes the cause with it. A paired
+    row stands beside a handed-over ACK only for an unlabelled act of my human's words: a quote whose row has no
+    client id rides a synthetic receipt id (``control_relay._tell_task``), so its ACK answers no chat row."""
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+
     def lost(*_a, **_k):
         raise RuntimeError("chat store unavailable")
 
+    quote = owner_quote(phone.data, phone.owner(50))
+    quote["source"]["client_message_id"] = ""  # an owner row the host holds without a client id
     phone.ctx.send_with_budget = lost
-    _refuse("cancel_pending", phone, monkeypatch)
-    _steer(phone, "")
-    assert [data["text"] for data in phone.sent()] == [f"Parser · {_cause('cancel_pending')}"]
+    _refuse("target_unknown", phone, monkeypatch)
+    _steer(phone, AGENT_RECEIPT_ID_PREFIX + "relay-4", quotes=[quote])
+    assert [data["text"] for data in phone.sent()] == [f"Task · {_cause('target_unknown')}"]
 
 
 def test_two_refused_acts_of_one_owner_message_are_two_notices(phone, monkeypatch):

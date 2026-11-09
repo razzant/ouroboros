@@ -54,10 +54,11 @@ def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool
 
     Always when its receipt selected that row as the carrier: no ACK carrying the cause
     was handed over (its durable row was refused, or no live ACK went out), so nothing else
-    tells it, whatever message the act wears. Otherwise only for an unlabelled act (a
-    synthetic receipt id) on a path that keeps the row the web shows, paired with the ACK.
-    A task that spoke for itself reads its typed refusal in its tool result and Logs row; so does a turn whose
-    act carried no owner words (``_mind_note``).
+    tells it, whatever message the act wears. Otherwise only for an unlabelled act of my human's
+    words (a quote whose row has no client id rides a synthetic receipt id) on a path that keeps
+    the row the web shows, paired with the ACK: that ACK answers no chat row. A task that spoke for
+    itself reads its typed refusal in its tool result and Logs row; so does a turn whose act carried
+    no owner words (``_mind_note``).
     """
     if _task_issued(evt) or _mind_note(evt):
         return False
