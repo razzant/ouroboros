@@ -736,7 +736,7 @@
  * @property {string=} routing_token
  * @property {string=} cause  // host-authored owner sentence for a REFUSED act; absent on scheduled/delivered/pending and on the picker frame
  * @property {string=} reasoning_effort  // the explicit start a New task picked from this picker card requests
- * @property {"routing_ack"|"system"=} routing_notice_carrier  // this ACK is the selected carrier of the act's owner notice; never delivery proof
+ * @property {"routing_ack"|"system"=} routing_notice_carrier  // the notice's selected carrier: this ACK, or the System row when it answers no chat row; never delivery proof
  * @property {Object=} reply_to  // the owner message that notice answers (host Reply reference)
  * @property {boolean} suppress_bubble
  * @property {string=} ts

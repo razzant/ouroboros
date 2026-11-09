@@ -556,7 +556,7 @@ class MessageAnnotationOutbound(TypedDict):
     routing_token: NotRequired[str]
     cause: NotRequired[str]
     reasoning_effort: NotRequired[str]  # #1539: the explicit start a New task picked from this card requests
-    # #966: this ACK is the SELECTED carrier of the act's owner notice (never delivery proof), answering reply_to.
+    # #966: the notice's SELECTED carrier (never delivery proof): this ACK, answering reply_to, or the System row.
     routing_notice_carrier: NotRequired[Literal["routing_ack", "system"]]
     reply_to: NotRequired[Dict[str, Any]]
     ts: NotRequired[str]
