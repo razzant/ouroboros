@@ -21,6 +21,7 @@ import uuid
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
+from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
 from tests.system_e2e.harness import (
     LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text, conversation_turn_row,
     keyless_settings, message_text, require_lane, start_server, wait_durable_result, wait_until, ws_url,
@@ -137,13 +138,16 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                 assert not gate.release.is_set() and not gate.timed_out
                 assert oracle.task_result(held_id).get("status") == "running"
                 # The held turn's carrier stayed bound to it, blocked in its model call, while the
-                # Project turn completed: that turn ran concurrently on ANOTHER carrier.
+                # Project turn completed on a worker carrier of its own, not on a thread of the server.
                 still = conversation_turn_row(oracle, held_id)
                 assert (still["worker_id"], still["carrier_pid"]) == (held_row["worker_id"], held_row["carrier_pid"]), (
                     held_row, still)
+                carrier = oracle.task_result(project_id).get("execution_owner") or {}
+                assert (carrier.get("kind"), carrier.get("lane"), carrier.get("executor")) == (
+                    "direct", LANE_CONVERSATION, EXECUTOR_WORKER), carrier
                 gate.release.set()
                 assert finish(held_message, "S27_HELD_COMPLETE") == held_id
-                # The held turn has answered, so Main's next message is a turn of its own.
+                # The held turn's result is settled, so Main's next message is a turn of its own.
                 main_id = finish(send("Read input.txt with the fixture, write main.txt, then answer here."),
                                  "S27_MAIN_COMPLETE")
 
