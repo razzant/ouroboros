@@ -535,15 +535,17 @@ def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_wh
     asyncio.run(handle(refused))
     assert len(b.calls) == 1 and b.calls[0][1]["text"] == f"Parser · {cause}"
     assert "\n" not in b.calls[0][1]["text"]
-    # The ACK is the carrier for an act that wears no owner message too; its paired System row is skipped
-    # only when it says so, and a row that carries the notice itself (or any standalone one) still arrives.
-    asyncio.run(handle({**refused, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1"}))
+    # An ACK that answers no chat row (an act wearing no owner message) names its System row the carrier and adds
+    # no line; a host act's row beside a carrier ACK is skipped only when it says so, and a row that carries the
+    # notice itself (or any standalone one) still arrives.
+    asyncio.run(handle({**refused, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1",
+                        "routing_notice_carrier": "system"}))
     row = {"role": "system", "system_type": "steer_not_delivered", "text": f"Parser · {cause}"}
-    asyncio.run(handle({**row, "routing_notice_carrier": "routing_ack"}))
-    assert [data["text"] for _, data in b.calls] == [f"Parser · {cause}"] * 2
+    asyncio.run(handle({**row, "system_type": "task_not_started", "routing_notice_carrier": "routing_ack"}))
+    assert [data["text"] for _, data in b.calls] == [f"Parser · {cause}"]
     asyncio.run(handle({**row, "routing_notice_carrier": "system"}))
     asyncio.run(handle(row))
-    assert len(b.calls) == 4 and all(method == "sendMessage" for method, _ in b.calls)
+    assert len(b.calls) == 3 and all(method == "sendMessage" for method, _ in b.calls)
 
 
 def test_relay_quotes_the_owners_words_and_files_above_the_note_verbatim(bridge):

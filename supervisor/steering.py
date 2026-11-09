@@ -17,16 +17,6 @@ from ouroboros.utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 
-def _relayed_owner_message(client_message_id: str) -> str:
-    """The owner message identified by this receipt, or empty for a synthetic act.
-
-    Only owner-text delivery copies it into the recipient's mailbox. A task
-    relay may key its receipt on that message without passing on owner authority."""
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
-
-    return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
-
-
 def _issuer(evt: Dict[str, Any]) -> Dict[str, Any]:
     """The event's issuer fact; an event from a producer that predates it is an
     owner turn (every such producer was a chat turn or the owner's picker click)."""
@@ -49,21 +39,16 @@ def _mind_note(evt: Dict[str, Any]) -> bool:
     return not evt.get("quotes") and str(evt.get("client_message_id") or "").startswith(AGENT_RECEIPT_ID_PREFIX)
 
 
-def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool:
-    """Whether an owner act's refusal publishes its System row (``_refusal_row``).
-
-    Always when its receipt selected that row as the carrier: no ACK carrying the cause
-    was handed over (its durable row was refused, or no live ACK went out), so nothing else
-    tells it, whatever message the act wears. Otherwise only for an unlabelled act of my human's
-    words (a quote whose row has no client id rides a synthetic receipt id) on a path that keeps
-    the row the web shows, paired with the ACK: that ACK answers no chat row. A task that spoke for
-    itself reads its typed refusal in its tool result and Logs row; so does a turn whose act carried
-    no owner words (``_mind_note``).
+def _notice_row_owed(evt: Dict[str, Any], carrier: str) -> bool:
+    """Whether an owner act's refusal publishes its System row (``_refusal_row``): exactly when its receipt
+    selected that row as the carrier, early or late alike. Nothing else then tells it: no ACK carrying the cause
+    was handed over (its durable row was refused, or no live ACK went out), or the ACK answers no chat row (an
+    unlabelled act of my human's words: a quote whose row has no client id rides a synthetic receipt id), which
+    is never a carrier (``events_project_routing._routing_notice_ack_fields``). A task that spoke for itself reads
+    its typed refusal in its tool result and Logs row; a turn's note without owner words (``_mind_note``) has no
+    owner notice, so its receipt selects no carrier.
     """
-    if _task_issued(evt) or _mind_note(evt):
-        return False
-    return carrier == "system" or (
-        paired and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip()))
+    return carrier == "system" and not _task_issued(evt)
 
 
 def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
@@ -149,23 +134,17 @@ def _refuse_steering_while_cancelling(
     # A cancel-pending refusal is a live notice to the OWNER who asked; a task
     # that spoke for itself reads its typed refusal in the tool result instead.
     # An act that wears an owner message shows its cause on that message's
-    # receipt line once its ACK is handed over; an UNLABELLED act of my human's
-    # words (a quote without a client id), or one whose ACK was not, needs the
-    # standalone sentence; a note of the mind (``_mind_note``) none — the same rule
-    # as the other refusals (``_notice_row_owed``).
-    if notify and _notice_row_owed(evt, carrier, paired=True):
-        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending", carrier)
+    # receipt line once its ACK is handed over; otherwise its receipt selects the
+    # standalone sentence — the same rule as the other refusals (``_notice_row_owed``).
+    if notify and _notice_row_owed(evt, carrier):
+        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending")
     return carrier
 
 
-def _refusal_row(
-    ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str, carrier: str = "",
-) -> None:
-    """Publish an owner act's host cause as System: an unlabelled act has no chat receipt row,
-    and any act whose ACK was not handed over has no other notice (``_notice_row_owed``).
+def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str) -> None:
+    """Publish an owner act's host cause as the System row its receipt selected as the notice's
+    carrier (``_notice_row_owed``): every client shows it, the phone included.
 
-    The row names the carrier its receipt selected: ``routing_ack`` when the ACK already
-    carried the cause (a transport showing ACKs skips this copy), otherwise ``system``.
     It replies to the act's own owner message, never to the target task's origin.
     """
     from ouroboros.project_dialogue import routing_refusal_cause
@@ -179,8 +158,7 @@ def _refusal_row(
         ctx.send_with_budget(
             chat, f"{target_label or 'Task'} · {routing_refusal_cause('steer_task', status, reason, None)}",
             role="system", system_type="steer_not_delivered", task_id=target,
-            progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": _routing_notice_reply(ctx, evt)},
+            progress_meta={"routing_notice_carrier": "system", "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
         log.debug("steer refusal row failed for %s", target, exc_info=True)
@@ -194,16 +172,17 @@ def _steer_receipt(
     additionally gets its Logs row and a chat acknowledgement only when tied to
     a real owner message; synthetic task receipts stay silent."""
     from supervisor.events import _emit_routing_receipt
+    from supervisor.events_project_routing import _owner_message_receipt
 
     task_issued = _task_issued(evt)
-    owner_message_id = _relayed_owner_message(str(evt.get("client_message_id") or "").strip())
     receipt = _emit_routing_receipt(
         ctx, evt, action="steer_task", target=target, target_label=target_label,
         status=status, reason=reason, detail=detail,
         attachment_manifest=attachment_manifest,
         # The owner hears of an act that carries their words or their click; a task's act and the mind's own note
-        # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone.
-        publish=(not task_issued and not _mind_note(evt)) or bool(owner_message_id),
+        # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone, except on the
+        # owner message a task's relay keys its receipt on (that passes on no owner authority).
+        publish=(not task_issued and not _mind_note(evt)) or bool(_owner_message_receipt(evt.get("client_message_id"))),
     )
     for quote in evt.get("quotes") or []:
         source = quote.get("source") or {}
@@ -369,8 +348,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         carrier = str(_steer_receipt(
             ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
         ).get("routing_notice_carrier") or "")
-        if _notice_row_owed(evt, carrier, paired=True):
-            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal, carrier)
+        if _notice_row_owed(evt, carrier):
+            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal)
         log.info("steer_task: %s target %s for chat %s", refusal, target, chat_id)
         return
     # Idempotent delivery: a stable msg_id from client_message_id+target dedups
@@ -483,12 +462,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         if direct_lock_held:
             direct_lock.release()
     if refused is not None:
-        # Only the cancel refusal keeps an unlabelled act's paired web row here; any
-        # refusal whose ACK was not handed over tells its cause in this row (never a
-        # note of the mind's: ``_mind_note``).
+        # A refusal found inside the transaction is told like an early one: by the
+        # System row whenever its receipt selected it (``_notice_row_owed``).
         status, reason, carrier = refused
-        if _notice_row_owed(evt, carrier, paired=reason == "cancel_pending"):
-            _refusal_row(ctx, evt, target, target_label, status, reason, carrier)
+        if _notice_row_owed(evt, carrier):
+            _refusal_row(ctx, evt, target, target_label, status, reason)
     if delivered:
         if fence_generation_changed:
             ctx.persist_queue_snapshot(reason="acceptance_fence_owner_message")
