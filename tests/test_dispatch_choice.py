@@ -188,12 +188,15 @@ def test_the_dead_row_is_never_chosen_and_launches_nothing(assigning, monkeypatc
     assert "silence-dead" in claims
 
 
-@pytest.mark.parametrize("control", ["none", "pause_before", "pause_between", "latch_between", "resume_between"])
+@pytest.mark.parametrize("control", ["none", "pause_before", "pause_between", "latch_between", "resume_between",
+                                     "resume_elsewhere"])
 def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_launch(env, monkeypatch, control):
     """The chooser's read-ahead is a pre-selection, never the authority: an owner Pause installed after it read the
     fence, a root latch after it chose, or the root's money moved by a Resume or Pause after C2 admitted a selection
     made under it, is refused at the launch, which reads again under its own lock and before its put; a Pause the
-    chooser already saw is never claimed at all; with nothing between, the same pass launches."""
+    chooser already saw is never claimed at all; with nothing between, the same pass launches. A Pause another
+    process wrote moves no count this process keeps, so the put's refusal forgets the kept admission and the
+    next pass decides C2 from a full read and repairs the selection instead of choosing it again."""
     from ouroboros import owner_pause
     from ouroboros.budget_pause import set_budget_pause
     from supervisor.events_budget import _root_resume_state, _set_root_budget_pause_locked
@@ -203,7 +206,7 @@ def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_l
 
     worker, delivered = install_worker(env, monkeypatch)
     row = scheduled_child(env)
-    if control == "resume_between":  # the owner's choice of this child, made under the root's current money basis
+    if control.startswith("resume_"):  # the owner's choice of this child, made under the root's current money basis
         with queue._queue_lock:
             basis = _root_resume_state(queue, "root", env.data, actor_id="root")["basis"]
             row["_resume_selection"] = {"selected_by": "owner", "root_resume_basis": basis}
@@ -220,10 +223,15 @@ def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_l
     elif control == "latch_between":
         with queue._queue_lock:
             _set_root_budget_pause_locked("root", {"cause": "owner_pause", "fence_id": "after-the-choice"})
-    elif control == "resume_between":  # the root's money pause moves the basis the choice was admitted under
+    elif control.startswith("resume_"):  # the root's money pause moves the basis the choice was admitted under
         assert dispatch_choice._ADMITTED.get("launch-child"), "C2 admitted the selection at the choice"
-        set_budget_pause(env.data, "root", {"pause_id": "later", "state": "paused", "reason": "budget",
-                                            "pause_generation": 1})
+        with monkeypatch.context() as written:
+            if control == "resume_elsewhere":  # a worker process's write: this process's control count stands
+                from ouroboros import store_hot_facts
+
+                written.setattr(store_hot_facts, "note_written", lambda columns: None)
+            set_budget_pause(env.data, "root", {"pause_id": "later", "state": "paused", "reason": "budget",
+                                                "pause_generation": 1})
     release.set()
     assert env.gen.wait_idle(_WAIT_SEC)
     if control == "none":
@@ -231,6 +239,11 @@ def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_l
     else:
         assert delivered == [] and "launch-child" not in queue.RUNNING and worker.busy_task_id is None
         assert "_launch_claim" not in row and env.pending_ids() == ["launch-child"]
+    if control == "resume_elsewhere":
+        assert "launch-child" not in dispatch_choice._ADMITTED, "the put's refusal forgets the kept admission"
+        workers.assign_tasks()
+        assert env.gen.wait_idle(_WAIT_SEC)
+        assert "_resume_selection" not in row and delivered == [], "the next pass repaired the stale selection"
 
 
 # ---- C2: the in-memory identity decides only whether to read again ---------------------------------------------

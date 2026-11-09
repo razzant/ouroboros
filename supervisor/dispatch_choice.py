@@ -571,13 +571,18 @@ def resume_read(queue: Any, row: Dict[str, Any]) -> Optional[Tuple[str, Dict[Any
 
 
 def resume_admits(queue: Any, row: Dict[str, Any], read: Optional[Tuple[str, Dict[Any, Any]]]) -> bool:
-    """Under Q at the put: C2 from ``resume_read``'s facts; a row without a selection passes, one read without fails."""
+    """Under Q at the put: C2 from ``resume_read``'s facts; a row without a selection passes, one read without fails.
+    A refusal forgets the chooser's kept admission: the put saw a write its identity cannot see (another process's),
+    so the next pass decides C2 from a full read and repairs the selection instead of choosing it again."""
     from ouroboros import store_hot_facts
     from supervisor.events_budget import budget_resume_dispatch_allowed
 
     if not _carrier(row):
         return True
-    if read is None:
-        return False
-    with store_hot_facts.serving(read[1], strict=True):
-        return budget_resume_dispatch_allowed(queue, row, actor_id=read[0]) is True
+    admitted = False
+    if read is not None:
+        with store_hot_facts.serving(read[1], strict=True):
+            admitted = budget_resume_dispatch_allowed(queue, row, actor_id=read[0]) is True
+    if not admitted:
+        _ADMITTED.pop(_tid(row), None)
+    return admitted
