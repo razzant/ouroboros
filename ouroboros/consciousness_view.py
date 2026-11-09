@@ -61,9 +61,11 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     wake = snapshot.get("live_wake_task_id")
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
-    elif not requested_enabled:  # the places it already read: a Paused one does not hear either
+    elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
         hearing = sum(row.get("state") != "paused" for row in snapshot.get("places_brief") or [])
-        status, detail = "disabled", f"Off: no own wakes; {_hearing(hearing)}." if hearing else "Off: no own wakes."
+        unread = "places_brief" in snapshot and snapshot["places_brief"] is None
+        status, detail = "disabled", (f"Off: no own wakes; {_hearing(hearing)}." if hearing else
+                                      "Off: no own wakes; its places only hear." if unread else "Off: no own wakes.")
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:

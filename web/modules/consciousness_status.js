@@ -243,6 +243,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
             openSheet(place, { returnFocus: chip });
             return;
         }
+        if (!failed && doc.activeElement === door) { coverageNote.tabIndex = -1; coverageNote.focus(); }
         door.disabled = !failed;
         coverageNote.textContent = failed || tr('places.disconnected', 'This place is disconnected.');
         coverageNote.removeAttribute('data-i18n-authored');

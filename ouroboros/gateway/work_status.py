@@ -338,8 +338,11 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         silence = raw.get("silence_attention")
         if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
             # The timeout pass dated a silence (owner 09.11, Q2 A): the work's line says since when, first, until its
-            # own progress ends the episode; a fact for whoever waits, never a stop or a mark.
-            state["reasons"].insert(0, reason("no_progress", since=silence["last_progress_at"]))
+            # own progress ends the episode; a fact for whoever waits, never a stop or a mark. The owner's recorded
+            # Stop still leads: a silent work is the one that never reaches the step that would end it.
+            codes = [item["code"] for item in state["reasons"]]
+            at = codes.index("stop_requested") + 1 if "stop_requested" in codes else 0
+            state["reasons"].insert(at, reason("no_progress", since=silence["last_progress_at"]))
         return state
     state["confirmed"] = False
     return state

@@ -219,10 +219,12 @@ test('a wake in a place is a door to that place\'s sheet, read at the press; a f
         status.chip.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
         doors = status.shade.querySelectorAll('.cx-wake-door');
+        doors[0].focus();
         doors[0].click();
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(opened, [['slack-1', true]]);
         assert.equal(doors[0].disabled, true, 'a place gone since is no door');
+        assert.equal(document.activeElement, status.shade.querySelector('.cx-wakes-coverage'), 'its focus moves to the line saying why');
         assert.equal(status.shade.querySelector('.cx-wakes-coverage').textContent, 'This place is disconnected.');
     } finally {
         status?.destroy();

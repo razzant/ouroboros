@@ -784,6 +784,9 @@ def test_a_silent_working_member_says_since_when_until_its_own_progress():
     state = ws.classify_member(row("t", "working"), {"running": True, **silent})
     assert state["reasons"][0] == {"code": "no_progress", "text": "No recorded progress", "since": 1794190200.0}
     assert state["activity"] == "working" and state["live"] is True
+    # The owner's recorded Stop leads the line; the silence fact stays right behind it.
+    stopped = ws.classify_member(row("t", "working"), {"running": True, "cancel_pending": True, **silent})["reasons"]
+    assert [r["code"] for r in stopped[:2]] == ["stop_requested", "no_progress"]
     moved = {"silence_attention": {**silent["silence_attention"], "state": "progress_observed"}}
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])

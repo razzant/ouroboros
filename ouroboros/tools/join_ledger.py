@@ -172,7 +172,7 @@ def _load_direct_child_results(
 
 
 def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
+    """Return cancellation or the current task-tree exact-hash disposition."""
 
     # Explicit cancellation wins every completion race; late scratch results are
     # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):

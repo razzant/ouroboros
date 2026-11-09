@@ -71,11 +71,12 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
     ([{"state": "paused"}], "Off: no own wakes."),
     (None, "Off: no own wakes."),
+    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
 ])
 def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
     """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
     one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
-    snapshot = {} if brief is None else {"places_brief": brief}
+    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
     described = view.describe_consciousness_state(snapshot, False)
     assert (described["status"], described["detail"]) == ("disabled", detail)
     assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
