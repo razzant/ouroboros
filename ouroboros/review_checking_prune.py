@@ -27,12 +27,13 @@ write, the attempts that custody still holds whose seats are proven closed (#271
 of an old writer is released by its own proof, never by age. Its owner is the task its ``checkout.json`` names;
 a checkout made before the marker is owned only through a recorded round of that state, and goes
 only once older than the retention period. Targeted ``git worktree remove`` retires only this
-checkout's registration. A rejoin rebuilds a retired checkout at its frozen tree. An unreadable
-review state or a busy or unreadable seat keeps every such checkout; an unreadable marker or task
-row keeps its own. Isolated-checkout reuse and retirement share no per-token lock:
-a rejoin starting after the custody judgment can reuse the tree and then lose it
-during removal. The pass lock only serializes pruners; the seat/view locks above
-protect other objects. Rebuilding after completed retirement does not close that race.
+checkout's registration. A rejoin rebuilds a retired checkout at its frozen tree. Before every POST of a read-only
+seat's explicit continuation (``review_subject.restore_released_subject``) its checkout is put back under the
+custody locks of its marker's task and the deciding task, the locks this removal takes (``owner_keep.gate``), with a
+marker naming the deciding task (a live Continue successor holds it as ``task_live``); a removal re-reads the
+marker under its gate and keeps a checkout rewritten since it was judged. An unreadable review state or a busy or
+unreadable seat keeps every such checkout; an unreadable marker or task row keeps its own. A gate rejoin's reuse
+shares no such lock: one starting after the custody judgment can reuse the tree and then lose it during removal.
 """
 from __future__ import annotations
 
@@ -261,15 +262,27 @@ def _checkout_registration_gone(repo: pathlib.Path) -> bool:
     return False
 
 
-def _remove_unless_kept(data_root: Any, entry: pathlib.Path, rounds: tuple) -> str:
-    """The removal under the keep gate of the checkout's task, read as ``_checkout_hold`` reads it."""
+def _marker_text(entry: pathlib.Path) -> Optional[str]:
     from ouroboros.tools.review_subject import CHECKOUT_MARKER
 
     try:
-        task_id = str(json.loads((entry / CHECKOUT_MARKER).read_text(encoding="utf-8")).get("task_id") or "")
-    except (OSError, ValueError, AttributeError):
+        return (entry / CHECKOUT_MARKER).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _remove_unless_kept(data_root: Any, entry: pathlib.Path, rounds: tuple, judged: Optional[str]) -> str:
+    """The removal under the keep gate of the checkout's task, read as ``_checkout_hold`` reads it. ``judged``: the
+    marker as the hold judged it; one rewritten since (a released read-only checkout put back for its continuation
+    under the same gate, ``review_subject.restore_released_subject``) is a new checkout, kept for the next pass."""
+    current = _marker_text(entry)
+    try:
+        task_id = str(json.loads(current or "").get("task_id") or "")
+    except (ValueError, AttributeError):
         task_id = rounds[1].get(entry.name, "")
     with gate(data_root, task_id, timeout_sec=0) as why:
+        if not why and _marker_text(entry) != judged:
+            why = "rebuilt_since_judged"
         return f"{entry.name}: {why}" if why else _remove_checkout(entry)
 
 
@@ -310,9 +323,10 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             report["partial"] = True  # the checkouts not judged keep the row's holds
             return
         try:
+            judged = _marker_text(entry)  # what the hold reads; a marker rewritten before removal keeps it
             hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources,
                                   live=lambda task: task in live(), cutoff=cutoff)
-            error = "" if hold else _remove_unless_kept(data_root, entry, rounds)
+            error = "" if hold else _remove_unless_kept(data_root, entry, rounds, judged)
         except Exception as exc:  # an unreadable marker, row or tree keeps the checkout
             hold, error = "", f"{entry.name}: {type(exc).__name__}: {exc}"
         if error:
@@ -449,6 +463,7 @@ def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], 
         return {entry: "busy" for entry in chosen}
     try:
         causes: dict = {}
+        judged = {entry: _marker_text(entry) for entry in chosen}  # before the judgment the removal re-checks
         verdicts, outcome = dict(orphan_review_checkouts(data_root, live, causes=causes)), {}
         rounds: Optional[tuple] = None
         for entry in chosen:
@@ -463,7 +478,8 @@ def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], 
             if verdict == "offer" and not rounds:
                 outcome[entry] = "review_state_unreadable"
                 continue
-            outcome[entry] = causes.get(entry, verdict) if verdict != "offer" else "other" if _remove_unless_kept(data_root, entry, rounds) else ""
+            outcome[entry] = causes.get(entry, verdict) if verdict != "offer" else "other" if _remove_unless_kept(
+                data_root, entry, rounds, judged[entry]) else ""
         return outcome
     finally:
         _PASS_LOCK.release()

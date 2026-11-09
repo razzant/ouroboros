@@ -112,10 +112,11 @@ class AdvisoryReviewState:
             attempt=attempt,
         )
 
-    def next_attempt_number(self, repo_key: str, tool_name: str, task_id: str = "") -> int:
+    def next_attempt_number(self, repo_key: str, tool_name: str, task_id: str = "", *, above: int = 0) -> int:
+        """The next number of this task's attempts, never one at or below ``above`` (a number the caller still holds)."""
         candidates = self.filter_attempts(repo_key=repo_key, tool_name=tool_name, task_id=task_id)
         latest = max((int(item.attempt or 0) for item in candidates), default=0)
-        return latest + 1
+        return max(latest, int(above or 0)) + 1
 
     def _newest_stale_marker(self) -> Dict[str, str]:
         return {"ts": self.last_stale_from_edit_ts, "reason": self.last_stale_reason,

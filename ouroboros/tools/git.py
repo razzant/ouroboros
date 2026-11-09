@@ -1178,7 +1178,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=refusal))
     _commit_start = time.time()
     if not commit_message.strip():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty.")))
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ ERROR: commit_message must be non-empty." + (" Its review's attempt left the recent review history and the ledger record it was read back from keeps no commit message, so name one." if continuation and getattr(ctx, "_author_commit_source", None) is not None and not ctx._author_commit_source.commit_message else ""))))
     ctx._current_review_commit_message = commit_message
     if _managed_block:
         _record_commit_attempt(ctx, commit_message, "blocked",
@@ -1467,7 +1467,7 @@ def get_tools() -> List[ToolEntry]:
         "reason": {"type": "string", "default": "", "description": "Why these reviewers; required when an Advisory panel is narrowed. Missing reason refuses at $0 before staging."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."},
         "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by the panel's coupling questions to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Without a goal it is the intended transformation the panel's coupling questions judge the change against (completeness, forgotten adjacent surfaces)."},
-        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git, sending nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
+        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task, or of the predecessor its recorded Continue continues, returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git when the index holds exactly its reviewed bytes, else read its outcome back without staging; it sends nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
         "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference and no author_disposition: " + CONTINUE_SEATS_SCHEMA["description"]},
         "author_disposition": AUTHOR_DISPOSITION_SCHEMA,
         "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS, finding or obligation carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},

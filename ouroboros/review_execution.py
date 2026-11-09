@@ -58,7 +58,7 @@ from ouroboros.review_session_custody import (
     checkpoint_pending_invocation,
     owned_started_review_custody,
     recorded_review_shape,
-    review_recovery_facts, continuation_send_admitted,
+    review_recovery_facts, continuation_send_admitted, prepare_continuation_send,
     continuation_generation_end, continuation_send, join_recorded_review_continuation, stopped_review_failure,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
@@ -711,6 +711,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             raise ReviewRouteUnavailable("delegated retry token has no durable invocation; refusing a second paid run",
                                          code="review_custody_lost")
         if recovering:
+            prepare_continuation_send(invocation, custody_drive, record, run_id)  # every continuation POST, replays too
             generation_end = continuation_generation_end(invocation, record, run_id)
             source_request = record.get("work_order_source_request") or {}
             delivery_facts.update(source_request)
