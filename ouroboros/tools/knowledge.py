@@ -123,9 +123,6 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
     if note.state == "archived":
         return "Residency: archived, so it is not in the active knowledge index; knowledge_read still opens it."
     body = note.source.text_at(note.source.body_span) if note.source else note.text
-    person = str(note.metadata.get("type") or "").strip().casefold() == knowledge_store.PERSON_TYPE
-    loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
-               if person else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
     if note.address.scope == "global" and note.address.topic == OVERVIEW_TOPIC:
         before = (delta or {}).get('old_body_chars', len(body))
         after = len(body)
@@ -134,12 +131,16 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
                 f"delta {(after - before) / 4:+.2f} tokens (chars/4). "
                 "Effect applies at the next context build; an accepted session keeps its earlier capture. "
                 "Current route room: unknown here; compact_context inspects its actual observation.")
-    where = (f"the global knowledge index ({loaders})" if note.address.scope == "global"
-             else f"the {note.address.scope} knowledge index, loaded in that project's contexts")
+    project = f"the {note.address.scope} knowledge index, loaded in that project's contexts"
     tail = f"the body ({len(body)} chars) is read on demand with knowledge_read."
-    if isinstance(note.summary, str) and note.summary.strip():
-        return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
-    return f"Residency: it has no summary, so {where} shows only its title, marked (no summary); {tail}"
+    if not (isinstance(note.summary, str) and note.summary.strip()):
+        where = "the global knowledge index" if note.address.scope == "global" else project + ","
+        return f"Residency: it has no summary, so {where} shows its address and title, and its whole view marks it (no summary); {tail}"
+    loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
+               if knowledge_store.outline_keeps_summary(note.metadata.get("type"))
+               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
+    where = f"the global knowledge index ({loaders})" if note.address.scope == "global" else project
+    return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
 
 
 def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> dict:

@@ -121,13 +121,10 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]
     # Where a summary is in front of me: a global note's in every room and place, a project note's in its project
-    # (context_sections.knowledge_navigation_sections). The fact sits in the tool text, which the custom codec of
-    # direct OpenAI routes delivers whole while it drops parameter prose (openai_chat_custom._compact_schema).
-    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+    # (context_sections.knowledge_navigation_sections). The fact sits in the tool text, which direct OpenAI routes
+    # carry whole (test_openai_chat_custom_contract.test_actual_profile_catalogs_carry_every_tool_lead_whole).
     audience = "(a global note's in every room and place I work in, a project note's in that project)"
     assert audience in schemas["knowledge_write"]["description"]
-    wire = project_function_tools_to_openai_custom([{"type": "function", "function": schemas["knowledge_write"]}]).wire_tools()
-    assert audience in wire[0]["custom"]["description"]
 
     # …and the retained-frontmatter claim is true: a body-only overwrite keeps
     # the authored summary that the index renders.

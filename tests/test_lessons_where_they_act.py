@@ -99,6 +99,8 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     assert "read on demand" in summarized
     bare = _write(ctx, "lessons/bare", "No summary here.")
     assert "it has no summary" in bare and "(no summary)" in bare
+    assert "shows its address and title, and its whole view marks it (no summary)" in bare
+    assert "only its title" not in bare and "outline" not in bare
     overview = _write(ctx, "overview", "What holds now.", summary="s")
     # The receipt names the integrating contexts that hold the overview whole and the helpers that read it
     # on demand (BIBLE P1, the subject of continuity).
