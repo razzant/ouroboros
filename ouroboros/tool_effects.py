@@ -1,4 +1,4 @@
-"""What a tool call does to the world outside Ouroboros: one fact, three consumers.
+"""External tool effects shared by place policy, Safety and routeless-final observations.
 
 A connector declares each of its tools in the manifest's ``tools:`` list with
 ``effect: read | message | gesture | write`` (absent = ``write``) and, where it has one,
@@ -19,9 +19,9 @@ value a ``message`` with those targets (a connector-owned fact, e.g. the API
 method of a generic Slack tool; core never lists provider methods). Selectors
 may be dotted (``body.channel``) to name a nested argument.
 
-Consumers: the Advises refusal (``place_guard``), Silent/Paused refusal of
-writes aimed at a place (``place_guard``), and the Supervisor (``safety``:
-declared reads skip Light/Full checks; ``message`` gets the speech semantics).
+Consumers: ``place_guard``'s Advises and targeted Silent/Paused refusals,
+routeless-note coverage (``place_reply``), and ``safety`` (declared reads skip
+Light/Full checks; ``message`` gets speech semantics).
 Built-in tools are governed by their own policy tables and answer ``""``.
 """
 

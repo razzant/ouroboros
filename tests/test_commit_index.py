@@ -1016,7 +1016,7 @@ def _staged_merge(ctx, shape: str, *, before_merge=None) -> list:
     repo = ctx.repo_dir
     _git(repo, "checkout", "-q", "-b", "contribution")
     (repo / "contrib").mkdir()
-    (repo / "contrib" / "feature.txt").write_text("contributed\n", encoding="utf-8")
+    (repo / "contrib" / "feature.txt").write_bytes(b"contributed\n")
     _git(repo, "add", "contrib/feature.txt")
     _git(repo, "-c", "user.name=Contributor", "-c", "user.email=contrib@example.invalid", "commit", "-qm", "contribution")
     _git(repo, "checkout", "-q", ctx.branch_dev)
@@ -1074,7 +1074,8 @@ def test_a_pathless_reset_drops_a_staged_merge(task):
     assert _merge_state(task.repo_dir) == dict.fromkeys(_MERGE_STATE)
 
 
-def test_the_managed_repair_after_the_shared_unstage_keeps_its_target(task, monkeypatch):
+@pytest.mark.parametrize("text_newline", [None, "\r\n"])
+def test_the_managed_repair_after_the_shared_unstage_keeps_its_target(task, monkeypatch, text_newline):
     """The managed resolver shares the whole-tree unstage and then re-asserts its target MERGE_HEAD: the target
     stays, and MERGE_MODE and MERGE_MSG now survive beside it."""
     from types import SimpleNamespace
@@ -1087,6 +1088,16 @@ def test_the_managed_repair_after_the_shared_unstage_keeps_its_target(task, monk
     _head, target = _staged_merge(task, "diverged")
     merging = _merge_state(repo)
     monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+    if text_newline is not None:
+        # Model Windows text-mode translation on any host; Git itself wrote the baseline bytes.
+        original_open = pathlib.Path.open
+
+        def open_with_platform_newline(path, mode="r", *args, **kwargs):
+            if path.name == "MERGE_HEAD" and mode == "w" and kwargs.get("newline") is None:
+                kwargs["newline"] = text_newline
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", open_with_platform_newline)
 
     git._unstage_candidate(SimpleNamespace(repo_dir=repo, _staged_selection=WHOLE_INDEX))
     reestablish_merge_head(target)

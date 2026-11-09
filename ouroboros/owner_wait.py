@@ -1134,7 +1134,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     """Rebind the saved cognition onto the live loop objects (shared by every
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
-    from ouroboros.loop_delivery import DeliveryCandidate
+    from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
 
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
@@ -1201,7 +1201,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         if key != "repair_attempted"}) if candidate else None
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
-        if value.control_episode_seen or value.finalization_control not in {"candidate", "owner_revision_required"}:
+        if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:
             ctx._delivery_control_required = True
             value.control_episode_seen = True
 

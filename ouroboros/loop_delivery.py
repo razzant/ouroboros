@@ -80,6 +80,11 @@ class DeliveryCandidate:
     owner_source_sha256: str = ""
     quiet: bool = False  # bytes of a wake's silent selection: replaced, never published, by other prose
 
+    @property
+    def owes_no_selection(self) -> bool:
+        """Its next answer is fresh prose: a host-shown round (``FRESH_ANSWER_CONTROLS``) outside a control episode."""
+        return self.finalization_control in FRESH_ANSWER_CONTROLS and not self.control_episode_seen
+
 
 # Host continuations retain the answer and require an explicit next selection.
 # These states retain the concrete action/handover reason, not another protocol.
@@ -91,21 +96,14 @@ _DELIVERY_HOLD_CONTROLS = frozenset({
     _CHILD_ABSORPTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
+# After these host-shown rounds (an owner follow-up, a routeless final's note) the answer is fresh, owing no selection.
+ROUTELESS_NOTED_CONTROL = "routeless_final_noted"
+FRESH_ANSWER_CONTROLS = frozenset({"owner_revision_required", ROUTELESS_NOTED_CONTROL})
 # The candidate degradations a normal exit derives from its own host suffixes (an unsettled child, an open plan).
 _SUFFIX_MARKS = frozenset({"host_child_status_suffix", "plan_review_advisory"})
 # Header of the host's own rendered control block; identifies the transcript's
 # control history the way ``acceptance_observation`` marks the observation rows.
 _DELIVERY_CONTROL_MARKER = "[DELIVERY_FINALIZATION_CONTROL]"
-_OBSERVATION_MARKER = "[ACCEPTANCE_SUBJECT_OBSERVATION]"
-
-
-def _selector_rendered(messages: List[Dict[str, Any]], sha256: str) -> bool:
-    """Whether Main was shown a source selector naming ``sha256`` — a host row it
-    could act on. A refusal about a selector never rendered is the host's, not Main's."""
-    return bool(sha256) and any(
-        _OBSERVATION_MARKER in text and sha256 in text
-        for text in (str(row.get("content") or "") for row in messages if row.get("role") == "user")
-    )
 
 
 def _swarm_handoff_attempt(ctx: Any) -> Dict[str, Any]:
@@ -1477,7 +1475,11 @@ def _no_tool_final_answer(
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
             return held("admission_seal")
-    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
+    from ouroboros.place_reply import prepare_focus_reply, refusal_facts, routeless_note
+    note = "" if stopping else routeless_note(tools._ctx, limit_ctx, llm_trace, str(content or ""), candidate, origin)
+    if note and _show_routeless_note(tools, limit_ctx, llm_trace, candidate, str(content), note, origin=origin):
+        solving_again()  # the mind reads the fact, then sends, stays quiet or keeps its words as the record
+        return None
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
     if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
         messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
@@ -1496,6 +1498,39 @@ def _no_tool_final_answer(
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)
     return _loop()._handle_text_response(str(content or ""), llm_trace, limit_ctx.accumulated_usage)
+
+
+def _show_routeless_note(tools: ToolRegistry, limit_ctx: Any, trace: dict, candidate: DeliveryCandidate,
+                         content: str, note: str, *, origin: str) -> bool:
+    """Return the final once beside its routeless fact (``place_reply.routeless_note``), first saved with its spent mark
+    at a ``ready`` boundary: a restart reads the note before any final is accepted again, never twice. A save that fails
+    or writes nothing shows nothing and this finish proceeds. Not a hold: it arms no control an earlier episode did not."""
+    from ouroboros.place_reply import NO_SEND_KEY, note_rows
+    ctx, messages, state, start = tools._ctx, limit_ctx.messages, trace[NO_SEND_KEY], len(limit_ctx.messages)
+    fields = ("_delivery_control_required", "_completion_selected", "_presence_completion")
+    before = (candidate.finalization_control, *(getattr(ctx, name, None) for name in fields))
+    messages.extend(note_rows(content, note, origin))  # the exact rows the money check priced
+    state["noted"], candidate.finalization_control = True, ROUTELESS_NOTED_CONTROL
+    ctx._delivery_control_required, ctx._completion_selected, ctx._presence_completion = candidate.control_episode_seen, None, None
+    _loop()._publish_delivery_candidate(tools, candidate, trace)
+    try:
+        saved = working_checkpoint.save_round(limit_ctx, "ready")
+    except Exception:
+        log.warning("Routeless final note of %s not saved", limit_ctx.task_id, exc_info=True)
+        saved = False
+    if saved:
+        working_checkpoint.flush_content_acks(ctx)
+    else:  # no durable state holds the note: it is not shown, and this finish proceeds as it was
+        del messages[start:]
+        state.pop("noted")
+        candidate.finalization_control = before[0]
+        for name, value in zip(fields, before[1:]):
+            setattr(ctx, name, value)
+        _loop()._publish_delivery_candidate(tools, candidate, trace)
+        return False
+    ctx._completion_pair_appended = ctx._completion_pair_private = True  # its rows are in; no hold notice follows
+    observe_completion_hold(tools, limit_ctx, origin, "routeless_final")
+    return True
 
 
 def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,

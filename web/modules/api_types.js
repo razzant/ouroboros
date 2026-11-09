@@ -11,6 +11,7 @@
  * @property {'available'|'unavailable'} status
  * @property {Array<string>} open_run_ids
  * @property {Array<string>} unrecorded_run_ids
+ * @property {Array<string>=} closed_unrecorded_run_ids
  * @property {Array<string>} pending_invocation_ids
  */
 /** @typedef {Object} StateResponse
@@ -736,7 +737,7 @@
  * @property {string=} routing_token
  * @property {string=} cause  // host-authored owner sentence for a REFUSED act; absent on scheduled/delivered/pending and on the picker frame
  * @property {string=} reasoning_effort  // the explicit start a New task picked from this picker card requests
- * @property {"routing_ack"|"system"=} routing_notice_carrier  // this ACK is the selected carrier of the act's owner notice; never delivery proof
+ * @property {"routing_ack"|"system"=} routing_notice_carrier  // the notice's selected carrier: this ACK, or the System row when it answers no chat row; never delivery proof
  * @property {Object=} reply_to  // the owner message that notice answers (host Reply reference)
  * @property {boolean} suppress_bubble
  * @property {string=} ts
@@ -1560,7 +1561,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.10.1-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.10.2-alpha.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

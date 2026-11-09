@@ -1264,6 +1264,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
+            from ouroboros.place_reply import note_dispatch
+            note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):

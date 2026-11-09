@@ -445,6 +445,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "DeliveryCandidate", "_append_or_merge_user_content",
         "_append_or_merge_user_message", "_current_delivery_candidate",
         "_emit_checkpoint_event", "_finalize_forced_services",
+        "_finalize_loop_candidate",  # a pending routeless note's retained final finishes before a rail (#2570)
         "_forced_fallback_result", "_forced_final_answer",
         "_handle_forced_finalization", "_last_assistant_text", "_owner_marked_content",
         "_measure_main_context_view", "_measure_round_main_fit",

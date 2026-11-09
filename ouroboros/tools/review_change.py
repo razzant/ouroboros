@@ -1254,6 +1254,7 @@ def _handle_new_review_change(
 def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, continue_seats: Any = None,
                           _resolved_binding: Any = None, **args: Any) -> str:
     from ouroboros.review_continuation import ContinuationRefused
+    from ouroboros.review_state_records import ReviewStateLockError
     from ouroboros.review_waiting import publish_delivery
     from ouroboros.tools.review_collection import collect_change
 
@@ -1275,6 +1276,12 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, con
             text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         except ContinuationRefused as exc:  # a typed $0 refusal naming the current offer
             return json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str)
+        except ReviewStateLockError as exc:  # recoverable: the wave and its record stay as they are (#2779)
+            from ouroboros.tools.review_collection import state_busy_refusal
+            from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE",
+                                                        text=state_busy_refusal(exc)))
         except (ValueError, LookupError) as exc:
             return argument_refusal(ctx, "TOOL_ARG_ERROR (review_change)", [str(exc)],
                                     effect="No reviewer was dispatched.")

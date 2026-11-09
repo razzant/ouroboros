@@ -332,6 +332,27 @@ def continuation_send(invocation: Any) -> bool:
     return str(getattr(invocation, "operation_id", "") or "").startswith(PREFIX)
 
 
+def prepare_continuation_send(invocation: Any, data_root: Any, record: Optional[Dict[str, Any]], run_id: str) -> None:
+    """Before EVERY POST of an explicit continuation's recorded start (no run bound yet), the first send and a crash or
+    restart replay alike: the released read-only checkout its START names is put back from the START row's exact
+    mapping (``review_continuation.RESTORE_KEY``, ``review_subject.restore_released_subject``). A failure raises before
+    any POST, so the start stays pending, decided and unsent, for a later collection to repair; a start with no
+    mapping (a writable seat, a live root, an older row) is untouched."""
+    from ouroboros.review_continuation import RESTORE_KEY
+
+    mapping = (record or {}).get(RESTORE_KEY)
+    if run_id or not continuation_send(invocation) or not isinstance(mapping, dict) or not mapping.get("root"):
+        return
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.tools.review_subject import restore_released_subject
+
+    try:
+        restore_released_subject(data_root, mapping)
+    except ValueError as exc:
+        raise ReviewRouteUnavailable(f"the reviewed checkout this continuation reads is unavailable: {exc}; its "
+                                     "recorded start was not POSTed", code="review_subject_unavailable") from exc
+
+
 def continuation_generation_end(invocation: Any, record: Optional[Dict[str, Any]], run_id: str) -> Optional[float]:
     """When an explicit continuation's successor must stop generating, on this process's monotonic clock: the instant
     its START recorded (``generation_end_at``: the original window narrowed by the owner deadline and task window

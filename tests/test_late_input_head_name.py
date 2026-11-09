@@ -34,15 +34,17 @@ QUESTIONS = (("q1", QUESTION), ("q2", "Should migrations run on deploy?"), ("q3"
 COINED = "Postgres for the new service"
 
 
+_LIGHTS: list = []  # this test's Light doubles, for _namers_settle_before_the_patches_undo
+
+
 class _Light:
-    """Light as the namer meets it: records each request it is asked to name, then coins ``coin`` or fails.
-    ``hold`` keeps the call open until it is set (a namer that settles late)."""
+    """Light as the namer meets it: the client the real ``project_naming.llm_project_name`` is handed
+    (``llm_client``). Records each request it is asked to name, then coins ``coin`` or fails. ``hold`` keeps
+    the call open until it is set (a namer that settles late)."""
 
     def __init__(self, coin="", hold=None):
         self.coin, self.hold, self.requests = coin, hold, []
-
-    def __call__(self, *_args, **_kwargs):  # LLMClient()
-        return self
+        _LIGHTS.append(self)
 
     def chat(self, messages, **_kwargs):
         self.requests.append(str(messages[0]["content"]).split("Owner request:\n", 1)[1])
@@ -150,9 +152,16 @@ def _lane(root, monkeypatch, coin="", *, hold=None, carrier=True):
     monkeypatch.setattr(mb, "load_state", lambda: {"session_id": "s-1"})
     monkeypatch.setattr(mb, "publish_event", lambda *_a, **_k: None)
     monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
-    light = _Light(coin, hold)
-    monkeypatch.setattr("ouroboros.llm.LLMClient", light)
-    monkeypatch.setattr("ouroboros.project_naming._light_naming_model", lambda: "light-test")
+    # Light reaches the namer as its client, never as ``ouroboros.llm.LLMClient``: a module the lane imports first
+    # (the carrier's ``agent`` and its loop) would keep that name bound to Light for the rest of the process (#2853).
+    from ouroboros import project_naming
+
+    light, namer = _Light(coin, hold), project_naming.llm_project_name
+    monkeypatch.setattr(project_naming, "llm_project_name",
+                        lambda *args, **kwargs: namer(*args, **{**kwargs, "llm_client": light}))
+    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "light-test")
+    for send in ("chat", "chat_async"):  # any other model client of the lane sends nothing
+        monkeypatch.setattr(f"ouroboros.llm.LLMClient.{send}", lambda *_a, **_k: pytest.fail("no provider call"))
     get_direct_activity_registry().clear()
     return SimpleNamespace(bridge=bridge, frames=frames, app=_decision_app(root, monkeypatch), light=light,
                            spare=spare, supervisor=_Supervisor(bridge))
@@ -228,6 +237,23 @@ def _join_namers(task_id):
         if thread.name in {f"namer-{task_id}", f"namer-call-{task_id}"}:
             thread.join(10)
             assert not thread.is_alive()
+
+
+@pytest.fixture(autouse=True)
+def _namers_settle_before_the_patches_undo(monkeypatch):
+    """A namer a test leaves waiting in Light (a ``hold`` never set: the test failed or ended first) is released and
+    joined while this test's patches still stand, never finishing later in the next test's queue and Light. Its
+    ``monkeypatch`` argument orders this teardown before monkeypatch's own undo."""
+    previous_threads = set(threading.enumerate())
+    yield
+    lights, _LIGHTS[:] = list(_LIGHTS), []
+    for light in lights:
+        if light.hold is not None:
+            light.hold.set()
+    for thread in threading.enumerate():
+        if thread not in previous_threads and thread.name.startswith("namer-"):
+            thread.join(10)
+            assert not thread.is_alive(), f"{thread.name} did not settle"
 
 
 def _receipt(lane, root, client_message_id, chat_id):

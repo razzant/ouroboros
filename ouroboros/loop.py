@@ -29,7 +29,6 @@ from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros import working_checkpoint
 from ouroboros.context import build_user_content  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-from ouroboros.context_budget import ContextReclaimRequest  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.utils import estimate_tokens, sanitize_tool_result_for_log, truncate_review_artifact  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -148,7 +147,7 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
         ctx._completion_selected = None
         ctx._presence_completion = None
         candidate = getattr(ctx, "_delivery_candidate", None)
-        plain_followup = candidate is not None and candidate.finalization_control == "owner_revision_required" and not candidate.control_episode_seen
+        plain_followup = candidate is not None and candidate.owes_no_selection
         if not plain_followup and candidate is not None:
             candidate.control_episode_seen = True
             ctx._delivery_control_required = True
@@ -495,6 +494,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
     else:
         resumed = (*route, cost_ceiling, False, False, False)
+        from ouroboros.place_reply import seed_no_send
+        seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
     if carried is not None:
         carried.reentered(tools._ctx, messages)
     from ouroboros.subagent_bootstrap import append_startup_receipt
@@ -515,7 +516,7 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
         return state
     except Exception as exc:
         log.warning("Working recovery source unusable for %s", getattr(ctx, "task_id", ""), exc_info=True)
-        ctx.working_recovery = None
+        ctx.working_recovery, ctx._working_recovery_lost = None, True  # a lost source still precedes this start
         messages.append({"role": "user", "content": (
             "[SYSTEM NOTICE]\nThis task was interrupted and its saved working state could not be restored "
             f"({type(exc).__name__}). It starts again from the original request: earlier tool effects may "
