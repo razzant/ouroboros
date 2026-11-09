@@ -2841,27 +2841,27 @@ Publish never downloads the scanner automatically. Typed failures return the
 completed stage, external effects, and a repair hint; Ouroboros decides whether
 to inspect, repair, re-review, retry, clean up, or stop.
 
-A successful publication also writes a durable local receipt to
-`data/state/skills/<name>/ouroboroshub.json` (`published` section: slug,
-version, content hash, repository, PR number/url, timestamp). The receipt is
-best-effort: a write failure is disclosed as `publication_recorded: false` in
-the tool result and never cancels the real PR. The skill's details show it as
-quiet submission history: the submitted version (not the current local one),
-the PR link and whether the local files now differ from the submitted copy. It
-is history, not a status: it never claims that the PR merged and never gates an
-action. The receipt survives uninstall (including the startup cleanup of
-uninstalled state) and reinstall; a republish overwrites it, and an explicit
-**Delete** of a local skill removes it with the rest of that skill's state.
+Successful publication best-effort writes a durable `published` receipt in
+`data/state/skills/<name>/ouroboroshub.json`: slug, submitted version, content
+hash, repository, PR number/URL and timestamp. Write failure is disclosed as
+`publication_recorded: false` without cancelling the real PR. Details show quiet
+submission history: that version (not the local one), the PR link and whether
+local files differ. It never claims merge or gates actions. Uninstall (including
+startup cleanup) and reinstall keep it; republishing replaces it; explicit
+**Delete** removes it with the skill's state.
 
-Forgetting the record in that history deliberately clears the local receipt.
-Nothing else needs it: the installed files, review and grants stay, the GitHub
-PR is not closed or changed, and installs and updates never wait for it. It
-clears the receipt shown; if another publication replaced it, refresh first.
+Forget clears only the displayed receipt; refresh if another publication replaced
+it. Installed files, review, grants and the GitHub PR stay unchanged; installs
+and updates never wait for this history.
 
 For an update of a catalog entry, the tool result and PR body name both the
-current catalog version and the proposed version. Versions are opaque strings:
-an older-looking or non-semantic version is allowed, while an identical version
-still needs to change before publishing an update.
+current catalog version and the proposed version; versions are opaque strings,
+so an older-looking or non-semantic one is allowed and only an identical one is
+refused. Before anything is written, the skill's files and entry at the
+destination are compared with the release its install record names for that
+folder: what the destination changed since, or would lose without such a
+release, is replaced only on Ouroboros's decision bound to that comparison,
+which the PR records.
 
 Publication succeeds only when the task records a validated pull-request
 receipt in the destination repository for this exact skill. A branch,

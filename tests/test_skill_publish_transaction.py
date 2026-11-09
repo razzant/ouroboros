@@ -140,7 +140,7 @@ def _install_transaction_fakes(
     monkeypatch.setattr(skill_publish, "fetch_upstream_file", lambda *_a, **_k: None)  # an older hub: no hub.json
     monkeypatch.setattr(skill_publish, "fetch_branch_head", lambda _ctx, _owner, _repo, branch: (BASE_SHA, branch or "main"))
     monkeypatch.setattr(skill_publish, "fetch_repository", lambda *_a: {"default_branch": "main", "can_push": False})
-    monkeypatch.setattr(skill_publish, "fetch_tree_paths", lambda *_a: [])
+    monkeypatch.setattr(skill_publish, "fetch_tree_blobs", lambda *_a, **_k: {})
 
     def no_merge(*_args):
         raise AssertionError("only a git destination this account may push to merges its request")
@@ -214,6 +214,15 @@ def _install_transaction_fakes(
 
     monkeypatch.setattr(skill_publish, "LLMClient", FakeLLM)
     return ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="task-1"), events, captured
+
+
+def _installed_from_destination(drive: pathlib.Path, folder: str = "skills/demo", commit: str = BASE_SHA) -> None:
+    """An install record naming the fake destination's folder at ``commit`` as the local copy's release."""
+    from ouroboros.skill_install_record import write_install_record
+
+    write_install_record(drive, "demo", {
+        "source": {"id": "ouroboros", "kind": "hub", "name": "Ouroboros", "url": "https://github.com/hub/project"},
+        "release": {"version": "0.9.0", "digest": "0" * 64, "commit": commit, "path": folder}, "basis": "trusted"})
 
 
 def _submit(ctx: ToolContext, **kwargs):
@@ -563,6 +572,7 @@ def test_update_deletes_files_absent_from_exact_snapshot(monkeypatch, tmp_path):
         tmp_path,
         snapshot=_snapshot(),
     )
+    _installed_from_destination(tmp_path)  # the row is the release this copy came from: removing a file is local
     old_catalog = {
         "skills": [
             {
