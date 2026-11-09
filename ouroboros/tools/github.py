@@ -32,6 +32,7 @@ from functools import wraps
 from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
+from ouroboros.platform_layer import PATH_SEP, common_tool_directories
 from ouroboros.secret_masking import redact_known_values
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult, _publish_tool_result, _replace_tool_result
@@ -273,7 +274,13 @@ def github_token_from_env_or_settings() -> str:
 def _gh_env(ctx: ToolContext) -> dict:
     # Only the public family is exported: gh sends it to github.com and *.ghe.com alone, and an Enterprise host
     # keeps its own credential, so a public token is never copied into an enterprise variable.
+    # A desktop launch can inherit a PATH without the folder holding gh (POSIX resolves gh on this env's PATH):
+    # the platform's common tool folders follow every inherited entry here, so the inherited order still decides
+    # and this process's own environment is unchanged.
     env = os.environ.copy()
+    path = env.get("PATH", "")
+    if extra := common_tool_directories(path):
+        env["PATH"] = PATH_SEP.join([part for part in (path, *extra) if part])
     token = github_token_from_env_or_settings()
     if token:
         env["GH_TOKEN"] = token

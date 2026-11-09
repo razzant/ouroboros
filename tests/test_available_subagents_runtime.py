@@ -906,7 +906,7 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
             AssertionError("an unacknowledged wake must replay before another poll")
         ),
     ).text)
-    assert replay == first
+    assert replay.pop("replay_of")["fresh_observation"] is False and replay == first  # marked, else as published
     assert acknowledge_pending_wake(ctx, replay)
     assert acknowledged_task_message_ids(tmp_path, "child1") == {"m1"}
 

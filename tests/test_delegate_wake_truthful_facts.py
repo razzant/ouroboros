@@ -173,6 +173,7 @@ def test_every_wake_measures_the_whole_sleep_and_replays_it_exactly(tmp_path, mo
     clock.now += 500.0
     replay = json.loads(supervised_wait(ctx, "run-1", wait_once=lambda *_a, **_k: (_ for _ in ()).throw(
         AssertionError("a pending wake replays before any new observation"))).text)
+    assert replay.pop("replay_of")["fresh_observation"] is False  # labelled as a replay (#2992)
     assert replay == wake                        # recorded facts, nothing added since
 
 
@@ -211,6 +212,7 @@ def test_an_old_pending_wake_without_sleep_replays_unchanged(tmp_path):
     path.write_text(json.dumps({"schema": 1, "run_id": "run-1", "pending_wake": {
         "wake_id": "w-old", "attempt_key": "1", "payload": stored}}), encoding="utf-8")
     replay = json.loads(supervised_wait(ctx, "run-1", wait_once=_settled("run-1")).text)
+    assert "published_at" not in replay.pop("replay_of")  # a replay label without an invented time (#2992)
     assert replay == stored                       # nothing invented for an old record
 
 

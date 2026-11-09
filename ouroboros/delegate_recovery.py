@@ -1263,6 +1263,83 @@ def adopt_handoff(ctx: Any, task: Mapping[str, Any]) -> dict[str, Any]:
             "holders": receipts, "cause": row.get("cause"), "liveness": "unobserved" if saved else "per_holder"}
 
 
+def seen_without_cut_mail(ctx: Any, seen: Any, payload: Any, transcript: Any) -> Any:
+    """``seen`` less the mail of ``payload`` (a pending or recovery re-queued wake) a still-present view showed cut.
+
+    Base 1a0e1e9d counted a spilled wake's cut mail summary as seen and saved it, so narrowing a replay or a
+    startup receipt by that mark would ACK words never shown; the full words travel in that dated wake instead.
+    Positive identity only: the tool row's own record over its current bytes, a complete spilled view of THIS
+    wake (``_cut_view_match``) and, per message id, an exact cut prefix of the canonical text with its omitted
+    count. An unrecorded, folded or rewritten row, or another wake's view, identifies nothing (the disclosed
+    limit: today's narrowing); a later whole direct delivery (a non-carried owner directive with the same id and
+    text) keeps its mail seen; no read counts as whole. Each recovery is a wake-owned diagnostic row."""
+    from ouroboros.tool_result_record import logical_tool_result_text, read_tool_result_record
+
+    events = payload.get("wake_events") if isinstance(payload, dict) else None
+    canonical = {str(event["msg_id"]): str(event.get("text") or "") for event in events or ()
+                 if isinstance(event, dict) and event.get("msg_id") and "text" in event}
+    marked = set(seen or ()) & set(canonical)
+    if not marked or not transcript:
+        return seen
+    marked -= {str(row.get("msg_id")) for row in getattr(ctx, "_owner_directives", None) or ()
+               if isinstance(row, dict) and not row.get("carried")
+               and canonical.get(str(row.get("msg_id"))) == row.get("words", row.get("content"))}
+    if not marked:  # every marked mail was delivered whole: no transcript read
+        return seen
+    cut, views = set(), []
+    for row in transcript:
+        try:
+            if row.get("role") != "tool" or read_tool_result_record(row).get("state") != "recorded":
+                continue
+            # The verified row may trail its JSON envelope with host notes (e.g. anchored marks).
+            view, _end = json.JSONDecoder().raw_decode((logical_tool_result_text(row.get("content")) or "").lstrip())
+            delivery = view.get("wake_delivery")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not isinstance(delivery, dict) or delivery.get("complete") is not False:
+            continue
+        shown = {str(event["msg_id"]) for event in view.get("wake_events") or () if isinstance(event, dict)
+                 and str(event.get("msg_id")) in marked and type(event.get("text_omitted_chars")) is int
+                 and event["text_omitted_chars"] > 0 and isinstance(event.get("text"), str)
+                 and canonical[str(event["msg_id"])].startswith(event["text"])
+                 and len(canonical[str(event["msg_id"])]) - len(event["text"]) == event["text_omitted_chars"]}
+        match = _cut_view_match(ctx, payload, view, delivery.get("source")) if shown else ""
+        if match:
+            cut |= shown
+            views.append({"tool_call_id": str(row.get("tool_call_id") or ""), "match": match})
+    if not cut:
+        return seen
+    custody.emit(custody.custody_root(ctx), "delegate_supervision_cut_mail_recovered", {
+        "task_id": str(getattr(ctx, "task_id", "") or ""), "wake_id": str(payload.get("supervision_wake_id") or ""),
+        "msg_ids": sorted(cut), "views": views})
+    return set(seen) - cut
+
+
+def _cut_view_match(ctx: Any, payload: dict, view: dict, ref: Any) -> str:
+    """How a cut view belongs to the selected wake, ``""`` when it does not. A view naming this wake's id is its
+    own; its referenced source then only describes it: ``canonical_bytes`` (the bytes its producer spilled,
+    ``json.dumps(payload, ensure_ascii=False, indent=2)``, proven by size and sha256 without a read),
+    ``source_read`` (read and equal), ``source_unavailable`` or ``source_unequal``. A recovery re-queue
+    (``holders.wait_fields``: ``replayed_after_worker_loss``, a new id) is matched only when that source proves
+    the old canonical wake (its old id back, the marker gone); any other id is another wake's view."""
+    same = view.get("supervision_wake_id") == payload.get("supervision_wake_id")
+    if not same and payload.get("replayed_after_worker_loss") is not True:
+        return ""
+    canonical = dict(payload)
+    if not same:
+        canonical.pop("replayed_after_worker_loss", None)
+        canonical["supervision_wake_id"] = view.get("supervision_wake_id")
+    raw = json.dumps(canonical, ensure_ascii=False, indent=2).encode("utf-8")
+    if isinstance(ref, dict) and ref.get("size") == len(raw) and ref.get("sha256") == hashlib.sha256(raw).hexdigest():
+        return "canonical_bytes"
+    try:
+        from ouroboros.artifacts import read_actor_source_bytes, task_id_for_artifacts
+
+        read = json.loads(read_actor_source_bytes(pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx), ref))
+    except Exception:
+        return "source_unavailable" if same else ""
+    return "source_read" if read == canonical else ("source_unequal" if same else "")
+
 __all__ = [
     "CAUSE_PLANNED_SELF_RESTART",
     "CAUSE_WORKER_CRASH",
@@ -1270,6 +1347,7 @@ __all__ = [
     "PLANNED_RESTART_PARENT_ENV",
     "PLANNED_RESTART_TRANSACTION_ENV",
     "arm_active_planned_restart_transaction",
+    "seen_without_cut_mail",
     "acknowledge_observed_restart_exit",
     "adopt_handoff",
     "authority_fingerprint_from_context",

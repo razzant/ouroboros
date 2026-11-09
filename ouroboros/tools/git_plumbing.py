@@ -99,10 +99,12 @@ WHOLE_INDEX = "whole index"  # ``_staged_selection`` after a whole-tree ``git ad
 def _unstage_candidate(ctx: ToolContext) -> None:
     """Undo exactly this call's staging (``ctx._staged_selection``, recorded by
     ``_stage_candidate_for_review``): the recorded paths, so a path someone else staged
-    stays staged; the whole index after a whole-tree add; nothing before any staging."""
+    stays staged; the whole index after a whole-tree add; nothing before any staging.
+    Both are path resets: a pathless ``git reset HEAD`` would also drop a staged merge
+    (MERGE_HEAD, MERGE_MODE, MERGE_MSG). ``:/`` names the whole tree from any directory."""
     paths = getattr(ctx, "_staged_selection", None)
     if paths == WHOLE_INDEX:
-        _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        _git().run_cmd(["git", "reset", "-q", "HEAD", "--", ":/"], cwd=ctx.repo_dir)
     elif paths:
         _git().run_cmd(["git", "--literal-pathspecs", "reset", "-q", "HEAD", "--", *paths], cwd=ctx.repo_dir)
 
