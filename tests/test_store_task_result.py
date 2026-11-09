@@ -110,6 +110,8 @@ def test_store_task_result_keeps_delivered_answer_and_unresolved_tool_errors(tmp
     assert payload["status"] == STATUS_COMPLETED
     assert payload["outcome_axes"]["execution"]["status"] == "ok"
     assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
+    # A command whose declared output never registered stays loud (owner 09.11, A): a promised file is missing.
+    assert "details_only" not in payload["outcome_axes"]["execution"]["unresolved_tool_errors"][0]
     assert payload["outcome_axes"]["objective"]["warning"] == "residual_tool_errors_without_review"
     assert payload["reason_code"] == "final_message"
     assert payload["loop_outcome"]["failure"] is None

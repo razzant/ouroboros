@@ -368,6 +368,8 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     assert tool_failure["reason_code"] == "final_message"
     assert tool_failure["failure"] is None
     assert tool_failure["outcome_axes"]["execution"]["unresolved_tool_errors"][0]["status"] == "artifact_output_error"
+    # A command whose declared output never registered is loud (owner 09.11, A): a promised file is missing.
+    assert "details_only" not in tool_failure["outcome_axes"]["execution"]["unresolved_tool_errors"][0]
     assert tool_failure["outcome_axes"]["objective"]["warning"] == "residual_tool_errors_without_review"
 
     answer_with_tool_error = derive_loop_outcome(
@@ -786,9 +788,8 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
 
     # T4 (v6.35.0): an unrecovered one-shot run_command non-zero exit is COSMETIC,
     # not a degraded execution. The error is preserved on the execution axis for
-    # monitoring; because no acceptance review ran, the objective carries a
-    # structural warning so the default-`auto` path still flags a possible
-    # overclaim (honesty moves to the LLM review axis — Bible P5).
+    # monitoring; since 09.11 (owner, A) a command the task went past is a quiet
+    # leftover: no objective warning, the card keeps it in its details.
     cosmetic_shell = derive_loop_outcome(
         "Created another file.",
         {"rounds": 3},
@@ -813,7 +814,8 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     assert cosmetic_shell["outcome_axes"]["execution"]["status"] == EXECUTION_OK
     assert cosmetic_shell["failure"] is None
     assert cosmetic_shell["outcome_axes"]["execution"]["cosmetic_tool_errors"][0]["status"] == "non_zero_exit"
-    assert cosmetic_shell["outcome_axes"]["objective"]["warning"] == "residual_tool_errors_without_review"
+    assert cosmetic_shell["outcome_axes"]["execution"]["cosmetic_tool_errors"][0]["details_only"] is True
+    assert "warning" not in cosmetic_shell["outcome_axes"]["objective"]
 
     cleanup_failure = derive_loop_outcome(
         "Done",
@@ -891,15 +893,15 @@ def test_t4_cosmetic_partition_guards():
         {"rounds": 2},
         {
             "tool_calls": [{
-                "tool": "run_command", "args": {"cmd": "find /nope"}, "is_error": True,
-                "status": "non_zero_exit", "result": "⚠️ SHELL_EXIT_ERROR: exit_code=1.",
+                "tool": "write_file", "args": {"path": "x.py"}, "is_error": True,
+                "status": "error", "result": "⚠️ unexpected write error",  # loud without a review
             }],
             "review_runs": [{"aggregate_signal": "PASS"}],  # a review ran -> objective judged
             "review_decision": {"eligibility": "eligible", "trigger": "agent_called_tool_result"},
         },
     )
     assert reviewed["outcome_axes"]["execution"]["status"] == EXECUTION_OK
-    assert reviewed["outcome_axes"]["execution"]["cosmetic_tool_errors"]
+    assert reviewed["outcome_axes"]["execution"]["unresolved_tool_errors"]
     assert "warning" not in reviewed["outcome_axes"]["objective"]
 
 
@@ -929,6 +931,8 @@ def test_signal_death_is_not_cosmetic_but_plain_exit_still_is():
     assert execution["failure"] is None
     assert execution["unresolved_tool_errors"][0]["signal"] == "SIGKILL"
     assert not execution["cosmetic_tool_errors"]
+    # A signal-killed command is loud (D7): the install acted, so the card still warns.
+    assert "details_only" not in execution["unresolved_tool_errors"][0]
     assert killed["outcome_axes"]["objective"]["warning"] == "residual_tool_errors_without_review"
 
     plain = derive_loop_outcome(
