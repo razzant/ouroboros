@@ -46,7 +46,7 @@ pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
 K = 1
 # The owner's turn beside others: two read transactions per other live turn, whichever store is asked.
-BESIDE_GAP = ("no unit of this sprint: room_reader.is_reading asks task_drive_status and read_fence for every other live turn in the room "
+BESIDE_GAP = ("no unit of this sprint: room_reader.is_reading asks task_drive_status and read_fence for every other live turn of the install "
               "(4 more read transactions beside 2 others, 8 beside 4); the rows the others added are payload")
 # A pass's flat gap over the whole growth: the union of the axis law's rows for that pass.
 FLAT_GAPS = {name: "; ".join(reason for (_axis, gap_name), reason in GAPS.items() if gap_name == name)

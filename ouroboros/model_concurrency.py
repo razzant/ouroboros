@@ -168,11 +168,13 @@ class _Waiter:
     def __init__(self, model, use_local, deadline_ts, route, cancel_event, check):
         self.check = check
         self.cancel_event = cancel_event
-        timeout = _max_slot_wait_sec()
+        timeout, self.bound = _max_slot_wait_sec(), "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"
         for deadline in (_DEADLINE.get(), deadline_ts):
-            if deadline is not None:
-                timeout = min(timeout, max(0.0, float(deadline) - time.time()))
-        self.until = time.monotonic() + timeout
+            if deadline is not None and (left := max(0.0, float(deadline) - time.time())) < timeout:
+                timeout, self.bound = left, "the caller's deadline"
+        self.model = str(model or "")
+        self.started = time.monotonic()
+        self.until = self.started + timeout
         self.directory = _queue_root() / _route_digest(model, use_local, route)
         self.path: Path | None = None
         self.acquired = False
@@ -183,7 +185,7 @@ class _Waiter:
 
     def remaining(self):
         if self.cancel_event is not None and self.cancel_event.is_set():
-            raise ModelSlotCancelled("Provider capacity wait cancelled before dispatch")
+            raise ModelSlotCancelled(f"Local model slot wait cancelled before dispatch{self._subject()}; the request was not sent")
         if self.check is not None:
             self.check()
             from ouroboros.owner_pause import RAIL_OWNER_PAUSE, scope_fence
@@ -195,8 +197,15 @@ class _Waiter:
                 raise _PhysicalSendNotStarted(RAIL_OWNER_PAUSE)
         remaining = self.until - time.monotonic()
         if remaining <= 0:
-            raise ModelSlotTimeout("Provider capacity wait expired before dispatch")
+            # The install's own per-model slot, never a provider: the raw llm_api_error row used to read
+            # "Provider capacity" for waits no provider ever saw. Only observed facts: no slot was acquired
+            # within the measured wait, and which bound ended it.
+            raise ModelSlotTimeout(f"Local model slot wait expired before dispatch{self._subject()}; no slot was acquired "
+                                   f"within {time.monotonic() - self.started:.0f} s ({self.bound}); the request was not sent")
         return remaining
+
+    def _subject(self):
+        return f": model {self.model}" if self.model else ""
 
     def _live_files(self):
         files = []
@@ -209,7 +218,7 @@ class _Waiter:
                 pid = int(pid)
                 ordinal = int(ordinal)
             except ValueError as error:
-                raise ModelSlotUnavailable("Invalid provider capacity record") from error
+                raise ModelSlotUnavailable("Invalid local model slot record") from error
             if pid not in alive:
                 alive[pid] = platform_layer.pid_is_alive(pid)
             if alive[pid]:
@@ -235,7 +244,7 @@ class _Waiter:
             if fd is None:
                 if outcome.get("reason") == "contention":
                     return False
-                raise ModelSlotUnavailable("Provider capacity queue could not be locked")
+                raise ModelSlotUnavailable("Local model slot queue could not be locked")
             try:
                 self.remaining()
                 files = self._live_files()
@@ -293,7 +302,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
         except ModelSlotUnavailable:
             raise
         except OSError as error:
-            raise ModelSlotUnavailable("Provider capacity storage unavailable") from error
+            raise ModelSlotUnavailable("Local model slot storage unavailable") from error
         yield
     finally:
         waiter.close()
@@ -314,7 +323,7 @@ async def model_call_slot_async(model: str, use_local: bool = False, deadline_ts
         except ModelSlotUnavailable:
             raise
         except OSError as error:
-            raise ModelSlotUnavailable("Provider capacity storage unavailable") from error
+            raise ModelSlotUnavailable("Local model slot storage unavailable") from error
         yield
     finally:
         waiter.close()

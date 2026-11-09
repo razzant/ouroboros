@@ -753,6 +753,12 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
     if name == "query_code":
         return ToolResult(status="error", code="TOOL_ARG_ERROR", text=text)
     if name == "vcs_read":  # the profile's vcs roots above are wider than this reader's own two
+        if isinstance(exc, ValueError):
+            # A root, repository or path the call named wrongly is the call's own argument fault, typed
+            # like query_code's (status error, so tools.jsonl and the task feed count it); a failure of
+            # the binding machinery itself (OSError, RuntimeError) stays the Git terminal below.
+            return ToolResult(status="error", code="TOOL_ARG_ERROR",
+                              text=f"⚠️ TOOL_ARG_ERROR (vcs_read): {detail}{_VCS_READ_ROOTS}")
         return ToolResult(status="ok", code="GIT_ERROR", text=text + _VCS_READ_ROOTS)
     if name not in prefixes:
         return ToolResult(status="error", code="TOOL_ERROR", text=text)

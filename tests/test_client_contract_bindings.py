@@ -530,3 +530,47 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     disconnect = {"expected_revision": listed["places"][0]["revision"]}
     assert not validate_ingress(disconnect, contract_typed_dict("PlaceDisconnectRequest"))
     assert client.request("DELETE", path, json=disconnect).status_code == 200
+
+
+def test_place_conflict_lookup_keeps_its_id_after_handler_cancellation(client, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from starlette.requests import Request
+    from ouroboros.gateway import places_api
+
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [{
+        "skill": "bridge", "id": "chat", "destination": "vendor:chat", "label": "Test chat", "wakes": ["mention"],
+    }])
+    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "note": "Help here."}
+    created = client.post("/api/places", json=connect)
+    assert created.status_code == 200, created.text
+    place = created.json()["place"]
+
+    async def exercise():
+        queued = asyncio.Event()
+        pending = []
+
+        async def delayed_read(function):
+            # A read worker can outlive its cancelled HTTP waiter.
+            pending.append(function)
+            queued.set()
+            await asyncio.Event().wait()
+
+        async def receive():
+            return {"type": "http.request", "body": json.dumps(connect).encode(), "more_body": False}
+
+        # Keep the mutation helper's real executor; control only this route's read dispatch.
+        monkeypatch.setattr(places_api, "asyncio", SimpleNamespace(to_thread=delayed_read))
+        request = Request({"type": "http", "method": "POST", "path": "/api/places",
+                           "path_params": {}, "app": client.app}, receive=receive)
+        handler = asyncio.create_task(places_api.api_places(request))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=10)
+        finally:
+            handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await handler
+        current, = pending
+        assert json.loads(json.dumps(current())) == place
+
+    asyncio.run(exercise())

@@ -126,7 +126,10 @@ def test_preclaim_exception_keeps_shared_registration(start_case, tmp_path, monk
         start()
     assert caught.value is error
     assert gateway().removals == [] and gateway().start_requests == []
-    assert failures(tmp_path)[-1]["definite"] is True
+    row = failures(tmp_path)[-1]
+    # The row names its task on both start paths (review registration and the delegate tool), so
+    # the task feed can show it; the review path wrote it anonymously until the 05–08.11 audit.
+    assert row["definite"] is True and row["task_id"] == "t-b" and row["invocation_id"]
 
 
 def test_recovered_unknown_start_is_not_retired_by_new_preclaim_error(start_case, tmp_path, monkeypatch):

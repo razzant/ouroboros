@@ -166,7 +166,7 @@ def test_fixed_names_and_selectors(ctx, kind, path):
         assert call(ctx, op="json", kind=kind, select=selector)["status"] == "error"
 
 
-@pytest.mark.parametrize("name", ["supervisor", "tools", "chat"])
+@pytest.mark.parametrize("name", ["supervisor", "tools"])
 def test_jsonl_filter_tail_and_exact_rows(ctx, name):
     lines = [b'{ "type": "read", "n": 1 }\r\n', b'{"type":"write","n":2}\n', b'{"type":"read","n":3}\n']
     write(ctx, f"logs/{name}.jsonl", b"".join(lines))
@@ -732,3 +732,37 @@ def test_knowledge_history_input_budget_counts_rows_without_their_bodies(ctx, mo
     narrowed = call(ctx, op="jsonl", kind="knowledge_history", tail=0, max_bytes=512,
                     filter={"field": "n", "op": "eq", "value": 3})
     assert [r["n"] for r in narrowed["data"]] == [3]
+
+
+def test_the_retired_chat_log_kind_names_the_conversation_readers(ctx):
+    """logs/chat.jsonl froze at the dialogue-store cutover; the kind that advertised it is gone from the
+    schema, a call that still names it is told where the conversation lives (13 not_found reads in
+    05–08.11), and the kept log kinds read as before."""
+    [entry] = get_tools()
+    assert "chat_log" not in entry.schema["parameters"]["properties"]["kind"]["enum"]
+    refused(call(ctx, op="jsonl", kind="chat_log"), 'kind="chat_log"', "frozen since the dialogue store cutover",
+            "chat_history", "memory_read(rows=true, room_id=...)")
+    write(ctx, "logs/tools.jsonl", b'{"n": 1}\n')
+    assert call(ctx, op="jsonl", kind="tools_log")["data"] == [{"n": 1}]
+
+
+def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_not(ctx, monkeypatch):
+    """A statement SQLite refused (16 "no such column", 10 table-valued pragma denials in 05–08.11)
+    carries the way to learn the real schema, read from the typed phase, never from the message; a
+    budget expiry before the statement and a served statement carry none."""
+    from ouroboros import query_data_sql
+
+    answers = iter([
+        {"status": "error", "code": "query_failed", "exception_class": "ValueError", "message": "no such column: id", "phase": "sql"},
+        {"status": "error", "code": "deadline", "phase": "acquire", "timeout_sec": 1, "elapsed_sec": 1.5},
+        {"status": "ok", "data": {"columns": ["n"], "rows": [[1]], "truncated": False}},
+    ])
+    monkeypatch.setattr(query_data_sql, "run_sql", lambda *a, **kw: next(answers))
+    failed = call(ctx, op="sql", query="SELECT id FROM tasks")
+    assert (failed["code"], failed["message"]) == ("query_failed", "no such column: id")
+    assert failed["schema"] == ("db=current SQL reads rows of tasks, sqlite_master, sqlite_schema only; columns: "
+                                "PRAGMA table_info(tasks) or SELECT * FROM pragma_table_info('tasks'); "
+                                "task bodies and cards: op=json kind=task_result")
+    assert "schema" not in call(ctx, op="sql", query="SELECT 1")
+    assert "schema" not in call(ctx, op="sql", query="SELECT 1")
+    assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"

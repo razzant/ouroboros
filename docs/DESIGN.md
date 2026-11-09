@@ -2366,7 +2366,7 @@ states the cause in the owner's words, the failed call stays the error row
 inside the block, and the tool result carries the typed reason (with the cause
 and repair in `detail` where the producer holds one) so the model narrates; no
 host bubble interrupts a narrating turn. When the host itself issued the act (a
-skill-card repair, a picker click), or a refused owner steer
+skill-card repair, a picker click), or a refused steer of my human's words
 carries no owner-message receipt, the host states the refusal as ONE typed
 System row (`task_not_started`, `task_start_unconfirmed` for unconfirmed
 admission, or `steer_not_delivered` for steering) in the issuing chat, keyed to
