@@ -586,3 +586,47 @@ def test_api_state_reads_the_slim_writer_snapshot_never_the_full_breakdown(tmp_p
     assert with_full_breakdown_available["spent_calls"] == 3
     assert with_full_breakdown_available["accounting"]["accounted_usd"] == 1.75
     assert with_full_breakdown_available["accounting"]["remaining_known_usd"] == (7.25 if limit else None)
+
+
+def test_cost_breakdown_keeps_a_disclosed_zero_session_and_invents_no_row(tmp_path, monkeypatch):
+    """#861: a subscription session that disclosed exactly $0 is a priced row with no physical call; every
+    Costs table keeps it as $0.00. A value the ledger never recorded stays absent, never a manufactured zero."""
+    from ouroboros.gateway.history import make_cost_breakdown_endpoint
+    from supervisor import state as supervisor_state
+
+    root = _data_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 7.5)
+    tables = ("by_model", "by_api_key", "by_model_category", "by_task_category")
+    empty = json.loads(asyncio.run(make_cost_breakdown_endpoint(root)(None)).body)
+    assert [empty[name] for name in tables] == [{}, {}, {}, {}]  # no rows: no row, not $0.00
+
+    ua.record_subscription_session("zero-session", drive_root=root, route="claudexor:claude", model="claude-opus-5",
+                                   task_id="root-z", root_task_id="root-z", spend_usd=0.0)
+    bucket = ua.usage_breakdown(root)["by_model"]
+    (raw,) = bucket.values()
+    assert (raw["priced_rows"], raw["subscription_sessions"], raw["physical_calls"], raw["unknown_unmetered"]) == (1, 1, 0, 0)
+    response = asyncio.run(make_cost_breakdown_endpoint(root)(None))
+    payload = json.loads(response.body)
+    assert response.status_code == 200
+    for name in tables:
+        (row,) = payload[name].values()
+        assert (row["cost"], row["calls"], row["unknown_unmetered"], row["cost_final"]) == (0.0, 0, 0, True), name
+    # The Costs page words that row as a priced zero, the card's own vocabulary.
+    import subprocess
+    from pathlib import Path
+    script = ("import {costBucketPresentation} from './web/modules/costs.js';"
+              f"console.log(JSON.stringify(costBucketPresentation({json.dumps(next(iter(payload['by_model'].values())))})));")
+    shown = subprocess.run(["node", "--input-type=module", "-e", script], cwd=Path(__file__).parents[1],
+                           capture_output=True, text=True, check=True)
+    assert json.loads(shown.stdout) == {"text": "$0.00", "open": False, "detail": ""}
+
+    # Controls on the same page: an undisclosed session stays unknown, a priced one keeps its amount.
+    ua.record_subscription_session("unknown-session", drive_root=root, route="claudexor:codex", model="gpt-6-astra",
+                                   task_id="root-u", root_task_id="root-u", spend_usd=None)
+    ua.record_subscription_session("paid-session", drive_root=root, route="claudexor:claude", model="claude-paid",
+                                   task_id="root-p", root_task_id="root-p", spend_usd=0.25)
+    by_model = json.loads(asyncio.run(make_cost_breakdown_endpoint(root)(None)).body)["by_model"]
+    assert len(by_model) == 3
+    assert sorted((row["cost"], row["unknown_unmetered"]) for row in by_model.values()) == [(0.0, 0), (0.0, 1), (0.25, 0)]
+    print(json.dumps({"zero_session_tables": {name: payload[name] for name in tables}, "with_controls": by_model},
+                     sort_keys=True))

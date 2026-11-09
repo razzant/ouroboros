@@ -1367,6 +1367,7 @@
           "status": "available",
           "open_run_ids": [],
           "unrecorded_run_ids": [],
+          "closed_unrecorded_run_ids": [],
           "pending_invocation_ids": []
         },
         "cost_presentation": {

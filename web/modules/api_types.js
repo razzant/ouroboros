@@ -11,6 +11,7 @@
  * @property {'available'|'unavailable'} status
  * @property {Array<string>} open_run_ids
  * @property {Array<string>} unrecorded_run_ids
+ * @property {Array<string>=} closed_unrecorded_run_ids
  * @property {Array<string>} pending_invocation_ids
  */
 /** @typedef {Object} StateResponse

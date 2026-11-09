@@ -362,6 +362,19 @@ class TestDisplay:
             assert cost_display({"cost_presentation": unpriced, **unreadable}) == "unknown (accounting unavailable)"
         assert cost_display({"cost_accounting_status": "unavailable"}) == "unknown (accounting unavailable)"
         assert cost_display({"status": "failed"}) == "unknown (accounting unavailable or not settled)"
+        # No row in the carrier's scope: a legacy zero beside it is no amount (#2828), as on the card.
+        empty = {"scope": "own", "tracked_amount": None, "has_unpriced": False, "tracked_final": False,
+                 "accounting_open": False, "has_rows": False}
+        legacy_zero = {"accounted_upper_bound_usd": 0.0, "cost_final": True, "cost_presentation": empty}
+        assert cost_display(legacy_zero) == "unknown (no usage recorded)"
+        assert cost_display({**legacy_zero, "cost_presentation": {**empty, "scope": "root_tree"}}) == "unknown (no usage recorded)"
+        assert cost_display({**legacy_zero, "cost_presentation": {**empty, "has_unpriced": True}}) == (
+            "unknown (a delegated run closed without a cost record)")
+        assert cost_display({**legacy_zero, "cost_presentation": {**empty, "accounting_open": True, "has_unpriced": True}}) == (
+            "unknown (not settled yet)")
+        # Control: a priced zero keeps its $0.00.
+        assert cost_display({**legacy_zero, "cost_presentation": {**empty, "has_rows": True, "tracked_amount": 0.0,
+                                                                  "tracked_final": True}}) == "$0.00"
 
 
 class TestProducers:
