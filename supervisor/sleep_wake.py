@@ -12,7 +12,7 @@ through the distinct policy entry (``grant_exact_sleep_resume``) with the typed
 the owner's Resume and not its root's model selection; it is VETOED, keeping
 the readiness recorded, by any hold on the row (an owner Restart or Panic
 hold), by a closed owner Pause fence over its tree and by a root that is
-itself paused — and every money/deadline/lifetime/custody refusal of the
+itself paused (a sleeping root only waits) — and every money/deadline/lifetime/custody refusal of the
 grant owner still applies. Readiness is never permission. The off-lock record
 compares the pause id, state and grant it read, so a Resume, revocation or
 newer pause landing meanwhile wins and the next pass re-observes.

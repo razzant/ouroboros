@@ -114,7 +114,7 @@ def refresh_pending_placement(drive_root: Any, task: dict, *, binding: dict | No
 def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: Any, pending: Any) -> bool:
     """Under Q, acquire the selected room's lease before changing execution resources."""
     from ouroboros.project_admission import project_admission_basis, project_admission_guard
-    from ouroboros.project_lease import candidate_is_leasable, cold_project_holders, running_project_ids
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders, running_project_ids
     from ouroboros.workspace_admission import validate_workspace_root
 
     binding = pending_placement(drive_root, task)
@@ -123,7 +123,7 @@ def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: An
     if not refresh_pending_placement(drive_root, task, binding=binding):
         return False
     if not candidate_is_leasable(task, running_project_ids(running.values()),
-                                cold_holders=cold_project_holders(pending)):
+                                holders=lane_holders(running.values(), pending)):
         return False
     # Placement changes the room's default, never a separately selected resource: an explicit
     # folder or opt-out, or the candidate of body work. The registry holds that candidate when a

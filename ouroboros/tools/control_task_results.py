@@ -1078,7 +1078,7 @@ def await_messages_entry() -> ToolEntry:
             "context again, so the first request after it re-reads everything past the leading system items; local services "
             "still need warm sleep. A new question from any ordinary run you own also wakes you, even "
             "if not selected; reviewer runs stay with their panel. Question sources are delivered, not answered. "
-            "Retaining an external writer retains its project lane. A source that is "
+            "Retained external runs and live children keep your tree's project lane. A source that is "
             "already ready answers at once; so does a selected task or sender held by a current stop you have "
             "not yet been shown (dependency_held, with its current_stop): the same request then sleeps. "
             "Sleep does not count as execution time; an explicit deadline "

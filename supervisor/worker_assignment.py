@@ -673,12 +673,12 @@ def needs_paid_admission(task: Dict[str, Any]) -> bool:
     return paid_admission("local" if use_local else provider_for_model(model), None)
 
 
-def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), refused=(), cold_holders=None,
+def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), refused=(), holders=None,
                           leased=None, unresolved_invalid_id_set=(), own_claim: str = "") -> bool:
     """The chooser's gates over one queued row; also the launch's revalidation under Q (``own_claim``:
     the revalidating launch's own token, the one claim that does not exclude the row). Side-effect
     free except that a foreign-root refusal is named once, by a job on the admission lane."""
-    from ouroboros.project_lease import candidate_is_leasable, cold_project_holders, running_project_ids
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders, running_project_ids
     from ouroboros.project_placement import refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
     from supervisor.events_budget import budget_resume_dispatch_allowed
@@ -726,9 +726,9 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         return True
     if not refresh_pending_placement(_pool().DRIVE_ROOT, candidate):
         return True
-    cold = cold_holders if cold_holders is not None else cold_project_holders(_pool().PENDING)
+    holders = holders if holders is not None else lane_holders(running, _pool().PENDING)
     if not candidate_is_leasable(candidate, leased if leased is not None else running_project_ids(running),
-                                 cold_holders=cold):
+                                 holders=holders):
         return True
     if str(candidate.get("delegation_role") or "") == "subagent":
         if (_pool()._running_subagent_count(root_task_id, running) >= get_max_active_subagents_per_root()
@@ -743,12 +743,12 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
     `running` is either current custody or a local projection for a bounded batch.
     Selection never claims dispatch, consumes a grant, or creates RUNNING custody.
     """
-    from ouroboros.project_lease import cold_project_holders, running_project_ids
+    from ouroboros.project_lease import lane_holders, running_project_ids
 
     leased = running_project_ids(running)
     while True:
-        # Accepted cold external writers keep their lane; PENDING can shrink below.
-        cold_holders = cold_project_holders(_pool().PENDING)
+        # A tree keeps its lane while its cold root waits on live members; PENDING can shrink below.
+        holders = lane_holders(running, _pool().PENDING)
         chosen_idx = None
         for i, candidate in enumerate(_pool().PENDING):
             from ouroboros.server_restart import agent_restart_holds
@@ -786,7 +786,7 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
                 queue.persist_queue_snapshot(reason="stale_child_resume_held")
                 continue
             if _candidate_ineligible(queue, candidate, remaining, running, selected=selected,
-                                     refused=refused_this_pass, cold_holders=cold_holders, leased=leased,
+                                     refused=refused_this_pass, holders=holders, leased=leased,
                                      unresolved_invalid_id_set=unresolved_invalid_id_set):
                 continue
             chosen_idx = i

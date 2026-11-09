@@ -508,12 +508,13 @@ def test_a_send_before_the_cold_park_retires_the_unentered_sleep_and_answers(tmp
     from ouroboros.tools.control_task_results import _wait_for_task
 
     _child(tmp_path, "parent", parent="")
-    _child(tmp_path, "kid-a")  # an own running child refuses a cold sleep (the process would leave it)
+    _child(tmp_path, "kid-a", "failed", launch_handoffs={"op-1": {"tool": "x"}})  # an ended child's open handoff refuses
+    _child(tmp_path, "kid-b")  # a running child does not: its own actor watches it and the tree keeps its lane
     _child(tmp_path, "foreign", parent="foreign-root")
     ctx = _ctx(tmp_path)
-    assert "running_member kid-a" in _wait_for_task(ctx, "foreign", sleep_mode="cold")
+    assert "member_custody kid-a" in _wait_for_task(ctx, "foreign", sleep_mode="cold")
     assert not getattr(ctx, "_pending_task_wait", None) and not getattr(ctx, "_model_sleep", None)
-    _child(tmp_path, "kid-a", "completed", result="done")
+    _child(tmp_path, "kid-a", "failed", launch_handoffs={})
     assert json.loads(_wait_for_task(ctx, "foreign", sleep_mode="cold"))["reason"] == "sleep_armed"
     assert ctx._model_sleep["mode"] == "cold" and ctx._owner_wait_requested.startswith("sleep:")
     messages = []

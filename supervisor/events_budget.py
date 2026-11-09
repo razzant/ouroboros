@@ -846,8 +846,8 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any]) -> Optional[boo
                         and budget_hold_fact(task) is None
                         and not member_fence(SimpleNamespace(task_id=task.get("id"),
                             root_task_id=root_id, budget_drive_root=result_root))
-                        and not any(str(t.get("id") or "") == root_id and t.get("_budget_pause")
-                                    for t in q.PENDING))
+                        and not any(str(t.get("id") or "") == root_id and t.get("_budget_pause")  # a sleep: a wait
+                                    and t["_budget_pause"].get("reason") != "sleep" for t in q.PENDING))
         except Exception:
             return False
     if carrier.get("selected_by") == "sleep_wake":
@@ -875,40 +875,38 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any]) -> Optional[boo
     from ouroboros.budget_pause import STATE_PAUSED, STATE_PAUSING
     from ouroboros.owner_pause import fence_closed
 
-    owner_unbound = (
-        carrier.get("selected_by") == "owner"
-        and not carrier.get("root_grant_id")
-    )
-    current_root = state["task"]
+    # A root's own sleep (its row's reason, in any state) is its wait: it pauses no member and
+    # replaces no money authority or owner choice a member was selected under (``owner_unbound`` above).
+    current_root, asleep = state["task"], state["pause"].get("reason") == "sleep"
     if not owner_unbound and (
-        isinstance(current_root.get("_budget_pause"), dict)
+        isinstance(current_root.get("_budget_pause"), dict) and not asleep
         or budget_hold_fact(current_root) is not None
         or current_root.get("_owner_hold")
-        or state["pause"].get("state") in {STATE_PAUSED, STATE_PAUSING}
+        or state["pause"].get("state") in {STATE_PAUSED, STATE_PAUSING} and not asleep
         or fence_closed(state["owner_fence"])
     ):
         return False
 
     if 'root_resume_basis' in carrier:
         basis = carrier['root_resume_basis']
-        if owner_unbound and fence_id and isinstance(basis, dict):
-            # This owner choice borrowed no root grant. The root parking on
-            # the same monetary latch does not supersede it; actor and owner
+        if (owner_unbound and fence_id or asleep) and isinstance(basis, dict):
+            # This owner choice borrowed no root grant, or the root only sleeps. Its parking on
+            # the same monetary latch or in a sleep does not supersede it; actor and owner
             # fence identities (and the latch check above) still bind it.
             basis = {**basis, 'budget': state['basis']['budget']}
         if basis != state['basis']:
             return False
         # A current queue selection still supersedes an older choice. With no
         # lender, unchanged durable identities preserve the choice already made.
-        return not live or matches(live)
+        return asleep or not live or matches(live)
 
     # Legacy rows: accept matching evidence and the no-history case. Conflicting
     # history takes the existing selectable-hold path, never a timestamp guess.
-    if live:
+    if live and not asleep:
         return matches(live)
-    if durable:
+    if durable and not asleep:
         return matches(durable)
-    if owner_unbound:
+    if owner_unbound or asleep:
         return True
     return not state['pause'] and not state['owner_fence'] and budget_hold_fact(state['task']) is None
 

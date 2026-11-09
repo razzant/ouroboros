@@ -625,17 +625,18 @@ def test_a_left_review_park_prepares_only_while_a_seat_of_its_panel_works(world,
     assert _chats(world) == []
 
 
-def test_a_cold_sleep_beside_a_running_helper_is_not_admitted(world):
-    """Corrected evidence: a cold root with a working native helper is no supported shape,
-    so the projection is not credited with it (``model_sleep.cold_blockers``)."""
-    from ouroboros import model_sleep
-    from tests._budget_pause_exact_helpers import _loop_ctx
+def test_a_cold_sleep_beside_a_working_helper_parks_and_types_only_while_it_works(world, monkeypatch):
+    """A sleep is a wait: a cold root beside a working native helper parks; its reply is prepared through the helper."""
+    from tests.test_sleep_tree_lease import cold_park
 
     _pooled(world, "root-c", chat_id=5)
     _pooled(world, "kid-c", chat_id=5, parent="root-c")
-    ctx, _limit = _loop_ctx(world.root, "root-c")
-    blockers = model_sleep.cold_blockers(ctx, chosen={"tasks": ["kid-c"], "senders": []})
-    assert {"kind": "running_member", "detail": "kid-c"} in blockers, blockers
+    cold_park(world.root, monkeypatch, world.workers, world.queue, "root-c", tasks=["kid-c"])
+    assert world.workers.PENDING[0]["_budget_pause"]["reason"] == "sleep" and list(world.workers.RUNNING) == ["kid-c"]
+    assert _chats(world) == [5], "the helper's work is the reply the sleeping root waits for"
+    write_task_result(world.root, "kid-c", STATUS_COMPLETED, chat_id=5, result="done")
+    world.workers.RUNNING.pop("kid-c")
+    assert _chats(world) == [], "no live descendant works: the sleep alone prepares nothing"
 
 
 class _Engine:

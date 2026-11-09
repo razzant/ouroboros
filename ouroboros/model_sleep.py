@@ -560,7 +560,10 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     """What this task still runs that a COLD sleep would leave unwatched.
 
     Only exact bound ordinary external runs can be handed to the body. Local
-    producers, services, other actors and unknown starts still keep the actor.
+    producers, services and unknown starts still keep the actor. A queued or running
+    member of its tree never does: a sleep is this actor's wait, the member's own actor
+    watches its custody and the tree keeps its project lane (``project_lease.lane_holders``).
+    An ended member's open custody, which no queued row carries to that lane, still holds.
     Arming may propose a transfer; release needs its exact accepted pairs.
     ``gaps`` receives the damaged rows the tree census tied to no tree: named, never a blocker, and
     only once its custody and model-request links were read; until then such a row holds.
@@ -584,8 +587,7 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     if allow_transfer:
         try:
             from ouroboros.sleep_custody import transferable_pairs
-            pairs, _writer = transferable_pairs(custody.custody_root(ctx), str(ctx.task_id))
-            allowed.update(tuple(pair) for pair in pairs)
+            allowed.update(tuple(pair) for pair in transferable_pairs(custody.custody_root(ctx), str(ctx.task_id)))
         except Exception:
             pass  # the authoritative census below keeps unknown/untransferable work
     blockers.extend({"kind": "delegated_run", "run_id": str(run.get("run_id") or ""),
@@ -598,26 +600,15 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
         records = [record for record in services._SERVICES.values() if record.task_id == str(ctx.task_id)]
     blockers.extend({"kind": "service", "name": record.name} for record in records
                     if record.proc.poll() is None)
-    # Only this actor's accepted external obligations transfer. Every member's
-    # other retained custody matters, including paused and terminal children.
+    # Only this actor's accepted external obligations transfer. An ended member's
+    # retained custody matters too: no queued row of its tree holds its lane.
     from ouroboros.owner_pause import (tree_member_results, tree_model_requests, current_tool_operation,
                                        _member_coordinates)
     from ouroboros.delegate_custody_current import tree_task_ids
+    from ouroboros.task_status import SETTLED_STATUSES
 
     root = _canonical_root(ctx)
     tree_id = _member_coordinates(ctx)[1]
-    dependencies = set(chosen.get("tasks", []) + chosen.get("senders", []))
-    if isinstance(chosen.get("task_wait"), dict):  # a native wait depends on who answers for the ids it selected
-        from ouroboros.native_task_wait import observe
-
-        rows, _lost, contended = observe(ctx, chosen.get("tasks") or ())
-        if contended is not None:
-            blockers.append({"kind": "tree_custody_unreadable", "detail": str(contended)[:200]})
-        for task_id, row in rows.items():
-            dependencies.add(str(row.get("task_id") or task_id))  # a retry successor the root fence would hold
-            if row.get("pre_first_result") and str(row.get("root_task_id") or task_id) == tree_id:  # no census row
-                blockers.append({"kind": "running_member" if row.get("status") == "running" else "queued_member",
-                                 "detail": task_id})
     members, links_known = {str(ctx.task_id)}, True  # a row is unlinked only once every link source answered
     try:
         members.update(tree_task_ids(root, tree_id))  # the store answers or raises: unreadable is a blocker
@@ -639,14 +630,11 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
             elif gaps is not None:
                 gaps.append({"task_id": task_id, "reason": fact["reason"]})
         for task_id, row in census.members.items():
-            members.add(task_id)
             own = task_id == str(ctx.task_id)
-            if not own and row.get("status") == "running":
-                blockers.append({"kind": "running_member", "detail": task_id})
-            if not own and task_id in dependencies and row.get("status") in {"requested", "scheduled"}:
-                # The root sleep fence would prevent this member from starting,
-                # including a child whose terminal/mail was selected as our wake.
-                blockers.append({"kind": "queued_member", "detail": task_id})
+            if not own and row.get("status") not in SETTLED_STATUSES:
+                members.discard(task_id)  # live: its own actor watches it, the tree's queued rows keep the lane
+                continue
+            members.add(task_id)
             own_sleep = ""
             if own:  # the in-flight call arming this very sleep (a native task wait too) is no custody
                 sleep_tools = ("continue_in_background",) if detach else ("await_messages", "wait_task", "wait_tasks")
@@ -716,9 +704,9 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
     from ouroboros.sleep_custody import transferable_pairs
     from ouroboros.task_carrier import LANE_CONVERSATION, execution_owner
     retains_lane = mode == MODE_WARM and execution_owner(ctx).get("lane") != LANE_CONVERSATION  # a turn holds none
-    if mode == MODE_COLD:
+    if mode == MODE_COLD:  # its accepted custody keeps the lane until it wakes; members keep it only while they live
         try:
-            _pairs, retains_lane = transferable_pairs(_canonical_root(ctx), str(ctx.task_id))
+            retains_lane = bool(transferable_pairs(_canonical_root(ctx), str(ctx.task_id)))
         except Exception:
             retains_lane = False  # cold_blockers reports the actual unavailable custody
     if retains_lane:
@@ -740,7 +728,7 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
                     and row.get("status") in {"requested", "scheduled"}):
                 raise ValueError("this sleep retains the project lane needed by the selected queued root, so it cannot "
                                  "start while you wait for it here: wait on another source or end this turn; a cold "
-                                 "sleep releases the lane unless your bound external runs keep it")
+                                 "sleep releases the lane unless your bound external runs or live members keep it")
     gaps: List[Dict[str, str]] = []
     if mode == MODE_COLD:
         blockers = cold_blockers(ctx, chosen=chosen, allow_transfer=True, gaps=gaps)
