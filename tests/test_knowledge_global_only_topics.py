@@ -120,6 +120,11 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]
+    # Where a summary is in front of me and what it says: a global note's in every room and place, a project
+    # note's in its project (context_sections.knowledge_navigation_sections); the receipt test pins the outline.
+    summary = props["summary"]["description"]
+    assert "a global note's summary is in front of me in every room and place I work in, a project note's in that project" in summary
+    assert "say when the note applies and who may hear it" in summary and "how they want us to work now" in summary
 
     # …and the retained-frontmatter claim is true: a body-only overwrite keeps
     # the authored summary that the index renders.

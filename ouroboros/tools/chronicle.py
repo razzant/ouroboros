@@ -730,7 +730,7 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
         parts += [f"scope {record.get('scope')}", f"target {_target_label(record.get('target_ref'))}",
                   f"visibility {record.get('visibility')}"]
         if isinstance(record.get("anchor"), dict):
-            parts.append(f"meets me at {describe_anchor(record['anchor'])}")
+            parts.append(f"also shown after the first call matching {describe_anchor(record['anchor'])}")
     for part in (record.get("status"), _covers_summary(record, period), _stamp_summary(record.get("host_stamp"))):
         if part:
             parts.append(str(part))
@@ -1459,14 +1459,16 @@ def chronicle_tools() -> List[ToolEntry]:
         "source_ref": source,
         "quote": {"type": "string", "description": "Optional exact substring of the target, kept beside the mark."},
         "room_id": room,
-        "scope": {"type": "string", "enum": ["room", "global"]},
+        "scope": {"type": "string", "enum": ["room", "global"],
+                  "description": "room: in view of every integrating focus and of this room's helpers and sessions; "
+                                 "global: of every helper and session start too. No view shows them to my human."},
         "mark_id": {"type": "string", "description": "Change an active mark's visible detail with visibility and reason."},
         "visibility": {"type": "string", "enum": ["full", "meaning"]},
         "release_ids": {"type": "array", "items": string, "minItems": 1, "uniqueItems": True,
                         "description": "Release these active marks with one reason; returns released ids and each refusal. Their history stays."},
         "reason": string,
         "anchor": {"type": "object", "additionalProperties": False,
-                   "description": "Optional action this mark meets me at: {tool, text?} is a tool name, optionally with text its call's arguments must contain; {path} is a file or directory path a call names. The host adds the mark's words to the result of the first such call in each task (a room mark: that room's work only); it compares literally and never refuses the call.",
+                   "description": "Optional action whose first result in a task also carries this mark's words: {tool, text?} is a tool name, optionally with text its call's arguments must contain; {path} is a file or directory path a call names. The host adds the mark's words to the result of the first such call in each task (a room mark: that room's work only); it compares literally and never refuses the call.",
                    "properties": {"tool": string, "text": string, "path": string}},
     }
 

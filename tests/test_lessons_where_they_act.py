@@ -108,6 +108,15 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     assert "not in the active knowledge index" in archived
     project = _write(_ctx(tmp_path, project_id="demo"), "lessons/local", "Project lesson.", summary="In demo.")
     assert "project:demo knowledge index, loaded in that project's contexts" in project
+    # Whom the summary reaches depends on the note's type: a person's summary stays in the outline a tight
+    # window, a helper and a session start with (knowledge.render_knowledge_outline); any other keeps only its title.
+    assert "a tight window and a helper's or session's start show only its title" in summarized
+    assert "helpers do not load it" not in summarized
+    person = tools._knowledge_write(ctx, topic="people/ada", scope="global",
+                                    content="---\ntype: person\nsummary: Prefers short answers.\n---\nAda.\n")
+    assert "summary (22 chars) is shown in the global knowledge index" in person
+    assert "and the outline a tight window, a helper and a session start with" in person
+    assert "show only its title" not in person and "helpers do not load it" not in person
 
 
 def test_the_frozen_reflection_log_renders_nowhere(tmp_path):

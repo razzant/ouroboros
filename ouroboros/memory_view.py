@@ -1237,7 +1237,7 @@ def _marks_text(marks: List[Dict[str, Any]]) -> str:
     for mark in marks:
         lines.append(f"- [{mark['scope']}; {mark['room']}] " + _indented(mark["text"]).lstrip()
                      + f" — marked by {mark['by']} on {mark['date']}; target {mark['target']}; "
-                     + (f"meets me at {mark['anchor']}; " if mark.get("anchor") else "")
+                     + (f"also shown after the first call matching {mark['anchor']}; " if mark.get("anchor") else "")
                      + f"memory_mark(release_ids=['{mark['id']}'], reason=…)")
         if mark.get("quote"):
             lines.append(f"{INDENT}quote: " + _indented(mark["quote"]).lstrip())
