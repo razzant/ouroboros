@@ -720,7 +720,7 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
         parts += [f"scope {record.get('scope')}", f"target {_target_label(record.get('target_ref'))}",
                   f"visibility {record.get('visibility')}"]
         if isinstance(record.get("anchor"), dict):
-            parts.append(f"meets me at {describe_anchor(record['anchor'])}")
+            parts.append(f"also shown after a task's first call matching {describe_anchor(record['anchor'])}")
     # The stamp as counts (``stamp_summary``, the view's form): the header repeats on every page, so it lists no task.
     for part in (record.get("status"), _covers_summary(record, period), stamp_summary(record.get("host_stamp"))):
         if part:
@@ -1471,7 +1471,7 @@ def chronicle_tools() -> List[ToolEntry]:
                         "description": "Release these active marks with one reason; returns released ids and each refusal. Their history stays."},
         "reason": string,
         "anchor": {"type": "object", "additionalProperties": False,
-                   "description": "Optional action this mark meets me at: {tool, text?} is a tool name, optionally with text its call's arguments must contain; {path} is a file or directory path a call names. The host adds the mark's words to the result of the first such call in each task (a room mark: that room's work only); it compares literally and never refuses the call.",
+                   "description": "Optional action whose first result in a task also carries this mark's words: {tool, text?} is a tool name, optionally with text its call's arguments must contain; {path} is a file or directory path a call names. The host adds the mark's words to the result of the first such call in each task (a room mark: that room's work only); it compares literally and never refuses the call.",
                    "properties": {"tool": string, "text": string, "path": string}},
     }
 
@@ -1491,6 +1491,6 @@ def chronicle_tools() -> List[ToolEntry]:
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",
-            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope; an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
+            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope (a room mark is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start; a mark adds nothing to my human's chat); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
             mark, []), _memory_mark),
     ]

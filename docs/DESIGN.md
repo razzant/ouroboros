@@ -1415,7 +1415,9 @@ Each room's bar has one status, right after its title: the short word in its
 status ink (a turn still preparing adds the start step it stands at, `Preparing ·
 Building context`, and nothing reads `Thinking` before a model call is sent),
 then one mark, as on the sidebar's rows; no frame at rest, a neutral
-tint on hover and while open, a caret when it opens. A work is one request with
+tint on hover and while open, a caret when it opens. A working work the host dated as silent
+says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
+new mark), until its own progress. A work is one request with
 its Continue episodes and whatever of them still lives (helpers, delegated
 runs still working, post-answer upkeep); the server gives each work and each room
 one status, and every surface (bar, work list, sidebar, cards, tray) words that
@@ -2085,7 +2087,8 @@ no circle exists). An open circle shows its words whole in their author's voice 
 the owner's only), Edit (name, words, Delete), Add a place and its rows; Delete names how many
 places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
 
-A row: mark, the place's own name, service, state word, readiness only when not simply on, the
+A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
+leaves a place that is not Paused only hearing), readiness only when not simply on, the
 last captured event (“no captured event”, never “no activity”) and the optional description,
 ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
@@ -2139,6 +2142,9 @@ Sheet/reader use status labels over manifest labels; otherwise core words stay. 
 declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
+While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
+only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.”, and the
+conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
 Reader out rows say “as {label}”/“as you”. Heard chips accompany reasons with
@@ -3157,7 +3163,9 @@ finger's docked column) while a Project's one-line name is still cut, where the 
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
-“Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both), `Dashboard ›`
+“Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both; a place's row is a
+door to that place's sheet (Active · Silent · Paused there), read from the places at the press: a
+failed read says so on that line, a place gone since disables its row), `Dashboard ›`
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:

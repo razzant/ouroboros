@@ -956,7 +956,7 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     import threading
 
     assert clock.clock.start() == "Background consciousness is already enabled."
-    assert clock.clock.stop() == "Background consciousness disabled."
+    assert clock.clock.stop() == "Consciousness off: no own wakes."  # no place, nothing live: nothing else to say
     assert clock.clock.enabled is False and clock.clock.tick(T0 + FLOOR + 1) == "disabled"
     assert clock.clock.stop() == "Background consciousness is already disabled."
     assert clock.clock.start().startswith("Background consciousness enabled; next wake-up at ")
@@ -973,8 +973,30 @@ def test_start_and_stop_flip_the_flag_and_stop_arms_a_graceful_stop_of_a_live_wa
     monkeypatch.setattr("supervisor.worker_chat_lane.stop_direct_chat_turn",
                         lambda *a, **k: pytest.fail("a carried wake has no in-process actor to stop"))
     message = clock.clock.stop()
-    assert message == "Background consciousness disabled; wake-up wake0001 ends at its next step."
+    assert message == "Consciousness off: no own wakes. Stopping now: its wake-up."
     assert done.wait(5) and stopped == ["wake0001"]
+
+
+@pytest.mark.parametrize("stored,said", [
+    ((("active", "active"), ("silent", "silent"), ("paused", "paused")),
+     "Consciousness off: no own wakes, and 2 places only hear until Start."),
+    ((("silent", "silent"),), "Consciousness off: no own wakes, and 1 place only hears until Start."),
+    ((("paused", "paused"),), "Consciousness off: no own wakes."),
+    (None, "Consciousness off: no own wakes, and its places only hear until Start."),
+])
+def test_off_says_how_many_places_only_hear_until_start(clock, monkeypatch, stored, said):
+    """Owner 06.11: he pressed Off to stop one place's replies, and nothing said that every place that is not Paused
+    then only hears until Start. The Main row (and the Telegram /bg reply) says it; an unreadable place store changes
+    only the words, never the switch."""
+    from ouroboros import places
+    if stored is None:
+        monkeypatch.setattr(places, "load_places", lambda _root: (_ for _ in ()).throw(OSError("places unreadable")))
+    for place_id, state in stored or ():
+        places.connect_place(clock.root, place_id=place_id, connector="bridge", provider="chat",
+                             conversation_id=place_id, label=place_id, state=state)
+    assert clock.clock.stop() == said
+    assert clock.clock.enabled is False, "an unreadable place store never holds the switch"
+    assert clock.clock.stop() == "Background consciousness is already disabled."
 
 
 def test_status_snapshot_carries_the_alarm_facts(clock):
@@ -1077,7 +1099,7 @@ def test_off_names_the_roots_it_leaves_running_on_my_humans_cited_words(clock, m
     assert carriers.cited_owner_schedules(None) == [("sched-1", "Проверь экономику")]
     stopped = []
     monkeypatch.setattr(carriers, "stop_pooled_wake", stopped.append)
-    assert clock.clock.stop() == ("Background consciousness disabled; autonomous work ends at its next step."
+    assert clock.clock.stop() == ("Consciousness off: no own wakes. Stopping now: «own-root»."
                                   "\nKept running on your words (task cited-root): «Проверь экономику»"
                                   "\nKept running on your words (task cited-running): «Проверь экономику»"
                                   "\nKept firing on your words (schedule sched-1): «Проверь экономику»")
