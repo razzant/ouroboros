@@ -363,6 +363,9 @@ def admit_owner_turn(
 
     client_msg_id = _client_message_id(task_metadata)
     task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata)
+    root = pathlib.Path(str(task.get("drive_root") or "") or _pool().DRIVE_ROOT)
+    intake = open_owner_intake(task, root)  # before its row exists: a carrier only ever replaces the fact
+    meta = None
     try:
         with queue._queue_lock, _pool()._repo_writer_gate_lock:
             if not owner_conversation_admitted(chat_id, client_msg_id):
@@ -390,6 +393,47 @@ def admit_owner_turn(
         _report_direct_chat_error({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id,
                                    "task_metadata": task_metadata}, e)
         return None
+    finally:
+        if intake and meta is None:  # no admitted row names the fact
+            close_owner_intake(task, root)
+
+
+def open_owner_intake(task: Dict[str, Any], root: Any) -> str:
+    """My human's next words in this chat reach this owner turn from here on
+    (``conversation_lease.owner_conversation_key``): the host's fact at admission, its carrier's from the moment it
+    takes the turn. The key; else "" with no fact of this attempt left standing (a failed take retires the host's,
+    ``conversation_lease.retire_author_intake``), so the words start their own turn."""
+    from ouroboros.conversation_lease import (
+        open_author_intake,
+        owner_conversation_key,
+        retire_author_intake,
+        task_attempt,
+    )
+
+    key, attempt = owner_conversation_key(task), task_attempt(task)
+    if not key:
+        return ""
+    try:
+        if open_author_intake(root, str(task["id"]), key, attempt=attempt):
+            return key
+    except Exception:
+        log.warning("Owner turn %s reads no follow-up: its intake fact was not written", task.get("id"), exc_info=True)
+    try:
+        retire_author_intake(root, str(task["id"]), key, attempt=attempt)
+    except Exception:
+        log.warning("Owner turn %s: an intake fact it could not take may still stand", task.get("id"), exc_info=True)
+    return ""
+
+
+def close_owner_intake(task: Dict[str, Any], root: Any) -> None:
+    """The writer's own fact for this attempt goes (``close_author_intake(own=True)``): an arrival starts its own
+    turn."""
+    from ouroboros.conversation_lease import close_author_intake, task_attempt
+
+    try:
+        close_author_intake(root, str(task["id"]), own=True, attempt=task_attempt(task))
+    except Exception:
+        log.debug("owner intake of %s not closed", task.get("id"), exc_info=True)
 
 
 def handle_wake_direct(
@@ -717,8 +761,8 @@ def refusal_terminal(agent: Any, task: Dict[str, Any], refusal: ConversationRefu
 class CarrierTurn:
     """A conversation turn's execution facts inside its carrier: the receipt (``TurnExecution``)
     seeded from the admission's wall clock, the endpoint hooks (the Stop marker, the namer, the
-    frame observer that also publishes each start phase as a ``direct_turn_phase`` frame) and the
-    thread's store meter."""
+    frame observer that also publishes each start phase as a ``direct_turn_phase`` frame), the
+    thread's store meter and an owner turn's intake fact, held from the take to the end."""
 
     def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any) -> None:
         from supervisor.active_activity import TurnExecution, get_direct_activity_registry
@@ -749,6 +793,7 @@ class CarrierTurn:
         carry_turn_execution(self.task_id, self.execution)  # the turn's own wait fact reads it in this carrier
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
+        self.intake = open_owner_intake(task, drive_root)  # the host's fact becomes this carrier's, whatever follows
         self._namer = None
         if not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn"):
             from ouroboros.project_naming import spawn_turn_namer
@@ -782,6 +827,8 @@ class CarrierTurn:
         from supervisor.active_activity import carry_turn_execution, record_direct_turn
 
         carry_turn_execution(self.task_id, None)
+        if self.intake:  # however the body ended, no later arrival is accepted for it
+            close_owner_intake({"id": self.task_id, "_attempt": self.attempt}, self.drive_root)
         self._namer = None  # the namer's closure holds the whole task: nothing of the turn's input stays reachable
         self.execution.ended_at = time.monotonic()
         if self.execution.owner_turn and self.execution.phase != "dispatched":

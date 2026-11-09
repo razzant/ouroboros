@@ -798,19 +798,19 @@ def _close_forced_intake(ctx: _RoundLimitContext) -> None:
     """A committed forced rail is its loop's last read of place mail: close that intake before the rail's first
     drain, under the admission lock, as the ordinary final close does (``loop_delivery``). What landed before reaches
     the rail's one call; an arrival after is refused and takes the Host's ordinary route. The durable fact moves with
-    it (``follow_loop_admission``); the local flag only in a Presence context, whose place door reads it (a direct
-    turn's flag is its owner's route and Stop door, and a forced call may run long). Idempotent; nothing reopens it.
-    A budget lookahead that only prices a wrap-up never calls this: healthy work keeps reading."""
+    it (``follow_loop_admission``, an owner turn's too); the local flag only in a Presence context, whose place door
+    reads it (a direct turn's flag is its owner's route and Stop door, and a forced call may run long). Idempotent;
+    nothing reopens it. A budget lookahead that only prices a wrap-up never calls this: healthy work keeps reading."""
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     lock = getattr(tools_ctx, "owner_message_admission_lock", None)
     agent = getattr(tools_ctx, "owner_message_admission_agent", None)
     metadata = getattr(tools_ctx, "task_metadata", None)
-    if lock is None or agent is None or not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict):
+    if lock is None or agent is None or not isinstance(metadata, dict):
         return
     from ouroboros.conversation_lease import follow_loop_admission
 
     with lock:
-        agent._accepting_owner_messages = False
+        agent._accepting_owner_messages &= not isinstance(metadata.get("presence"), dict)  # a place door's flag only
         follow_loop_admission(tools_ctx, False)
 
 

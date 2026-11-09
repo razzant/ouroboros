@@ -123,7 +123,100 @@ def _route_project_chat_to_running_task(
         # decision the AGENT must make (P5/WS1), so do not deliver here.
         if len(steerable) != 1:
             return ""
-        candidate = steerable[0]
+        return _deliver_to_reader(ctx, steerable[0], message, client_message_id,
+                                  task_metadata=task_metadata, image_data=image_data)
+    except Exception:
+        log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
+    return ""
+
+
+def _owner_turn_key(ctx: Any, row: Dict[str, Any], meta: Any, chat_id: int) -> str:
+    """``owner:<chat>`` when ROW's RUNNING row is my human's own confirmed turn of this chat on the conversation lane.
+
+    The lane's host facts (its admission barrier landed, the door's reply expected, no live call's reservation)
+    and the task's origin and carrier facts (``conversation_lease.owner_conversation_key``), with no Project binding
+    the turn took since; else ""."""
+    from ouroboros.conversation_lease import OWNER_CONVERSATION, owner_conversation_key
+    from ouroboros.projects_registry import project_chat_for_task
+    from supervisor.conversation_lane import conversation_row
+
+    if (row.get("inline_presence") or not conversation_row(meta) or not meta.get("reply_expected")
+            or meta.get("_unpublished") or meta.get("_inline_bind")):
+        return ""
+    key = owner_conversation_key(meta.get("task"))
+    if key != f"{OWNER_CONVERSATION}{int(chat_id or 0)}" or project_chat_for_task(ctx.DRIVE_ROOT, str(row["task_id"])):
+        return ""
+    return key
+
+
+def _owner_turn_closed(ctx: Any, row: Dict[str, Any], chat_id: int) -> bool:
+    """Whether ROW is my human's own turn of this chat whose final drain already read last: its own fact for the
+    attempt RUNNING names is closed (``conversation_lease.author_intake_closed``). It finishes what it holds and
+    reads no more words. No fact, an unreadable or foreign one, or another attempt's proves nothing."""
+    from ouroboros.conversation_lease import author_intake_closed
+    from supervisor.queue import _task_drive_for_task
+
+    tid = str(row["task_id"])
+    meta = getattr(ctx, "RUNNING", {}).get(tid)
+    key = _owner_turn_key(ctx, row, meta, chat_id)
+    return bool(key) and author_intake_closed(_task_drive_for_task(meta["task"], tid), tid, key,
+                                              attempt=int(meta.get("attempt") or 1))
+
+
+def _route_main_followup(
+    ctx: Any,
+    chat_id: int,
+    message: str,
+    client_message_id: str = "",
+    *,
+    task_metadata: Any = None,
+    image_data: Any = None,
+    roots: Optional[RootSnapshot] = None,
+) -> str:
+    """Main's ordinary owner message reaches the one turn reading this conversation when it is my human's own.
+
+    One author per conversation: a clarification typed while that turn still awaits its carrier or prepares must not
+    start a second author acting on the same request. Every reader of the chat counts first: a wake, a call or
+    background work beside the turn leaves the words their own turn, and none is chosen among several; an owner turn
+    whose own fact is closed (``_owner_turn_closed``) reads no more and is none. From its confirmed admission the
+    turn takes them only under its durable intake for the attempt judged
+    (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail lock, and
+    never once its result settled: no settled-result check alone orders words against a loop in another process.
+    A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
+    message's one root snapshot."""
+    try:
+        roots = roots if roots is not None else addressable_roots(ctx)
+        readers = [row for row in roots.rows(chat_id)
+                   if row.get("room_reader") and not _owner_turn_closed(ctx, row, chat_id)]
+        if roots.gap or len(readers) != 1:
+            return ""
+        meta = getattr(ctx, "RUNNING", {}).get(str(readers[0]["task_id"]))
+        key = _owner_turn_key(ctx, readers[0], meta, chat_id)
+        return _deliver_to_reader(ctx, readers[0], message, client_message_id, task_metadata=task_metadata,
+                                  image_data=image_data, owner=(key, meta)) if key else ""
+    except Exception:
+        log.debug("Main follow-up routing failed; the message starts its own turn", exc_info=True)
+    return ""
+
+
+def _deliver_to_reader(
+    ctx: Any,
+    candidate: Dict[str, Any],
+    message: str,
+    client_message_id: str,
+    *,
+    task_metadata: Any,
+    image_data: Any,
+    owner: tuple = ("", None),
+) -> str:
+    """One reader's delivery transaction: its id, or "" when any admission check refuses (nothing stays staged).
+
+    ``owner``: Main's ``(intake key, RUNNING meta)`` of an owner turn, whose words its durable intake admits
+    for that meta's attempt (``_route_main_followup``), Q held for memory only, never across a read or the mail
+    lock's wait; a Project room's reader passes none."""
+    owner_key, owner_meta = owner
+    owner_attempt = int((owner_meta or {}).get("attempt") or 1)
+    try:
         tid = str(candidate["task_id"])
         direct_agent = None
         direct_lock = None
@@ -157,11 +250,13 @@ def _route_project_chat_to_running_task(
             tid,
             task=task_obj or candidate,
             project_id=str((task_obj or candidate).get("project_id") or ""),
+            fallback="" if owner_key else "Task",
         )
         from ouroboros.conversation_lease import author_intake_accepting
-        from ouroboros.owner_mailbox import write_owner_message
+        from ouroboros.owner_mailbox import mailbox_drain_ended, write_owner_message
         from supervisor.queue import (
             ACCEPTANCE_FENCES,
+            BUDGET_ROOT_FENCES,
             _queue_lock,
             _task_drive_for_task,
             persist_queue_snapshot,
@@ -236,7 +331,24 @@ def _route_project_chat_to_running_task(
                     log.info("Mailbox follow-up refused for %s: cancel pending (direct lane)", tid)
                     _drop_staged_inputs()
                     return ""
-            if not direct_lock_held and not remote_author:
+            if owner_key:
+                # Main's owner turn: Q spans only memory (the row judged, a snapshot of its fences); the file reads
+                # and the mail lock's wait run outside it, and the append re-checks under that lock what can move.
+                with _queue_lock:
+                    live_meta = getattr(ctx, "RUNNING", {}).get(tid)
+                    if live_meta is not owner_meta:  # its barrier, landed when judged, only stays landed
+                        return ""  # not the row judged (a crash's readmission, an ended turn): their own turn
+                    task_obj = live_meta.get("task") if isinstance(live_meta.get("task"), dict) else live_meta
+                    live_fences = getattr(ctx, "BUDGET_ROOT_FENCES", None)
+                    budget_fences = dict(BUDGET_ROOT_FENCES if live_fences is None else live_fences)
+                    active_fence = ACCEPTANCE_FENCES.get(str(task_obj.get("root_task_id") or tid))
+                    if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
+                        return ""
+                from ouroboros.room_reader import is_reading
+                if (not is_reading(task_drive, tid, task_obj, running=True, fences=budget_fences)
+                        or cancel_pending(ctx.DRIVE_ROOT, tid)):
+                    return ""
+            elif not direct_lock_held and not remote_author:
                 _queue_lock.acquire()
                 queue_lock_held = True
                 live_meta = getattr(ctx, "RUNNING", {}).get(tid)
@@ -251,8 +363,6 @@ def _route_project_chat_to_running_task(
                 # mailbox; accepting an owner follow-up here would label it
                 # delivered, then terminal cleanup would erase it unread. One
                 # predicate with the quiz ingress (TZ-2 D15).
-                from ouroboros.owner_mailbox import mailbox_drain_ended
-
                 if mailbox_drain_ended(task_drive, tid):
                     return ""
                 # Phase A: a task whose cancellation is PENDING must not accept a
@@ -268,6 +378,21 @@ def _route_project_chat_to_running_task(
                 active_fence = ACCEPTANCE_FENCES.get(fence_root)
                 if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
                     return ""
+            def owner_accepts_now() -> bool:
+                # The mail lock can wait while Pause/holds change. Read the current controls here, without Q:
+                # Project delivery still takes Q before mail, so the opposite order would deadlock it.
+                current = getattr(ctx, "RUNNING", {}).get(tid)
+                if current is not owner_meta:
+                    return False
+                task = current.get("task") if isinstance(current.get("task"), dict) else current
+                fence = ACCEPTANCE_FENCES.get(str(task.get("root_task_id") or tid))
+                return (_owner_turn_key(ctx, candidate, current, int(task.get("chat_id") or 0)) == owner_key
+                        and not (isinstance(fence, dict) and fence.get("status") == "sealed")
+                        and is_reading(task_drive, tid, task, running=True,
+                                       fences=getattr(ctx, "BUDGET_ROOT_FENCES", None), canonical=ctx.DRIVE_ROOT)
+                        and author_intake_accepting(task_drive, tid, owner_key, attempt=owner_attempt)
+                        and not cancel_pending(ctx.DRIVE_ROOT, tid))
+
             if not write_owner_message(
                 task_drive, f"{message}{attachment_note}", tid, msg_id=msg_id,
                 # This delivery IS the owner's message; the id is the caller's
@@ -286,7 +411,10 @@ def _route_project_chat_to_running_task(
                 reply_reference=task_metadata.get("reply_reference") if isinstance(task_metadata, dict) else None,
                 # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
                 # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
-                admit=(lambda: author_intake_accepting(task_drive, tid)) if remote_author else None,
+                # An owner turn's row must still be the one judged, its fact name the attempt judged, its result not
+                # settled and no Stop pending since: a forced rail closes the fact alone, its flag stays its Stop door.
+                admit=((lambda: author_intake_accepting(task_drive, tid)) if remote_author else
+                       owner_accepts_now if owner_key else None),
             ):
                 return ""
             message_written = True
@@ -295,6 +423,9 @@ def _route_project_chat_to_running_task(
                     getattr(direct_agent, "_owner_message_generation", 0) or 0
                 ) + 1
             else:
+                if owner_key and isinstance(active_fence, dict):  # after the mail lock, never inside it (Q→mail)
+                    _queue_lock.acquire()
+                    queue_lock_held = True
                 if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "active":
                     active_fence["owner_message_generation"] = int(
                         active_fence.get("owner_message_generation") or 0
@@ -408,6 +539,7 @@ def _record_routing_receipt(
     detail: str = "",
     attachment_manifest: Optional[list] = None,
     task: Optional[Dict[str, Any]] = None,
+    unnamed_label: str = "Task",
 ) -> None:
     """Emit a typed bubble-free ack and optionally persist its presentation state.
 
@@ -422,7 +554,7 @@ def _record_routing_receipt(
 
     fields = _routing_receipt_fields(
         ctx, {"relay_target": task}, action=action, target=target, target_label=target_label, status=status,
-        reason=reason, options=options, attachment_manifest=attachment_manifest,
+        reason=reason, options=options, attachment_manifest=attachment_manifest, unnamed_label=unnamed_label,
     )
     if persist:
         try:
@@ -590,6 +722,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # ONE read of the addressable roots for this message: the room's reader, Main's
     # manifest and the decision metadata all see the same projection.
     roots = addressable_roots(ctx)
+    routed_to_task, unnamed_label = "", "Task"
     # A live call's admitted turn keeps the room it was opened in; it never re-routes.
     if realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
@@ -608,30 +741,36 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             from ouroboros.owner_relay import carry_room_context
 
             carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
-        if routed_to_task:
-            _record_routing_receipt(
-                bridge,
-                ctx,
-                chat_id=chat_id,
-                client_message_id=client_message_id,
-                action="mailbox_delivery",
-                target=routed_to_task,
-                target_label=(
-                    str(task_metadata.get("_routing_target_label") or "")
-                    if isinstance(task_metadata, dict) else ""
-                ),
-                status="delivered",
-                detail=(
-                    str(task_metadata.get("_attachment_report") or "")
-                    if isinstance(task_metadata, dict) else ""
-                ),
-                attachment_manifest=(
-                    list(task_metadata.get("_attachment_manifest") or [])
-                    if isinstance(task_metadata, dict) else None
-                ),
-                task=task_metadata.get("_routing_target") if isinstance(task_metadata, dict) else None,
-            )
-            return
+    elif realtime_turn is None and not (project_id or late or press or task_constraint):
+        # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
+        routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,
+                                              task_metadata=task_metadata, image_data=image_data, roots=roots)
+        unnamed_label = ""  # its turn named nothing yet: the receipt says saved, never a placeholder name
+    if routed_to_task:
+        _record_routing_receipt(
+            bridge,
+            ctx,
+            chat_id=chat_id,
+            client_message_id=client_message_id,
+            action="mailbox_delivery",
+            target=routed_to_task,
+            target_label=(
+                str(task_metadata.get("_routing_target_label") or "")
+                if isinstance(task_metadata, dict) else ""
+            ),
+            status="delivered",
+            detail=(
+                str(task_metadata.get("_attachment_report") or "")
+                if isinstance(task_metadata, dict) else ""
+            ),
+            attachment_manifest=(
+                list(task_metadata.get("_attachment_manifest") or [])
+                if isinstance(task_metadata, dict) else None
+            ),
+            task=task_metadata.get("_routing_target") if isinstance(task_metadata, dict) else None,
+            unnamed_label=unnamed_label,
+        )
+        return
 
     try:
         from ouroboros.projects_registry import list_projects

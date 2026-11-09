@@ -945,7 +945,9 @@ def task_presentation_name(*sources: Any, fallback: str = "Task") -> str:
 
 
 def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = None,
-                               result: Any = None, project_id: str = "", strict: bool = False) -> Dict[str, Any]:
+                               result: Any = None, project_id: str = "", strict: bool = False,
+                               fallback: str = "Task") -> Dict[str, Any]:
+    """``fallback``: a nameless work's name outside a Project ("" leaves it unnamed, its label empty)."""
     tid = str(task_id or "").strip()
     sources = [row for row in (task, result) if isinstance(row, dict)]
     if tid and not strict:
@@ -990,7 +992,7 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
     if pid and not pname:
         pname = "Project"
     # Nameless work of a Project is called by its Project: never a bare "Project › Task".
-    task_name = task_presentation_name(*sources, fallback=pname or "Task")
+    task_name = task_presentation_name(*sources, fallback=pname or fallback)
     label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality
