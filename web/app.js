@@ -11,6 +11,7 @@ import { markView, paintStatusMark, syncMarkPhases } from './modules/status_mark
 import { createProjectsNav, setActivityOwnerName } from './modules/projects_nav.js';
 import { bindRowMenuGesture } from './modules/row_menu_gesture.js';
 import { initFiles } from './modules/files.js';
+import { initCircles } from './modules/circles.js';
 import { draftPort, getContributions } from './modules/contributions.js';
 import { bridgeContributedActions } from './modules/message_actions.js';
 import { startHostModules } from './modules/host_modules.js';
@@ -1344,6 +1345,7 @@ initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 const disposeStorage = initStorage({ ...ctx, mount: document.getElementById('dashboard-panel-storage') });
 initSkills(ctx);
 initWidgets(ctx);
+initCircles(ctx);
 const updateStatus = initUpdateStatus(ctx);
 // The interface size's one controller: the desktop keys work on every page, the slider lives in Settings.
 getInterfaceSize();

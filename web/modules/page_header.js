@@ -101,8 +101,10 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
             node.before(home);
             return { node, bar, how, home };
         });
-    if (!moves.length) return () => {};
-    const toolbar = header.querySelector('.app-page-toolbar');
+    const toolbar = header?.querySelector('.app-page-toolbar');
+    // A bar whose actions are already in it (Circles) still lays out as the desk band of every named page; only a
+    // header with no bar and nothing to move has nothing to do here.
+    if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
         // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).

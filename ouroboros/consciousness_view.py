@@ -118,43 +118,71 @@ def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
-    """Stored PlaceSummary facts, using the caller's allowance without connector discovery."""
+    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance, no connector
+    discovery."""
     from ouroboros.place_projection import place_view
-    from ouroboros.places import load_places
+    from ouroboros.places import place_records
 
-    return [place_view(drive_root, place, allowance=allowance, brief=True) for place in load_places(drive_root)]
+    records = place_records(drive_root)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records)
+            for place in records.places.values()]
 
 
 def places_text(drive_root, views) -> str:
-    from ouroboros.place_arrivals import recent_identity
-    from ouroboros.places import OwnerAccount, PlaceError, owner_account_matches, place_owner_accounts
+    """The places as my own map: each circle once with its whole words and its places under it, then the places in
+    no circle. A place I put in a circle says so: there my human's words still restrict, but consent needs their
+    placement."""
+    from ouroboros.places import PlaceError, place_owner_accounts
     if views is None:
         return "unknown (place index unavailable)"
     try:
         counted = place_owner_accounts(drive_root)  # one read: the accounts each place's connector account confirms
     except PlaceError:
         counted = {}
-    lines = []
+    groups: dict[str, list] = {}
     for view in views:
-        identity = recent_identity(drive_root, view["place_id"])
-        sending = (identity or {}).get("sends_as") or {}
-        owner = sending.get("kind") == "user" and owner_account_matches(
-            counted.get(view["place_id"]) or [OwnerAccount(**a) for a in view.get("owner_accounts", [])],
-            sending["id"], view.get("account_id", ""))
-        voice = ""
-        if sending:
-            voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
-                     else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
-        count, rooms = view.get("unanswered"), view.get("rooms")
-        # A count; the closing line names the reader of every room, sealed ones included.
-        held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
-        lines.append(f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
-                     f'open turns: {count if count is not None else "unknown"}; {held}{voice}')
-        for note in view.get("notes") or []:
-            lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+        groups.setdefault((view.get("circle") or {}).get("circle_id", ""), []).append(view)
+    lines = []
+    for key in sorted(groups, key=lambda key: (not key, str((groups[key][0].get("circle") or {}).get("name", "")))):
+        indent = "  " if key or len(groups) > 1 else ""
+        if key:  # its words like a note's lines, with their author, once for every place in it
+            circle = groups[key][0]["circle"]
+            lines.append(f'circle {circle["name"]} [{key}]' + ("" if circle["text"] else ": no words yet"))
+            lines.extend(f'  words ({circle["text_author"]}): {line}' for line in circle["text"].splitlines())
+        elif indent:
+            lines.append("not in a circle:")
+        for view in groups[key]:
+            lines.extend(indent + line for line in _place_lines(drive_root, view, counted))
     if lines:
         lines.append("a place's rooms: configure_presence(action='inspect', place_id=<its id in brackets>)")
     return "\n  ".join(lines) if lines else "none"
+
+
+def _place_lines(drive_root, view, counted) -> list[str]:
+    from ouroboros.place_arrivals import recent_identity
+    from ouroboros.places import OWNER_VOICE, OwnerAccount, owner_account_matches
+    identity = recent_identity(drive_root, view["place_id"])
+    sending = (identity or {}).get("sends_as") or {}
+    owner = sending.get("kind") == "user" and owner_account_matches(
+        counted.get(view["place_id"]) or [OwnerAccount(**a) for a in view.get("owner_accounts", [])],
+        sending["id"], view.get("account_id", ""))
+    voice = ""
+    if sending:
+        voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
+                 else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
+    count, rooms = view.get("unanswered"), view.get("rooms")
+    # A count; the closing line names the reader of every room, sealed ones included.
+    held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
+    circle = view.get("circle") or {}
+    placed = ""
+    if circle.get("text") and circle["placed_by"] not in OWNER_VOICE:  # words I wrote there stay my own record
+        placed = ("; you placed it in this circle: your human's words there still restrict it, but consent needs their "
+                  "placement" if circle.get("text_author") in OWNER_VOICE else "; you placed it in this circle")
+    lines = [f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
+             f'open turns: {count if count is not None else "unknown"}; {held}{voice}{placed}']
+    for note in view.get("notes") or []:
+        lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+    return lines
 
 
 def cause_views(rows, places) -> list[dict] | None:

@@ -311,6 +311,16 @@ test('a removed trigger is never focused on close; nested dialog owns its own ke
     assert.equal(doc.activeElement, input);
 });
 
+test('a returnFocus function is read at close: an opener a repaint replaced is still given focus', () => {
+    const { doc, node, trigger, dialog, input } = dialogFixture();
+    let current = trigger;
+    const dispose = bindDialogFocus(dialog, { initialFocus: input, returnFocus: () => current });
+    trigger.isConnected = false;  // the page under the dialog repainted its rows
+    current = node('button'); doc.body.append(current);
+    dispose();
+    assert.equal(doc.activeElement, current);
+});
+
 function menuFixture() {
     const { doc, node } = environment();
     const anchor = node('button');
