@@ -647,7 +647,8 @@ class _Engine:
     def get_run(self, run_id, timeout_sec=None):
         if self.fail:
             raise OSError("daemon unreachable")
-        return {"summary": {"runId": run_id, "state": self.state, "waitingOnUser": self.waiting},
+        return {"summary": {"runId": run_id, "state": self.state, "waitingOnUser": self.waiting,
+                            "effectiveAccess": "readonly"},
                 "lastSeq": 1, "pendingInteractions": []}
 
     def close(self):

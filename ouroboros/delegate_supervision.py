@@ -27,9 +27,6 @@ _TICK_SEC = 3
 _QUIET_STATUSES = {"progress", "no_progress", "observation_pending"}
 _LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY}
 _MAX_COORDINATION_SEEN = 256
-# The gateway's typed code for a read that delivered no daemon answer at all
-# (``gateways.claudexor._request``): a quiet renewal here, never a model wake.
-_DAEMON_UNREACHABLE = "daemon_unreachable"
 # The hold's in-slot mark outlives one slow observation read (60 s), then renews; an
 # observation older than a few ticks says nothing current about the run's work.
 _HOLD_MARK_SEC = 120.0
@@ -37,28 +34,11 @@ _OBSERVATION_CURRENT_SEC = 4 * _TICK_SEC
 _OBSERVED: dict = {}  # state path -> ((mtime_ns, size), parsed observation fields)
 
 
-def _owner_line(ctx: Any, text: str, key: str, tone: str) -> None:
-    """One owner-visible line per unreachable-daemon episode, through the task's
-    existing progress channel; the typed ``task_incident``/``toast_once`` pair is
-    what the client toasts once, so no host state is written for the dedup."""
-    fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
-    try:
-        fn(text, incident={
-            "task_incident": "delegation_daemon_unreachable",
-            "toast_once": f"{getattr(ctx, 'task_id', '') or ''}:{key}",
-            "toast_tone": tone,
-        })
-    except Exception:
-        pass
-
-
 # A tick that returned NO DAEMON ANSWER: either a read the daemon never answered,
 # or a refusal raised before any byte left the host (a missing descriptor, an
 # unreadable token, an engine below the floor). It drops the loop's transport, so
-# the next tick re-reads the descriptor and re-handshakes, and it cannot close an
-# open outage episode either: silence of a different shape is not contact.
+# the next tick re-reads the descriptor and re-handshakes. Whether the engine answers
+# at all is the body's to tell the owner (``delegate_feed``), for every held run.
 _NO_DAEMON_ANSWER_STATUSES = frozenset({"observation_pending", "refused"})
 # A tick text the host could not read as a JSON object (``_payload``): no daemon
 # answer is established either, whatever the text was.
@@ -1085,7 +1065,7 @@ def _record_observation(state: dict[str, Any], payload: dict[str, Any], answered
 
 def run_activity(observation: Any) -> Optional[bool]:
     """What one dated observation of a run says of its work (this supervision record's, or the
-    body observer's, ``delegate_collection.current_activity``): True running, False waiting
+    body observer's, ``delegate_feed.current_activity``): True running, False waiting
     (queued for capacity, paused on its question, terminal), None unanswered or unknown.
     A running run counts as working: an engine-internal provider wait carries no typed fact."""
     if not isinstance(observation, dict) or observation.get("answered") is not True:
@@ -1222,8 +1202,8 @@ def supervised_wait(
     The journal cursor survives restart. A checkpoint wakes once; any earlier event
     consumes it. The existing three-second renewal keeps unanswered reads quiet (the quiet
     holes: ``observation_read_timeout``, our bound expired; ``daemon_unreachable``, no socket;
-    a ``DAEMON_BUSY_CODES`` GET answer; ``daemon_stopping``);
-    only daemon_unreachable opens an outage episode, closed by an answered read.
+    a ``DAEMON_BUSY_CODES`` GET answer; ``daemon_stopping``). The run's speech, its rights
+    floor and the engine's reach are the body's (``delegate_feed``, ``delegate_containment``).
     The applied cache horizon is disclosed once per wake when exceeded.
     """
 
@@ -1304,11 +1284,6 @@ def supervised_wait(
             "sleep_entry": dict(state["sleep_entry"]),
         })
 
-    # The OPEN unreachable-daemon episode: its UTC start (empty when none) plus the
-    # millisecond stamp that keeps two episodes of one wait distinct on both client
-    # dedup surfaces (the loop_transport.incident precedent).
-    outage_since = ""
-    outage_stamp = ""
     # The loop's own transport, only when it built the observing wait.
     from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
     retained_runs = {selected: retained_terminal_result(ctx, selected, retry_money=True) for selected in run_ids} if owns_transport else {}
@@ -1353,7 +1328,7 @@ def supervised_wait(
             answered = readable and str(payload.get("status") or "") not in _NO_DAEMON_ANSWER_STATUSES
             # A typed 503 the engine itself sent to the read reached the daemon over an intact
             # transport: rebuilding it would re-handshake into the same refusal and wake the
-            # model, and it is no outage either. Only a read nothing answered is a dead socket.
+            # model. Only a read nothing answered is a dead socket.
             reached = answered or payload.get("answered") is True
             resumed = False
             if observed:
@@ -1362,21 +1337,6 @@ def supervised_wait(
                 resumed = activity is True and previous is not True
             if not reached:
                 gateway = _drop_gateway(gateway)
-            unreachable = (
-                payload.get("status") == "observation_pending"
-                and payload.get("reason") == _DAEMON_UNREACHABLE and not reached
-            )
-            if observed and outage_since and reached:
-                # The first read the daemon ANSWERED closes the episode. A refusal
-                # that never reached it (descriptor gone, token unreadable, engine
-                # too old) used to satisfy this and told the owner the daemon was
-                # reachable again at the moment it became less reachable.
-                _owner_line(
-                    ctx,
-                    "Delegation daemon reachable again; the outage that began at "
-                    f"{outage_since} is over and delegated runs are being observed again.",
-                    f"delegation_daemon_recovered:{outage_stamp}", "ok")
-                outage_since, outage_stamp = "", ""
             cursor = payload.get("last_seq")
             if isinstance(cursor, int):
                 state["journal_cursor"] = max(int(state.get("journal_cursor") or 0), cursor)
@@ -1465,23 +1425,10 @@ def supervised_wait(
                     "run_id": str(run_id), "reason": payload.get("reason"),
                     "waited_sec": payload.get("waited_sec"),
                 })
-                if unreachable and not outage_since:
-                    # The class the model can do nothing about: a dead socket is a quiet
-                    # renewal on the same 3 s beat (no backoff, no durable counter), and
-                    # the owner hears about it exactly once per episode. Deadline, ceiling,
-                    # budget and cancel stay the outer bounds that cut a long unobserved
-                    # stretch. The episode stamps its own key and names its start in the
-                    # text, so a SECOND outage in the same wait is a new line on both
-                    # client surfaces instead of a duplicate the toast set already holds.
-                    opened = time.time()
-                    outage_since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(opened))
-                    outage_stamp = str(int(opened * 1000))
-                    _owner_line(ctx, f"Delegation daemon unreachable since {outage_since}; "
-                                "delegated runs are not being observed, the runs themselves "
-                                "keep going.",
-                                f"delegation_daemon_unreachable:{outage_stamp}", "warn")
-                # A failed read is not a completed quiet window; retain the cursor
-                # and avoid a busy loop if a transport fails before its read bound.
+                # A dead socket is a quiet renewal on the same 3 s beat (no backoff, no durable
+                # counter); deadline, ceiling, budget and cancel stay the outer bounds that cut a
+                # long unobserved stretch. A failed read is not a completed quiet window: the
+                # cursor stays, and no busy loop follows a transport that fails before its bound.
                 time.sleep(_TICK_SEC)
             state["coordination_cursor"] = next_coordination_cursor
             state["quiet_renewals"] = int(state.get("quiet_renewals") or 0) + 1

@@ -328,7 +328,7 @@ def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monk
         def close(self):
             pass
 
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     try:
         assert runtime.ensure_runs([(a.run_id, a.invocation_id)], task_id=a.task_id)
         _until(lambda: current.run(tmp_path, a.run_id).terminal_state)
@@ -434,7 +434,7 @@ def test_one_unanswered_reader_does_not_hide_another_selected_run(tmp_path, monk
             return terminal(rid)
         def close(self):
             pass
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     try:
         assert entered.wait(10)
         _until(lambda: current.run(tmp_path, b.run_id).terminal_state)
@@ -457,12 +457,13 @@ def test_observation_reuses_one_client_and_rebuilds_it_after_a_failed_read(tmp_p
         def get_run(self, rid, **kwargs):
             if rid == a.run_id and fail.pop("once", False):
                 raise ConnectionError("the daemon moved")
-            return {"summary": {"runId": rid, "state": "running"}, "lastSeq": 1, "pendingInteractions": []}
+            return {"summary": {"runId": rid, "state": "running", "effectiveAccess": "readonly"}, "lastSeq": 1,
+                    "pendingInteractions": []}
         def close(self):
             closed.append(self)
     stop = threading.Event()
     stop.set()  # no background ticks: the observations below are the only ones
-    runtime = body.BodyRuntime(tmp_path, stop_event=stop, gateway_factory=Gateway, max_workers=2)
+    runtime = body.BodyRuntime(tmp_path, stop_event=stop, gateway_factory=Gateway)
     runtime.thread.join(10)
     with pytest.raises(ConnectionError):
         runtime._observe(a)

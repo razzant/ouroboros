@@ -1,4 +1,4 @@
-"""The supervised wait's beat on a repaired engine: speech from the journal, attention from the engine."""
+"""The supervised wait's beat on a repaired engine: its wait from the journal, attention from the engine."""
 from __future__ import annotations
 
 import contextlib
@@ -104,7 +104,9 @@ def _speech(seq, text):
                   "payload": {"type": "message", "text": text, "harness_id": "codex", "attempt_id": "a1"}})
 
 
-def test_a_quiet_beat_reads_no_detail_and_speech_reaches_the_owner(ctx):
+def test_a_quiet_beat_reads_no_detail_and_leaves_the_speech_to_the_body(ctx):
+    """The journal read is the beat's wait, from the wait's own cursor; what the run said reaches the owner
+    from the body (``delegate_feed``), so the step publishes nothing (no second producer of one feed)."""
     gateway = Engine(streams=[_frames([_speech(1, "hello"), _speech(2, "world")])],
                      wakes=[_wake("timeout", [_summary()])])
     step = delegate_observe.step(ctx, gateway, "run-s", window=3.0, since_seq=0, read_window=lambda: 30.0,
@@ -116,11 +118,11 @@ def test_a_quiet_beat_reads_no_detail_and_speech_reaches_the_owner(ctx):
     assert (payload["elapsed_seconds"], payload["max_seconds"]) == (42, 600), "the facts against a premature cancel"
     assert gateway.stream_opens == [("run-s", 0, 3.0)]
     assert gateway.requests == [{"targets": [{"runId": "run-s"}], "wait_ms": 0}], "attention is a present-state read"
-    assert len(ctx.frames) == 1 and "hello" in ctx.frames[0][0]
-    assert ctx.frames[0][1]["delegated_activity"]["through_seq"] == 2
-    again = delegate_observe.step(ctx, Engine(wakes=[_wake("timeout", [_summary()])]), "run-s",
-                                  window=3.0, since_seq=2, read_window=lambda: 30.0)
+    assert ctx.frames == [], "the body publishes the run's speech, never the waiting nanny's beat"
+    quiet = Engine(wakes=[_wake("timeout", [_summary()])])
+    again = delegate_observe.step(ctx, quiet, "run-s", window=3.0, since_seq=2, read_window=lambda: 30.0)
     assert json.loads(again.payload)["status"] == "no_progress", "a silent beat is quiet"
+    assert quiet.stream_opens == [("run-s", 2, 3.0)], "the next beat reads after the wait's own cursor"
 
 
 def test_attention_earns_the_detail_and_acknowledges_the_token_after_it(ctx):
@@ -143,7 +145,7 @@ def test_the_streams_end_earns_the_terminal_detail(ctx):
     gateway = Engine(streams=[_frames([_speech(1, "bye")], end=True)],
                      wakes=[_wake("attention", [_summary(status="succeeded", token=TOKEN_B)], [0])], details=[done])
     step = delegate_observe.step(ctx, gateway, "run-s", window=3.0, since_seq=0, read_window=lambda: 30.0)
-    assert step.detail is done and len(ctx.frames) == 1
+    assert step.detail is done and ctx.frames == []
 
 
 def test_a_hole_on_the_attention_read_raises_the_gateways_typed_hole(ctx):

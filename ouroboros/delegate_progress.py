@@ -710,9 +710,9 @@ def emit(ctx: Any, run_id: str, advance: _Advance, *,
 
 
 def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
-    """Push the events of one journal read the wait made itself (``delegate_observe.step``)
-    to the live progress surface, each frame committed once handed over; a broken channel
-    never aborts the wait."""
+    """Push the events of one journal read the body made (``delegate_feed``) to the live
+    progress surface, each frame committed once handed over; a broken channel never aborts
+    the read."""
     fn = getattr(ctx, "emit_progress_fn", None)
     if not callable(fn):
         return

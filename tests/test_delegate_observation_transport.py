@@ -303,11 +303,10 @@ def _scripted_wait_once(script):
     return wait_once
 
 
-def test_unreachable_daemon_episode_is_one_owner_line_each_way(tmp_path, monkeypatch):
-    """N consecutive ``daemon_unreachable`` ticks tell the owner ONCE; the first read the
-    daemon answers again tells the owner once more and re-arms the episode. The beat
-    stays one ``_TICK_SEC`` per unreachable tick (no backoff), and the dedup is the
-    client's ``toast_once`` on the existing typed pair, not new host state."""
+def test_an_unanswered_beat_is_a_quiet_renewal_and_the_reach_line_is_the_bodys(tmp_path, monkeypatch):
+    """N consecutive ``daemon_unreachable`` ticks keep the same run on one ``_TICK_SEC`` beat each (no backoff, no
+    model wake) until a read is answered. The owner's line about the engine's reach is the body's now, for every
+    held run (``tests/test_body_feed.py``): the supervised wait says nothing of it, so no task hears it twice."""
     ctx = _delegating_ctx(tmp_path, acting=False)
     notes = []
     ctx.emit_progress_fn = lambda text, *, incident=None: notes.append((text, incident))
@@ -320,60 +319,14 @@ def test_unreachable_daemon_episode_is_one_owner_line_each_way(tmp_path, monkeyp
             unreachable, ("terminal", None),
         ])).text)
     assert result["status"] == "terminal"
-    assert [text.startswith("Delegation daemon unreachable") for text, _ in notes] == [
-        True, False, True, False]
-    outage, recovered = notes[0][1], notes[1][1]
-    assert outage["task_incident"] == recovered["task_incident"] == "delegation_daemon_unreachable"
-    assert outage["toast_tone"] == "warn" and recovered["toast_tone"] == "ok"
-    assert outage["toast_once"].startswith(f"{ctx.task_id}:delegation_daemon_unreachable:")
-    assert recovered["toast_once"].startswith(f"{ctx.task_id}:delegation_daemon_recovered:")
-    # The SECOND episode is a second line on both client surfaces: the toast set
-    # dedupes on the key and the timeline on the rendered text, so an episode
-    # discriminator has to reach both or outages 2..N are dropped, not repeated.
-    keys = [incident["toast_once"] for _text, incident in notes]
-    assert len(set(keys)) == 4, keys
-    # The text names the episode it belongs to, so the timeline's text-keyed
-    # dedup sees a second episode too (two episodes inside one second would
-    # still collapse there; the toast key above never does).
-    assert all(text.count(":") >= 2 for text, _ in notes), notes
-    # One episode's own pair shares its stamp: the recovery names the outage it closes.
-    assert outage["toast_once"].rsplit(":", 1)[1] == recovered["toast_once"].rsplit(":", 1)[1]
-    assert notes[2][1]["toast_once"].rsplit(":", 1)[1] == notes[3][1]["toast_once"].rsplit(":", 1)[1]
     assert sleeps == [delegate_supervision._TICK_SEC] * 4
-
-
-def test_other_typed_observation_reasons_say_nothing_to_the_owner(tmp_path, monkeypatch):
-    """A daemon that was merely SLOW stays silent to the owner.
-
-    ``observation_read_timeout`` is what the gateway mints for an httpx
-    ReadTimeout and what the observing wait relays (both pinned above), so this
-    is the production value of a live daemon that answered after our own read
-    bound, not a hand-fed string: the run settles from that same daemon and the
-    owner is never told it was unreachable.
-    """
-    ctx = _delegating_ctx(tmp_path, acting=False)
-    notes = []
-    ctx.emit_progress_fn = lambda text, *, incident=None: notes.append((text, incident))
-    monkeypatch.setattr(delegate_supervision.time, "sleep", lambda _sec: None)
-    slow = ("observation_pending", "observation_read_timeout")
-    result = json.loads(delegate_supervision.supervised_wait(
-        ctx, "run-existing", wait_once=_scripted_wait_once([slow, slow, ("terminal", None)])).text)
-    assert result["status"] == "terminal"
     assert notes == []
 
 
-def test_a_refusal_that_never_reached_the_daemon_closes_no_outage(tmp_path, monkeypatch):
-    """Recovery is contact, not merely "something other than the outage".
-
-    A refusal raised before any byte left the host (a missing descriptor, an
-    unreadable token, an engine below the floor) used to satisfy the recovery
-    gate: the owner was told the daemon was reachable again at the moment it
-    became less reachable, and the constant recovery key was burned for the rest
-    of the session. Only a payload the daemon itself produced closes the episode.
-    """
+def test_a_refusal_that_never_reached_the_daemon_wakes_the_wait_with_its_reason(tmp_path, monkeypatch):
+    """A refusal raised before any byte left the host (a missing descriptor, an unreadable token, an engine
+    below the floor) is no quiet hole: the wait returns it typed, with its reason."""
     ctx = _delegating_ctx(tmp_path, acting=False)
-    notes = []
-    ctx.emit_progress_fn = lambda text, *, incident=None: notes.append((text, incident))
     monkeypatch.setattr(delegate_supervision.time, "sleep", lambda _sec: None)
     unreachable = ("observation_pending", "daemon_unreachable")
     result = json.loads(delegate_supervision.supervised_wait(
@@ -382,15 +335,13 @@ def test_a_refusal_that_never_reached_the_daemon_closes_no_outage(tmp_path, monk
         ])).text)
 
     assert result["status"] == "refused" and result["reason"] == "daemon_not_discovered"
-    assert [text.startswith("Delegation daemon unreachable") for text, _ in notes] == [True]
-    assert not any("reachable again" in text for text, _ in notes)
 
 
 @pytest.mark.parametrize("raw", ["<html>proxy error</html>", '"a json string"', "[1, 2]", None])
 def test_an_unreadable_tick_is_a_typed_host_failure_never_an_answer(tmp_path, monkeypatch, raw):
     """#947: a tick the host cannot read as an object is its own read failure. It publishes the
-    family's refusal envelope (kept ``fault`` for the hold) with the whole text, keeps the last
-    answered time, and closes no outage; its pending wake replays with the same class."""
+    family's refusal envelope (kept ``fault`` for the hold) with the whole text and keeps the last
+    answered time; its pending wake replays with the same class."""
     ctx = _delegating_ctx(tmp_path, acting=False)
     notes = []
     ctx.emit_progress_fn = lambda text, *, incident=None: notes.append(text)
@@ -413,7 +364,7 @@ def test_an_unreadable_tick_is_a_typed_host_failure_never_an_answer(tmp_path, mo
     state = delegate_supervision._load_state(ctx, "run-existing")
     assert state["last_answered_observation_at"] == answered["last_answered_observation_at"]
     assert (state["observation"]["answered"], state["observation_failure"]) == (False, "observation_malformed")
-    assert [text.startswith("Delegation daemon unreachable") for text in notes] == [True], notes
+    assert notes == [], "the engine's reach is the body's line, never the wait's"
     replay = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: pytest.fail("replayed"))
     shown = json.loads(replay.text)  # the recorded refusal, labelled as a replay (#2992)
     assert replay.code == "TOOL_REPORTED_FAILURE" and shown.pop("replay_of")["fresh_observation"] is False
@@ -422,7 +373,8 @@ def test_an_unreadable_tick_is_a_typed_host_failure_never_an_answer(tmp_path, mo
 
 def test_an_observed_failed_leaf_stays_an_answered_observation(tmp_path, monkeypatch):
     """The negative control: a daemon answer that the run FAILED is a successful read of a failed
-    leaf, so it stays OK and closes an open outage (#947 changes only the host's unreadable tick)."""
+    leaf, so it stays OK (#947 changes only the host's unreadable tick); an answer closing an outage
+    is the body's (``tests/test_body_feed.py``)."""
     ctx = _delegating_ctx(tmp_path, acting=False)
     notes = []
     ctx.emit_progress_fn = lambda text, *, incident=None: notes.append(text)
@@ -432,7 +384,7 @@ def test_an_observed_failed_leaf_stays_an_answered_observation(tmp_path, monkeyp
                   json.dumps({"status": "terminal", "run_id": "run-existing", "state": "failed"})])
     result = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: next(steps))
     assert result.code == "OK" and json.loads(result.text)["state"] == "failed"
-    assert any(text.startswith("Delegation daemon reachable again") for text in notes), notes
+    assert notes == []
 
 
 def test_an_oversized_unreadable_tick_spills_whole_and_keeps_its_class(tmp_path, monkeypatch):
@@ -677,15 +629,15 @@ def _raise(exc):
 
 
 @pytest.mark.parametrize(("status", "code", "repaired"), [(404, "not_found", True), (503, "daemon_busy", False)])
-def test_an_unavailable_stream_keeps_the_provisional_window_on_the_repaired_engine_too(
+def test_an_unavailable_stream_hands_the_beat_to_the_detail_read_and_never_refuses_the_wake(
         tmp_path, monkeypatch, repaired, status, code):
-    """A journal that cannot be opened hands the beat to the detail read and its degraded window,
-    exactly as on the engine before the compact wait: never a refused wake."""
+    """A journal that cannot be opened hands the beat to the detail read, exactly as on the engine before the
+    compact wait: never a refused wake. The run's words are the body's to publish once its journal opens
+    (``delegate_feed``); the beat publishes no window of its own."""
     result, frames = _repaired_engine(tmp_path, monkeypatch, repaired=repaired,
                                       events=lambda _r: httpx.Response(status, json={"code": code}))
     assert result["status"] == "progress", result
-    sources = [meta["delegated_activity"]["source"] for meta in frames if "delegated_activity" in meta]
-    assert sources == [{"kind": "timeline_window", "reason": f"stream_unavailable:{code}", "provisional": True, "rows": 1}]
+    assert frames == []
 
 
 def test_holes_on_the_repaired_engines_observation_routes_are_quiet(tmp_path, monkeypatch):

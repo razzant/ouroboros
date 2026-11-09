@@ -523,7 +523,8 @@ def test_a_warm_sleep_on_its_own_run_types_and_resumes_when_the_body_sees_it_wor
         state = "running"
 
         def get_run(self, run_id, timeout_sec=None):
-            return {"summary": {"runId": run_id, "state": self.state}, "lastSeq": 1, "pendingInteractions": []}
+            return {"summary": {"runId": run_id, "state": self.state, "effectiveAccess": "readonly"}, "lastSeq": 1,
+                    "pendingInteractions": []}
 
         def close(self):
             pass

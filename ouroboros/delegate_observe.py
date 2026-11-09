@@ -1,15 +1,16 @@
-"""One observation step of the supervised wait: speech from the journal, attention from the engine.
+"""One observation step of the supervised wait: its beat from the journal, attention from the engine.
 
 The supervising wait used to learn everything from one full run detail per three-second beat:
 whether the run spoke (``lastSeq`` moved), whether it asks a question, whether it ended. On an
 engine that serves the compact attention wait and the run's own event stream, the beat is two
-cheap reads instead: the journal read IS the wait (it returns as events arrive, or at the
-window's end, and every event it carries reaches the owner's live stream exactly as before),
-then one body-free present-state read says whether a question or a terminal is due. Only then
-is the run's detail read — the addressed read the attention earned — and the engine's token
-acknowledged as ``seen`` after it, never before. An engine without either surface keeps the
-detail beat (``tools/delegate._delegate_wait``), as do a problem row and a route that vanished
-mid-call, so the old path and its semantics decide everything this step does not understand.
+cheap reads instead: the journal read IS the wait (it returns at the window's end or the
+journal's, from the wait's own cursor; what the run said reaches the owner from the body,
+``delegate_feed``, whoever waits), then one body-free present-state read says whether a question
+or a terminal is due. Only then is the run's detail read — the addressed read the attention
+earned — and the engine's token acknowledged as ``seen`` after it, never before. An engine
+without either surface keeps the detail beat (``tools/delegate._delegate_wait``), as do a
+problem row and a route that vanished mid-call, so the old path and its semantics decide
+everything this step does not understand.
 """
 from __future__ import annotations
 
@@ -57,7 +58,7 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     could not be read this beat: the caller reads detail, with its hole rules and its degraded
     window. ``elapsed_seconds``/``max_seconds`` are the run's timing facts the quiet payload
     carries, as the window payload does, against a nanny's premature cancel."""
-    from ouroboros import delegate_activity, delegate_progress
+    from ouroboros import delegate_progress
     from ouroboros.gateways import claudexor_observation as observation
     from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
     from ouroboros.gateways.claudexor_run_events import read_run_events, run_events_supported
@@ -74,13 +75,12 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     task_id = str(getattr(ctx, "task_id", "") or "")
     key = (task_id, str(run_id))
     started = time.monotonic()
-    # 1. Speech: the journal read is the wait. It resumes after what this process has shown.
-    after = delegate_activity.shown_cursor(ctx, task_id, run_id, since_seq)
+    # 1. The journal read is the wait, from the wait's own cursor; the body publishes the speech.
+    after = int(since_seq or 0)
     try:
         read = read_run_events(gateway, run_id, after_seq=after, through_seq=None, timeout_sec=max(0.0, float(window)))
     except ClaudexorUnavailable:
         return None  # a transport before the stream opened, busy, stopping, a refused or absent stream
-    delegate_progress.emit_stream(ctx, run_id, read, after_seq=after)
     # 2. Attention: the present state, body-free. A hole raises the gateway's own typed hole
     # (``observation_timeout``), which the wait already reports as a quiet observation hole.
     with _SEEN_LOCK:
@@ -99,7 +99,7 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
         detail = delegate_progress.bounded_poll(gateway, run_id, read_window())
         _acknowledge(key, row.token)  # acknowledged only once the rows it stands for were fetched
         return Step(detail=detail)
-    cursor = max(int(after), int(read.through_seq or 0), int(since_seq or 0))
+    cursor = max(after, int(read.through_seq or 0))
     payload = {"status": "progress" if read.events else "no_progress", "run_id": str(run_id),
                "state": row.status or "", "last_seq": cursor, "waited_sec": int(time.monotonic() - started),
                "elapsed_seconds": elapsed_seconds, "max_seconds": max_seconds,

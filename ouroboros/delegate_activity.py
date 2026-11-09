@@ -639,19 +639,20 @@ def _commit(memo: _RunMemo, record: Dict[str, Any], shown_through: Optional[int]
     return commit
 
 
-def shown_cursor(ctx: Any, task_id: str, run_id: str, after_seq: Optional[int]) -> int:
-    """Where this process's view of the run's journal ends: what it showed, else the last
-    retained range, else the journal's beginning — the same resolution ``observations`` makes."""
+def shown_cursor(ctx: Any, task_id: str, run_id: str) -> int:
+    """Where this process's view of the run's journal ends: what it showed, else the last retained
+    range (read again once), else the journal's beginning. The body's feed has no wake cursor to
+    narrow it, unlike a wait (``observations``)."""
     memo = _memo(task_id, run_id)
     if memo.shown_through is None:
         retained = _retained_range(ctx, task_id, run_id)
-        memo.shown_through = min(int(after_seq or 0), retained[0] - 1) if retained else 0
+        memo.shown_through = retained[0] - 1 if retained else 0
     return int(memo.shown_through or 0)
 
 
 def stream_observations(ctx: Any, run_id: str, read: Any, *, after: int):
-    """The typed record of one journal read the caller already made (the supervised wait's
-    speech read), with the commit its emitter calls; nothing for a read that carried no event."""
+    """The typed record of one journal read the caller already made (the body's speech read,
+    ``delegate_feed``), with the commit its emitter calls; nothing for a read that carried no event."""
     if not read.events:
         return
     task_id = str(getattr(ctx, "task_id", "") or "")

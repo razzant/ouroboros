@@ -40,7 +40,7 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(body.BodyRuntime, "tick", park)
     clock = [100.0]
     monkeypatch.setattr(body, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    started = body.start_body_runtime(tmp_path, gateway_factory=_no_daemon, max_workers=2)
+    started = body.start_body_runtime(tmp_path, gateway_factory=_no_daemon)
     assert entered.wait(5)
 
     def step():

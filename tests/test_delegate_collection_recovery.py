@@ -251,7 +251,7 @@ def driven_runtime(tmp_path, monkeypatch, capture_child):  # noqa: F811
     class Gateway:
         def get_run(self, rid, **kwargs): return terminal(rid)
         def close(self): pass
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     assert entered.wait(3)
     def step():
         tick(runtime)

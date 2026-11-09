@@ -156,6 +156,7 @@ from ouroboros.delegate_containment import (  # noqa: E402
     _widened_access,  # noqa: F401  (leaf reads it through _delegate() at call time)
     home_nested_under_operator_home,  # noqa: F401  (leaf reads it through _delegate() at call time)
 )
+from ouroboros.delegate_containment import granted_shape, halt_breached  # noqa: E402
 _POLL_INTERVAL_SEC = 3.0
 # Claudexor's own schema bound on maxSeconds (packages/schema/src/control.ts).
 _CLAUDEXOR_MAX_SECONDS = 604_800
@@ -974,29 +975,15 @@ def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
                        breach: _Breach) -> str:
     """Stop a run the engine did not contain as asked, and say exactly what failed.
 
-    The BREACH incident goes through ``custody.record_containment_fault``, the same
-    writer an unverified cancel uses, so a breached run also surfaces as the CRITICAL
-    health invariant that stays open until a terminal receipt resolves it. Emitting a
-    look-alike event here instead left the breach out of the open-fault sweep.
-
-    The stop itself goes through ``custody.cancel_and_verify`` — the ONE cancel path,
-    with its four typed outcomes — and the sentence handed back to the agent is built
-    from the outcome it returns. The ad-hoc cancel this replaced swallowed every
-    exception into a log line and then said "The run was cancelled" unconditionally,
-    which is precisely what ``record_containment_fault``'s own contract forbids: an
-    incident must never surface "as a reassuring string in a tool result". An
-    overpowered run that refused to stop was reported to the agent as stopped.
+    The stop and its incident are ``delegate_containment.halt_breached`` (the ONE cancel
+    path and the fault writer the body's rights floor uses too); the sentence handed back
+    to the agent is built from the outcome it returns. The ad-hoc cancel this replaced said
+    "The run was cancelled" unconditionally, which ``record_containment_fault``'s own
+    contract forbids: an incident must never surface "as a reassuring string in a tool
+    result". An overpowered run that refused to stop was reported to the agent as stopped.
     """
     run_id = entry.run_id
-    drive = custody.custody_root(ctx)
-    try:
-        cancelled = custody.cancel_and_verify(drive, gateway, entry, breach.code)
-    except Exception:
-        log.warning("Failed to cancel an uncontained delegated run %s", run_id, exc_info=True)
-        cancelled = {"outcome": custody.CANCEL_CONTAINMENT_FAULT}
-    custody.record_containment_fault(drive, entry, breach.code, breach.detail,
-                                     fault=breach.code, **breach.facts)
-    outcome = str(cancelled.get("outcome") or custody.CANCEL_CONTAINMENT_FAULT)
+    outcome = halt_breached(custody.custody_root(ctx), gateway, entry, breach)
     return _fail(
         "delegate_wait", breach.code,
         f"{breach.detail} {_CANCEL_NOTES.get(outcome, '')} Do not retry it: this is a "
@@ -1092,15 +1079,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     # first wait. Ownership was already proven above (`_owned_run`), and a lost or
     # legacy custody record (no recorded access) keeps the live derivation, so a
     # missing record still cannot become a wider run.
-    if entry.access:
-        from ouroboros.subagents import DelegatedRunShape as _Shape
-        from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
-
-        authority = _Shape(access=entry.access, mode=entry.mode,
-                           isolation=entry.isolation, delegated=entry.delegated,
-                           investigation=entry.authority_source == INVESTIGATION_AUTHORITY)
-    else:
-        authority = _derive_authority(ctx)
+    authority = granted_shape(entry) if entry.access else _derive_authority(ctx)
     # FACTS against premature cancels: how long the run has actually been going and
     # what its cap really is, from the durable start row. A nanny that cannot see
     # these confabulates "exceeded the cap" out of its own impatience. Absent facts
@@ -1140,17 +1119,21 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             summary = custody.summary_of(detail)
             state = str(summary.get("state") or "")
             last_seq = int(detail.get("lastSeq") or 0)
-            breach = _containment_breach(detail, authority)
+            # A supervised beat leaves the run's speech and its rights floor to the body, which holds them
+            # for every run it observes (``delegate_feed``, ``delegate_containment.hold_to_grant``); a row
+            # with no recorded grant has only this wait's live derivation to hold it to.
+            breach = None if observation_only and entry.access else _containment_breach(detail, authority)
             if breach:
                 return _halt_breached_run(ctx, gateway, entry, breach)
             if last_seq > baseline or state in _TERMINAL_STATES:
-                # The STREAM is not collapsed — the TIMER is: every advance reaches the live
-                # progress surface the instant this loop sees it (also the frame the idle enforcer
-                # reads); only waking the MODEL per batch stops. At the end it drains the unread
-                # tail within this wait's read allowance before settlement returns.
-                progress.emit(ctx, rid, seen.record(detail, last_seq, int(time.monotonic() - started)), detail=detail,
-                              entry=entry, gateway=gateway, after_seq=baseline, read_remaining=read_window,
-                              drain_sec=read_window() if state in _TERMINAL_STATES else None)
+                # The STREAM is not collapsed — the TIMER is: every advance reaches the live progress
+                # surface the instant this loop sees it; only waking the MODEL per batch stops. At the
+                # end it drains the unread tail within this wait's read allowance before settlement returns.
+                advance = seen.record(detail, last_seq, int(time.monotonic() - started))
+                if not observation_only:
+                    progress.emit(ctx, rid, advance, detail=detail, entry=entry, gateway=gateway,
+                                  after_seq=baseline, read_remaining=read_window,
+                                  drain_sec=read_window() if state in _TERMINAL_STATES else None)
                 baseline = last_seq          # so the NEXT advance is counted once
             if state in _TERMINAL_STATES:
                 from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal

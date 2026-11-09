@@ -12,7 +12,7 @@ access, a sleep, a slot held on mail, task terminals, a delegated run or a
 review panel), when what the wait names works: a held run the host currently
 observes running (``delegate_supervision.observed_run_activity``), a run a warm
 or cold sleep selected that the body observer currently sees running
-(``delegate_collection.current_activity``), a panel seat not waiting for model
+(``delegate_feed.current_activity``), a panel seat not waiting for model
 access (``review_pause.panel_activity``), or a live descendant active by the
 same rules. Children contribute only through their
 root and never name a chat. Unknown facts make no positive and never cancel
@@ -163,7 +163,7 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
     known positives either way. Without any awaited reply alive the census is not read.
     """
     from ouroboros.budget_pause import budget_pause_row
-    from ouroboros.delegate_collection import current_activity
+    from ouroboros.delegate_feed import current_activity
     from ouroboros.delegate_supervision import observed_run_activity
     from ouroboros.sleep_custody import accepted_receipt
     from ouroboros.gateway.state import _answer_stored, _chat_activities_snapshot_safe, _direct_turns_snapshot_safe

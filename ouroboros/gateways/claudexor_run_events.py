@@ -80,6 +80,14 @@ def route_listed(gateway: Any, operation: Tuple[str, str], *, timeout_sec: Optio
     return operation in listed
 
 
+def route_known(gateway: Any, operation: Tuple[str, str]) -> Optional[bool]:
+    """``route_listed`` from this process's memo alone, without a request: ``None`` while no catalog of
+    this exact engine has been read."""
+    with _SUPPORT_LOCK:
+        listed = _SUPPORT.get(engine_identity(gateway))
+    return None if listed is None else operation in listed
+
+
 # Each harness row's declared ``liveInput`` per exact engine identity: a static profile facet of
 # the engine build, unlike the row's presence (a harness's availability), which is never cached.
 _LIVE_INPUT: Dict[Tuple[str, str], Dict[str, str]] = {}
