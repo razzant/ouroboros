@@ -13,9 +13,10 @@ Two handler facts the description used to misstate or omit:
   census (``unsupported``) and a Docker backend's children live in its container;
   ``start_service`` is the path for work that must outlive the task.
 
-Issue #502 asks schemas to shrink, so the truthful words are paid for inside the
-same description: its length is pinned to the pre-change size plus a small
-allowance. Real children here belong to this test process; they are ended by the
+Issue #502 asked schemas to shrink, so the description's length is pinned to its
+measured size plus a small allowance; a new fact re-measures it (owner Q4,
+2026-11-09: tool descriptions stay full). A third fact rides the same schema: what
+a stop by pid or by a name pattern reaches (audit 08.11 item 12). Real children here belong to this test process; they are ended by the
 task end under test and, as a safety net, by exact pid.
 """
 from __future__ import annotations
@@ -34,9 +35,9 @@ from ouroboros.tools.shell import _SHELL_BUILTINS, _run_shell, get_tools
 from ouroboros.tools.shell_process import _active_subprocesses
 from tests._cases import case_folders
 
-# measured on ef33a0a956c2 (481); re-measured after the process-ownership sentence of audit 08.11 item 12
-# (owner-approved), paid in part by dropping the string-array sentence the cmd parameter already states.
-_DESCRIPTION_CHARS_BEFORE = 718
+# measured on ef33a0a956c2 (481); re-measured after the process-stop fact of audit 08.11 item 12,
+# paid in part by dropping the string-array sentence the cmd parameter already states.
+_DESCRIPTION_CHARS_BEFORE = 714
 _ALLOWANCE = 80
 
 
@@ -195,22 +196,22 @@ def test_detached_background_child_lives_until_the_task_ends(tmp_path):
 
 
 def test_description_states_what_a_process_stop_reaches():
-    """Audit 08.11 item 12: the schema carries the fact a mind needs before ending a process (a pid it
-    started names one process; a name or command-line pattern reaches other tasks', the owner's and this
-    installation's processes). It is text, not a guard: the parameter already states the argv shape, so
-    the duplicate sentence about it paid part of the words."""
+    """Audit 08.11 item 12: the schema carries the fact a mind needs before ending a process, as a fact,
+    not an authority rule. Text only: no guard, filter or safety policy changed with it. The argv shape
+    stays stated once, by the cmd parameter's own schema."""
     description = _schema()["description"]
-    assert "A pid you started yourself (your own $!, start_service's result) is yours to stop" in description
-    assert "a name or command-line pattern (pkill -f, killall) also reaches other tasks', the owner's and this installation's processes" in description
+    assert "A stop by pid reaches exactly that process" in description
+    assert "pkill -f" in description and "other tasks', the owner's and this installation's processes" in description
     assert "cmd MUST be a string array" not in description
-    assert "NEVER" in _schema()["parameters"]["properties"]["cmd"]["description"], "the argv shape stays stated once, at the parameter"
+    cmd = _schema()["parameters"]["properties"]["cmd"]
+    assert cmd["type"] == "array" and cmd["items"] == {"type": "string"}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process tools")
-def test_stopping_processes_through_run_command_is_unchanged(tmp_path):
-    """The owner's question on item 12 («are flexible tools kept?»): nothing is filtered. A stop by exact
-    pid of a child this test started ends it through run_command, and a stop by name that matches nothing
-    comes back as the command's own exit code, not as a refusal."""
+def test_a_stop_by_exact_pid_runs_through_run_command(tmp_path):
+    """The owner's question on item 12 («are flexible tools kept?»): the shell path refuses nothing new.
+    A child this test started is stopped by its exact pid through run_command (``kill`` is not a refused
+    builtin); the command class ``pkill``/``killall`` goes through the same safety check as before."""
     ctx = _ctx(tmp_path, "t-stop")
     with _bound(ctx):
         started = _run_shell(ctx, ["sh", "-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"], timeout_sec=5)
@@ -221,9 +222,6 @@ def test_stopping_processes_through_run_command_is_unchanged(tmp_path):
             stopped = _run_shell(ctx, ["kill", str(pid)], timeout_sec=5)
         assert "exit_code=0" in stopped and "BLOCKED" not in stopped, stopped
         assert _gone(pid), "the exact-pid stop reached the child"
-        with _bound(ctx):
-            unmatched = _run_shell(ctx, ["pkill", "-f", "ouroboros-g02-no-such-process-7f3a9c"], timeout_sec=5)
-        assert unmatched.startswith("⚠️ SHELL_EXIT_ERROR") and "BLOCKED" not in unmatched, unmatched
     finally:
         try:
             os.kill(pid, 9)

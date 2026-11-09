@@ -336,8 +336,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         if (keys.length) parts.push(`Wants to use ${escapeHtml(keys.join(', '))}.`);
         if (permissions.length) parts.push(`Wants your permission to ${escapeHtml(grantPhrases(permissions).join(', '))}.`);
         // The same fact the readiness line carries: the grant exists, for an earlier version of the files.
-        const earlier = grants.earlier_grant ? [...(grants.earlier_grant.keys || []), ...(grants.earlier_grant.permissions || [])] : [];
-        const note = earlier.length ? `You granted ${escapeHtml(earlier.join(', '))} to an earlier version of the skill; its files changed since.` : '';
+        const earlier = new Set(grants.earlier_grant ? [...(grants.earlier_grant.keys || []), ...(grants.earlier_grant.permissions || [])] : []);
+        const share = [...keys, ...permissions].every((item) => earlier.has(item)) ? 'this' : 'some of this';
+        const note = earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '';
         trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.', note,
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }

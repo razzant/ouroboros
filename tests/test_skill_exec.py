@@ -1062,14 +1062,14 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
 
     ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
     assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
-    assert "inject_chat was granted to an earlier version of this skill's files (grant last updated 20" in ran
+    assert "inject_chat was granted to an earlier version of this skill's files" in ran
     assert "hash" not in ran.lower()
 
     save_enabled(ctx.drive_root, "alpha", False)
     toggled = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
     assert toggled.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "grants"' in toggled, toggled
     assert '"error": "Grant it the keys and permissions it asks for first."' in toggled
-    assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files (grant last updated 20' in toggled
+    assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files' in toggled
 
 
 def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):

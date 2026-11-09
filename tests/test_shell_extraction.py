@@ -131,9 +131,11 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the R1 platform-wait refusal: both timeout_sec descriptions say only the task's deadline or budget
     # narrows a timeout and that one this platform cannot wait on is refused. Rolled for #2916: both outputs
     # descriptions say an eligible path is captured even if this run left it unchanged, and that outside Cyber
-    # Pro a system_repo file is eligible only while it has uncommitted changes.
+    # Pro a system_repo file is eligible only while it has uncommitted changes. Rolled for audit 08.11 item 12:
+    # run_command states what a stop by pid or by a name pattern reaches, and its string-array sentence left the
+    # description because the cmd parameter already states it.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "07ffdfbcbf50ef1758a1cff61817698be4eed420b785b356d4b5fa1865ed89f6"
+        "5b94de0cc5bc46c986820e94741c52653d0ab7b3cdd971cf68bafcd7690ac977"
     )
     original = json.loads(schema_bytes)
     for schema in original:
@@ -147,10 +149,11 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
         "The underlying command result echoes the resolved cwd."
     )
     # The reconstruction keeps run_command's CURRENT description (the 2A background-child
-    # sentence and its local-POSIX limit), so this derived digest rolled with the one above.
+    # sentence and its local-POSIX limit, the process-stop fact of audit 08.11 item 12), so this
+    # derived digest rolled with the one above.
     assert hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest() == (
-        "3551b8d0cb3fcd4689936be9aca215b9e3a39033991dd1652a9f6050c3a4361a"
+        "626c01b93f859e8487d972665c5aed91fce33dd52f35b523ecfae59a7cdc2186"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

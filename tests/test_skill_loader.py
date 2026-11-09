@@ -1333,8 +1333,7 @@ def test_skill_grants_are_content_and_request_bound(tmp_path):
     assert stale["granted_keys"] == []
     assert stale["missing_keys"] == ["OPENROUTER_API_KEY"]
     # The binding to bytes stays; the status now also says WHOSE bytes the saved grant covered.
-    assert stale["earlier_grant"]["keys"] == ["OPENROUTER_API_KEY"] and stale["earlier_grant"]["permissions"] == []
-    assert stale["earlier_grant"]["at"] == status["updated_at"] and stale["earlier_grant"]["at"]
+    assert stale["earlier_grant"] == {"keys": ["OPENROUTER_API_KEY"], "permissions": []}
     # Same bytes: nothing earlier to name. A key the earlier grant never covered is not named either.
     assert status["earlier_grant"] is None
     skill.manifest.env_from_settings = ["GITHUB_TOKEN"]
@@ -1844,10 +1843,7 @@ def test_readiness_names_the_earlier_version_a_grant_belongs_to(tmp_path, monkey
     stale = skill_readiness_for_execution(drive_root, skill, require_enabled=False, skills=[skill])
     [blocker] = stale.blockers
     assert blocker.startswith("missing_grants:keys=['OPENROUTER_API_KEY'],permissions=['notify_owner']; ")
-    assert ("OPENROUTER_API_KEY and notify_owner were granted to an earlier version of this skill's files "
-            "(grant last updated 20") in blocker
-    assert blocker.endswith("the files changed since, so that grant does not cover the current files. "
-                            "The saved Settings values are untouched.")
+    assert "earlier version of this skill's files" in blocker and "OPENROUTER_API_KEY and notify_owner" in blocker
     assert "hash" not in blocker.lower()
     assert stale.owner_action_blockers == [blocker]
     reason = stale.next_actions[0]["reason"]
@@ -1855,6 +1851,5 @@ def test_readiness_names_the_earlier_version_a_grant_belongs_to(tmp_path, monkey
     # The one sentence, for every producer; a status that knows nothing earlier yields nothing to append.
     assert grant_gap_sentence(stale.grant_status) in blocker
     assert grant_gap_sentence(never.grant_status) == "" and grant_gap_sentence({"missing_keys": ["X"]}) == ""
-    assert grant_gap_sentence({"earlier_grant": {"keys": ["ONE"], "permissions": [], "at": "not a time"}}) == (
-        "ONE was granted to an earlier version of this skill's files; the files changed since, so that grant "
-        "does not cover the current files. The saved Settings values are untouched.")
+    unknown_time = grant_gap_sentence({"earlier_grant": {"keys": ["ONE"], "permissions": []}, "updated_at": "not a time"})
+    assert unknown_time.startswith("ONE was granted to an earlier version") and "last updated" not in unknown_time

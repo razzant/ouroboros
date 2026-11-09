@@ -23,8 +23,7 @@ from typing import Dict, List  # noqa: F401
 from ouroboros.owner_pause import OwnerPauseRefused
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.tool_result import launch_refusal_result, _publish_tool_result
-from ouroboros.artifacts import copy_directory_to_task_artifacts, copy_file_to_task_artifacts, record_task_scratch  # noqa: F401
-from ouroboros.platform_layer import bootstrap_process_path, kill_process_tree, scrub_repo_from_pythonpath, subprocess_new_group_kwargs  # noqa: F401
+from ouroboros.platform_layer import bootstrap_process_path
 from ouroboros.process_interpreters import (
     active_node_resolution,
     apply_env_path_prepend,
@@ -698,13 +697,11 @@ def get_tools() -> List[ToolEntry]:
             "name": "run_command",
             "description": (
                 "Run a bounded foreground command in an allowed cwd; returns stdout+stderr and resolved cwd. "
-                "A builtin as cmd[0] (cd, export, ...) "
-                "is refused: use cwd= or [\"sh\", \"-c\", \"cd x && a | b\"] (also pipes/chaining). "
+                "A builtin as cmd[0] (cd, export, ...) is refused: use cwd= or [\"sh\", \"-c\", \"cd x && a | b\"] (also pipes/chaining). "
                 "A background child (&, nohup) is no service: holding stdout/stderr it stalls the call until "
                 "timeout_sec; it ends with this task (local POSIX runs only; start_service keep_alive=true "
-                "outlives the task). A pid you started yourself (your own $!, start_service's result) is yours "
-                "to stop; a name or command-line pattern (pkill -f, killall) also reaches other tasks', the "
-                "owner's and this installation's processes. "
+                "outlives the task). A stop by pid reaches exactly that process (your own $!, start_service's pid); "
+                "a name or command-line pattern (pkill -f, killall) also reaches other tasks', the owner's and this installation's processes. "
                 "Prefer read_file, search_code/query_code, write_file/edit_text to cat/head/sed, grep/find, redirects."
             ),
             "parameters": {"type": "object", "properties": {

@@ -55,7 +55,7 @@ def grant_gap_sentence(grants: Any) -> str:
         return ""
     names = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
     verb = "was" if len(items) == 1 else "were"
-    return (f"{names} {verb} granted to an earlier version of this skill's files{_grant_stamp(str(earlier.get('at') or ''))}; "
+    return (f"{names} {verb} granted to an earlier version of this skill's files{_grant_stamp(str(grants.get('updated_at') or ''))}; "
             "the files changed since, so that grant does not cover the current files. The saved Settings values are untouched.")
 
 
@@ -295,8 +295,8 @@ def skill_readiness_for_execution(
             reason = "Grant only manifest items covered by expressed owner intent; repeating review does not supply owner permission."
             if cause:
                 reason += (" A grant for the current files restores it: skill_owner_action grant carrying the owner's words, "
-                           "or an accepted release from the skill's source (skill_update), which re-grants when automatic grants "
-                           "for reviewed skills are on and replaces in-place edits of the payload.")
+                           "or, for a skill installed from a source, an accepted release (skill_update), which re-grants when "
+                           "automatic grants for reviewed skills are on; its replace mode also replaces in-place edits of the payload.")
             next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})
 
     try:

@@ -816,8 +816,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             perm for perm in requested_permissions if perm in set(grants.get("granted_permissions") or [])
         ]
         if earlier_keys or earlier_permissions:
-            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions,
-                             "at": str(grants.get("updated_at") or "")}
+            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions}
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
     review_ready = skill.review.gate_for(skill.content_hash)["executable_review"]
