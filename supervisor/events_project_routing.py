@@ -258,8 +258,8 @@ def _emit_routing_receipt(
         receipt["attachment_manifest"] = _events()._routing_attachments(attachment_manifest) or []
     # The carrier SELECTED for the act's owner notice (never proof that a transport
     # delivered it): the ACK when one carrying it was handed over and answers a chat row;
-    # for a known refusal without such an ACK, the System row its path writes, if any (a
-    # tool act's writes none: its tool result tells the model); "" when nothing to say.
+    # for a known refusal without such an ACK, the System row its path writes, if any;
+    # "" when there is nothing to say.
     receipt["routing_notice_carrier"] = "system" if fields.get("cause") and publish else ""
     if annotation_status == "failed":
         # Fail closed: no ACK outruns its durable row, so a landed act reads unconfirmed

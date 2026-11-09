@@ -161,7 +161,7 @@ def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, 
             progress_meta={"routing_notice_carrier": "system", "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
-        log.warning("steer refusal row failed for %s: the owner notice it carried is lost", target, exc_info=True)
+        log.warning("steer refusal row failed for %s", target, exc_info=True)
 
 
 def _steer_receipt(
