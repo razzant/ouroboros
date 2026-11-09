@@ -178,7 +178,9 @@ def test_a_real_partial_clone_is_the_body_through_its_annotated_remote(system, t
     partial = tmp_path / "partial"
     _git(tmp_path, "clone", "-q", "--filter=blob:none", system.as_uri(), str(partial))
     _git(partial, "remote", "set-url", "origin", str(system))
-    assert "(fetch) [blob:none]" in _git(partial, "remote", "-v")  # the display Git writes for this clone
+    major, minor = map(int, _git(tmp_path, "--version").split()[2].split(".")[:2])
+    shown = " [blob:none]" if (major, minor) >= (2, 37) else ""  # Git writes the filter there since 2.37
+    assert f"origin\t{system} (fetch){shown}" in _git(partial, "remote", "-v").splitlines()
     chained = _fact(partial, system)
     assert (chained.body, chained.how) == ("true", "remote_chain")
     _git(partial, "remote", "set-url", "origin", MANAGED_URL)
@@ -249,7 +251,7 @@ FETCH_URL_SHAPES = {
     "insteadof": ("true", "managed_remote"),  # Git's url.<base>.insteadOf rewrite applies
     "first_url_decides": ("false", "remote_chain"),  # the first URL fetches; later URLs and the pushurl do not
     "push_only_name_rewritten": ("unknown", "unknown"),  # Git's own-name fallback is never a fetch URL
-    "reset_url_name_rewritten": ("unknown", "unknown"),
+    "reset_url_name_rewritten": None,  # as the installed Git reads its empty last URL, below
     "push_only_beside_body_folder": ("unknown", "unknown"),  # ... nor a folder followed under that name
     "same_name_local_url": ("true", "remote_chain"),  # an explicit URL equal to its name is followed
     "dotted_name": ("true", "managed_remote"),  # a name keeps its dots and inner slash
@@ -266,6 +268,9 @@ def test_a_remote_is_judged_by_its_fetch_url_as_git_resolves_it(system, tmp_path
     _shape(shape, root, system, monkeypatch)
     fact = _fact(root, system)
     expected = FETCH_URL_SHAPES[shape]
+    if expected is None:  # Git 2.46+ clears the list at the empty value; an older Git keeps the URL before it,
+        kept = f"{FOREIGN_URL} (fetch)" in _git(root, "remote", "-v")  # and only then lists it as the fetch URL
+        expected = ("false", "remote_chain") if kept else ("unknown", "unknown")
     assert (fact.body, fact.how) == expected, fact.detail
     if shape == "dotted_name":
         assert "remote team/my.fork " in fact.detail

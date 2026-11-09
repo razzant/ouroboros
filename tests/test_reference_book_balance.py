@@ -28,31 +28,9 @@ from ouroboros.reference_books import (
     ruled_text_sizes,
 )
 from tests._cases import case_folders
+from tests._reference_book_fixtures import BODY, CHAPTER, ENTRY, _book_repo, _git, _registry
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-CHAPTER = "docs/architecture/01-one.md"
-ENTRY = "# Architecture\n\nThe map.\n\n## Chapters\n\n- [One](architecture/01-one.md)\n"
-BODY = "# One\n\nThe first chapter.\n\nP1 honest and long enough to shorten.\n"
-
-
-def _git(root, *args):
-    return subprocess.check_output(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
-                                   cwd=root).decode("utf-8").strip()
-
-
-def _book_repo(root: pathlib.Path, *, official: bool = True) -> pathlib.Path:
-    for path, text in {BOOK_ENTRYPOINTS["architecture"]: ENTRY, CHAPTER: BODY,
-                       "ouroboros/reference_books.py": "# the book contract\n", "ouroboros/loop.py": "x = 1\n",
-                       "notes.md": "notes\n"}.items():
-        (root / path).parent.mkdir(parents=True, exist_ok=True)
-        (root / path).write_text(text, encoding="utf-8", newline="\n")
-    _git(root, "init", "-q")
-    _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "base")
-    if official:
-        _git(root, "remote", "add", "canonical", "https://github.com/razzant/ouroboros.git")
-        _git(root, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
-    return root
 
 
 def test_composed_size_is_the_composed_book_on_the_real_tree():
@@ -166,7 +144,9 @@ def test_the_first_official_remote_by_name_is_the_base_whatever_git_shows_beside
     _git(repo, "update-ref", "refs/remotes/a.partial/ouroboros", base)
     _git(repo, "remote", "add", "b-plain", "https://github.com/razzant/ouroboros.git")
     _git(repo, "update-ref", "refs/remotes/b-plain/ouroboros", _git(repo, "commit-tree", "HEAD^{tree}", "-m", "elsewhere"))
-    assert "a.partial\thttps://github.com/razzant/ouroboros (fetch) [blob:none]" in _git(repo, "remote", "-v")
+    major, minor = map(int, _git(repo, "--version").split()[2].split(".")[:2])
+    shown = " [blob:none]" if (major, minor) >= (2, 37) else ""  # Git writes the filter there since 2.37
+    assert f"a.partial\thttps://github.com/razzant/ouroboros (fetch){shown}" in _git(repo, "remote", "-v").splitlines()
     assert contribution_base(repo) == ("refs/remotes/a.partial/ouroboros", base)
     (balance,) = book_balances(repo, [CHAPTER])
     assert balance.upstream == "refs/remotes/a.partial/ouroboros" and balance.vs_upstream == 0
@@ -179,6 +159,100 @@ def test_the_first_official_remote_by_name_is_the_base_whatever_git_shows_beside
 
     monkeypatch.setattr(subprocess, "run", resolving_fails)
     assert contribution_base(repo) == ("", "")  # unavailable, never raised
+
+
+@pytest.mark.parametrize("no_lazy_fetch", ["1", "0"])  # "0": as a Git older than 2.44, which ignores the variable
+@pytest.mark.parametrize("lacking", ["books", "test_module"])
+def test_a_filtered_clone_is_measured_offline_and_what_it_lacks_stays_unknown(tmp_path, monkeypatch, no_lazy_fetch,
+                                                                              lacking):
+    """#3004: a ``--filter=blob:none`` clone of a feature tip lacks the base's side of what the feature changed: a
+    test module, and with ``books`` the entrypoint, a chapter and BIBLE.md too. No measurement fetches them: no
+    transport opens and no object is written. The cached base stays exact; a book whose base side is absent has an
+    unknown contribution, while books read in full keep theirs. The pulse of the worktree and of the index counts
+    from HEAD and says the contribution diff is unavailable. Once Git has fetched them on request, all is measured."""
+    from ouroboros import reference_books, review
+
+    monkeypatch.setitem(reference_books._OFFLINE_GIT, "GIT_NO_LAZY_FETCH", no_lazy_fetch)
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")  # the test's own clone and fetch; nothing reaches a network
+    entry, longer = BOOK_ENTRYPOINTS["architecture"], ENTRY.replace("The map.", "The map, longer.")
+    module, suite = "tests/test_x.py", "def test_a():\n    pass\n"
+    source = _book_repo(tmp_path / "source", official=False)
+    for path, text in {"BIBLE.md": "# BIBLE\n\nP0.\n", module: suite}.items():
+        (source / path).parent.mkdir(parents=True, exist_ok=True)
+        (source / path).write_text(text, encoding="utf-8", newline="\n")
+    _git(source, "add", "-A")
+    _git(source, "commit", "-qm", "constitution and a suite")
+    base = _git(source, "rev-parse", "HEAD")
+    _git(source, "checkout", "-qb", "feature")
+    feature = {module: suite + "\n\ndef test_b():\n    pass\n"}
+    if lacking == "books":
+        feature.update({entry: longer, CHAPTER: BODY + "Feature.\n", "BIBLE.md": "# BIBLE\n\nP0. P1.\n"})
+    for path, text in feature.items():
+        (source / path).write_text(text, encoding="utf-8", newline="\n")
+    _git(source, "commit", "-qam", "feature")
+    _git(source, "config", "uploadpack.allowFilter", "true")
+    _git(source, "config", "uploadpack.allowAnySHA1InWant", "true")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", "--filter=blob:none", "--branch", "feature", source.as_uri(), str(clone))
+    _git(clone, "remote", "add", "canonical", "https://github.com/razzant/ouroboros.git")
+    _git(clone, "update-ref", "refs/remotes/canonical/ouroboros", base)
+    for path, text in {CHAPTER: feature.get(CHAPTER, BODY) + "Worktree.\n",
+                       module: feature[module] + "\n\ndef test_c():\n    pass\n"}.items():
+        (clone / path).write_text(text, encoding="utf-8", newline="\n")
+    _git(clone, "add", CHAPTER, module)  # the index a commit holds: its suite side is read as well
+
+    def absent() -> set[str]:  # `--missing=print` fetches nothing
+        listed = _git(clone, "rev-list", "--objects", "--missing=print", base).splitlines()
+        return {line[1:] for line in listed if line.startswith("?")}
+
+    def measured(trace: pathlib.Path):
+        """Every measurement, asserting it opened no transport and wrote no object."""
+        store = clone / ".git" / "objects"
+        before = sorted((str(path), path.stat().st_size) for path in store.rglob("*") if path.is_file())
+        monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+        facts = (contribution_base(clone), book_source_sizes(clone, "architecture", base),
+                 ruled_text_sizes(clone, "constitution", base), book_balances(clone, [CHAPTER, "BIBLE.md"]),
+                 review.diff_pulse(clone, [CHAPTER, module]), review.diff_pulse(clone, staged=True),
+                 review._blob_texts(clone, [f"{base}:{module}"]))
+        monkeypatch.delenv("GIT_TRACE2_EVENT")
+        assert sorted((str(path), path.stat().st_size) for path in store.rglob("*") if path.is_file()) == before
+        assert "upload-pack" not in (trace.read_text(encoding="utf-8") if trace.exists() else "")
+        return facts
+
+    lacking_objects = absent()
+    assert len(lacking_objects) == (4 if lacking == "books" else 1)
+    target, entry_at_base, bible_at_base, balances, pulse, staged, texts = measured(tmp_path / "offline.trace2")
+    assert target == ("refs/remotes/canonical/ouroboros", base) and absent() == lacking_objects
+    assert texts == {f"{base}:{module}": None}  # absent here, never fetched
+    head_only = f"Diff pulse since HEAD (contribution diff from canonical/ouroboros merge-base {base[:12]} unavailable)"
+    for shown in (pulse, staged):
+        assert shown.startswith(f"{head_only}: files 2, ") and "tests: items +1/-0, new modules 0," in shown, shown
+    if lacking == "books":
+        assert entry_at_base is bible_at_base is None and "contribution unknown" in pulse
+        assert [(b.book_id, b.vs_head, b.vs_upstream) for b in balances] == [
+            ("architecture", len("Worktree.\n"), None), ("constitution", 0, None)]
+    else:  # the books' base side is here: their contribution is measured
+        assert entry_at_base == {entry: len(ENTRY), CHAPTER: len(BODY)}
+        assert bible_at_base == {"BIBLE.md": len("# BIBLE\n\nP0.\n")} and "contribution unknown" not in pulse
+        assert [(b.book_id, b.vs_head, b.vs_upstream) for b in balances] == [
+            ("architecture", len("Worktree.\n"), len("Worktree.\n")), ("constitution", 0, 0)]
+        assert f"+10 B vs refs/remotes/canonical/ouroboros (merge-base {base})" in pulse
+
+    for oid in lacking_objects:  # fetched on request, outside any measurement
+        _git(clone, "cat-file", "-t", oid)
+    assert not absent()
+    target, entry_at_base, bible_at_base, balances, pulse, staged, texts = measured(tmp_path / "held.trace2")
+    assert target == ("refs/remotes/canonical/ouroboros", base) and texts == {f"{base}:{module}": suite}
+    assert entry_at_base == {entry: len(ENTRY), CHAPTER: len(BODY)}
+    assert bible_at_base == {"BIBLE.md": len("# BIBLE\n\nP0.\n")}
+    grown = (len(longer) - len(ENTRY) + len("Feature.\n"), len(" P1.")) if lacking == "books" else (0, 0)
+    assert [(b.book_id, b.vs_upstream) for b in balances] == [
+        ("architecture", grown[0] + len("Worktree.\n")), ("constitution", grown[1])]
+    files = 4 if lacking == "books" else 2
+    assert pulse.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: files {files}, ")
+    assert staged.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: files {files}, ")
+    for shown in (pulse, staged):
+        assert "tests: items +2/-0, new modules 0," in shown and "contribution unknown" not in shown, shown
 
 
 @pytest.mark.parametrize("url", [
@@ -284,20 +358,6 @@ def test_note_discloses_an_unavailable_book_beside_a_measured_book(tmp_path, mis
 
     (repo / missing).write_text(BODY, encoding="utf-8", newline="\n")
     assert book_balance_note(repo, paths) == complete
-
-
-def _registry(tmp_path, *, external: bool):
-    from ouroboros.tools.registry import ToolContext, ToolRegistry
-
-    system = _book_repo(tmp_path / "system")
-    drive = tmp_path / "drive"
-    drive.mkdir()
-    registry = ToolRegistry(repo_dir=system, drive_root=drive)
-    if external:  # a user's own project that happens to carry the same docs layout
-        project = _book_repo(tmp_path / "project")
-        registry.set_context(ToolContext(repo_dir=system, system_repo_dir=system, drive_root=drive,
-                                         workspace_root=project, workspace_mode="external"))
-    return registry
 
 
 GROW = {

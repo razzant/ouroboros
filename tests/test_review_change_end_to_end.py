@@ -3,7 +3,6 @@ The only brief differences are the narrative line in ``## Informational context 
 and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -19,43 +18,10 @@ from ouroboros.tools.review_change import run_review_change
 from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 from tests import _contributor_packet_shared as shared
 from tests._worlds import clone_repository, world
+from tests._review_change_fixtures import GOAL, SCOPE, _brief_text, staged_body as staged_body
 from tests.review_pool_rosters import set_review_pool
 
-GOAL = "Make the installed body's helper return the proposal's constant."
-SCOPE = "ouroboros/helper.py only; the checklist and tests stay as they are."
 COMMIT_MESSAGE = "fix: return the proposal's constant\n\nThe narrative body of the intended commit."
-
-
-def _brief_text(brief: dict) -> str:
-    """All delivered message bodies and, for a retrieving seat, its session task."""
-    parts = []
-    for message in brief["messages"]:
-        content = message.get("content") or ""
-        if isinstance(content, list):
-            parts.extend(str(block.get("text") or json.dumps(block, sort_keys=True)) for block in content)
-        else:
-            parts.append(str(content))
-    return "\n".join(parts) + "\n" + brief["session_task"]
-
-
-@pytest.fixture
-def staged_body(tmp_path, monkeypatch):
-    fixture = shared.init_installed_body(tmp_path)
-    repo = Path(fixture["repo"])
-    # A real install carries a .gitignore; without one the gate's `git add -A`
-    # door would stage the one it writes and review a different tree.
-    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
-    shared.git(repo, "add", ".gitignore")
-    shared.git(repo, "commit", "-q", "-m", "ignore caches")
-    shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
-    fixture["staged_tree_sha"] = shared.git(repo, "write-tree")
-    assert fixture["staged_tree_sha"] != fixture["head_tree_sha"]
-    set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the proposal touches a protected surface
-    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
-    return fixture
 
 
 def test_review_change_on_the_system_index_is_the_commit_gates_brief(staged_body, tmp_path, monkeypatch):

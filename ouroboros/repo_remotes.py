@@ -69,21 +69,24 @@ def remote_fetch_urls(git: Callable[..., Any]) -> List[Tuple[str, str]]:
     ``git(*args)`` runs one read-only git command in the repository and returns its stdout (text or
     bytes), or ``None`` when git answered non-zero; how it fails otherwise (raise or ``None``) stays the
     caller's. The ``remote.<name>.url`` entries of every scope Git reads, NUL-separated and in Git's
-    order, decide which remotes have a fetch URL: an empty value clears the earlier ones, as Git applies
-    it, and a name beginning with ``/`` is no remote, as Git skips it. Git then gives each remote's first
-    URL with ``url.<base>.insteadOf`` applied (``ls-remote --get-url``, offline). Display text such as a
-    partial clone's ``[blob:none]`` never takes part, and a remote without a URL never reaches the fallback
-    in which Git answers its name as the URL.
+    order, name the remotes with a URL; a name beginning with ``/`` is no remote, as Git skips it. Git
+    then gives each one's first URL with ``url.<base>.insteadOf`` applied (``ls-remote --get-url``,
+    offline). An empty last entry clears the list in Git 2.46 and later but is one more URL in an older
+    Git, so the installed Git is asked: one line from ``remote get-url --all`` is then the fallback in which
+    Git names a remote without a URL by its name, never a fetch URL. Display text such as a partial clone's
+    ``[blob:none]`` never takes part.
     """
-    has_url: Dict[str, bool] = {}
+    entries: Dict[str, List[str]] = {}
     for entry in _stdout(git("config", "-z", "--get-regexp", r"^remote\..+\.url$")).split("\0"):
         key, _newline, value = entry.partition("\n")  # a key holds no newline; a value may
         name = key.removeprefix("remote.").removesuffix(".url")
         if name and not name.startswith("/") and key == f"remote.{name}.url":
-            has_url[name] = bool(value)  # the last entry decides: an empty one ends the list
+            entries.setdefault(name, []).append(value)
     remotes = []
-    for name in sorted(name for name, present in has_url.items() if present):
+    for name in sorted(name for name, values in entries.items() if any(values)):
         url = _stdout(git("ls-remote", "--get-url", "--", name)).rstrip("\r\n")
+        if url and not entries[name][-1]:  # a cleared list leaves one line, the name fallback
+            url = url if _stdout(git("remote", "get-url", "--all", "--", name)).count("\n") > 1 else ""
         if url:
             remotes.append((name, url))
     return remotes

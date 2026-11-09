@@ -343,11 +343,22 @@ class BookBalance:
         return max(0, delta or 0)
 
 
+_OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
+
+
 def _git_bytes(root: Path, *args: str) -> bytes | None:
+    """stdout of one git read, ``None`` when it fails; a measurement fetches nothing.
+
+    A partial clone fetches an object it lacks once a read needs it. Here that read fails instead
+    and its measure stays unknown: Git 2.44+ starts no fetch (``GIT_NO_LAZY_FETCH``), and the fetch
+    of an older Git stops before it opens a transport, because the empty ``GIT_ALLOW_PROTOCOL`` allow-list denies every protocol.
+    """
+    import os
     import subprocess
 
     try:
-        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30)
+        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30,
+                              env={**os.environ, **_OFFLINE_GIT})
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
