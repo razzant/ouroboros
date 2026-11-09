@@ -70,9 +70,10 @@ async def api_places(request):
         conflict = code in {"place_revision_conflict", "place_exists"}
         result = {"ok": False, "error": str(exc), "code": code or "place_invalid"}
         if conflict:
+            conflict_place_id = place_id or getattr(exc, "place_id", "")
             def current():
                 try:  # a repeated Add names the place connected already
-                    return place_view(root, get_place(root, place_id or getattr(exc, "place_id", "")))
+                    return place_view(root, get_place(root, conflict_place_id))
                 except PlaceError as error:
                     if error.code != "place_not_found":
                         raise

@@ -35,7 +35,7 @@ _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "
           "knowledge_history": "memory/knowledge_history.jsonl",  # global knowledge writes, bodies left out
           "update_letter": "state/update_letter.json",  # the description with its whole range qualification
           "update_material": "state/update_material.json",  # the offered range's commits, rows and read recipe
-          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "chat", "store_sites")}}
+          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "store_sites")}}
 _ID_KINDS = {"task_result", "run", "review_ledger", "skill_state", "verification_receipts"}
 # op=blob reads the observability CAS by digest. The digest in a task-source handle's name is that file's own
 # hash, read through the source's reader; a miss names that reader instead of another plane (BIBLE P1).
@@ -459,6 +459,10 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 source.update(db=db, query=query, snapshot=use_snapshot)
                 result = sql.run_sql(ctx, root, db=db, query=query, max_rows=max_rows, max_bytes=max_bytes,
                                      snapshot=use_snapshot, timeout_sec=timeout_sec)
+                if result.get("code") == "query_failed" and result.get("phase") == "sql":
+                    # Every failed statement carries the way to learn the real schema, whatever failed in
+                    # it: a fact of the class, read from the typed phase, never from SQLite's message.
+                    result["schema"] = sql.schema_hint(db)
             value = result.get("data")
             raw, reconstructed = _canonical(value), True
         elif op == "blob":
@@ -483,6 +487,9 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             value = json.loads(raw) if blob_kind == "json" else {"hex": raw.hex()} if blob_kind == "bin" else raw.decode("utf-8")
             source.update(sha256=sha256, blob_kind=blob_kind)
         else:
+            if kind == "chat_log":  # the kind that advertised logs/chat.jsonl, frozen at the dialogue-store cutover
+                raise ValueError('kind="chat_log": logs/chat.jsonl is frozen since the dialogue store cutover and holds '
+                                 'no current conversation; read it with chat_history or memory_read(rows=true, room_id=...)')
             if kind not in _FILES and kind != "task_result":
                 raise ValueError(f"{_arg('kind', kind)}: op={op} needs one of task_result, {', '.join(_FILES)}")
             if state_file not in _STATES:

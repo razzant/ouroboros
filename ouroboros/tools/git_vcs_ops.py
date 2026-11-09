@@ -169,15 +169,14 @@ def _git_diff(
         binding = _git()._vcs_binding(ctx, _resolved_binding, root=root, path=path or ".")
         repo_dir = binding.repository_path or binding.base_path
         base, head = str(kwargs.get("base") or ""), str(kwargs.get("head") or "")
-        if head and (not base or staged):
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
-                text="⚠️ TOOL_ARG_ERROR (vcs_read diff): head requires base and cannot be combined with staged=true.",
-                meta={"operation_outcome": "completed_no_effect"}))
+        # vcs_read refused head without base, or with staged, among the call's other argument problems.
+        from ouroboros.tools.vcs_read import _object
+
         comparison = {}
         revisions = []
         for name, ref in (("base", base), ("head", head)):
             if ref:
-                tree = _git().run_cmd(["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], cwd=repo_dir).strip()
+                tree = _object(repo_dir, ref, "tree", field=name)  # an unresolved one is named with Git's answer
                 revisions.append(tree)
                 comparison.update({f"{name}_ref": ref, f"{name}_tree": tree})
         cmd = ["git", "diff"]
