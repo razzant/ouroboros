@@ -832,7 +832,7 @@ calls and runtime behaviours:
 | `tool` | The skill may call `register_tool`. |
 | `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
 | `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
-| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; opening one needs its place, `presence` grant and a `/presence/turn` event. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |

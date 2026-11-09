@@ -450,5 +450,6 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
                 "type": "worker_event_handler_error",
                 "event_type": event_type,
                 "error": repr(e),
+                **_event_shape(evt),  # the event's own task ids (content-free): the row stays attributable
             },
         )

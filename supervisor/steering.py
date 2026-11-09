@@ -38,16 +38,29 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
+def _mind_note(evt: Dict[str, Any]) -> bool:
+    """An act whose words are the teller's own: no owner quote and a synthetic receipt id (``tell_task`` with a note
+    only, ``control_relay._tell_task``). Whatever turn speaks it, the note is not my human's words (D7: without a
+    verified source the words are the teller's), so its refusal is the teller's to narrate from its typed tool
+    result, as a task-issued act's is; the owner's chat shows no row and no ACK for it. An act that carries an owner
+    quote or wears an owner message id (a relayed message, the routing card's click) keeps its owner notice."""
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+
+    return not evt.get("quotes") and str(evt.get("client_message_id") or "").startswith(AGENT_RECEIPT_ID_PREFIX)
+
+
 def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool:
     """Whether an owner act's refusal publishes its System row (``_refusal_row``).
 
     Always when its receipt selected that row as the carrier: no ACK carrying the cause
     was handed over (its durable row was refused, or no live ACK went out), so nothing else
-    tells it, whatever message the act wears. Otherwise only for an unlabelled act (a
-    synthetic receipt id) on a path that keeps the row the web shows, paired with the ACK.
-    A task that spoke for itself reads its typed refusal in its tool result and Logs row.
+    tells it, whatever message the act wears. Otherwise only for an unlabelled act of my human's
+    words (a quote whose row has no client id rides a synthetic receipt id) on a path that keeps
+    the row the web shows, paired with the ACK: that ACK answers no chat row. A task that spoke for
+    itself reads its typed refusal in its tool result and Logs row; so does a turn whose act carried
+    no owner words (``_mind_note``).
     """
-    if _task_issued(evt):
+    if _task_issued(evt) or _mind_note(evt):
         return False
     return carrier == "system" or (
         paired and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip()))
@@ -136,9 +149,10 @@ def _refuse_steering_while_cancelling(
     # A cancel-pending refusal is a live notice to the OWNER who asked; a task
     # that spoke for itself reads its typed refusal in the tool result instead.
     # An act that wears an owner message shows its cause on that message's
-    # receipt line once its ACK is handed over; an UNLABELLED owner act (a
-    # synthetic receipt id), or one whose ACK was not, needs the standalone
-    # sentence — the same rule as the other refusals (``_notice_row_owed``).
+    # receipt line once its ACK is handed over; an UNLABELLED act of my human's
+    # words (a quote without a client id), or one whose ACK was not, needs the
+    # standalone sentence; a note of the mind (``_mind_note``) none — the same rule
+    # as the other refusals (``_notice_row_owed``).
     if notify and _notice_row_owed(evt, carrier, paired=True):
         _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending", carrier)
     return carrier
@@ -186,7 +200,10 @@ def _steer_receipt(
     receipt = _emit_routing_receipt(
         ctx, evt, action="steer_task", target=target, target_label=target_label,
         status=status, reason=reason, detail=detail,
-        attachment_manifest=attachment_manifest, publish=not task_issued or bool(owner_message_id),
+        attachment_manifest=attachment_manifest,
+        # The owner hears of an act that carries their words or their click; a task's act and the mind's own note
+        # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone.
+        publish=(not task_issued and not _mind_note(evt)) or bool(owner_message_id),
     )
     for quote in evt.get("quotes") or []:
         source = quote.get("source") or {}
@@ -344,11 +361,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = ""
     if refusal:
         # Fail visibly: the chosen task is not a steerable running task here.
-        # The receipt carries the cause; an OWNER turn whose act wears no owner
-        # message (a synthetic receipt id), or whose ACK was not handed over,
-        # also gets the chat sentence, because nothing else in its chat can show
-        # the refusal. A task that spoke for itself reads the typed refusal in
-        # its tool result and its Logs row.
+        # The receipt carries the cause; an owner act of my human's words that
+        # wears no owner message (a quote without a client id), or whose ACK was
+        # not handed over, also gets the chat sentence, because nothing else in
+        # its chat can show the refusal. A task that spoke for itself, and a note
+        # of the mind (``_mind_note``), read the typed refusal in the tool result.
         carrier = str(_steer_receipt(
             ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
         ).get("routing_notice_carrier") or "")
@@ -467,7 +484,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             direct_lock.release()
     if refused is not None:
         # Only the cancel refusal keeps an unlabelled act's paired web row here; any
-        # refusal whose ACK was not handed over tells its cause in this row.
+        # refusal whose ACK was not handed over tells its cause in this row (never a
+        # note of the mind's: ``_mind_note``).
         status, reason, carrier = refused
         if _notice_row_owed(evt, carrier, paired=reason == "cancel_pending"):
             _refusal_row(ctx, evt, target, target_label, status, reason, carrier)

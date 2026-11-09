@@ -137,6 +137,16 @@ def test_metadata_pragmas_are_readable(ctx, pragma):
     assert result["data"]["rows"]
 
 
+def test_the_table_valued_form_of_an_admitted_pragma_reads_the_same_schema(ctx):
+    """Owner 09.11 (answer A): SELECT ... FROM pragma_table_info('tasks') reads what PRAGMA table_info(tasks)
+    already reads; it opens no row of another table."""
+    pragma = run(ctx, "PRAGMA table_info(tasks)")
+    table = run(ctx, "SELECT * FROM pragma_table_info('tasks')")
+    assert table["status"] == "ok" and table["data"]["rows"] == pragma["data"]["rows"], (table, pragma)
+    assert run(ctx, "SELECT name FROM pragma_table_list")["status"] == "ok"
+    assert run(ctx, "SELECT body FROM task_bodies")["status"] == "error"
+
+
 def test_heap_is_limited_only_in_child(ctx):
     with sqlite3.connect(":memory:") as parent:
         before = parent.execute("PRAGMA hard_heap_limit").fetchone()
