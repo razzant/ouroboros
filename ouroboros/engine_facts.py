@@ -200,8 +200,8 @@ def _count(document: dict, key: str) -> Optional[int]:
 
 def _pool_clause(root: Path) -> str:
     """The published project worker pool (``queue_publication._pool_counts``): ceiling apart from the slots
-    that exist, dispatch-enabled capacity apart from slots holding a task, the scheduler's last admissible
-    demand apart from pending rows (a pending row may be paused or held), the conversation lane apart."""
+    that exist, dispatch-enabled capacity apart from slots holding a task (acting, or asleep on their process),
+    pending rows apart from those the launch refuses by their own facts, the conversation lane apart."""
     try:
         from ouroboros.queue_observation import load_queue_document, pool_observation_status, queue_stamp
         document = load_queue_document(root)
@@ -225,18 +225,13 @@ def _pool_clause(root: Path) -> str:
         pending = len(document["pending"])
     parts = [said("ceiling", "max_workers"), said("total", "worker_total"),
              said("dispatch-enabled", "active_worker_count"), said("with a task", "busy_worker_count"),
+             said("acting", "acting_worker_count"), said("asleep on their process", "parked_worker_count"),
              said("booting", "booting_count"), said("reaping (incl. booting)", "reaping_count"),
              said("assignable idle", "assignable_idle_workers")]
-    demand = document.get("project_demand")
-    if isinstance(demand, dict) and demand.get("status") == "computed" and _count(demand, "admissible_pending") is not None:
-        parts.append(f"admissible pending {demand['admissible_pending']}"
-                     + (" or more" if demand.get("at_ceiling") else "")
-                     + f" (last assignment pass, unchanged since {demand.get('observed_since') or 'an unrecorded time'})")
-    elif isinstance(demand, dict):
-        parts.append(f"admissible pending unknown ({demand.get('reason') or 'not computed'})")
-    else:
-        parts.append("admissible pending not observed")
     parts.append(f"pending rows {pending}" if pending is not None else "pending rows not observed")
+    refused = document.get("dispatch_refusals")
+    if isinstance(refused, dict) and refused:
+        parts.append(f"refused by their own facts {len(refused)}")
     carriers = _count(document, "lane_carrier_total")
     lane = (f"conversation carriers {carriers}, outside the ceiling" if carriers is not None
             else "conversation carriers not observed")

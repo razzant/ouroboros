@@ -73,7 +73,8 @@ def pool_slot_counts(pool: Any = None) -> Dict[str, Any]:
     ``max_workers`` is the configured ceiling of active project capacity; ``worker_total`` counts
     the project slots that exist now (parked owner-wait slots can remain materialized after the
     active ceiling is reached). ``active_worker_count`` is dispatch-enabled capacity (a parked owner-wait author
-    lends its slot), not work in progress: ``busy_worker_count`` counts slots holding a task.
+    lends its slot), not work in progress: ``busy_worker_count`` counts slots holding a task, of which
+    ``acting_worker_count`` act and ``parked_worker_count`` sleep on their own process.
     The booting/reaping/retiring flags overlap (a fresh slot is booting and reaping until its
     readiness row); ``assignable_idle_workers`` is what dispatch could use this instant.
     Conversation carriers are another lane, outside the ceiling, counted apart. No queue,
@@ -95,6 +96,8 @@ def pool_slot_counts(pool: Any = None) -> Dict[str, Any]:
         "active_worker_count": active,
         "parked_worker_count": len(projects) - active,
         "busy_worker_count": sum(1 for slot in projects if getattr(slot, "busy_task_id", None) is not None),
+        "acting_worker_count": sum(1 for slot in projects if getattr(slot, "busy_task_id", None) is not None
+                                   and getattr(slot, "active_capacity", True)),
         "booting_count": sum(1 for slot in projects if getattr(slot, "booting", False)),
         "reaping_count": sum(1 for slot in projects if getattr(slot, "reaping", False)),
         "retiring_count": sum(1 for slot in projects if getattr(slot, "retiring", False)),
@@ -104,52 +107,12 @@ def pool_slot_counts(pool: Any = None) -> Dict[str, Any]:
     }
 
 
-def _initial_forecast() -> Dict[str, Any]:
-    return {"status": "unknown", "admissible_pending": None, "ceiling": None, "reason": "not_computed",
-            "observed_since": "", "revision": 0, "passes": 0}
-
-
-#: The growth forecast the last assignment pass computed (``reconcile_worker_capacity``), process-local;
-#: a pool generation's stop or start makes it unknown again (``workers.spawn_workers``/``kill_workers``).
-_DEMAND_FORECAST: Dict[str, Any] = _initial_forecast()
-_DEMAND_FORECAST_LOCK = threading.Lock()
-
-
-def record_demand_forecast(demand: Optional[int], *, reason: str = "", assignment_pass: bool = True) -> None:
-    """Record what one assignment pass knew about admissible demand; ``None`` with a reason when it computed none.
-
-    The value is the one ``reconcile_worker_capacity`` already grows on, never recomputed for a
-    reader. ``observed_since`` and ``revision`` move only when the observation changes, so a
-    steady pool publishes no new queue document; its currency is the document's own certificate.
-    A generation's stop or start records unknown outside any pass (``assignment_pass=False``).
-    """
-    ceiling = max(1, int(_pool().MAX_WORKERS))
-    if demand is None:
-        observed = {"status": "unknown", "admissible_pending": None, "ceiling": ceiling,
-                    "reason": str(reason or "not_computed")}
-    else:
-        observed = {"status": "computed", "admissible_pending": min(max(0, int(demand)), ceiling),
-                    "ceiling": ceiling, "reason": ""}
-    with _DEMAND_FORECAST_LOCK:
-        if assignment_pass:
-            _DEMAND_FORECAST["passes"] = int(_DEMAND_FORECAST.get("passes") or 0) + 1
-        if any(_DEMAND_FORECAST.get(key) != value for key, value in observed.items()):
-            _DEMAND_FORECAST.update(observed, observed_since=utc_now_iso(),
-                                    revision=int(_DEMAND_FORECAST.get("revision") or 0) + 1)
-
-
-def demand_forecast_passes() -> int:
-    with _DEMAND_FORECAST_LOCK:
-        return int(_DEMAND_FORECAST.get("passes") or 0)
-
-
-def demand_forecast() -> Dict[str, Any]:
-    """The published form: the last pass's admissible pending rows (capped by the ceiling), or unknown and why."""
-    with _DEMAND_FORECAST_LOCK:
-        forecast = {key: value for key, value in _DEMAND_FORECAST.items() if key != "passes"}
-    value = forecast["admissible_pending"]
-    return {**forecast, "scope": "last_assignment_pass",
-            "at_ceiling": value is not None and forecast["ceiling"] is not None and value >= forecast["ceiling"]}
+def admissible_starts(active: Any, resuming: int) -> int:
+    """How many new project processes the pool may start now: the share of ``MAX_WORKERS`` that no
+    dispatch-enabled slot (booting ones included) and no authorized Resume holds. The assignment pass
+    sizes its choice with it before it looks at the queue (``dispatch_choice.run_pass``), and growth
+    starts at most this many (``reconcile_worker_capacity``): one answer for both."""
+    return max(0, int(_pool().MAX_WORKERS) - len(active) - int(resuming))
 
 
 def project_fenced(slot: Any) -> bool:
@@ -1054,10 +1017,10 @@ def reap_idle_worker(job: dict) -> None:
 def reconcile_worker_capacity(residual_demand) -> None:
     """Demand-sized growth; one stable ready spare at quiescence, with no idle timer.
 
-    Forecast uses assignment's chooser under Q, once; readers get that value
-    (``record_demand_forecast``), never a second run. Booting slots can satisfy future
-    demand; exhausted or retiring slots cannot, but all keep charged reservations.
-    Parked authors lend theirs only through the durable owner-wait protocol.
+    ``residual_demand()`` answers, under Q, how many rows the assignment pass chose that no idle
+    worker took (``dispatch_choice.run_pass``; None: the pass was blocked); it reads no store and
+    runs no chooser. Booting slots can satisfy that demand; exhausted or retiring slots cannot, but
+    all keep charged reservations. Parked authors lend theirs only through the durable owner-wait protocol.
 
     Growth and retirement take the lifecycle serializer, then Q; a spawn starts outside
     Q. Surplus and a cap-full warm Resume share the quiescence probe, and an authorized
@@ -1072,11 +1035,8 @@ def reconcile_worker_capacity(residual_demand) -> None:
     reconcile_conversation_lane()
     with _queue_lock:
         if not _pool().WORKERS or _pool()._WORKER_POOL_DISABLED_REASON:
-            record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
-                                   else "pool_absent")
             return
         demand = residual_demand()
-        record_demand_forecast(demand, reason="assignment_blocked")  # the one forecast growth reads, as computed
         if demand is None or (_pool().repo_writer_admission_closed() and not demand):
             return
         active = [w for w in project_slots() if w.active_capacity]
@@ -1089,8 +1049,7 @@ def reconcile_worker_capacity(residual_demand) -> None:
         # Only a warm Resume its owner authorized this tick takes lent capacity back.
         resuming = sum(1 for w in project_slots()
                        if not w.active_capacity and getattr(w, "resume_hold", ""))
-        missing = min(max(0, wanted - len(idle) - booting),
-                      max(0, _pool().MAX_WORKERS - len(active) - resuming))
+        missing = min(max(0, wanted - len(idle) - booting), admissible_starts(active, resuming))
         # An empty table stops growth: a pool whose lane spare is absent keeps its last
         # idle slot, as it did before the lane existed.
         keep = wanted if len(_pool().WORKERS) > len(idle) else max(1, wanted)

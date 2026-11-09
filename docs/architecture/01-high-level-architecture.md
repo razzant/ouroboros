@@ -46,7 +46,7 @@ supervisor/ — background thread inside server.py (§5)
   message_bus.py — local message bus for the Web UI and transport skills; re-exports the ingress names
   message_ingress.py — one accepted row per message id, its dispatch a durable obligation (§4 WebSocket chat)
   workers.py — worker pool: forkserver on Linux, spawn elsewhere, never fork (why: its comment)
-  worker_assignment.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
+  worker_assignment.py, dispatch_choice.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
   worker_owner_wait.py — a required owner wait lends its active slot; the task stays RUNNING, custodied (§5)
   conversation_lane.py, inline_carrier.py — the lane's slots, admission, spare and census; the two inline executors (§5 Conversation lane)
   state.py, state_initialization.py — `state/state.json` updates with typed read quality; init witness

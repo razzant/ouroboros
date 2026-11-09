@@ -272,16 +272,19 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         pending_stop_status = "unknown"
     fact["pending_paused_or_held_count"] = pending_stops if pending_stop_status == "observed" else None
     fact["pending_paused_or_held_status"] = pending_stop_status
+    # A cold sleeper is a queued row that keeps no process: its saved pause says it sleeps.
+    fact["pending_sleeping_count"] = (sum(((row.get("task") or {}).get("_budget_pause") or {}).get("reason") == "sleep"
+                                          for row in pending_rows) if pending_stop_status == "observed" else None)
     observed = pool_observation_status(snapshot)
     fact["pool_observation_status"] = observed
-    for key in ("max_workers", "worker_total", "active_worker_count", "busy_worker_count", "booting_count",
-                "reaping_count", "retiring_count", "lane_carrier_total"):
+    for key in ("max_workers", "worker_total", "active_worker_count", "busy_worker_count", "acting_worker_count",
+                "parked_worker_count", "booting_count", "reaping_count", "retiring_count", "lane_carrier_total"):
         # worker_total: project slots that exist (the pool grows on demand below the ceiling); the
         # conversation lane's carriers are apart. A snapshot's max_workers is its writer's ceiling.
         fact["recorded_max_workers" if key == "max_workers" else key] = (
             snapshot.get(key) if observed == "observed" else None)
-    demand = snapshot.get("project_demand")  # the last assignment pass's growth forecast, as it published it
-    fact["project_demand"] = dict(demand) if isinstance(demand, dict) else {"status": "not_recorded"}
+    refused = snapshot.get("dispatch_refusals")  # queued rows the launch would refuse by their own facts, with why
+    fact["dispatch_refusals"] = dict(refused) if isinstance(refused, dict) and observed == "observed" else {}
     assignable = snapshot.get("assignable_idle_workers")
     if observed != "observed":
         fact["free_worker_slots"] = None
@@ -301,9 +304,10 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "Last recorded queue counts at ts; freshness and age were measured when this context "
         "was built and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
-        "pending_count counts rows, not runnable demand: project_demand.admissible_pending is what the "
-        "scheduler's last pass could dispatch (capped by the ceiling), paused or held rows say so explicitly, and "
-        "other rows record no wait cause here. free_worker_slots is assignable idle existing capacity, not headroom; "
+        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so "
+        "explicitly, dispatch_refusals names rows the launch refuses by their own facts, and other rows record no "
+        "wait cause here. acting_worker_count holds a task and acts; parked_worker_count sleeps on its own process. "
+        "free_worker_slots is assignable idle existing capacity, not headroom; "
         "the configured ceiling applies on the next task/restart. booting and reaping overlap for fresh slots. "
         "active_worker_count is dispatch-enabled capacity, not work. "
         "Scheduling owns admission; these observations reserve no slots."

@@ -121,19 +121,25 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "supervisor/worker_assignment.py": ("supervisor/workers.py", "_pool", frozenset({
         "DRIVE_ROOT", "PENDING", "RUNNING", "WORKERS",
-        "_assignment_depth_reservation_admits", "_cancel_unauthorized_evolution",
+        "_assignment_depth_reservation_admits",
         "_drop_assignable_evolution_tasks", "_drop_cancelled_pending",
-        "_emit_task_done_terminal", "_evolution_assignment_error",
-        "_invalid_depth_deferred", "_normalize_pending_task_depth",
+        "_emit_task_done_terminal",
+        "_invalid_depth_deferred",
         "_quarantine_invalid_pending_depths",
         "_retry_terminalization_pending_for_assignment", "_running_subagent_count",
-        "_terminalize_invalid_pending_depth", "append_jsonl", "load_state",
+        "append_jsonl", "load_state",
         "reconstruct_task_cost", "repo_writer_task_allowed", "send_with_budget",
         "utc_now_iso",
-        # The bounded residual forecast and a disabled pool's frozen membership.
-        "MAX_WORKERS", "_WORKER_POOL_DISABLED_REASON",
+        # A disabled pool's frozen membership.
+        "_WORKER_POOL_DISABLED_REASON",
         # A moved work's placement readmission validates its new room folder at launch.
         "REPO_DIR",
+    })),
+    # WP7 (pool-capacity): the assignment pass and its one predicate's store stage left worker_assignment.
+    "supervisor/dispatch_choice.py": ("supervisor/workers.py", "_pool", frozenset({
+        "DRIVE_ROOT", "PENDING", "WORKERS", "_cancel_unauthorized_evolution", "_evolution_assignment_error",
+        "_normalize_pending_task_depth", "_terminalize_invalid_pending_depth", "direct_chat_turn",
+        "repo_writer_task_allowed",
     })),
     "supervisor/worker_health.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime707: health hands off recovery; the reaper owns the respawn.

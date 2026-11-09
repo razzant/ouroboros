@@ -212,20 +212,21 @@ def test_stop_reaches_direct_pool_children_and_lent_focus_but_leaves_owner(clock
 @pytest.mark.parametrize("metadata", [OWN, FOCUS, STARTED])
 def test_recovered_autonomous_work_rechecks_off_and_panic_at_assignment(tmp_path, monkeypatch, metadata):
     from supervisor import state
-    from supervisor.worker_assignment import _choose_candidate
+    from supervisor.dispatch_choice import choose as dispatch_choose
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     enabled, panic = {"value": False}, {"value": False}
     monkeypatch.setattr(state, "load_state", lambda: {"bg_consciousness_enabled": enabled["value"]})
     monkeypatch.setattr(clock_module, "panic_blocks_wake", lambda root: panic["value"])
     workers.PENDING.append(_task("restored", metadata, depth=0, admitted_dispatch="none"))
-    choose = lambda: _choose_candidate(q, 5.0, set(), set(), {}, set())
-    assert choose() == (None, False)
+    def choose():
+        return [row["id"] for row in dispatch_choose(q, 5.0)]
+    assert choose() == []
     enabled["value"] = True
-    assert choose() == (0, False)
+    assert choose() == ["restored"]
     panic["value"] = True
-    assert choose() == (None, False)
+    assert choose() == []
     workers.PENDING[0]["metadata"] = OWNER
-    assert choose() == (0, False)
+    assert choose() == ["restored"]
 
 
 def test_off_switch_stops_only_work_consciousness_started(tmp_path, monkeypatch):

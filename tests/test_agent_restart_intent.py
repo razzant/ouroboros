@@ -330,11 +330,11 @@ def test_late_or_unconfirmed_intake_promises_no_execution(runtime, monkeypatch, 
 @pytest.mark.parametrize("boundary", ["before_marks", "after_marks"])
 def test_intent_at_last_dispatch_boundary_spares_committed_handoff(runtime, monkeypatch, boundary):
     from ouroboros import owner_pause
-    from supervisor import worker_assignment as assignment
+    from supervisor import dispatch_choice, worker_assignment as assignment
 
     candidate = enqueue(runtime, "picked")
     slot, delivered = worker(runtime, monkeypatch)
-    assert assignment._choose_candidate(runtime.queue, 10, set(), set(), list(runtime.queue.RUNNING.values()), set())[0] == 0
+    assert dispatch_choice.choose(runtime.queue, 10) == [candidate]
     slot.busy_task_id = candidate["id"]
     candidate["_launch_claim"] = {"token": "claim", "wid": slot.wid}
     event = {"type": "restart_request", "phase": "intent", "request_id": "boundary-proof",

@@ -242,10 +242,11 @@ def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead, and
     ``conversation_lane`` the lane's carriers now, each with its last own RSS report)."""
     from ouroboros import dialogue_retry, store_timing
-    from supervisor import conversation_lane, queue
+    from supervisor import conversation_lane, dispatch_choice, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
+        "dispatch": dispatch_choice.drain,  # passes, rows the memory gates walked, rows screened, store reads
         "store_locks": store_timing.drain,
         "dialogue_retry": dialogue_retry.snapshot,
         "conversation_lane": conversation_lane.carrier_vitals,

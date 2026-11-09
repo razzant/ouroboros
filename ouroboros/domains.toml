@@ -1004,6 +1004,7 @@ D20 = "Presence"
 "supervisor/tree_census.py" = "D08"  # one tree's writer census, its inputs read once per change of its rows
 "supervisor/sleep_wake.py" = "D08"
 "supervisor/direct_roots.py" = "D08"  # the main loop's off-lock fragment, written beside the snapshot
+"supervisor/dispatch_choice.py" = "D08"  # the assignment pass: one gate predicate in cost order, stopping at free capacity
 "supervisor/consciousness_carriers.py" = "D08"
 "supervisor/queue_timeouts.py" = "D08"
 "supervisor/silence_attention.py" = "D08"

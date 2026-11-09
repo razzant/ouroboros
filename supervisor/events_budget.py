@@ -807,7 +807,7 @@ def native_continuation_repair(task: Dict[str, Any]) -> bool:
                 and isinstance(task.get("_owner_wait_resume"), dict))
 
 
-def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any]) -> Optional[bool]:
+def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any], *, actor_id: Optional[str] = None) -> Optional[bool]:
     """A child selection belongs to the CURRENT root grant and fence only.
 
     Both carriers are revalidated at dispatch: an exact grant handoff and a
@@ -815,7 +815,7 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any]) -> Optional[boo
     under, so a root that is pausing or paused again (with or without a new
     fence) admits neither on its old selection (#1196, owner Q9).
     ``None`` holds this dispatch on unreadable retry/root-grant authority;
-    ``False`` retains stale-selection handling. Resolve the physical root once.
+    ``False`` retains stale-selection handling. Resolve the physical root once (or pass the one read ahead).
     """
     if continuation_refusal(task):
         return False
@@ -858,7 +858,7 @@ def budget_resume_dispatch_allowed(q: Any, task: Dict[str, Any]) -> Optional[boo
 
     result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     try:
-        actor_id = _validated_single_cancel_target(result_root, root_id)
+        actor_id = actor_id if actor_id is not None else _validated_single_cancel_target(result_root, root_id)
         owner_unbound = carrier.get('selected_by') == 'owner' and not carrier.get('root_grant_id')
         if owner_unbound and actor_id == str(task.get('id') or ''):
             return True

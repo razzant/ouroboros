@@ -883,31 +883,20 @@ def test_an_unresolved_launch_commit_stays_demand_but_a_refusal_does_not(assigni
         assert not _COMMITTED_UNSENT and forecasts == [0] and len(retiring) == 2
 
 
-# ---- the published growth forecast: one measurement owner, read without side effects --------------
+# ---- the published pool counters: measured from the pool, read without side effects --------------
 
 def _published(root):
     import json
     return json.loads((root / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
 
 
-def _counting_chooser(monkeypatch):
-    from supervisor import worker_assignment
-    calls = []
-    real = worker_assignment._choose_candidate
-
-    def counted(*args, **kwargs):
-        calls.append(1)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(worker_assignment, "_choose_candidate", counted)
-    return calls
-
-
 def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_count_is(
         assigning, monkeypatch, tmp_path):
-    """The owner's case: a 40 ceiling, a pool that grew only to demand, pending rows that are held."""
+    """The owner's case: a 40 ceiling, a pool that grew only to demand, pending rows that are held. No forecast is
+    published: the counters say what acts, what boots, what is idle and what is held, and no reader chooses."""
     from ouroboros.context_runtime_facts import _queue_context_fact
     from ouroboros.engine_facts import engine_pool_line
+    from supervisor import dispatch_choice
     from supervisor.queue_publication import _pool_counts
 
     monkeypatch.setattr(workers, "MAX_WORKERS", 40)
@@ -918,100 +907,55 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
                                                          "status": "paused_exact_continuation"}),
                             task("held", _budget_pause={"reason": "owner", "exact_continuation": True,
                                                        "status": "paused_before_dispatch"})])
-    calls = _counting_chooser(monkeypatch)
+    passes = dispatch_choice.counts()["passes"]
     workers.assign_tasks()  # the sole slot is the busy parent: growth buys the three runnable rows only
-    assert len(assigning.created) == 3 and calls
-    forecast = lifecycle.demand_forecast()
-    assert (forecast["status"], forecast["admissible_pending"], forecast["ceiling"], forecast["at_ceiling"],
-            forecast["scope"]) == ("computed", 3, 40, False, "last_assignment_pass")
-    queue.persist_queue_snapshot("forecast")
+    assert len(assigning.created) == 3 and dispatch_choice.counts()["passes"] == passes + 1
+    queue.persist_queue_snapshot("counters")
     document = _published(tmp_path)
     assert (document["max_workers"], document["worker_total"], document["active_worker_count"],
-            document["busy_worker_count"], document["booting_count"], document["assignable_idle_workers"],
-            document["pending_count"]) == (40, 4, 4, 1, 3, 0, 5)
-    assert document["project_demand"]["admissible_pending"] == 3
-    before, pending = len(calls), [dict(row) for row in workers.PENDING]
-    # Every reader takes the recorded value: none reruns the chooser or touches a row.
+            document["busy_worker_count"], document["acting_worker_count"], document["parked_worker_count"],
+            document["booting_count"], document["assignable_idle_workers"],
+            document["pending_count"]) == (40, 4, 4, 1, 1, 0, 3, 0, 5)
+    assert "project_demand" not in document and document["dispatch_refusals"] == {}
+    seen, pending = dispatch_choice.counts(), [dict(row) for row in workers.PENDING]
+    # Every reader takes the recorded counts: none chooses, reads the store for a row or touches one.
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     line = engine_pool_line(tmp_path)
     _pool_counts()
-    lifecycle.demand_forecast()
-    assert len(calls) == before and [dict(row) for row in workers.PENDING] == pending
+    assert dispatch_choice.counts() == seen and [dict(row) for row in workers.PENDING] == pending
     assert all("admitted_dispatch" not in row for row in workers.PENDING)
-    assert (fact["recorded_max_workers"], fact["worker_total"], fact["busy_worker_count"], fact["pending_count"],
-            fact["pending_paused_or_held_count"], fact["project_demand"]["admissible_pending"],
-            fact["free_worker_slots"]) == (40, 4, 1, 5, 2, 3, 0)
-    assert ("ceiling 40, total 4, dispatch-enabled 4, with a task 1, booting 3, reaping (incl. booting) 3, "
-            "assignable idle 0, admissible pending 3 (last assignment pass, unchanged since ") in line
-    assert "pending rows 5; conversation carriers 0, outside the ceiling" in line
+    assert (fact["recorded_max_workers"], fact["worker_total"], fact["busy_worker_count"], fact["acting_worker_count"],
+            fact["pending_count"], fact["pending_paused_or_held_count"], fact["pending_sleeping_count"],
+            fact["free_worker_slots"], fact["dispatch_refusals"]) == (40, 4, 1, 1, 5, 2, 0, 0, {})
+    assert "project_demand" not in fact
+    assert ("ceiling 40, total 4, dispatch-enabled 4, with a task 1, acting 1, asleep on their process 0, booting 3, "
+            "reaping (incl. booting) 3, assignable idle 0, pending rows 5; "
+            "conversation carriers 0, outside the ceiling") in line
 
 
-def test_a_new_pool_generation_never_republishes_the_stopped_pools_forecast(assigning, monkeypatch):
-    """An in-process stop and spawn keep this module: the forecast is unknown until the new pool's own pass."""
-    import supervisor.worker_process as wp
+def test_a_steady_pool_keeps_its_census_and_a_real_change_moves_it(assigning, monkeypatch):
+    """Nothing in the published pool facts moves on an unchanged pool, so no tick rewrites the document."""
     from supervisor.queue_publication import _pool_counts
 
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.PENDING.append(task("runnable"))
-    workers.assign_tasks()
-    computed, passes = lifecycle.demand_forecast(), lifecycle.demand_forecast_passes()
-    assert computed["status"] == "computed" and computed["admissible_pending"] == 1
-    with workers._queue_lock:
-        workers._partition_slots_for_stop(frozenset({workers.LANE_PROJECT}))  # the crash-storm fence's stop
-    stopped = lifecycle.demand_forecast()
-    assert (stopped["status"], stopped["admissible_pending"], stopped["reason"]) == ("unknown", None, "pool_stopped")
-    assert _pool_counts()["project_demand"]["status"] == "unknown"
-    workers.WORKERS.clear()
-    monkeypatch.setattr(workers, "_record_worker_processes", lambda *a, **k: None)
-    monkeypatch.setattr(workers.threading, "Thread", lambda **kw: type("T", (), {"start": lambda self: None})())
-    monkeypatch.setattr(workers, "events_log_cursor", lambda: (0, 0, 0))
-    monkeypatch.setattr(workers, "event_queue_generation", lambda: "gen")
-    monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
-    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive: Process(900 + wid))
-    lifecycle.record_demand_forecast(2)  # a stale value left behind must not survive the next start
-    workers.spawn_workers()
-    fresh = lifecycle.demand_forecast()
-    assert (fresh["status"], fresh["admissible_pending"], fresh["reason"]) == ("unknown", None, "new_pool_generation")
-    assert lifecycle.demand_forecast_passes() == passes + 1  # only the explicit pass above counted
-
-
-def test_a_steady_forecast_keeps_its_clock_so_the_census_does_not_move(assigning, monkeypatch):
-    from supervisor.queue_publication import _pool_counts
-
-    clock = iter(f"2026-11-06T00:00:{second:02d}+00:00" for second in range(60))
-    monkeypatch.setattr(lifecycle, "utc_now_iso", lambda: next(clock))
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
     workers.PENDING.append(task("held", _owner_hold={"reason": "owner"}))
     workers.assign_tasks()
-    first, census = lifecycle.demand_forecast(), _pool_counts()
-    assert first["status"] == "computed" and first["admissible_pending"] == 0
+    census = _pool_counts()
     for _tick in range(3):
         workers.assign_tasks()
-    assert lifecycle.demand_forecast() == first and _pool_counts() == census
+    assert _pool_counts() == census and not assigning.created
     workers.PENDING.append(task("runnable"))
     workers.assign_tasks()
-    moved = lifecycle.demand_forecast()
-    assert moved["admissible_pending"] == 1 and moved["revision"] == first["revision"] + 1
-    assert moved["observed_since"] != first["observed_since"]
+    assert _pool_counts() != census and len(assigning.created) == 1
 
 
-def test_the_forecast_caps_at_the_ceiling_and_says_so(assigning, monkeypatch):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 2)
-    workers.PENDING.extend(task(str(i)) for i in range(5))
-    workers.assign_tasks()
-    forecast = lifecycle.demand_forecast()
-    assert (forecast["admissible_pending"], forecast["at_ceiling"]) == (2, True)
-
-
-@pytest.mark.parametrize("ending", ["lifecycle_busy", "authority_unavailable", "chooser_blocked", "disabled",
-                                    "exception"])
-def test_a_pass_that_ends_before_growth_never_republishes_the_older_forecast(assigning, monkeypatch, ending):
-    from supervisor import state, worker_assignment
+@pytest.mark.parametrize("ending", ["lifecycle_busy", "authority_unavailable", "depth_unwritable", "disabled"])
+def test_a_pass_that_ends_before_growth_grows_nothing(assigning, monkeypatch, ending):
+    """Growth reads only what this pass chose: a pass that ended first starts no process (no older answer stands)."""
+    from supervisor import state
 
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.PENDING.append(task("runnable"))
-    workers.assign_tasks()
-    assert lifecycle.demand_forecast()["status"] == "computed"
+    workers.PENDING.append(task("runnable", depth="not-a-depth" if ending == "depth_unwritable" else 0))
     if ending == "lifecycle_busy":
         held, release = threading.Event(), threading.Event()
 
@@ -1028,25 +972,21 @@ def test_a_pass_that_ends_before_growth_never_republishes_the_older_forecast(ass
         finally:
             release.set()
             holder.join(5)
-        expected = "assignment_pass_incomplete"
     elif ending == "authority_unavailable":
         def unavailable(*_a, **_kw):
             raise RuntimeError("ledger unreadable")
         monkeypatch.setattr(state, "budget_remaining", unavailable)
         workers.assign_tasks()
-        expected = "assignment_pass_incomplete"
-    elif ending == "chooser_blocked":
-        monkeypatch.setattr(worker_assignment, "_choose_candidate", lambda *_a, **_kw: (None, True))
+    elif ending == "depth_unwritable":
+        monkeypatch.setattr(workers, "_quarantine_invalid_pending_depths", lambda: ([], []))
+        monkeypatch.setattr(workers, "_terminalize_invalid_pending_depth", lambda *_a: False)
         workers.assign_tasks()
-        expected = "assignment_blocked"
-    elif ending == "disabled":
+    else:
         monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "crash_storm")
         workers.assign_tasks()
-        expected = "pool_disabled"
-    else:
-        monkeypatch.setattr(worker_assignment, "_tick_parked_work", lambda _q: 1 / 0)
-        with pytest.raises(ZeroDivisionError):
-            workers.assign_tasks()
-        expected = "assignment_pass_incomplete"
-    forecast = lifecycle.demand_forecast()
-    assert (forecast["status"], forecast["admissible_pending"], forecast["reason"]) == ("unknown", None, expected)
+    assert not assigning.created and [row["id"] for row in workers.PENDING] == ["runnable"]
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)  # the other direction: an ordinary pass
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
+    workers.PENDING[0]["depth"] = 0
+    workers.assign_tasks()
+    assert len(assigning.created) == 1, "the next ordinary pass grows for the same row"

@@ -109,7 +109,7 @@ def test_a_failed_pool_measurement_publishes_unknown_and_every_reader_keeps_it_u
     document = _read(root, "queue_snapshot.json")
     assert document["pool_observation_status"] == "unknown"
     assert all(document[key] is None for key in queue_publication._POOL_COUNT_KEYS), "never zeros"
-    assert document["project_demand"]["status"] == "unknown"
+    assert "project_demand" not in document  # no forecast is published; the counters say what acts and waits
     # The control projections refuse as the old zero-count form did, under the honest reason.
     ctx = types.SimpleNamespace(drive_root=root, budget_drive_root="")
     assert _promotion_pool_disabled_from_snapshot(ctx) == "unknown"

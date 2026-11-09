@@ -449,34 +449,33 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
 
 def _pool_counts() -> Dict[str, Any]:
     """The pool's published facts, measured by ``worker_pool_lifecycle.pool_slot_counts`` (its docstring names
-    each count) from the ACTUAL pool, never the configured ceiling, plus the last assignment pass's growth
-    forecast (``project_demand``). A slot mid-reap is not assignable, so no reader is told of a free slot that
-    is not. A failed measurement publishes ``pool_observation_status: "unknown"`` with null counts: never
-    zeros, which would read as an empty pool. The census hashes these facts, so nothing here carries a clock
-    that moves without the facts."""
+    each count) from the ACTUAL pool, never the configured ceiling, plus the queued rows the launch would refuse
+    for good by their own facts (``dispatch_refusals``: ``dispatch_choice.refusals``). A slot mid-reap is not
+    assignable, so no reader is told of a free slot that is not. A failed measurement publishes
+    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool. The
+    census hashes these facts, so nothing here carries a clock that moves without the facts."""
     try:
         from supervisor import workers as _workers_mod
-        from supervisor.worker_pool_lifecycle import demand_forecast, pool_slot_counts
+        from supervisor.dispatch_choice import refusals
+        from supervisor.worker_pool_lifecycle import pool_slot_counts
 
         counts = pool_slot_counts(_workers_mod.WORKERS)
         disabled = _workers_mod._worker_pool_execution_state()["disabled_reason"]
         # Absence is counted above, not an explicit disablement.
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
-        counts["project_demand"] = demand_forecast()
+        counts["dispatch_refusals"] = refusals()
         return counts
     except Exception:
         log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood
         return {**dict.fromkeys(_POOL_COUNT_KEYS), "worker_pool_disabled_reason": "unknown",
-                "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed",
-                "project_demand": {"status": "unknown", "admissible_pending": None, "reason": "introspection_failed",
-                                   "scope": "last_assignment_pass"}}
+                "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed"}
 
 
 #: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
 _POOL_COUNT_KEYS = ("max_workers", "worker_total", "active_worker_count", "parked_worker_count", "busy_worker_count",
-                    "booting_count", "reaping_count", "retiring_count", "assignable_idle_workers",
-                    "lane_carrier_total", "lane_carrier_idle")
+                    "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
+                    "assignable_idle_workers", "lane_carrier_total", "lane_carrier_idle", "dispatch_refusals")
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

@@ -1,8 +1,10 @@
 """An unreadable retry lineage holds one dispatch, without spending the owner's Resume.
 
 The real Pause, park, Resume and assign_tasks consumer run. The injected fault is
-only the lineage read inside budget_resume_dispatch_allowed, like the reproduced
-one-read failure; every other lineage read succeeds.
+only the dispatch's own lineage read (inside budget_resume_dispatch_allowed, or the
+chooser's read of it ahead of that decision, ``dispatch_choice._actor_reads``), like
+the reproduced one-read failure; every other lineage read succeeds. A full pool
+chooses nothing and reads nothing, so it neither spends nor reads the grant.
 """
 import inspect
 
@@ -17,11 +19,13 @@ from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import _fresh_plan, reaper  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
+DISPATCH_READS = {"budget_resume_dispatch_allowed", "_actor_reads"}
+
 
 
 @pytest.mark.parametrize(("busy", "fault_count", "actor"), [
     pytest.param(False, 1, "retry", id='assignment-1-retry'),
-    pytest.param(True, 2, "retry_chain", id='busy-forecast-2-retry_chain'),
+    pytest.param(True, 2, "retry_chain", id='busy-pool-2-retry_chain'),
 ])
 def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
         host, monkeypatch, clock, reaper, actor, fault_count, busy):  # noqa: F811
@@ -36,7 +40,7 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
     unavailable, forecasts = True, []
 
     def unreadable_dispatch(*args, **kwargs):
-        if "budget_resume_dispatch_allowed" in {frame.function for frame in inspect.stack()}:
+        if DISPATCH_READS & {frame.function for frame in inspect.stack()}:
             calls.append(args[1])
             if unavailable:
                 raise OSError("one targeted transient lineage-read refusal")
@@ -47,8 +51,12 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
     # Exercise the actual residual-demand callback without creating native workers.
     monkeypatch.setattr("supervisor.worker_pool_lifecycle.reconcile_worker_capacity",
                         lambda demand: forecasts.append(demand()))
-    if busy:
+    if busy:  # a full pool: no pass, no read, no demand, the grant untouched; then the slot frees
         workers.WORKERS[0].busy_task_id = "another-task"
+        workers.assign_tasks()
+        assert not calls and not sent and forecasts[-1] == 0 and pending["_budget_pause_resume"] == handoff
+        assert budget_pause.budget_pause_row(host.root, running["id"])["grant"] == before["grant"]
+        workers.WORKERS[0].busy_task_id = None
     for attempt in range(fault_count):
         reads_before = len(calls)
         workers.assign_tasks()
@@ -62,11 +70,6 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
         assert pending["_budget_pause_resume"] == handoff and len(calls) > reads_before
         assert forecasts[-1] == 0, "unknown selection never becomes capacity demand"
     unavailable = False
-    if busy:
-        workers.assign_tasks()
-        assert not sent and forecasts[-1] == 1, "a readable grant is demand, not dispatch"
-        assert pending["_budget_pause_resume"] == handoff
-        workers.WORKERS[0].busy_task_id = None
     workers.assign_tasks()
     assert [task["id"] for task in sent] == [running["id"]]
     assert sent[0]["_budget_pause_resume"] == handoff
@@ -76,7 +79,7 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
 
 @pytest.mark.parametrize("fault", ["lineage", "grant_row"])
 @pytest.mark.parametrize("after_readable", ["unchanged", "new_generation"])
-@pytest.mark.parametrize("busy", [False, True], ids=["assignment", "busy-forecast"])
+@pytest.mark.parametrize("busy", [False, True], ids=["assignment", "busy-pool"])
 def test_child_dispatch_preserves_unknown_but_revokes_proven_stale_authority(
         tmp_path, monkeypatch, fault, after_readable, busy):
     from tests.test_budget_pause_lineage import CHILD, ROOT, _resumed_root_over_parked_child
@@ -92,17 +95,19 @@ def test_child_dispatch_preserves_unknown_but_revokes_proven_stale_authority(
     forecasts = []
     monkeypatch.setattr("supervisor.worker_pool_lifecycle.reconcile_worker_capacity",
                         lambda demand: forecasts.append(demand()))
-    if busy:
-        pool.WORKERS[1].busy_task_id = "another-task"
-
     def unreadable(*args, **kwargs):
-        if args[1] == ROOT and "budget_resume_dispatch_allowed" in {f.function for f in inspect.stack()}:
+        if args[1] == ROOT and DISPATCH_READS & {f.function for f in inspect.stack()}:
             calls.append(args[1])
             raise OSError("current root authority unreadable")
         return real(*args, **kwargs)
 
     with monkeypatch.context() as unavailable:
         unavailable.setattr(module, name, unreadable)
+        if busy:  # a full pool reads nothing, the unreadable authority included; then the slot frees
+            pool.WORKERS[1].busy_task_id = "another-task"
+            pool.assign_tasks()
+            assert not calls and not sent and forecasts[-1] == 0 and child["_budget_pause_resume"] == handoff
+            pool.WORKERS[1].busy_task_id = None
         pool.assign_tasks()
     assert calls and set(calls) == {ROOT} and not sent and child in pool.PENDING
     assert budget_pause.budget_pause_row(tmp_path, CHILD) == before
@@ -115,11 +120,6 @@ def test_child_dispatch_preserves_unknown_but_revokes_proven_stale_authority(
             "grant": {**root_grant, "grant_id": "later-root-grant", "generation": 2}})
     pool.assign_tasks()
     if after_readable == "unchanged":
-        if busy:
-            assert not sent and forecasts[-1] == 1
-            assert child["_budget_pause_resume"] == handoff
-            pool.WORKERS[1].busy_task_id = None
-            pool.assign_tasks()
         assert [task["id"] for task in sent] == [CHILD]
         assert sent[0]["_budget_pause_resume"] == handoff
     else:

@@ -405,7 +405,7 @@ def test_receipt_owner_never_replays_an_uncertain_queue_append(attention, monkey
 
 def _handoff_diagnostic(attention, monkeypatch):
     """Use the real chooser/launch lane; only the worker and its inbox are doubles."""
-    from supervisor import worker_assignment
+    from supervisor import dispatch_choice, worker_assignment
     from supervisor import workspace_preparation as preparation
     from tests.worker_pool_support import affirm_ready
 
@@ -420,13 +420,11 @@ def _handoff_diagnostic(attention, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(preparation, "current_generation", lambda: generation)
         try:
-            with queue._queue_lock:
-                index, _ = worker_assignment._choose_candidate(
-                    queue, 1000, set(), {row["id"] for row in queue.PENDING
-                                        if not row["id"].startswith("silence-")},
-                    list(attention.running.values()), set())
-                if index is not None:
-                    assert worker_assignment._claim_worker_launch(queue, queue.PENDING[index], worker) is None
+            chosen = dispatch_choice.choose(queue, 1000, excluded={row["id"] for row in queue.PENDING
+                                                                    if not row["id"].startswith("silence-")})
+            if chosen:
+                with queue._queue_lock:
+                    assert worker_assignment._claim_worker_launch(queue, chosen[0], worker) is None
             assert generation.lane_idle(preparation.ADMISSION_LANE, 15)
         finally:
             generation.close()
