@@ -702,8 +702,8 @@ def test_a_follow_up_waits_for_the_turns_mail_lock_outside_q_and_refuses_what_mo
                                   "other_conversation", "closed_beside_wake"])
 def test_only_its_own_closed_fact_for_its_attempt_takes_a_finishing_owner_turn_out_of_the_count(main, fact):
     """Proof that A stopped reading is its own fact for this chat and its current attempt, closed. No fact, an
-    unreadable or foreign one, or an open one leaves A and B two readers (the words are their own turn); and beside
-    B a wake still makes two, among which the owner's turn is never chosen."""
+    unreadable or foreign one, or an open one leaves A and B two owner turns (the words are their own turn); a wake
+    beside B is no owner turn, so once A is closed B alone takes the words."""
     from ouroboros.conversation_lease import _intake_path, follow_loop_admission
 
     first = _owner_turn(main, "Send it to the group")["task"]["id"]
