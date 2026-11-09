@@ -38,6 +38,9 @@ from tests._live_set import measure as measure_live_set
 
 CHARS_PER_TOKEN = 4  # the plan's "~125k-token story": what a page's text weighs, read by no law as a limit
 FIRST_ROOM = 6000
+# The others each start in a conversation of their own: two owner messages in one chat are one owner turn while
+# it reads (``server_owner_routing._route_main_followup``), so a turn beside others is one beside other chats' turns.
+OTHER_CHAT = 7000
 HOLD_SEC = 300.0  # a transport bound: a turn the measurement forgot fails the driver, never hangs the lane
 
 
@@ -169,7 +172,7 @@ def _turns(meter: Any, srv: Any, result: Dict[str, Any], root: pathlib.Path, fac
     others = [f"T:other:{index}" for index in range(stand.turns - 1)]
     for index, tag in enumerate(others):
         requests.waiting[tag] = threading.Event()
-        tagged(tag, lambda index=index: _owner_turn(srv, ctx, 1, f"stand-other-{index}"))
+        tagged(tag, lambda index=index: _owner_turn(srv, ctx, OTHER_CHAT + index, f"stand-other-{index}"))
     arrived = [tag for tag in others if requests.waiting[tag].wait(HOLD_SEC)]
     out["others_held"] = len(arrived)
     out["registry_live"] = len(get_direct_activity_registry().actors())
