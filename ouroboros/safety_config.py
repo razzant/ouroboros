@@ -162,6 +162,7 @@ def owner_rules_section(*, session: bool = False) -> str:
               "constraints also bind.") if session else
              (f"Verbatim from {_RULES_ADDRESS}, as this task's settings hold them; {reach}. Within their scope "
               "they bind in every mode (BIBLE P0) and outrank general defaults, as permission and as restriction; "
-              "my human's notes in a place add rules for that place. A change in Settings reaches the next task "
+              "my human's notes in a place add rules for that place, and their words for a circle add rules for "
+              "each place in it, permission only where they placed it. A change in Settings reaches the next task "
               "or turn."))
     return head + frame + "\n\n" + rules

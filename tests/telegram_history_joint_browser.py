@@ -33,7 +33,7 @@ import pytest
 
 from ouroboros import dialogue_store as ds
 from ouroboros import places as p
-from tests._skills_page_harness import URL, _document, fixture, open_skills
+from tests._skills_page_harness import URL, _document, fixture, open_place_sheet, open_skills
 from tests._skills_page_harness import skills_browser as skills_browser
 from tests.telegram_history_joint import ACCOUNT, CONNECTOR, DAY, GROUP, MINUTE, MIRA, SKILL, TOM, World, hub, room
 from tests.telegram_history_joint import _mutation as _mutation  # the red controls (OUROBOROS_JOINT_MUTATION)
@@ -248,8 +248,7 @@ def test_imported_telegram_history_reads_in_the_place_reader(skills_browser, tmp
         page.evaluate("({theme,width}) => { document.documentElement.classList.add('ouro-ui'); document.documentElement"
                       ".dataset.theme=theme; document.documentElement.dataset.layout=width < 720 ? 'stack' : 'docked'; }",
                       {"theme": theme, "width": width})
-        page.locator(f'.skills-card[data-skill="{CONNECTOR}"] .skills-card-name').click()
-        page.locator(f'.skills-detail-sheet [data-place-open="{w.place.place_id}"]').click()
+        open_place_sheet(page, w.place.place_id)  # a connector's sheet only points to Circles
         sheet.locator(f'[data-place-room="{room(GROUP)}"]').wait_for()
         shot("rooms")
 
@@ -413,8 +412,7 @@ def test_an_open_place_reader_recovers_after_the_rooms_first_import(skills_brows
         page.goto(URL, wait_until="networkidle")
         page.add_script_tag(url="/static/purify.min.js")
         page.add_script_tag(url="/static/marked.min.js")
-        page.locator(f'.skills-card[data-skill="{CONNECTOR}"] .skills-card-name').click()
-        page.locator(f'.skills-detail-sheet [data-place-open="{w.place.place_id}"]').click()
+        open_place_sheet(page, w.place.place_id)  # a connector's sheet only points to Circles
         page.locator(f'.place-sheet [data-place-room="{room(MIRA)}"]').click()
         reader.locator(".place-convo-row").first.wait_for()
         page.wait_for_function(settled)

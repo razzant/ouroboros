@@ -922,7 +922,9 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
+values are untouched.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
@@ -1036,15 +1038,17 @@ dropped; a nonempty list with no valid rows is unavailable, not known empty.
 | Source response | Meaning in Connect |
 | --- | --- |
 | `connect` absent | No instance chooser is offered; the connector's declared default scope remains available. |
-| Known nonempty list | Show valid instances and mark exact connected identities as “Connected · Open”. |
+| Known nonempty list | Show valid instances and mark exact connected identities “Connected”, chosen rather than connected again. |
 | `connect: []` | Known empty: “None offered yet”, with the declared connector settings door (Skills if none). |
-| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector with no live source asks to be turned on. |
+| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector that is off asks to be turned on. |
 
-The host's explicit “Whole account” action remains available in all four states; it is independent of the
-instance list and posts only `connector`. Selecting an instance posts its string ids and label through
+Where shows the host's explicit “Whole account” action in all four states; it is independent of the instance
+list and posts only `connector`. Add skips Where only for a ready connector with neither a list nor a place yet,
+connecting its whole account at once. Selecting an instance posts its string ids and label through
 `POST /api/places`; the saved title is `<Service> · <label>`. A new identity starts Silent in one atomic write;
-repeat Connect preserves state, label, wakes and notes. Several identities can coexist without splitting or
-relabeling an existing broad place. Connectors remain listed with a place count and “Connect another”.
+a plain repeat Connect preserves state, label, wakes and notes, and one carrying an Add's words is refused
+(`place_exists`), writing nothing. Several identities can coexist without splitting or relabeling an existing
+broad place. Connectors remain listed with a place count and “Choose where”.
 
 A `provides: place` contribution may include `facts`: core names from `/identity.presence_wake_facts`,
 labelled core kinds `{id: "direct_message", label: "Mail addressed to you"}`, or connector-defined
@@ -1148,7 +1152,7 @@ Send identity and this actor fact only after the host advertises `presence_ident
 ### Places and focus transport ingress
 
 A reviewed connector declares `permissions: [presence]` and `provides: place`.
-The owner connects it in Consciousness > Places or through `configure_presence`.
+The owner adds it in Circles or through `configure_presence`.
 A place stores its state (Active, Silent or Paused), authored wake facts and notes,
 confirmed owner accounts, working-folder address and model choice. Connector updates
 never replace those choices. The old behavior skill's `presence:` block is migration

@@ -201,6 +201,45 @@ def test_a_note_is_signed_by_whoever_composed_its_words(focus, monkeypatch):
     assert p.get_place(root, place.place_id).state == "active"
 
 
+def test_circle_words_and_placements_follow_the_note_rule_and_the_turns_act(focus, monkeypatch):
+    """Circle words and a description are my human's only as their exact words in an owner-door turn; a placement is
+    the turn's act. A focus (consciousness) may place a place, but its placement certifies no choice of my human's;
+    list names each circle's words once and inspect the words a place inherits."""
+    from ouroboros.tools.presence import _configure_presence
+    root, place, _admission, _event = focus
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _r: [])
+    door = SimpleNamespace(task_metadata={"origin_message_ref": {"client_message_id": "owner1", "chat_id": 1}},
+                           is_direct_chat=True, task_id="t1", _owner_directives=[
+                               {"source": "initial_user", "content": "Друзья: про работу молчи.\nЧат друзей"}])
+    focused = SimpleNamespace(task_metadata=task_for(focus)["metadata"], is_direct_chat=True, task_id="t2",
+                              _owner_directives=[])
+    call = lambda ctx, action, **kw: json.loads(_configure_presence(ctx, action, kw.pop("place_id", ""), **kw))
+    owned = call(door, "create_circle", name="Друзья", text="Друзья: про работу молчи.")["circle"]
+    composed = call(door, "create_circle", name="Работа", text="Отвечай коротко и по делу.")["circle"]
+    assert (owned["text_author"], composed["text_author"]) == ("owner", "ouroboros")
+    assert call(focused, "set_circle", place_id=place.place_id, circle_id=owned["circle_id"])["place"]["circle"][
+        "placed_by"] == "ouroboros"
+    inspected = call(focused, "inspect", place_id=place.place_id)
+    assert inspected["circle"]["text"] == "Друзья: про работу молчи." and inspected["circle"]["standing_delegation"] is False
+    assert call(door, "set_circle", place_id=place.place_id, circle_id=owned["circle_id"])["place"]["circle"][
+        "placed_by"] == "owner"
+    assert call(door, "inspect", place_id=place.place_id)["circle"]["standing_delegation"] is True
+    described = call(door, "set_description", place_id=place.place_id, description="Чат друзей")["place"]
+    assert described["description"]["author"] == "owner"
+    assert call(focused, "set_description", place_id=place.place_id, description="Друзья и быт")["place"][
+        "description"]["author"] == "ouroboros"
+    listed = call(focused, "list")
+    assert [c["name"] for c in listed["circles"]] == ["Друзья", "Работа"]
+    assert listed["places"][0]["circle"] == {key: listed["places"][0]["circle"][key] for key in (
+        "circle_id", "placed_by", "placed_at")}  # the words once, in the circles list
+    stale = _configure_presence(focused, "edit_circle", "", circle_id=owned["circle_id"], text="x", expected_revision=0)
+    assert stale.startswith("ERROR: Current revision") and p.place_records(root).circle(owned["circle_id"])["text"] != "x"
+    gone = call(focused, "delete_circle", circle_id=composed["circle_id"])
+    assert gone["circle"]["text"] == "Отвечай коротко и по делу." and gone["detached"] == []
+    assert p.get_place(root, place.place_id).state == place.state  # no circle act ever switches a place
+
+
 def test_author_lending_and_stop(focus):
     from ouroboros.conversation_lease import PresenceTurnGate, live_author, live_authors
     root, _place, _admission, event = focus

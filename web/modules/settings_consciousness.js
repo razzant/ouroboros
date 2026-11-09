@@ -1,20 +1,17 @@
 // Settings › Behavior › Consciousness (formerly Background Cognition): what Ouroboros does when nobody asked,
 // on its own clock and in the places the owner connected. The autonomy level with its three notes, the daily
-// allowance, how many of its own tasks may run, the places (each opens its sheet) and, under More, the wake
-// interval bounds, the physical bound on concurrent conversations (moved here from Advanced, same key) and a
-// pointer to its model. The fields keep their ids and keys, so settings.js reads and saves them as before;
-// the places list reads `GET /api/places` on its own and writes nothing here (the sheet writes).
+// allowance, how many of its own tasks may run, one link to Circles (where the places and their words live) and,
+// under More, the wake interval bounds, the physical bound on concurrent conversations (moved here from Advanced,
+// same key) and a pointer to its model. The fields keep their ids and keys, so settings.js reads and saves them as
+// before; nothing here reads or writes a place.
 import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { parseModelSource } from './route_editor_primitives.js';
-import { PLACES_CHANGED_EVENT, readPlaces } from './consciousness_api.js';
-import { AUTONOMY_LEVELS, placeStateWord } from './consciousness_words.js';
-import { skillIconHtml } from './skill_presentation.js';
-import { openPlaceSheet } from './place_sheet.js';
-import { connectPlaceButtonHtml, openConnectPlace } from './place_connect.js';
+import { AUTONOMY_LEVELS } from './consciousness_words.js';
+import { openCircles } from './place_sheet.js';
 import { settingsLinkHtml } from './settings_safety.js';
 import { settingsSection } from './settings_controls.js';
-import { tr, fmt } from './i18n.js';
+import { tr } from './i18n.js';
 
 /** The whole Behavior › Consciousness section (settings_controls.js settingsSection). */
 export function consciousnessSectionHtml() {
@@ -40,13 +37,7 @@ export function consciousnessSectionHtml() {
                 <div class="settings-inline-note ui-field-help" id="s-consciousness-max-tasks-help">How many of its own tasks may run at once. Work you asked for never counts.</div>
             </div>
         </div>
-        <div class="consciousness-places" data-consciousness-places>
-            <div class="consciousness-places-head">
-                <h4 class="consciousness-subhead">Places</h4>
-                ${connectPlaceButtonHtml()}
-            </div>
-            <div class="consciousness-place-list" data-place-list><p class="settings-inline-note">Reading places…</p></div>
-        </div>
+        <p class="settings-inline-note" data-consciousness-places>${tr('consciousness.places.circles', 'The places it lives in, their words and their circles:')} <button type="button" class="consciousness-inline-link ui-hit-area" data-circles-open>${tr('circles.link', 'Circles ›')}</button></p>
         <details class="consciousness-more" data-consciousness-more>
             <summary><span class="consciousness-marker" aria-hidden="true">▸</span>More</summary>
             <div class="consciousness-more-body">
@@ -78,35 +69,6 @@ export function consciousnessSectionHtml() {
     });
 }
 
-/** One row of the places list: icon, authored label, state word, open turns and connector readiness; the row's text is its accessible name. */
-export function settingsPlaceRowHtml(place) {
-    const count = Number.isInteger(place.unanswered) && place.unanswered > 0 ? fmt('{n} open turns', { n: place.unanswered }) : '';
-    const readiness = place.readiness ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
-    return `<li><button type="button" class="consciousness-place-row" data-place-open="${escapeHtml(place.id)}">
-        <span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span>
-        <span class="consciousness-place-name" data-i18n-authored>${escapeHtml(place.label)}</span>
-        <span class="consciousness-place-facts">${escapeHtml([placeStateWord(place.state), count, readiness].filter(Boolean).join(' · '))}</span>
-    </button></li>`;
-}
-
-/** «Could not move an old connection: <detail>. Connect it again.», each distinct sentence once. */
-export function migrationProblemLines(problems = []) {
-    const lines = problems.map((problem) => {
-        const why = (problem.detail || problem.code.replace(/_/g, ' ')).trim().replace(/\.+$/, '');
-        return `Could not move an old connection${why ? `: ${why}` : ''}. Connect it again.`;
-    });
-    return [...new Set(lines)];
-}
-
-export function settingsPlacesHtml({ places = null, error = '', problems = [] } = {}) {
-    if (error) return `<p class="settings-inline-note" data-tone="warn">${escapeHtml(error)}</p>`;
-    if (!places) return '<p class="settings-inline-note">Reading places…</p>';
-    // What the places migration could not carry over; said here only, never on the Dashboard.
-    const moved = migrationProblemLines(problems).map((line) => `<p class="settings-inline-note" data-tone="warn">${escapeHtml(line)}</p>`).join('');
-    if (!places.length) return `${moved}<p class="settings-inline-note">No place yet. Connect one from an installed connector.</p>`;
-    return `${moved}<ul class="consciousness-place-rows">${places.map(settingsPlaceRowHtml).join('')}</ul>`;
-}
-
 /** «Uses Main», or the consciousness slot's model as the Models tab names it. */
 export function consciousnessModelText(settings = {}) {
     const value = String(settings.OUROBOROS_MODEL_CONSCIOUSNESS ?? '').trim();
@@ -119,54 +81,16 @@ export function applyConsciousnessSettings(root, settings = {}) {
     if (model) model.textContent = consciousnessModelText(settings);
 }
 
-/**
- * Bind once: the places list follows the server (read when Behavior shows, again after any place write),
- * a row opens its sheet, Connect opens the Connect flow, an in-page link opens the tab it names.
- */
-export function bindConsciousnessSettings(root, { read = readPlaces, state = null } = {}) {
+/** Bind once: an in-page link opens the Settings tab it names; the Circles link opens the Circles page. */
+export function bindConsciousnessSettings(root) {
     const host = root.querySelector('[data-consciousness-places]');
-    const list = root.querySelector('[data-place-list]');
-    if (!host || !list) return () => {};
+    if (!host) return () => {};
     const section = host.closest('.form-section') || host;
-    let places = null;
-    let problems = [];
-    let generation = 0;
-    const paint = (view) => { list.innerHTML = settingsPlacesHtml({ problems, ...view }); };
-    const visible = () => (!state || state.activePage === 'settings') && root.dataset.activeSettingsTab === 'behavior';
-    async function refresh() {
-        const current = ++generation;
-        try {
-            const data = await read();
-            if (current !== generation) return;
-            places = data.places;
-            problems = data.migrationProblems || [];
-            paint({ places });
-        } catch (error) {
-            if (current === generation) paint({ places, error: fmt('Places could not be read: {reason}', { reason: error?.message || error }) });
-        }
-    }
     const onClick = (event) => {
         const goto = event.target.closest?.('[data-settings-goto]');
         if (goto && section.contains(goto)) { root.activateSettingsTab?.(goto.dataset.settingsGoto); return; }
-        if (event.target.closest?.('[data-place-connect]')) { openConnectPlace({ returnFocus: event.target.closest('[data-place-connect]'), openSettingsTab: (tab) => root.activateSettingsTab?.(tab) }); return; }
-        const row = event.target.closest?.('[data-place-open]');
-        const place = row && (places || []).find((entry) => entry.id === row.dataset.placeOpen);
-        if (place) openPlaceSheet(place, { returnFocus: row });
+        if (event.target.closest?.('[data-circles-open]')) openCircles();
     };
-    const onShown = (event) => {
-        if (event?.detail?.tab === 'behavior' || (event?.detail?.page === 'settings' && visible())) void refresh();
-    };
-    const onChanged = () => { void refresh(); };
     section.addEventListener('click', onClick);
-    window.addEventListener('ouro:settings-subtab-shown', onShown);
-    window.addEventListener('ouro:page-shown', onShown);
-    window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
-    if (visible()) void refresh();
-    return () => {
-        generation += 1;
-        section.removeEventListener('click', onClick);
-        window.removeEventListener('ouro:settings-subtab-shown', onShown);
-        window.removeEventListener('ouro:page-shown', onShown);
-        window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
-    };
+    return () => { section.removeEventListener('click', onClick); };
 }

@@ -38,17 +38,18 @@ def test_counts_include_foreign_reviews_notes_and_only_open_projects_and_fall_af
         assert snapshot.active
         facts, shown = snapshot.waiting, line(snapshot)
         assert set(facts) == set(WAITING_CLASSES)
-        assert facts["late_reviews"]["count"] == facts["notes"]["count"] == 1
+        assert facts["late_reviews"]["count"] == facts["notes"]["count"] == facts["late_reviews"]["in_rooms"] == 1
         projects = pr.list_projects(tmp_path, closed=False, oldest_first=True)
         assert facts["projects"] == {"count": len(projects), "oldest": projects[0]["last_active_at"]}
         assert facts["notes"]["rooms"] == [(str(rooms["beta"]), 1)]
-        assert "waiting for me at the start: late reviews 1, oldest " in shown
+        assert "waiting for me at the start: late reviews 1 in 1 room, oldest " in shown
         assert "release_ids=[...]" in shown and "chronicle_write(kind='page'" in shown and "close_project(" in shown
         assert "failed001" not in shown and "late words" not in shown
     for role in ("child", "nanny"):
         snapshot = view(tmp_path, role)
         assert snapshot.waiting == {} and line(snapshot) == ""
-    assert review in _memory_read(ctx, room_id="late_reviews") and ordinary not in _memory_read(ctx, room_id="late_reviews")
+    listed = _memory_read(ctx, room_id="late_reviews")
+    assert review in listed and ordinary not in listed and "result review of task bound" in listed
     assert note in _memory_read(ctx, room_id="notes")
     assert json.loads(_memory_mark(ctx, release_ids=[review], reason="considered"))["ok"]
     page = json.loads(_chronicle_write(ctx, kind="page", room_id=str(rooms["beta"]), text="I resolved the thought.", covers={"note_ids": [note]}))

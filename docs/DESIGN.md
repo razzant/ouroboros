@@ -2077,25 +2077,43 @@ the door with a reason. Refresh keeps open nodes, disclosure, focus, selection a
 position until closure. Host words use `tr`/`fmt`; summaries, notes and names use
 `data-i18n-authored`.
 
-#### Places and Connect
+#### Circles and Add
 
-Connect writes Silent atomically: “It starts Silent: it hears and thinks there and
-sends nothing until you make it Active.” Declared writes/delivery are held; the
-sheet retains the scripts/browser/unintegrated-code disclosure. Repeat Connect keeps
-choices; Paused stays connected without new foci.
+Circles (first tool) is the one home of places; Dashboard, Settings and a connector's Skills sheet
+point to it. One card: circles in the owner's order, one open, then “Not in a circle” (open while
+no circle exists). An open circle shows its words whole in their author's voice (owner tint for
+the owner's only), Edit (name, words, Delete), Add a place and its rows; Delete names how many
+places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
 
-Connectors supply names/monochrome marks; technical ids stay in details.
-Titles: service, instance, state. Readiness: “Connector on”, “Off in Skills”,
-“Review required”, “Connector not running” or “Connector unavailable”. Status supplies
-setup facts; neither Active nor marks prove readiness. Names, status and labels are authored.
+A row: mark, the place's own name, service, state word, readiness only when not simply on, the
+last captured event (“no captured event”, never “no activity”) and the optional description,
+ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
+
+Add asks “What is this place, and what am I here for?” (its first note) and the optional
+description, then where: each connector says its state with Connect, “Choose where” or “Enable in
+Skills”; one without instances or places connects its whole account at once. A connected place shows its
+notes and saves only the ticked changes under its revision; a repeat writes nothing twice. Add
+writes Silent atomically: “It starts Silent: it hears and thinks there and sends nothing until you
+make it Active.” Declared writes/delivery are held; the sheet retains the
+scripts/browser/unintegrated-code disclosure. Paused stays connected without new foci.
+
+Connectors supply names/monochrome marks; technical ids stay in details unless two rows would read
+the same. Readiness: “Connector on”, “Off in Skills”, “Review required”, “Connector not running” or
+“Connector unavailable”. Status supplies setup facts; neither Active nor marks prove readiness.
+Names, status and labels are authored.
 
 “Where” keeps declared instance labels/identities: no list, no chooser; empty,
 “None offered yet” with settings; unreadable, “Could not read the connector’s list”
 with “Try again”. “Whole account” stays separate; missing instance accounts never
-imply it. Existing identities say “Connected · Open”; services retain
-“Connected · N places · Connect another”. Narrower places never relabel broad ones.
+imply it. An existing identity says “Connected” under its name, with “Choose”. Narrower places never relabel broad ones.
 
 ##### Place sheet
+
+Title: the row's name; meta: service and state. First the context: the circle as a choice (a
+change moves the place), “Edit in circle ›”, its words in two lines with who wrote them and who
+placed the place (an Ouroboros placement offers “Keep it in {circle}”), the place's own notes in
+brief in their authors' voices and the description; then “Open conversation”, three recent rows,
+“All N ›”.
 
 “Your accounts here” uses status: “It writes here as {label}
 · reads as {labels}”. Only users match confirmed accounts: unconfirmed senders
@@ -2117,9 +2135,8 @@ explanation. Notes retain authorship.
 
 “What calls it here” lists supported kinds, connector suggestions at Connect and
 saved author chips: “A checked kind calls it here at once, when <Service> reports it.”
-Sheet/reader use status labels over manifest labels; Dashboard keeps manifest
-labels. Otherwise, core words stay. Sentences lowercase only an initial capital in a
-lowercase first word, keeping “GitHub”/“PR”. Signals keep declared labels/settings.
+Sheet/reader use status labels over manifest labels; otherwise core words stay. Signals keep
+declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
@@ -2970,7 +2987,7 @@ window jump, a layout switch) is laid out at once.
 the navigation rows, names the titles and feeds the shell gate, so a new page is
 a registry row and its module, checked at phone widths with no further work. The column
 has a pinned head (Main Chat), one collection (Projects, the column's only
-scroller), the tools right after it (Files, Skills, Widgets, Dashboard,
+scroller), the tools right after it (Circles, Files, Skills, Widgets, Dashboard,
 Settings), and its foot, the version and the update, on the bottom edge above
 the safe area (owner 22.10). Free room lies between the tools and the foot,
 never between the list and the tools (owner 18.10); a wrapping update grows the

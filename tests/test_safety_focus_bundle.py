@@ -362,3 +362,82 @@ def test_source_place_and_wake_authorship_survive_a_nonplace_call(focus, monkeyp
     assert source["matched_wakes"] == [w for w in captured["wakes"]
         if w["fact"] in task["metadata"]["focus"]["matched_wakes"]]
     assert source["matched_wakes"] and all(w["author"] for w in source["matched_wakes"])
+
+
+def _in_circle(root, place, *, text="CIRCLE WORDS: keep my projects out of this chat.", placed_by="owner"):
+    circle = p.create_circle(root, name="Friends", text=text, author="owner")
+    p.edit_place(root, place.place_id, "set_circle", author=placed_by, circle_id=circle["circle_id"])
+    return circle
+
+
+def test_circle_words_reach_the_frame_replay_and_bundle_once_with_both_origins(focus, monkeypatch, checker):
+    """A saved circle and placement reach the admitted frame (the event-time record), re-render byte for byte from the
+    typed records, and reach the Supervisor once, as standing delegation only through my human's own placement."""
+    from ouroboros.presence_context import focus_frame_sources, frame_focus_content
+    root, place, _admission, _event = focus
+    _in_circle(root, place)
+    task, content = _focus_task(root)
+    frame = content[0]["text"] if isinstance(content, list) else content
+    circle = task["metadata"]["presence"]["circle"]
+    assert (circle["name"], circle["text_author"], circle["placed_by"]) == ("Friends", "owner", "owner")
+    assert '- its circle\'s words, shared by every place in it' in frame and frame.count("CIRCLE WORDS") == 1
+    typed = focus_frame_sources(task["metadata"], frame_focus_content(task, task["metadata"]["presence"]["observed_text"]))
+    assert typed["circle_at_event"]["text"].startswith("CIRCLE WORDS")
+    _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker)
+    assert "circle_at_event" not in bundle["occasion"]["sources"][0]  # the same words are read now
+    [entry] = [n for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert (entry["circle"], entry["author"], entry["placed_by"], entry["standing_delegation"]) == (
+        "Friends", "owner", "owner", True)
+    assert prompt.count("CIRCLE WORDS") == 1
+
+
+@pytest.mark.parametrize("change", ["reworded", "deleted"])
+def test_circle_words_changed_after_the_event_keep_the_events_words_beside_todays(focus, monkeypatch, checker, change):
+    root, place, _admission, _event = focus
+    circle = _in_circle(root, place, text="EARLIER: you may discuss my projects here.")
+
+    def later():
+        if change == "reworded":
+            p.edit_circle(root, circle["circle_id"], author="owner", text="NOW: keep my projects out of this chat.")
+        else:
+            p.delete_circle(root, circle["circle_id"])
+    _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, before_reply=later)
+    source = bundle["occasion"]["sources"][0]
+    assert source["circle_at_event"]["text"] == "EARLIER: you may discuss my projects here."
+    now = [n["text"] for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert now == (["NOW: keep my projects out of this chat."] if change == "reworded" else [])
+    assert prompt.count("EARLIER") == 1
+
+
+def test_a_frame_recorded_before_circles_renders_as_it_did(focus):
+    """FOCUS.md has no circle field: the circle's words ride one more line after the place's own notes only when the
+    event-time record has them, so a frame recorded before circles re-renders byte for byte and still replays."""
+    from ouroboros.presence_context import PLACEHOLDERS, focus_frame_sources, frame_focus_content
+    root, place, _admission, _event = focus
+    task, content = _focus_task(root)
+    frame = content[0]["text"] if isinstance(content, list) else content
+    assert "circle" not in task["metadata"]["presence"] and "its circle" not in frame
+    assert "circle_line" not in PLACEHOLDERS
+    assert frame_focus_content(task, task["metadata"]["presence"]["observed_text"]) == frame
+    assert focus_frame_sources(task["metadata"], frame) is not None
+    _in_circle(root, place)
+    with_circle, framed = _focus_task(root, text="another message")
+    framed = framed[0]["text"] if isinstance(framed, list) else framed
+    notes_line = next(line for line in framed.splitlines() if line.startswith("- notes with their authors:"))
+    following = framed.splitlines()[framed.splitlines().index(notes_line) + 1]
+    assert following.startswith("- its circle's words") and "CIRCLE WORDS" in following
+    assert "(your human's words restrict this place, and consent here only when your human placed it)" in following
+
+
+def test_a_placement_i_made_carries_my_humans_words_as_labelled_restriction_into_a_refusal(focus, monkeypatch, checker):
+    from ouroboros import safety
+    root, place, _admission, _event = focus
+    _in_circle(root, place, placed_by="ouroboros")
+    _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker)
+    [entry] = [n for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert entry["placed_by"] == "ouroboros" and entry["standing_delegation"] is False  # words kept, not filtered
+    lines = safety._destination_lines({"place": bundle["subject"]["place"], "notes": bundle["standing_delegation"]["place_notes"]})
+    assert len(lines) == 1 and "its circle \"Friends\"'s words, by your human, placed there by you" in lines[0]
+    # Their restriction still binds there; only consent needs their own placement (prompts/SAFETY.md).
+    assert "(they still restrict here; consent needs your human's placement)" in lines[0] and "CIRCLE WORDS" in lines[0]
+    assert "context" not in lines[0]
