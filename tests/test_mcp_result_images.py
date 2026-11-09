@@ -187,6 +187,10 @@ def _retained_paths(text):
     return re.findall(r"retained as (.+?)\]", text)
 
 
+def _resource_paths(text):
+    return re.findall(r"task artifact (.+?); sha256 [0-9a-f]{64}\]", text)
+
+
 def _no_base64_text(text):
     """No long base64 run outside image data URLs; masking inside base64 cannot fool this oracle."""
     return not re.search(r"[A-Za-z0-9+/=]{200,}", re.sub(r"data:image/[\w.+-]+;base64,[A-Za-z0-9+/=]+", "", text))
@@ -309,8 +313,130 @@ def test_mixed_annotated_parts_keep_text_and_data_while_every_binary_leaves_the_
     retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
     assert retained == mcp.peer.result.model_dump(mode="json", by_alias=True)
     assert [pathlib.Path(path).read_bytes() for path in _retained_paths(result.text)] == [PNG, second]
+    assert [pathlib.Path(path).read_bytes() for path in _resource_paths(result.text)] == [second, b"\x00\x01\x02\x03"]
+    assert all(artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(path).name)
+               for path in _resource_paths(result.text))
     messages, trace = _batch(mcp, [_row(result)])
     assert _items(trace) == ("attached", [(1, "attached"), (2, "attached")]) and _pixels(messages) == [PNG, second]
+
+
+@pytest.mark.parametrize("mime,payload,suffix", [
+    ("application/pdf", b"%PDF-1.7\n\x00\xff", ".pdf"),
+    ("text/csv", b"name,score\r\nA,1\r\n", ".csv"),
+    ("application/zip", b"PK\x03\x04\x00\xff", ".zip"),
+])
+def test_binary_only_resource_is_registered_and_readable_after_disconnect(mcp, mime, payload, suffix):
+    from ouroboros import mcp_client
+
+    encoded = base64.b64encode(payload).decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime=mime)])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert encoded not in result.text and "mcp_image_owner" not in result.meta
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == encoded
+    (path,) = _resource_paths(result.text)
+    path = pathlib.Path(path)
+    assert path.suffix == suffix and path.read_bytes() == payload
+    record = artifacts.registered_task_artifact(mcp.data, TASK, path.name)
+    assert record["kind"] == "mcp_resource" and record["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert record["immutable"] is True
+    mcp_client.reset_manager_for_tests()  # the task artifact is independent of the MCP connection
+    assert path.read_bytes() == payload
+    assert artifacts.registered_task_artifact(mcp.data, TASK, path.name)["status"] == "ready"
+    if mime == "text/csv":
+        read = mcp.registry.execute_result("read_file", {"root": "artifact_store", "path": path.name})
+        assert read.status == "ok" and "name,score" in read.text
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
+
+
+def test_mixed_image_and_resource_registers_blob_and_attaches_only_image(mcp):
+    payload = b"PK\x03\x04\xff\x00"
+    encoded = base64.b64encode(payload).decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_text("result"), _image(),
+        _blob(encoded, mime="application/zip"), _text("end")])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert encoded not in result.text and len(_resource_paths(result.text)) == 1
+    assert pathlib.Path(_resource_paths(result.text)[0]).read_bytes() == payload
+    assert artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(_resource_paths(result.text)[0]).name)
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _items(trace) == ("attached", [(1, "attached")]) and _pixels(messages) == [PNG]
+
+
+def test_bad_resource_base64_names_gap_and_keeps_exact_source(mcp):
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob("%%%bad-base64%%%", mime="application/pdf")])
+    result = mcp.registry.execute_result(TOOL, {})
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == "%%%bad-base64%%%"
+    assert "resource data is not valid base64" in result.text and not _resource_paths(result.text)
+    assert "mcp_image_owner" not in result.meta and not artifacts.collect_task_artifact_records(mcp.data, TASK)
+
+
+def test_resource_storage_failure_keeps_success_and_retained_bytes(mcp, monkeypatch):
+    encoded = base64.b64encode(b"%PDF-1.7\n").decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime="application/pdf")])
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", refuse)
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert "resource artifact not saved (OSError)" in result.text and not _resource_paths(result.text)
+    assert encoded not in result.text
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == encoded
+
+
+def test_binary_only_source_retention_failure_keeps_sole_payload_inline(mcp, monkeypatch):
+    encoded = base64.b64encode(b"PK\x03\x04\xff").decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime="application/zip")])
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", refuse)
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert encoded in result.text and result.meta["mcp_response_retention_gap"] == "OSError"
+    assert "mcp_response_source" not in result.meta and not _resource_paths(result.text)
+    assert not artifacts.collect_task_artifact_records(mcp.data, TASK)
+
+
+def test_error_resource_is_registered_without_image_attachment(mcp):
+    encoded = base64.b64encode(b"a,b\n1,2\n").decode()
+    mcp.peer.result = mcp_types.CallToolResult(isError=True, content=[_text("failed"), _blob(encoded, mime="text/csv")])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("error", "MCP_ERROR") and "failed" in result.text
+    assert pathlib.Path(_resource_paths(result.text)[0]).read_bytes() == b"a,b\n1,2\n"
+    assert "mcp_image_owner" not in result.meta
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
+
+
+def test_resource_protocol_masking_and_repeat_digest_reuse(mcp):
+    payload = b"%PDF-1.7\nsecret\x00"
+    encoded = base64.b64encode(payload).decode()
+    planted = mcp.data / f"{SECRET}.pdf"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_bytes(b"unrelated local file")
+    mcp.peer.result = mcp_types.CallToolResult(content=[_text(f"echo {SECRET}"),
+        mcp_types.EmbeddedResource(type="resource", resource=mcp_types.BlobResourceContents(
+            uri=planted.as_uri(), mimeType=f"application/pdf; name={SECRET}", blob=encoded))])
+    first = mcp.registry.execute_result(TOOL, {})
+    second = mcp.registry.execute_result(TOOL, {})
+    assert first.meta["mcp_response_source"]["sha256"] == second.meta["mcp_response_source"]["sha256"]
+    assert _resource_paths(first.text) == _resource_paths(second.text)
+    (path,) = _resource_paths(first.text)
+    assert pathlib.Path(path).read_bytes() == payload
+    assert pathlib.Path(path).parent == artifacts.task_artifact_dir_path(mcp.data, TASK)
+    assert SECRET not in first.text
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, first.meta["mcp_response_source"]))
+    resource = retained["content"][1]["resource"]
+    assert resource["blob"] == encoded and resource["mimeType"] == "application/pdf; name=<redacted:mcp-auth-token>"
+    assert SECRET not in resource["uri"]
+    assert artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(path).name)["sha256"] == hashlib.sha256(payload).hexdigest()
 
 
 def test_error_result_keeps_its_status_and_offers_its_image_only_by_path(mcp):
@@ -574,16 +700,16 @@ def test_a_projection_fault_after_the_remote_call_is_a_named_gap_never_a_failure
     assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
 
 
-def test_only_an_image_bearing_response_carries_its_sdk_value():
+def test_only_an_image_or_embedded_blob_response_carries_its_sdk_value():
     from ouroboros.mcp_result_images import ReturnedResult, with_returned
     from ouroboros.tools.tool_result import ToolResult
 
     plain = ToolResult(status="ok", code="OK", text="adapted")
     for raw in (mcp_types.CallToolResult(content=[_text("plain")]), mcp_types.CallToolResult(content=[]),
-                mcp_types.CallToolResult(content=[_blob("AAECAw==", mime="application/octet-stream")]),
                 mcp_types.CallToolResult(content=[mcp_types.AudioContent(type="audio", mimeType="audio/wav", data="AAAA")])):
         assert with_returned(plain, raw) is plain
-    for raw in (mcp_types.CallToolResult(content=[_image()]), mcp_types.CallToolResult(content=[_blob()])):
+    for raw in (mcp_types.CallToolResult(content=[_image()]), mcp_types.CallToolResult(content=[_blob()]),
+                mcp_types.CallToolResult(content=[_blob("AAECAw==", mime="application/octet-stream")])):
         carried = with_returned(plain, raw)
         assert type(carried) is ReturnedResult and carried.returned is raw and B64 not in repr(carried)
 

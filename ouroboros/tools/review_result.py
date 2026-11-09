@@ -120,8 +120,8 @@ def _file_identity(path: pathlib.Path) -> Dict[str, Any]:
 
 
 def produced_material(ctx: Any) -> Dict[str, Any]:
-    """What this task produced: its registered artifacts, its workspace changes against the
-    task's own baseline, and the effects an extension tool declared (``observed_effect``).
+    """What this task produced: registered artifacts in its canonical and child stores,
+    workspace changes against its own baseline, and effects an extension tool declared (``observed_effect``).
     Inputs, checkpoints and the expected result a task was given are not production. A capture
     that fails is named as a gap, never filled in."""
     out: Dict[str, Any] = {"files": [], "effects": [], "issues": [], "workspace": ""}
@@ -130,13 +130,22 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
         return out
     try:
         from ouroboros.artifacts import collect_task_artifact_records, registered_task_artifact
+        from ouroboros.headless import ARTIFACTS_DIR
+        from ouroboros.task_finalization import artifact_store_roots
+        from ouroboros.tool_access import canonical_data_root
 
-        for row in collect_task_artifact_records(root, task_id, measure=False, strict=True, require_registered=True):
-            name = str(row.get("relpath") or row.get("name") or "")
-            if not name or not row.get("size") or not registered_task_artifact(root, task_id, name):
-                continue
-            path = pathlib.Path(str(row["path"]))
-            out["files"].append({"path": str(path), "kind": "artifact", **_file_identity(path)})
+        for store in artifact_store_roots(canonical_data_root(ctx), task_id, child_root=root):
+            drive = store.parents[len(ARTIFACTS_DIR.parts)]
+            try:
+                for row in collect_task_artifact_records(drive, task_id, measure=False, strict=True,
+                                                         require_registered=True):
+                    name = str(row.get("relpath") or row.get("name") or "")
+                    if not name or not row.get("size") or not registered_task_artifact(drive, task_id, name):
+                        continue
+                    path = pathlib.Path(str(row["path"]))
+                    out["files"].append({"path": str(path), "kind": "artifact", **_file_identity(path)})
+            except Exception as exc:
+                out["issues"].append(f"task artifacts in {store} could not be listed ({type(exc).__name__}: {exc})")
     except Exception as exc:
         out["issues"].append(f"task artifacts could not be listed ({type(exc).__name__}: {exc})")
     try:
