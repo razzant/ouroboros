@@ -313,6 +313,40 @@ def test_a_rotated_log_tail_continues_into_its_newest_archive_segments(ctx):
     assert live["source"]["rotation"] == {"segments": ["logs/events.jsonl"], "unopened": 2, "gaps": []}
 
 
+@pytest.mark.parametrize("rotations", [1, 2])
+@pytest.mark.parametrize("missing_anchor", [False, True])
+def test_backfill_uses_the_observed_live_generation(ctx, monkeypatch, rotations, missing_anchor):
+    """Use real rename-based rotations between reading live and listing older files."""
+    from ouroboros.tools import query_data
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    older = b'{"n":0}\n'
+    current = json.dumps({"n": 1, "padding": "x" * 800_000}).encode() + b"\n"
+    _rotated_log(ctx, "tools", older, current)
+    original = query_data._jsonl
+
+    def rotate_after_read(*args, **kwargs):
+        result = original(*args, **kwargs)
+        for n in range(rotations):
+            rotate_jsonl_log_if_needed(ctx.drive_root, "tools.jsonl", "tools")
+            write(ctx, "logs/tools.jsonl", current.replace(b'"n": 1', b'"n": %d' % (n + 2)))
+        if missing_anchor:
+            for segment in (ctx.drive_root / "archive").glob("tools_*.jsonl"):
+                stat = segment.stat()
+                if (stat.st_dev, stat.st_ino) == result[-1]:
+                    segment.rename(segment.with_name("not-listed.jsonl"))
+                    break
+        return result
+
+    monkeypatch.setattr(query_data, "_jsonl", rotate_after_read)
+    result = call(ctx, op="jsonl", kind="tools_log", tail=10, max_bytes=2_000_000,
+                  save_as="observed-generation.jsonl")
+    assert [row["n"] for row in result["data"]] == ([1] if missing_anchor else [0, 1])
+    assert saved(ctx, result) == (b"" if missing_anchor else older) + current
+    assert result["source"]["scan_truncated"] is missing_anchor
+    assert result["source"]["rotation"]["gaps"] == (["live_generation_unresolved"] if missing_anchor else [])
+
+
 def test_archive_rows_spend_the_same_input_budget_and_a_clipped_window_says_so(ctx, monkeypatch):
     from ouroboros import query_data_sql
 

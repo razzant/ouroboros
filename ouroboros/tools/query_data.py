@@ -279,6 +279,29 @@ def _matches(value, where):
     return isinstance(field, (str, list, dict)) and where["value"] in field
 
 
+def _archive_start(path, live, listed, admit, gaps):
+    """Resolve the already-read generation without opening newer archive payloads."""
+    try:
+        current = path.stat()
+        if (current.st_dev, current.st_ino) == live:
+            return 0
+    except OSError:
+        pass  # Rotation can be between rename and creation of the next live file.
+    for position, member in enumerate(listed):
+        try:
+            stat = admit(member).stat()
+        except PermissionError:
+            gaps.add("refused_source")
+            break
+        except OSError:
+            gaps.add("unreadable_source")
+            break
+        if (stat.st_dev, stat.st_ino) == live:
+            return position + 1
+    gaps.add("live_generation_unresolved")
+    return None
+
+
 def _older_segments(path, live, where, need, budget, admit):
     """The rotated side of a log its live read did not cover: ``(rows, consumed, clipped, facts)``.
 
@@ -287,7 +310,9 @@ def _older_segments(path, live, where, need, budget, admit):
     through ``admit``; ``need=0`` (a tail=0 read) opens none. The window stays contiguous: a refused
     or unreadable segment ends it rather than leaving a hole, an exhausted budget reads a segment's
     newest bytes (``clipped``), and the live file itself, rotated during the read (``live`` is its
-    handle's device and inode), is not read twice. A malformed row or a torn last line of a closed
+    handle's device and inode), bounds which segments are older. After rotation only metadata is
+    read until that generation is found; unresolved identity returns the live rows with a gap.
+    A malformed row or a torn last line of a closed
     segment is skipped and named in ``gaps``; the live file stays strict. ``facts`` is ``None`` for
     a log that never rotated, else the files read, oldest first, the listed segments left unopened
     (``None`` when the archive could not be listed) and the gaps.
@@ -296,6 +321,10 @@ def _older_segments(path, live, where, need, budget, admit):
 
     gaps, chunks, read, consumed, clipped, position = set(), [], [], 0, False, 0
     listed = remembered_listing(path)(path.parent.parent / "archive", path.stem, gaps)
+    position = _archive_start(path, live, listed, admit, gaps)  # check live AFTER the listing
+    if position is None:
+        return [], 0, True, {"segments": [f"{path.parent.name}/{path.name}"],
+                             "unopened": None, "gaps": sorted(gaps)}
     if not listed and not gaps:
         return [], 0, False, None
     unlisted = bool(gaps)  # only the listing has met a gap so far
