@@ -172,7 +172,9 @@ export function residualToolErrorsPhrase(execution = {}) {
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
-    const capped = (listed[0].length >= LISTED && unresolved.length > 0) || (listed[1].length >= LISTED && cosmetic.length > 0);
+    // "More" only when a capped list is loud through and through; otherwise the retained loud errors are counted exactly.
+    const capped = (listed[0].length >= LISTED && unresolved.length === listed[0].length)
+        || (listed[1].length >= LISTED && cosmetic.length === listed[1].length);
     const tail = capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';

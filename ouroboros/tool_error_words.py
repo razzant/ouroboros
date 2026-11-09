@@ -81,7 +81,10 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     else:
         subject = f"{noun} failed"
     more = len(unresolved) + len(cosmetic) - 1
-    capped = (len(listed_unresolved) >= _LISTED and bool(unresolved)) or (len(listed_cosmetic) >= _LISTED and bool(cosmetic))
+    # "More" is asserted only when a list the producer capped is loud through and through; otherwise the retained
+    # loud errors are counted exactly (details-only entries never stand in for an unseen loud one).
+    capped = any(len(listed) >= _LISTED and len(loud) == len(listed)
+                 for listed, loud in ((listed_unresolved, unresolved), (listed_cosmetic, cosmetic)))
     tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
     return f"{subject}{tail}."
