@@ -67,14 +67,9 @@ def test_an_unmarked_change_of_a_published_row_fact_is_published_by_the_tick(pub
         queue.RUNNING["r"]["silence_attention"] = {"episode_id": "e1", "state": "pending_attention", "last_progress_at": now[0] - 50}
     assert queue_publication.publish_queue_changes() is True
     row = _read(root, "queue_snapshot.json")["running"][0]
-    assert row["silence_attention"]["episode_id"] == "e1" and row["last_progress_at"] == now[0] - 50
+    assert row["silence_attention"]["episode_id"] == "e1"
     second = _read(root, "queue.alive")["generation"]
     assert second != generation, "the census saw the unmarked change"
-    # The progress that revokes the episode (work_diagnostics reads it from the snapshot) is published too.
-    with queue._queue_lock:
-        queue.RUNNING["r"]["last_progress_at"] = now[0] - 10
-    assert queue_publication.publish_queue_changes() is True
-    assert _read(root, "queue_snapshot.json")["running"][0]["last_progress_at"] == now[0] - 10
     # The quota clock (task_model_wait) and the model waits a worker reports are watched the same way.
     with queue._queue_lock:
         queue.RUNNING["r"]["model_wait_quota_clock"] = {"revision": 2, "active": True, "elapsed_sec": 3, "observed_at": now[0]}

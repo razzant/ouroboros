@@ -172,7 +172,7 @@ def _load_direct_child_results(
 
 
 def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
+    """Return cancellation or the current task-tree exact-hash disposition."""
 
     # Explicit cancellation wins every completion race; late scratch results are
     # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
@@ -188,14 +188,7 @@ def _child_disposition_state(child: Dict[str, Any]) -> str:
             return current
     except Exception:
         pass
-    # A host-minted silence diagnostic is attention to this task, not work it
-    # delegated: it stays listed, accounted and readable, but owes no author
-    # disposition, pending or settled (#1376). An explicit one above still wins.
-    from ouroboros.work_diagnostics import diagnostic_ref
-
-    ref = diagnostic_ref(child)
-    minted = bool(ref) and str(child.get("task_id") or child.get("id") or "") == "silence-" + ref["episode_id"]
-    return "host_attention" if minted and str(child.get("parent_task_id") or "") == ref["task_id"] else ""
+    return ""
 
 
 def _record_child_result_disposition(

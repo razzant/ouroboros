@@ -137,19 +137,10 @@ def _subagent_and_update_guard_result(
     acting_tool_grants: Any,
     repo_mutation: bool,
 ) -> ToolResult | None:
-    """Early dispatch gates (native denial, or ``None`` to allow): the task-diagnostic,
-    read-only and acting subagent tool-name allowlists, and the managed-update merge
+    """Early dispatch gates (native denial, or ``None`` to allow): the read-only and
+    acting subagent tool-name allowlists, and the managed-update merge
     write-exclusivity (P2/SC2 — only the authorized resolution task may run code tools
     while a merge is staged)."""
-    from ouroboros.tool_capabilities import TASK_DIAGNOSTIC_TOOL_NAMES, schema_selection_tools_for_context
-    from ouroboros.work_diagnostics import context_ref
-
-    if context_ref(registry._ctx) and (
-            entry is None or name not in TASK_DIAGNOSTIC_TOOL_NAMES | schema_selection_tools_for_context(registry._ctx)):
-        return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
-            "⚠️ DIAGNOSTIC_CAPABILITY_BLOCKED: this task-related diagnostic may inspect "
-            "work and request existing task controls; it has no product-write or external-tool authority."
-        ))
     if local_readonly_subagent and entry is not None and not registry._readonly_tool_allowed(name):
         return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
             "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "

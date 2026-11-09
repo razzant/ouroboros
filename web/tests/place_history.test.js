@@ -5,7 +5,7 @@ import { installCardDom, TextNode } from './helpers/card_dom.js';
 import { applyPayload, createTranslator, setMissTransport } from '../modules/i18n.js';
 import { normalizePlace, readPlaceRooms } from '../modules/consciousness_api.js';
 import { wakeFactWord } from '../modules/consciousness_words.js';
-import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeRoomsHtml, shownTime } from '../modules/place_history.js';
+import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -58,6 +58,17 @@ function mount(f, options = {}, currentPlace = place) {
     const reader = mountPlaceHistory(host, currentPlace, room, { onBack: () => reader.close(), ...options });
     return reader;
 }
+
+test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
+    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
+    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
+    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
+    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
+    assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
+        'Silent now: it still hears and wakes here; what it would say or change here is held.');
+});
 
 test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(['user', 'assistant', 'system'].map((role) => historySpeaker({role, sender_label: 'Alice'})), ['Alice', 'Ouroboros', 'System']);

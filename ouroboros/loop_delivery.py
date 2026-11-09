@@ -283,9 +283,6 @@ def delivery_evidence_fingerprint(
     root_task_id = str(root_task_id or metadata.get("root_task_id") or task_id)
     status_root = status_root or metadata.get("budget_drive_root") or getattr(tool_ctx, "budget_drive_root", None) or getattr(tool_ctx, "drive_root", None)
     children = _loop()._load_direct_child_results(pathlib.Path(status_root), task_id, root_task_id) if status_root and task_id else []
-    # Unclaimed host attention (#1376) is no evidence of the answer: a diagnostic that
-    # answers or is withdrawn re-arms nothing. Reading past a settled cancellation, only
-    # the author's current exact-hash claim keeps a diagnostic here.
     children = [
         {
             "task_id": str(child.get("task_id") or child.get("id") or ""),
@@ -294,7 +291,6 @@ def delivery_evidence_fingerprint(
             "disposition": _loop()._child_disposition_state(child),
         }
         for child in children
-        if _loop()._child_disposition_state({**child, "parent_decision": ""}) != "host_attention"
     ]
     receipt_root = getattr(tool_ctx, "drive_root", None) or status_root
     evidence = {

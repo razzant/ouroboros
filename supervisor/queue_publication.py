@@ -358,9 +358,8 @@ def _frozen(value: Any) -> Any:
 def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     """The published facts of one RUNNING row besides its task, as the capture writes them.
 
-    Only a dated silence episode is a diagnostic's source authority (#1376): its fact, and while it
-    stays open the progress that revokes it before the recovery lane writes the result. Ordinary
-    progress rotates nothing.
+    A dated silence episode rides the row as a fact for its readers; ordinary progress
+    rotates nothing.
     """
     facts = {key: meta.get(key) for key in _ROW_FACTS}
     facts.update(started_at=float(meta.get("started_at") or 0.0),
@@ -368,8 +367,6 @@ def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     silence = meta.get("silence_attention")
     if silence:
         facts["silence_attention"] = silence
-        if isinstance(silence, dict) and silence.get("state") == "pending_attention":
-            facts["last_progress_at"] = meta.get("last_progress_at")
     return facts
 
 
