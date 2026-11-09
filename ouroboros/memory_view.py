@@ -49,7 +49,7 @@ from ouroboros.chronicle_import import LEGACY_ROOM_ID, LEGACY_ROOM_LABEL, legacy
 from ouroboros.chronicle_store import (CHILD_DRAFT_RIGHT, DELEGATED_FOCUS_ROLES, ChronicleStore, capture, draft_signer,
                                        is_late_review_mark, source_time_span)
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-from ouroboros.dialogue_provenance import (RoomLabelResolver, is_presence_task, render_memory_row, render_row_text,
+from ouroboros.dialogue_provenance import (RoomLabelResolver, is_presence_task, render_memory_row, render_row_text, stamp_summary,
                                            row_class, warm_lineage)
 from ouroboros.mark_anchors import describe as describe_anchor
 from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
@@ -360,15 +360,6 @@ def _gap_detail(store: ChronicleStore, pointer: Mapping[str, Any]) -> str:
     return str(_mapping(record.get("metadata")).get("source_gap") or "the old writer marked this period as a gap")
 
 
-def _stamp_summary(stamp: Any) -> str:
-    """``host stamp: 3 tasks — completed 2, failed 1``: statuses only, never the time it was computed."""
-    tasks = [entry for entry in _mapping(stamp).get("tasks") or [] if isinstance(entry, Mapping)]
-    if not tasks:
-        return ""
-    counts = Counter(str(entry.get("status") or "unknown") for entry in tasks)
-    return f"host stamp: {len(tasks)} tasks — " + ", ".join(f"{status} {n}" for status, n in sorted(counts.items()))
-
-
 def _fixes(store: ChronicleStore, record: Mapping[str, Any], fixes: Mapping[str, List[Dict[str, Any]]]) -> List[Dict[str, str]]:
     """The mind's corrections and rejections aimed at a part's members, nested parts' too, one per record."""
     members = store.folded_members(record["id"]) if record.get("kind") == "part" else []
@@ -405,7 +396,7 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
             "source_period": period.span, "period_basis": period.source,
             "period": _period(period.span, period.note()), "text": str(record.get("current_text") or ""),
             "status": str(record.get("status") or ""), "signer": draft_signer(record.get("author")),
-            "stamp": _stamp_summary(record.get("host_stamp")), "fixes": _fixes(store, record, fixes),
+            "stamp": stamp_summary(record.get("host_stamp")), "fixes": _fixes(store, record, fixes),
             "terminal_links": terminal_links(store.data_root, record, terminal_cache), "quotes": record.get("quotes") or []}))
     told = told_map([entry for _key, entry in keyed if entry["kind"] == "account"])
     ordered = sorted(keyed, key=lambda pair: (1, pair[0][1]) if pair[1]["kind"] == "page" else (0, *pair[0]))
@@ -797,24 +788,27 @@ def source_reader(target: Mapping[str, Any], source_read: Any = None) -> str:
     return f"memory_read(source_ref={json.dumps(ref, ensure_ascii=False, sort_keys=True)})"
 
 
-def _late_review_entry(mark: Mapping[str, Any], label: Callable[..., str], *, own_room: bool = True) -> Dict[str, Any]:
-    """A host-kept late review (``late_review_marks``): its words, when it settled, its full source and its release."""
+def _late_review_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Dict[str, Any]:
+    """A host-kept late review of this room (``late_review_marks``): its words, when it settled, its full source and
+    its release. Other rooms' late reviews are no entries: the waiting facts count them (``memory_waiting.measure``)
+    and ``memory_read(room_id='late_reviews')`` lists them by room and work."""
     review, target = _mapping(mark.get("review")), _mapping(mark.get("target_ref"))
-    reader = (source_reader(target, review.get("source_read")) if own_room
-              else f"memory_read(node_id={json.dumps(mark['id'])})")  # the full mark names the same reader
     return {"id": mark["id"], "scope": "room", "room": label(mark.get("room_id")),
-            "text": str(mark.get("text") or "") if own_room else "",
+            "text": str(mark.get("text") or ""),
             "by": "host", "date": _minute(mark.get("ts")).split(" ")[0], "target": _mark_target(target), "quote": "",
-            "late_review": {"task_id": str(review.get("task_id") or ""), "source": reader,
-                            "sha256": str(target.get("sha256") or ""), "own_room": own_room}}
+            "late_review": {"task_id": str(review.get("task_id") or ""),
+                            "source": source_reader(target, review.get("source_read")),
+                            "sha256": str(target.get("sha256") or "")}}
 
 
 def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., str], marks=None) -> List[Dict[str, Any]]:
     """The acting marks a role keeps in view: every room's, or this room's and the global ones.
 
     Late review feedback the host keeps in view belongs to the room of its work whatever the role's
-    mark scope: that room holds its words; consciousness gets pointers for foreign rooms.
-    Ordinary foreign-room turns keep omitting it.
+    mark scope: that room holds its words, every role alike. Other rooms' late reviews are counted in the
+    waiting facts and listed by room and work on request, never enumerated here: a wake once drew one
+    pointer per foreign mark, hundreds of addresses on every start, beside the waiting line that already
+    counted them (one source delivered twice; BIBLE P1).
     """
     if spec.marks == "none":
         return []
@@ -824,8 +818,8 @@ def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., s
     entries = []
     for mark in marks:
         if is_late_review_mark(mark):
-            if spec.role == "consciousness" or str(mark.get("room_id")) == spec.room_id:
-                entries.append(_late_review_entry(mark, label, own_room=str(mark.get("room_id")) == spec.room_id))
+            if str(mark.get("room_id")) == spec.room_id:
+                entries.append(_late_review_entry(mark, label))
             continue
         author = _mapping(mark.get("author"))
         by = _mapping(author.get("focus")).get("role") or (
@@ -1223,9 +1217,6 @@ def _late_reviews_text(marks: List[Dict[str, Any]], role: str) -> str:
     lines = ["## Late review feedback (host)", "", _LATE_REVIEW_INTRO.format(who=who)]
     for mark in marks:
         late = mark["late_review"]
-        if late.get("own_room") is False:
-            lines.append(f"- [{mark['room']}] Late review of task {late['task_id']}: {late['source']}")
-            continue
         release = "" if helper else f"; memory_mark(release_ids=['{mark['id']}'], reason=…)"
         lines += [f"- [{mark['room']}; kept since {mark['date']}] " + _indented(mark["text"]).lstrip(),
                   f"{INDENT}full source (sha256 {late['sha256'][:12]}): {late['source']}{release}"]
@@ -1320,11 +1311,14 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
                          f"room, newest first; this room is chat_id {room['room_id']}.")
         return "\n\n".join(part for part in parts if part)
     gone = dict(level.addressed)
-    late = [mark for mark in snapshot.marks if mark.get("late_review")]
+    # A snapshot persisted before other rooms' late reviews left this view (a pointer entry: ``own_room`` False, no
+    # words) is re-rendered after an update (``context_fit``); such an entry draws nothing.
+    late = [mark for mark in snapshot.marks if mark.get("late_review") and mark["late_review"].get("own_room") is not False]
+    ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
     if late:
         parts.append(_late_reviews_text(late, snapshot.spec.role))
-    if len(late) < len(snapshot.marks):
-        parts.append(_marks_text([mark for mark in snapshot.marks if not mark.get("late_review")]))
+    if ordinary:
+        parts.append(_marks_text(ordinary))
     if room:
         parts.append(_room_text(room, gone))
     if snapshot.spec.other_conversations:

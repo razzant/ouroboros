@@ -941,9 +941,8 @@ def get_tools() -> List[ToolEntry]:
                 "no_visible_machine_contract records your best proxy and risk for review when no machine "
                 "check exists; delegation_zero_run records an incomplete/unknown decision for configured "
                 "session actors whose physical leaf never started (zero_run_decision + zero_run_basis). "
-                "A receipt suppresses receipt_absent on a clean turn. Verify ONLY against PUBLIC task "
-                "instructions, embedded examples, installed oracles and your independent checks. NEVER "
-                "read hidden /tests/, solution.sh or copied verifier code, or look up the answer online."
+                "A receipt suppresses receipt_absent on a clean turn. Verify against the task's own statement "
+                "and materials, your human's words, installed oracles and your independent checks."
             ),
             "parameters": {"type": "object", "properties": {
                 "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "Declare how the deliverable is verifiable; the host never guesses."},
