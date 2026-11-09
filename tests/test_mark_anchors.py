@@ -126,32 +126,14 @@ def test_a_malformed_anchor_is_refused_and_the_view_names_the_action(tmp_path):
     assert mark(ctx, "Check the exit code.", {"tool": "run_command", "text": "pytest"})["ok"]
     active = ChronicleStore(tmp_path).active_marks("1")
     assert active[-1]["anchor"] == {"tool": "run_command", "text": "pytest"}
-    assert "also shown after the first call matching run_command with 'pytest'" in _memory_read(ctx, room_id="1")
+    assert "also shown after a task's first call matching run_command with 'pytest'" in _memory_read(ctx, room_id="1")
     shown = _marks_text([{"id": "m1", "scope": "room", "room": "Main", "text": "Check the exit code.", "by": "root",
                           "date": "2026-10-23", "target": "a note", "quote": "", "anchor": "run_command with 'pytest'"},
                          {"id": "m2", "scope": "global", "room": "Main", "text": "Plain.", "by": "root",
                           "date": "2026-10-23", "target": "a note", "quote": "", "anchor": ""}])
-    assert ("also shown after the first call matching run_command with 'pytest'" in shown
-            and shown.count("also shown after the first call matching") == 1 and "meets me at" not in shown)
+    assert ("also shown after a task's first call matching run_command with 'pytest'" in shown
+            and shown.count("also shown after a task's first call matching") == 1 and "meets me at" not in shown)
 
-
-
-def test_the_mark_schema_states_who_sees_a_mark():
-    """The memory_mark schema is the per-tool contract: its scope sentence names the readers the view really
-    gives a mark (memory_view.ROLE_DEFAULTS), and the anchor sentence says the words come with a result."""
-    from ouroboros.memory_view import ROLE_DEFAULTS
-    from ouroboros.tools.chronicle import chronicle_tools
-
-    props = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]["parameters"]["properties"]
-    scope = props["scope"]["description"]
-    assert "room: in view of every integrating focus and of this room's helpers and sessions" in scope
-    assert "global: of every helper and session start too" in scope and "No view shows them to my human." in scope
-    integrating = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "all"}
-    helpers = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "room_and_global"}
-    assert integrating == {"integrator", "consciousness", "presence"} and helpers == {"child", "nanny"}
-    anchor = props["anchor"]["description"]
-    assert anchor.startswith("Optional action whose first result in a task also carries this mark's words:")
-    assert "meets me at" not in anchor
 
 def _probe_registry(tmp_path, monkeypatch, ctx):
     import ouroboros.safety as safety

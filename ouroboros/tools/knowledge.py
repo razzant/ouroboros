@@ -125,7 +125,7 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
     body = note.source.text_at(note.source.body_span) if note.source else note.text
     person = str(note.metadata.get("type") or "").strip().casefold() == knowledge_store.PERSON_TYPE
     loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
-               if person else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its title")
+               if person else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
     if note.address.scope == "global" and note.address.topic == OVERVIEW_TOPIC:
         before = (delta or {}).get('old_body_chars', len(body))
         after = len(body)
@@ -278,14 +278,14 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_read),
         ToolEntry("knowledge_write", {
             "name": "knowledge_write",
-            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view; body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
+            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view (a global note's in every room and place I work in, a project note's in that project); body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. Required except for a summary-only edit; omit for archive/restore. No summary is generated from the body."},
                 "mode": {"type": "string", "enum": ["overwrite", "append", "edit", "archive", "restore"], "description": "overwrite replaces the body; append adds text, optionally with summary; edit replaces one exact old_str and/or summary. archive/restore preserve body bytes and require a current revision; archive requires reason. The overview always stays active. Missing notes are created by overwrite/append only."},
                 "reason": {"type": "string", "description": "Required non-empty explanation for archive only; no automatic classification or summarization occurs."},
                 "old_str": {"type": "string", "description": "Non-empty exact body substring for mode=edit; it must occur once. content is the replacement, including empty text for a justified deletion. Omit both to change only the summary."},
-                "summary": {"type": "string", "description": "mode=edit or append: the new authored summary, in the same revision-checked write as the old_str replacement or the appended text, or alone with mode=edit. While the index is whole, a global note's summary is in front of me in every room and place I work in, a project note's in that project; say when the note applies and who may hear it. A person's summary carries how they want us to work now."},
+                "summary": {"type": "string", "description": "mode=edit or append: the new authored summary, in the same revision-checked write as the old_str replacement or the appended text, or alone with mode=edit."},
                 "expected_revision": {"type": "string", "description": "Source revision returned by knowledge_read. Required for overwrite/edit of existing notes, an append with summary, and archive/restore. Omit or pass empty only to create a missing note; drift returns the current source without replacing it."},
             }, "required": ["topic"]},
         }, _knowledge_write),

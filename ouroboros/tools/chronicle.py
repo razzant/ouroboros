@@ -720,7 +720,7 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
         parts += [f"scope {record.get('scope')}", f"target {_target_label(record.get('target_ref'))}",
                   f"visibility {record.get('visibility')}"]
         if isinstance(record.get("anchor"), dict):
-            parts.append(f"also shown after the first call matching {describe_anchor(record['anchor'])}")
+            parts.append(f"also shown after a task's first call matching {describe_anchor(record['anchor'])}")
     # The stamp as counts (``stamp_summary``, the view's form): the header repeats on every page, so it lists no task.
     for part in (record.get("status"), _covers_summary(record, period), stamp_summary(record.get("host_stamp"))):
         if part:
@@ -1464,9 +1464,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "source_ref": source,
         "quote": {"type": "string", "description": "Optional exact substring of the target, kept beside the mark."},
         "room_id": room,
-        "scope": {"type": "string", "enum": ["room", "global"],
-                  "description": "room: in view of every integrating focus and of this room's helpers and sessions; "
-                                 "global: of every helper and session start too. No view shows them to my human."},
+        "scope": {"type": "string", "enum": ["room", "global"]},
         "mark_id": {"type": "string", "description": "Change an active mark's visible detail with visibility and reason."},
         "visibility": {"type": "string", "enum": ["full", "meaning"]},
         "release_ids": {"type": "array", "items": string, "minItems": 1, "uniqueItems": True,
@@ -1493,6 +1491,6 @@ def chronicle_tools() -> List[ToolEntry]:
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",
-            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope; an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
+            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope (a room mark is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start; a mark adds nothing to my human's chat); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
             mark, []), _memory_mark),
     ]

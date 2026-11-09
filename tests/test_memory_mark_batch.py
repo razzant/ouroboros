@@ -62,3 +62,24 @@ def test_io_failure_does_not_hide_the_other_results(tmp_path, monkeypatch):
     result = json.loads(_memory_mark(ctx, release_ids=ids, reason="done"))
     assert result["released_ids"] == [ids[0], ids[2]]
     assert result["refused"] == [{"id": ids[1], "reason": "unavailable", "detail": "temporarily unavailable"}]
+
+
+def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
+    """memory_mark's own text names the readers the view really gives a mark (memory_view.ROLE_DEFAULTS) and that the
+    owner's chat shows nothing of it; the custom codec of direct OpenAI routes keeps tool text and drops parameter
+    prose, so the fact lives in the description."""
+    from ouroboros.memory_view import ROLE_DEFAULTS
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+
+    schema = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]
+    reach = ("a room mark is in view of every integrating focus and of that room's helpers and session starts, "
+             "a global one of every focus, helper and session start; a mark adds nothing to my human's chat")
+    assert reach in schema["description"]
+    wire = project_function_tools_to_openai_custom([{"type": "function", "function": schema}]).wire_tools()
+    assert reach in wire[0]["custom"]["description"]
+    integrating = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "all"}
+    helpers = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "room_and_global"}
+    assert integrating == {"integrator", "consciousness", "presence"} and helpers == {"child", "nanny"}
+    anchor = schema["parameters"]["properties"]["anchor"]["description"]
+    assert anchor.startswith("Optional action whose first result in a task also carries this mark's words:")
+    assert "meets me at" not in anchor

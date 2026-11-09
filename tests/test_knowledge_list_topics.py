@@ -1,4 +1,4 @@
-"""knowledge_list(topics=...) is the read SYSTEM.md points at when the index shows only its outline."""
+"""knowledge_list(topics=...) is the read the outline header and knowledge_write's description point at when the index shows only its outline."""
 from __future__ import annotations
 
 import pathlib
