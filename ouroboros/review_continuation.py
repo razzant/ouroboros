@@ -29,13 +29,17 @@ on stale bytes. A successor START is new generation: before it is decided or wri
 known-spend admission every review wave rides, and the executor's send callback admits its POST,
 a replay included, on that same admission and on the recorded instant, then stops it generating
 there (``review_session_custody``). Passive readers never project or send. The transport creates
-no successor of its own.
+no successor of its own. A read-only seat whose wave released its isolated checkout is refused before the choice
+unless the record can rebuild it; its START row carries the exact mapping (``RESTORE_KEY``) from which a read-only
+checkout, released or still present, is put back and re-owned before the START is written and again before every
+POST, a crash replay included (#2796).
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import math
+import pathlib
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -360,6 +364,9 @@ def _stopped_run(custody: Any, seat: Dict[str, Any], invocation: Dict[str, Any])
     return own
 
 
+RESTORE_KEY = "review_subject_restore"  # the START row's exact mapping of what a released checkout held (#2796)
+
+
 def _prepare(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster, seat_id: str, named: str) -> _Choice:
     """Validate one choice and build its successor from retained sources; writes nothing."""
     from ouroboros.delegate_invocation import invocation_record
@@ -417,10 +424,20 @@ def _prepare(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster, sea
     seconds = _remaining_seconds(ctx, window_end)
     if seconds is not None and seconds <= 0:
         raise refuse("window_spent", "no original review time remains within the current deadline; start a fresh review instead")
+    from ouroboros.tools.review_subject import readonly_scope_root
+
     if str(original.get("access") or "readonly") in {"workspace_write", "full"}:
         held, why = checking_copy_holder(custody, roster.task_id, named)
         if not held:
             raise refuse("checking_progress_unavailable", f"the reviewer's writable checking copy is not held: {why}")
+    elif (read := readonly_scope_root(original)) and not pathlib.Path(read).exists():  # put back before each send
+        from ouroboros.tools.review_subject import released_subject
+
+        try:
+            released_subject(custody, record, read, invocation_record(custody, origin) or {}, str(ctx.task_id))
+        except ValueError as exc:
+            raise refuse("subject_unavailable", f"the read-only reviewer's checkout was released and its reviewed "
+                                                f"subject cannot be materialized again: {exc}") from exc
     successor = successor_operation_id(str(record.get("record_id") or ""), seat_id, named)
     from ouroboros.delegate_custody import idempotency_key
 
@@ -636,11 +653,14 @@ def _drop_replays(ctx: Any, superseded: set) -> None:
 
 
 def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[str, Any],
-                     closes: Optional[datetime] = None) -> Optional[bool]:
+                     closes: Optional[datetime] = None, record: Optional[Dict[str, Any]] = None) -> Optional[bool]:
     """Write the successor's START_REQUESTED from the RECORDED body (first wins per token): True when written, False
     when an earlier call wrote it, ``None`` when ``closes`` (``_window_closes``, read before this call's steps) passed
     first, so nothing was written. The START records that instant (``generation_end_at``, where the executor admits
-    its POST and stops it generating) and asks the engine for no more than what remains of it once written."""
+    its POST and stops it generating) and asks the engine for no more than what remains of it once written. A
+    read-only seat's released checkout is resolved from ``record`` into the START row's exact mapping (``RESTORE_KEY``)
+    and put back before the START is written; every POST puts it back again (``review_session_custody.prepare_continuation_send``). A failure
+    here is the choice's typed unsent refusal."""
     from ouroboros import delegate_custody as custody_module
     from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
     from ouroboros.deadline_utils import bounded_seconds
@@ -653,6 +673,21 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     body = read_blob_ref(custody, decision["request_ref"], expected_kind="json")
     source = (custody_module.invocation_record(custody, str(decision.get("predecessor_invocation_id") or ""))
               or custody_module.invocation_record(custody, str(decision.get("origin_invocation_id") or "")) or {})
+    from ouroboros.tools.review_subject import readonly_scope_root, released_subject, restore_released_subject
+
+    restore = {}
+    if record is not None and (read := readonly_scope_root(body)):  # an existing checkout is owned and mapped too
+        origin = custody_module.invocation_record(custody, str(decision.get("origin_invocation_id") or "")) or {}
+        try:
+            restore = released_subject(custody, record, read, origin, str(decision.get("decided_by_task") or task_id))
+        except ValueError as exc:
+            if not pathlib.Path(read).exists():
+                raise ContinuationRefused("subject_unavailable", f"{exc}; nothing was sent") from exc
+        try:  # a live root that is no review checkout, or an existing one with no mapping, is read as it is
+            if restore:
+                restore_released_subject(custody, restore)
+        except ValueError as exc:
+            raise ContinuationRefused("subject_unavailable", f"{exc}; nothing was sent") from exc
     project_id, owned, left = str(source.get("project_id") or ""), False, _seconds_left(closes)
     scope = body.get("scope") or {}
     if not decision.get("thread_id") and scope.get("kind") == "project" and not scope.get("ephemeral"):
@@ -682,7 +717,7 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
         continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
         surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
         project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
-        prompt_cache_ttl=source.get("prompt_cache_ttl") or None,
+        prompt_cache_ttl=source.get("prompt_cache_ttl") or None, **({RESTORE_KEY: restore} if restore else {}),
         **({"generation_end_at": closes.isoformat()} if closes is not None else {}),
         **{key: str(source.get(key) or "") for key in ("root_task_id", "parent_task_id", "category", "source",
                                                        *REVIEW_ATTRIBUTION_KEYS, "authority_source", "execution_root", "target_root")})
@@ -806,7 +841,7 @@ def _project(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster,
     for seat_id, closes in fresh.items():
         decision = decisions[seat_id]
         transfer_checking_copy(custody, roster.task_id, str(decision["supersedes"]), str(decision["operation_id"]))
-        recorded_now = _start_requested(custody, roster.task_id, seat_id, decision, closes)
+        recorded_now = _start_requested(custody, roster.task_id, seat_id, decision, closes, record)
         now = roster.transition(seat_id, decision, lambda current, d=decision, b=bindings[seat_id], ended=recorded_now is None: (
             unsent_row(current, d, b, WINDOW_SPENT) if ended else continued_row(current, d, b)))  # ended: no START written
         if now.get("operation_state") == "not_dispatched":  # its window closed first, or another call settled it unsent
