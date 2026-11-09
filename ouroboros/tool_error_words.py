@@ -3,10 +3,9 @@
 ``residual_tool_errors_without_review`` read one sentence whatever had failed. The record already
 holds the failures (``outcome_axes.execution.unresolved_tool_errors`` first, else
 ``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first LOUD one — not a
-failed read (``read_only``, owner 06.11 A) and not a quiet leftover (``quiet``, owner 09.11 A: a command the task
-went past, a call rejected before running; both stay in the details) — in plain words: a noun for the step and
-what happened to it, never a tool name, its result text or a
-path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
+failed read (``read_only``, owner 06.11 A) and not a details-only leftover (``details_only``, owner 09.11 A: a
+command that ran and failed, a call refused before running; both stay in the details) — in plain words: a noun for
+the step and what happened to it, never a tool name, its result text or a path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
 ``web/modules/task_reason_words.js`` (``residualToolErrorsPhrase``); the cases of
 ``web/tests/fixtures/outcome_phase_parity.json`` pin both.
 """
@@ -28,7 +27,7 @@ _TOOL_NOUNS = {
     "pr_merge": "A pull request merge",
     "review_change": "A review request",
     "finish_task": "A finish request",
-    # The effects the main view names once commands are quiet (owner 09.11, A).
+    # The effects the main view names once command failures stay in the details (owner 09.11, A).
     "write_file": "A file write",
     "edit_text": "A file edit",
     "edit_batch": "A file edit",
@@ -53,9 +52,9 @@ def _int(value: Any) -> Any:
 
 
 def _loud(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The errors the main view names: a failed read (owner 06.11, A) and a quiet leftover (owner 09.11, A) stay in
-    the details. Twin of ``_outcome_tool_errors.warns_without_review``."""
-    return [error for error in errors if not (error.get("read_only") or error.get("quiet"))]
+    """The errors the main view names: a failed read (owner 06.11, A) and a details-only leftover (owner 09.11, A)
+    stay in the details. Twin of ``_outcome_tool_errors.warns_without_review``."""
+    return [error for error in errors if not (error.get("read_only") or error.get("details_only"))]
 
 
 def residual_tool_errors_phrase(execution: Any) -> str:
@@ -82,7 +81,7 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     else:
         subject = f"{noun} failed"
     more = len(unresolved) + len(cosmetic) - 1
-    capped = len(listed_unresolved) >= _LISTED or len(listed_cosmetic) >= _LISTED
+    capped = (len(listed_unresolved) >= _LISTED and bool(unresolved)) or (len(listed_cosmetic) >= _LISTED and bool(cosmetic))
     tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
     return f"{subject}{tail}."

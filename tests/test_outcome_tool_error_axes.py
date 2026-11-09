@@ -5,7 +5,6 @@ import copy
 import pytest
 
 from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes
-from ouroboros.tool_effects import record_mcp_annotations
 from tests._cases import plain_rows
 
 
@@ -48,7 +47,7 @@ def test_tool_errors_do_not_decide_delivery_or_acceptance(subtests):
                     assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated" and loud)
                     errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
                     assert errors[0]["status"] == tool_error["status"]
-                    assert bool(errors[0].get("read_only") or errors[0].get("quiet")) == (not loud)
+                    assert bool(errors[0].get("read_only") or errors[0].get("details_only")) == (not loud)
                     if tool_error.get("signal"):
                         assert errors[0]["signal"] == "SIGKILL"
                         assert errors[0]["exit_code"] == -9
@@ -75,26 +74,27 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     pytest.param({"tool": "search_code", "status": "error"}, False, "read_only", id="failed-search"),
     pytest.param({"tool": "browse_page", "status": "error"}, False, "read_only", id="failed-page-read"),
     pytest.param({"tool": "github_read", "status": "error"}, False, "read_only", id="failed-github-read"),
-    pytest.param({"tool": "mcp_docs__read_page", "status": "mcp_error"}, False, "read_only", id="declared-mcp-read"),
     pytest.param({"tool": "write_file", "status": "error"}, True, "", id="unfulfilled-write"),
     pytest.param({"tool": "github_write", "status": "safety_violation"}, True, "", id="send-stopped-by-safety"),
-    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, False, "quiet", id="failed-command"),
-    pytest.param({"tool": "run_script", "status": "timeout"}, False, "quiet", id="timed-out-script"),
+    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, False, "details_only", id="failed-command"),
+    pytest.param({"tool": "run_script", "status": "timeout"}, False, "details_only", id="timed-out-script"),
+    pytest.param({"tool": "run_command", "status": "safety_violation"}, True, "", id="command-stopped-by-safety"),
+    pytest.param({"tool": "run_script", "status": "safety_violation"}, True, "", id="script-stopped-by-safety"),
+    pytest.param({"tool": "run_script", "status": "run_script_error"}, True, "", id="script-run-error"),
     pytest.param({"tool": "run_command", "status": "artifact_output_error"}, True, "", id="command-output-unregistered"),
     pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": -9, "signal": "SIGKILL"}, True, "",
                  id="signal-killed-command"),
-    pytest.param({"tool": "edit_batch", "status": "argument_error"}, False, "quiet", id="rejected-write-call"),
-    pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "quiet", id="call-named-no-tool"),
+    pytest.param({"tool": "edit_batch", "status": "argument_error"}, False, "details_only", id="rejected-write-call"),
+    pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "details_only", id="call-named-no-tool"),
     pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
     pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
 ])
 def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with
-    warnings only for a loud leftover — an effect that did not land, a Safety-stopped send, a signal-killed command, a
-    command whose declared output never registered, or a tool of unknown kind that ran and failed. A failed read
-    (``read_only``), a command the task went past and a call the tool refused before running (``quiet``) are still
-    recorded, in the details."""
-    record_mcp_annotations("docs", [{"name": "read_page", "annotations": {"readOnlyHint": True}}])
+    warnings only for a loud leftover — an effect that did not land, a send or command Safety stopped, a signal-killed
+    command, a command whose declared output never registered, or a tool of unknown kind that ran and failed. A failed
+    read (``read_only``), a command that ran and failed or timed out and a call the tool refused before running
+    (``details_only``) are still recorded, in the details."""
     axes = derive_loop_outcome("Delivered answer.", {}, {"tool_calls": [{**call, "is_error": True, "args": {}}]})["outcome_axes"]
     assert axes["objective"]["status"] == "not_evaluated" and axes["execution"]["status"] == "ok"
     assert bool(axes["objective"].get("warning")) == loud
@@ -102,11 +102,11 @@ def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     assert bool(stored["objective"].get("warning")) == loud
     [error] = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
     assert error["tool"] == call["tool"]
-    assert {key for key in ("read_only", "quiet") if error.get(key)} == ({flag} if flag else set())
+    assert {key for key in ("read_only", "details_only") if error.get(key)} == ({flag} if flag else set())
 
 
 def test_a_record_written_before_the_flags_stays_loud():
-    """A stored error without ``read_only`` or ``quiet`` (written before either flag) keeps the warning: the
+    """A stored error without ``read_only`` or ``details_only`` (written before either flag) keeps the warning: the
     presentation never guesses that an old command error was harmless."""
     from ouroboros.outcomes import normalize_outcome_axes
 

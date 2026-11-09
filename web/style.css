@@ -3250,12 +3250,21 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 
 /* Helpers' outcomes belong to their root's Details (owner 09.11, A): under a FINISHED root that is collapsed, a finished
-   helper card folds away (the Details disclosure's accessible name still counts "N children"); a helper still running
-   stays in view (the live picture of the work), and an open root shows every helper under its facts and timeline as
-   before. The same rule holds at every depth. The fold happens as the root settles, when its chip, line and actions
+   helper card folds away (the Details disclosure's accessible name still counts "N children"); a helper still running,
+   or one with a running helper of its own, stays in view (the live picture of the work), and an open root shows every
+   helper under its facts and timeline as before. The same rule holds at every depth. The fold happens as the root settles, when its chip, line and actions
    already change. */
-.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents > .chat-live-card.subagent[data-finished="1"] {
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents > .chat-live-card.subagent[data-finished="1"]:not(:has(.chat-live-card[data-finished="0"])) {
     display: none;
+}
+
+/* The folded container keeps no blank band of its own; a helper still in view under it keeps the inset. */
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents {
+    margin-block-end: 0;
+}
+
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents > .chat-live-card.subagent {
+    margin-block-end: var(--space-3);
 }
 
 /* The one narrow-column rule: any chat column of 620px or less (a phone, a

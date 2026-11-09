@@ -137,7 +137,7 @@ const TOOL_NOUNS = {
     pr_merge: 'A pull request merge',
     review_change: 'A review request',
     finish_task: 'A finish request',
-    // The effects the main view names once commands are quiet (owner 09.11, A).
+    // The effects the main view names once command failures stay in the details (owner 09.11, A).
     write_file: 'A file write',
     edit_text: 'A file edit',
     edit_batch: 'A file edit',
@@ -152,13 +152,13 @@ const TOOL_NOUNS = {
 const LISTED = 20;  // outcomes keeps at most this many errors per list
 
 /** The residual-warning clause naming the first recorded LOUD tool error in plain words (never a tool name, its
- *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a quiet
- *  leftover (`quiet`, owner 09.11 A: a command the task went past, a call rejected before running) stay in the
- *  details. Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
+ *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a
+ *  details-only leftover (`details_only`, owner 09.11 A: a command that ran and failed, a call refused before running)
+ *  stay in the details. Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
 export function residualToolErrorsPhrase(execution = {}) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
     const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
-    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.quiet)));
+    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
     const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
@@ -172,7 +172,8 @@ export function residualToolErrorsPhrase(execution = {}) {
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
-    const tail = listed[0].length >= LISTED || listed[1].length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
+    const capped = (listed[0].length >= LISTED && unresolved.length > 0) || (listed[1].length >= LISTED && cosmetic.length > 0);
+    const tail = capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
     return fmt('{subject}{tail}.', { subject, tail });

@@ -241,7 +241,8 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
 
 # The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
 # (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
-# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+# parallel. A tool not named here stays loud unless its leftover is details-only (a command that ran and failed, a call
+# refused before running: _outcome_tool_errors).
 PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
     "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
 })

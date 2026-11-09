@@ -685,23 +685,6 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
     return f"{prefix} ({reason_text})" if reason_text else prefix
 
 
-def routing_options_with_labels(drive_root: Any, options: Any) -> List[Dict[str, Any]]:
-    """Stamp human labels on manual task choices while retaining their raw ids."""
-    rows: List[Dict[str, Any]] = []
-    for raw in list(options or [])[:100]:
-        if not isinstance(raw, dict):
-            continue
-        row = dict(raw)
-        task_id = str(row.get("task_id") or "").strip()
-        if task_id and not str(row.get("label") or "").strip():
-            row["label"] = routing_target_label(
-                drive_root, str(row.get("action") or "steer_task"), task_id,
-                task=row, project_id=str(row.get("project_id") or ""),
-            )
-        rows.append(row)
-    return rows
-
-
 def routing_option_label(option: Any) -> str:
     """One human label per manual-routing option — the HOST SSOT (the durable
     routing_options history row and the Telegram skill both render through it;
@@ -810,7 +793,9 @@ TASK_CAUSE_PHRASES = {
     "configured_actor_incomplete": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
     "configured_actor_unknown": "This helper was set to run as a coding session; whether that run succeeded is unknown.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
-    # The one non-reason-code key: the task-result FIELD terminal_plan_review_open (task_finalization.terminal_result_fields), a standing limitation of the answer, not what ended the task.
+    # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
+    # (task_finalization.terminal_result_fields), a standing limitation of the
+    # answer rather than the thing that ended the task.
     "terminal_plan_review_open": "The plan review was still open when this answer was delivered",
     "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
     "tool_failure": "A tool this task used failed and nothing recovered it",
@@ -1595,6 +1580,6 @@ __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",
-    "routing_options_with_labels", "routing_target_label", "resolve_owner_message_source",
+    "routing_target_label", "resolve_owner_message_source",
     "source_refs_for_project",
 ]
