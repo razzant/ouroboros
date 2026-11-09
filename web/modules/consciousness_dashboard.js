@@ -1,22 +1,21 @@
 // Dashboard › Consciousness: what Ouroboros does when nobody asked, now and lately. The status with Stop
-// (the same /bg command the Activity row and the chat header send), where its money went by cause, the own
-// tasks MAX_TASKS counts, its places (each opens its sheet; Connect a place) and the recent wakes with their
-// cause, where, how fast it answered, what the Safety Supervisor did and what each cost. Facts come from
-// `GET /api/consciousness`, with `/api/state` as the status fallback. Places always read `/api/places`.
-// Wakes say when they are not reported; unknown money is never zero.
+// (the same /bg command the Activity row and the chat header send), where its money went by cause (each place's
+// included), the own tasks MAX_TASKS counts and the recent wakes with their cause, where, how fast it answered, what
+// the Safety Supervisor did and what each cost. The places themselves live on the Circles page; this tab reads
+// `/api/places` only to open a wake's captured conversation in its place sheet. Facts come from
+// `GET /api/consciousness`, with `/api/state` as the status fallback. Wakes say when they are not reported; unknown
+// money is never zero.
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { statusMarkHtml } from './status_mark.js';
 import { controlIcon } from './page_icons.js';
-import { chipHtml, skillIconHtml } from './skill_presentation.js';
+import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
-import { PLACES_CHANGED_EVENT, failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
-import { getContributions } from './contributions.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, placeStatusText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { openPlaceSheet } from './place_sheet.js';
-import { connectPlaceButtonHtml, openConnectPlace } from './place_connect.js';
+import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 
 const SEP = ' · ';
@@ -42,11 +41,9 @@ export function headlineView(snapshot) {
 const causeWord = (row) => (row.cause === 'own' ? tr('task.title.own_time', 'Own time') : row.cause === 'started' ? tr('consciousness.started_work', 'Started work') : row.label || row.cause.replace(/^place:/, ''));
 
 /** Where the money of the rolling 24 hours went, for the headline card's Details: each cause that spent something,
- *  except a place the Places list shows with its own spend; and whether some calls have no price. */
-export function spendDetails(snapshot, placeIds = null) {
-    const listed = new Set(placeIds || []);
-    const rows = snapshot.spendByCause.filter((row) => row.usd !== null && row.usd > 0
-        && !(row.cause.startsWith('place:') && listed.has(row.cause.slice('place:'.length))))
+ *  every place included; and whether some calls have no price. */
+export function spendDetails(snapshot) {
+    const rows = snapshot.spendByCause.filter((row) => row.usd !== null && row.usd > 0)
         .map((row) => ({ words: causeWord(row), amount: usdText(row.usd) }));
     const unpriced = snapshot.spendByCause.some((row) => row.unmeteredCalls > 0);
     return { rows, unpriced };
@@ -71,7 +68,7 @@ export function countedRootsText(snapshot) {
  *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them;
  *  where the money went, the unpriced caveat and the own tasks' names are the card's Details. `toggling` is the
  *  command just sent (its button says so until the next read). */
-export function summaryHtml(snapshot, { placeIds = null, hasSocket = true, toggling = '', detailsOpen = false } = {}) {
+export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
     const headline = headlineView(snapshot);
     const kicker = snapshot.enabled === null ? 'Consciousness · state unknown' : `Consciousness · ${snapshot.enabled ? 'on' : 'off'}`;
     const money = allowanceText(snapshot);
@@ -83,7 +80,7 @@ export function summaryHtml(snapshot, { placeIds = null, hasSocket = true, toggl
     // It cannot wake until Ouroboros starts again: the next step is beside the words that say so.
     const restart = snapshot.enabled && snapshot.status === 'stopped'
         ? `<button type="button" class="btn btn-default btn-sm" data-cx-act="restart"${hasSocket ? '' : ' disabled'}>Restart</button>` : '';
-    const spend = spendDetails(snapshot, placeIds);
+    const spend = spendDetails(snapshot);
     const details = [
         spend.rows.length ? `<dl class="dashboard-facts">${spend.rows.map((row) => `<dt data-i18n-authored>${escapeHtml(row.words)}</dt><dd>${escapeHtml(row.amount)}</dd>`).join('')}</dl>` : '',
         spend.unpriced ? `<p class="consciousness-foot">${escapeHtml(tr('consciousness.unpriced', 'Some calls have no price'))}.</p>` : '',
@@ -96,37 +93,9 @@ export function summaryHtml(snapshot, { placeIds = null, hasSocket = true, toggl
             ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
             ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
         </div>
-        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
-}
-
-/** A place row: its name, its state in words, today's spend in its own column (empty when unknown, never $0.00); the
- *  connector's readiness only when it is not simply on (a status true for every row says nothing). */
-export function dashboardPlaceRowHtml(place, { awake = false } = {}) {
-    const unknown = place.spent24hUsd == null;
-    const spend = unknown ? '' : usdText(place.spent24hUsd);
-    const spendWords = unknown ? tr('places.money.aria', 'spend unknown') : fmt('{spend} spent', { spend });
-    const readiness = place.readiness && place.readiness.tone !== 'ok'
-        ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
-    return `<li><button type="button" class="consciousness-dash-place" data-place-open="${escapeHtml(place.id)}"
-            aria-label="${escapeHtml(fmt('Open {place}{awake}: {status}; {spend} in 24 hours', { place: place.label,
-                awake: awake ? tr('places.awake', ', awake here now') : '', status: [placeStatusText(place), readiness].filter(Boolean).join('; '), spend: spendWords }))}">
-        <span class="consciousness-dash-place-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(place.label)}</span>${awake ? dots() : ''}</span>
-        <span class="consciousness-dash-place-meta">${escapeHtml(placeStatusText(place))}${readiness ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}</span>
-        <span class="consciousness-spend">${escapeHtml(spend)}</span>
-    </button></li>`;
-}
-
-export function placesCardHtml(places, { error = '', awakeIn = '' } = {}) {
-    const body = error ? `<p class="ui-status" data-tone="warn">${escapeHtml(error)}</p>`
-        : !places ? '<p class="consciousness-copy">Reading places…</p>'
-            : !places.length ? '<p class="consciousness-copy">No place yet. A connector you install can connect one here.</p>'
-                : `<ul class="consciousness-dash-places">${places.map((place) => dashboardPlaceRowHtml(place, { awake: place.id === awakeIn })).join('')}</ul>`;
-    return `<div class="consciousness-card-head">
-            <h3 class="dashboard-card-title">Places</h3>
-            ${connectPlaceButtonHtml()}
-        </div>
-        ${body}
-        <p class="consciousness-foot">Allowance, own tasks and concurrent conversations: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="settings">Settings ›</button></p>`;
+        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}
+        <p class="consciousness-foot consciousness-door-line">${escapeHtml(tr('consciousness.places.circles', 'The places it lives in, their words and their circles:'))} <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="circles">${escapeHtml(tr('circles.link', 'Circles ›'))}</button></p>
+        <p class="consciousness-foot consciousness-door-line">Allowance, own tasks and concurrent conversations: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="settings">Settings ›</button></p>`;
 }
 
 /** One view of the card: authored line, whole note on request, factual phase and cost. */
@@ -232,25 +201,21 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
 
 /** Mount the tab into its Dashboard panel. */
 export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, read = readConsciousness,
-    readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet, contributions = getContributions(),
+    readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
     // The tab's one root and scroller (style.css "The Dashboard tab body").
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
             <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>
-            <section class="ui-card consciousness-card" aria-label="Places" data-cx-places></section>
             <section class="ui-card consciousness-card" aria-label="Recent wakes" data-cx-wakes></section>
         </div>`;
     const regions = {
         status: mount.querySelector('[data-cx-status]'), summary: mount.querySelector('[data-cx-summary]'),
-        places: mount.querySelector('[data-cx-places]'), wakes: mount.querySelector('[data-cx-wakes]'),
+        wakes: mount.querySelector('[data-cx-wakes]'),
     };
     // The page binds every `.scroll-fade-y` scroller once, after the panels mount (app.js).
     let snapshot = null;
-    let places = null;
-    let placesError = '', placesGeneration = 0;
-    let placesBehind = false;  // a skill lifecycle ended while hidden: the next show reads Places
     let generation = 0;
     let timer = 0;
     let destroyed = false;
@@ -279,12 +244,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
     let toggledAt = 0;
     let detailsOpen = false;  // the headline card's Details stays as its reader left it across repaints
     function paint() {
-        if (snapshot) {
-            put(regions.summary, summaryHtml(snapshot, { placeIds: places?.map((place) => place.id) ?? null,
-                hasSocket: Boolean(ws?.send), toggling, detailsOpen }));
-        }
-        const awake = snapshot ? liveWake(snapshot) : null;
-        put(regions.places, placesCardHtml(places, { error: placesError, awakeIn: awake?.cause === 'focus' ? places?.find((place) => place.rooms.some((room) => room.chatId === awake.chatId))?.id : '' }));
+        if (snapshot) put(regions.summary, summaryHtml(snapshot, { hasSocket: Boolean(ws?.send), toggling, detailsOpen }));
         const wakes = snapshot?.recentWakes ?? null;
         const coverage = snapshot?.coverage || '';
         if (!regions.wakes.querySelector('[data-cx-wake-group]')) { put(regions.wakes, wakesCardHtml(wakes, coverage)); return; }
@@ -296,32 +256,9 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         }
     }
 
-    // One read in flight at a time; a change, a show or a lifecycle end starts a fresh one over it, and the newest paints.
-    let placesPending = null;
-    function refreshPlaces({ force = false } = {}) {
-        if (placesPending && !force) return placesPending;
-        const current = ++placesGeneration;
-        placesBehind = false;
-        placesPending = (async () => {
-            try {
-                const data = await readPlacesFn();
-                if (destroyed || current !== placesGeneration) return;
-                places = data.places; placesError = '';
-            } catch (error) {
-                if (destroyed || current !== placesGeneration) return;
-                placesError = fmt('Places could not be read: {reason}', { reason: failureText(error) });
-            }
-            paint();
-        })().finally(() => { if (current === placesGeneration) placesPending = null; });
-        return placesPending;
-    }
-
-    async function refresh({ rereadPlaces = false } = {}) {
+    async function refresh() {
         if (destroyed) return;
         const current = ++generation;
-        // Places are read when the tab is shown, on their change event and at a skill lifecycle end, never by the poll;
-        // a failed first read retries.
-        const placesRead = places === null || rereadPlaces ? refreshPlaces({ force: rereadPlaces }) : Promise.resolve();
         const earlier = Boolean(snapshot);
         regions.status.textContent = earlier ? '' : 'Reading…';
         let next = null;
@@ -345,7 +282,6 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         regions.status.dataset.tone = readError ? 'error' : '';
         paint();
         schedule();
-        await placesRead;
     }
 
     function schedule() {
@@ -371,32 +307,28 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         if (openTaskReference(event)) return;
         const roomDoor = event.target.closest('[data-cx-open-room]');
         if (roomDoor) {
-            if (roomDoor.dataset.pending) return;  // one press at a time while Places are re-read
+            if (roomDoor.dataset.pending) return;  // one press at a time while the places are read
+            // The places are read at the press: the conversation's place as it stands now, never an older list's.
             const chatId = Number(roomDoor.dataset.cxOpenRoom);
-            const owner = () => (places || []).find((entry) => entry.rooms.some((room) => room.chatId === chatId));
-            let place = owner();
-            if (!place) {
-                // A conversation captured after the last Places read is not absence: read once more before saying so.
-                roomDoor.dataset.pending = '1';
-                try { await refreshPlaces({ force: true }); while (placesPending) await placesPending; } finally { delete roomDoor.dataset.pending; }
-                place = owner();
-                if (!place && placesError) return;  // the read failed: the Places card says so; the door stays
+            roomDoor.dataset.pending = '1';
+            let place = null, failed = '';
+            try { place = (await readPlacesFn()).places.find((entry) => entry.rooms.some((room) => room.chatId === chatId)) || null; }
+            catch (error) { failed = fmt('Places could not be read: {reason}', { reason: failureText(error) }); }
+            finally { delete roomDoor.dataset.pending; }
+            if (destroyed) return;
+            if (failed) {  // the tab's status says so; the door stays for another try
+                regions.status.textContent = failed;
+                regions.status.dataset.tone = 'error';
+                return;
             }
             if (place) openSheet(place, { returnFocus: roomDoor, openRoomChatId: chatId });
             else if (roomDoor.isConnected !== false) { roomDoor.disabled = true; roomDoor.textContent = tr('consciousness.room_unavailable', 'Conversation unavailable'); }
             return;
         }
-        const row = event.target.closest('[data-place-open]');
-        if (row) {
-            const place = (places || []).find((entry) => entry.id === row.dataset.placeOpen);
-            if (place) openSheet(place, { returnFocus: row });
-            return;
-        }
-        const connect = event.target.closest('[data-place-connect]');
-        if (connect) { openConnectPlace({ returnFocus: connect, openSettingsTab }); return; }
         const button = event.target.closest('[data-cx-act]');
         if (!button || button.disabled) return;
         const act = button.dataset.cxAct;
+        if (act === 'circles') { openCircles(); return; }
         if (act === 'settings') {
             await openSettingsTab?.('behavior');
             document.getElementById('settings-consciousness')?.scrollIntoView({ block: 'start' });
@@ -418,24 +350,18 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
             await refresh();
         }
     };
-    // Shown by its subtab or by returning to the Dashboard on it, as Settings re-reads its places when shown.
+    // Shown by its subtab or by returning to the Dashboard on it.
     const onShown = (event) => {
-        if (event?.detail?.tab === 'consciousness' || (event?.detail?.page === 'dashboard' && shown())) void refresh({ rereadPlaces: true });
+        if (event?.detail?.tab === 'consciousness' || (event?.detail?.page === 'dashboard' && shown())) void refresh();
         else clearTimeout(timer);
     };
-    const onChanged = () => { void refreshPlaces({ force: true }); };
-    // A skill lifecycle end (an update, a turn-on, whoever started it) can change a place's icon, label or readiness
-    // without the change event, and the contributions projection leaves an off connector out, so `onChange` misses it.
-    const onLifecycle = () => { if (shown()) void refreshPlaces({ force: true }); else placesBehind = true; };
-    const onVisibility = () => { if (placesBehind && shown()) void refreshPlaces({ force: true }); };
-    const offLifecycle = contributions.onLifecycle(onLifecycle);
     mount.addEventListener('click', onClick);
     mount.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:dashboard-subtab-shown', onShown);
     window.addEventListener('ouro:page-shown', onShown);
-    window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
-    document.addEventListener('visibilitychange', onVisibility);
-    if (shown()) void refresh(); else void refreshPlaces();
+    // The card's frame at once, before any read: the wake rows then always arrive through the keyed per-group painter.
+    paint();
+    if (shown()) void refresh();
     return {
         refresh,
         destroy() {
@@ -446,9 +372,6 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
             mount.removeEventListener('toggle', onToggle, true);
             window.removeEventListener('ouro:dashboard-subtab-shown', onShown);
             window.removeEventListener('ouro:page-shown', onShown);
-            window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
-            document.removeEventListener('visibilitychange', onVisibility);
-            offLifecycle();
         },
     };
 }

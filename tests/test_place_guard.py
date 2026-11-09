@@ -27,6 +27,8 @@ def places(monkeypatch, tmp_path):
             Place("active", "connector", "service", "account", "C2", "Active")]
     monkeypatch.setattr(guard.places, "places_of_connector", lambda root, connector: rows if connector == "connector" else [])
     monkeypatch.setattr(guard.places, "load_places", lambda root: rows)
+    monkeypatch.setattr(guard.places, "place_records", lambda root: guard.places.PlaceRecords(
+        0, {row.place_id: row for row in rows}, (), {}))
 
     def resolve(root, *, connector, targets, conversation="", thread=""):
         values = [v for values in targets.values() for v in values]
@@ -72,7 +74,7 @@ def test_place_state_from_every_origin_and_active_sibling(published_tool, places
         name, tool = published_tool(effect, target="room", conversation="room")
         refusal = guard.dispatch_refusal(ctx, name, {"room": "C1"}, ext_tool=tool)
         assert refusal.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED:")
-        assert state.title() in refusal and "Consciousness › Places" in refusal
+        assert state.title() in refusal and "Circles" in refusal
         assert "configure_presence" in refusal
         assert guard.dispatch_refusal(ctx, name, {"room": "C2"}, ext_tool=tool) == ""
     name, tool = published_tool("read", target="room")
@@ -248,7 +250,7 @@ def test_unreadable_place_store_holds_only_connector_writes(published_tool, plac
     name, tool = published_tool("write", target="channel")
     refusal = guard.dispatch_refusal(ctx, name, {"channel": "C1"}, ext_tool=tool)
     if declares_place:
-        assert "need repair" in refusal and "Consciousness › Places" in refusal
+        assert "need repair" in refusal and "Circles" in refusal
     else:
         assert refusal == ""
     name, tool = published_tool("read", target="channel")
@@ -378,3 +380,37 @@ def test_supervisor_facts_carry_this_turns_own_sends_in_its_conversation_both_wa
                                                            {"room": "C2"}, ext_tool=tool)
     bare = SimpleNamespace(drive_root=tmp_path, task_id="other", task_metadata={})
     assert "this_turn_sends" not in guard.call_place_facts(bare, "place_reply", {"place_id": "active", "text": "final"})
+
+
+def test_a_destinations_circle_words_trail_its_result_after_the_act(monkeypatch, tmp_path):
+    """After a send into another place has run, its result carries that place's circle words with both origins, from
+    one read of the store: a fact beside the act, never guidance the act had before it ran."""
+    from ouroboros import places as real_places
+    from ouroboros.tools.tool_result import ToolResult
+    target = real_places.connect_place(tmp_path, connector="connector", provider="service", account_id="account",
+                                       conversation_id="C9", label="Team room")
+    circle = real_places.create_circle(tmp_path, name="Team", text="Circle words", author="owner")
+    real_places.edit_place(tmp_path, target.place_id, "set_circle", author="ouroboros", circle_id=circle["circle_id"])
+    monkeypatch.setattr(guard, "effect_of", lambda *a, **k: _tool_effects.ToolEffect(_tool_effects.EFFECT_MESSAGE))
+    monkeypatch.setattr(guard, "_call_destinations", lambda *a: (None, {}, [target], [], True))
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="caller", task_metadata={})
+    result = guard.with_destination_facts(ctx, "ext_send", {"room": "C9"}, ToolResult(status="ok", code="OK", text="queued"))
+    assert result.producer_text == "queued" and result.text.startswith("queued\n\n[DESTINATION] Team room: ")
+    assert ('its circle "Team"\'s words, by your human, placed there by you (they still restrict here; consent needs '
+            'your human\'s placement): "Circle words"') in result.text and result.host_annotations[-1] in result.text
+
+
+@pytest.mark.parametrize(("author", "placed_by", "said"), [
+    ("owner", "owner", ": "),  # their letter: restriction and consent, nothing to qualify
+    ("owner", "ouroboros", " (they still restrict here; consent needs your human's placement): "),
+    ("ouroboros", "owner", " (context, not your human's choice for this place): "),  # my words never become theirs
+    ("ouroboros", "ouroboros", " (context, not your human's choice for this place): "),
+], ids=["their-letter", "their-words-my-placement", "my-words-their-placement", "all-mine"])
+def test_a_destinations_circle_words_say_what_binds_by_who_wrote_and_who_placed(tmp_path, author, placed_by, said):
+    from ouroboros import places as real_places
+    place = real_places.connect_place(tmp_path, connector="connector", provider="service", conversation_id="C9", label="Room")
+    circle = real_places.create_circle(tmp_path, name="Team", text="Circle words", author=author)
+    real_places.edit_place(tmp_path, place.place_id, "set_circle", author=placed_by, circle_id=circle["circle_id"])
+    [entry] = guard.authored_notes(real_places.place_records(tmp_path), real_places.get_place(tmp_path, place.place_id))
+    assert entry["standing_delegation"] is (author == placed_by == "owner")
+    assert f'placed there by {"your human" if placed_by == "owner" else "you"}{said}"Circle words"' in guard.destination_line("Room", [entry])

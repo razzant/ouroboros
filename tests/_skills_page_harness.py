@@ -53,6 +53,16 @@ def skills_browser():
         yield playwright
 
 
+def open_place_sheet(page, place_id):
+    """The place sheet as Circles opens it, with the circles of the same real places read: a connector's sheet only
+    points to Circles, and this harness mounts the Skills page alone. `/api/places` must be answered."""
+    page.evaluate("""async id => {
+        const [{openPlaceSheet}, {readPlaces}] = await Promise.all([import('/static/modules/place_sheet.js'), import('/static/modules/consciousness_api.js')]);
+        const view = await readPlaces();
+        openPlaceSheet(view.places.find(row => row.id === id), {circles: view.circles});
+    }""", place_id)
+
+
 class SkillsPage:
     """Routes one Playwright page. `answers[path]` is a JSON body, `(status, body)` or a callable
     `request -> (status, body)`; a path in `hold` waits until `release(path, ...)`."""

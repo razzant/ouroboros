@@ -12,6 +12,12 @@ REAL_CALL_PLACE_FACTS = _place_guard.call_place_facts  # bound before the fixtur
 REAL_EFFECT_OF = _tool_effects.effect_of
 
 
+def snapshot(rows):
+    """One read of the place store as ``places.place_records`` answers it: these places, no circles."""
+    from ouroboros import places
+    return places.PlaceRecords(0, {row.place_id: row for row in rows}, (), {})
+
+
 def bundle(h, name, arguments):
     assert h.module.check_safety(name, arguments, ctx=h.ctx)[0]
     return json.loads(h.calls[-1]["user_prompt"].split(
@@ -26,7 +32,7 @@ def test_focus_and_arbitrary_place_arguments_are_not_destinations(supervisor, mo
     record = places.Place("target", "connector", "chat", label="Target",
                           notes=(places.NoteEntry("For this target only", "owner"),))
     reads = []
-    monkeypatch.setattr(places, "load_places", lambda root: reads.append(root) or [record])
+    monkeypatch.setattr(places, "place_records", lambda root: reads.append(root) or snapshot([record]))
     data = bundle(h, name, {"place_id": "target", "text": "unrelated work"})
     assert data["subject"]["place"] == {} and not data["standing_delegation"]["place_notes"]
     assert data["occasion"]["focus"]["place_id"] == "focus-room" and not reads
@@ -57,7 +63,7 @@ def test_destination_notes_use_canonical_root_and_keep_each_place(supervisor, mo
         places.NoteEntry(f"{id} owner's note", "owner"), places.NoteEntry(f"{id} migration", "migration"),
         places.NoteEntry(f"{id} mind's note", "ouroboros"))) for id, state in (("a", "active"), ("b", "silent"))]
     reads = []
-    monkeypatch.setattr(places, "load_places", lambda path: reads.append(path) or records)
+    monkeypatch.setattr(places, "place_records", lambda path: reads.append(path) or snapshot(records))
     args = {"place_id": "a", "action": "inspect", "destination": {"conversation_id": "chat"}}
     if name == "remote_write":
         monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_k: {
@@ -124,16 +130,16 @@ def test_a_speech_refusal_names_the_words_the_rule_and_the_destinations_notes(su
     h = supervisor
     monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_k: {
-        "places": [{"place_id": "fb", "place_label": "Telegram · FusionBrain"}]})
-    monkeypatch.setattr(places, "load_places", lambda root: [places.Place("fb", "connector", "chat", label="Telegram · FusionBrain",
-        notes=(places.NoteEntry("Do not disclose Joi/Eva/SDG here.", "owner"), places.NoteEntry("They like brevity.", "ouroboros")))])
-    h.replies.append({"status": "DANGEROUS", "reason": "owner rule 1 keeps Joi/Eva apart", "speech": True,
-                      "quote": "App stays his track"})
-    ok, message = h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Andrei: App stays his track."}, ctx=h.ctx)
-    assert not ok and "owner rule 1 keeps Joi/Eva apart" in message and 'Flagged words: "App stays his track"' in message
-    assert ('[DESTINATION] Telegram · FusionBrain: your human\'s notes for this place: "Do not disclose Joi/Eva/SDG here."'
+        "places": [{"place_id": "fb", "place_label": "Telegram · Studio"}]})
+    monkeypatch.setattr(places, "place_records", lambda root: snapshot([places.Place("fb", "connector", "chat", label="Telegram · Studio",
+        notes=(places.NoteEntry("Do not disclose private work here.", "owner"), places.NoteEntry("They like brevity.", "ouroboros")))]))
+    h.replies.append({"status": "DANGEROUS", "reason": "owner rule 1 keeps work private", "speech": True,
+                      "quote": "The confidential launch is next week"})
+    ok, message = h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Alex: The confidential launch is next week."}, ctx=h.ctx)
+    assert not ok and "owner rule 1 keeps work private" in message and 'Flagged words: "The confidential launch is next week"' in message
+    assert ('[DESTINATION] Telegram · Studio: your human\'s notes for this place: "Do not disclose private work here."'
             in message) and "They like brevity" not in message
-    assert h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Atlas passed 70 and 95."}, ctx=h.ctx) == (True, "")
+    assert h.module.check_safety("connector_send", {"chat_id": "-100", "text": "The public example checks passed."}, ctx=h.ctx) == (True, "")
 
 
 def test_a_sending_identity_is_my_humans_where_their_bot_or_app_confirms_them(supervisor, monkeypatch, published_tool):
@@ -156,3 +162,24 @@ def test_a_sending_identity_is_my_humans_where_their_bot_or_app_confirms_them(su
     elsewhere = _place_guard.call_place_facts(h.ctx, name, {"room": "C3", "account_id": "other", "text": "Hello"})
     assert sibling["places"][0]["sends_as_owner"] is True
     assert elsewhere["places"][0]["sends_as_owner"] is False
+
+
+def test_a_circle_call_is_judged_with_the_circle_it_changes(supervisor, monkeypatch, tmp_path):
+    """A configure_presence call naming a circle carries that circle's current words and its places into the bundle,
+    read now from the canonical store; a placement call also carries the place's own guidance."""
+    from ouroboros import places
+    h = supervisor
+    h.ctx.budget_drive_root = str(tmp_path)
+    room = places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id="r", label="Friends chat")
+    circle = places.create_circle(tmp_path, name="Friends", text="Keep work out of here.", author="owner")
+    places.edit_place(tmp_path, room.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    data = bundle(h, "configure_presence", {"action": "edit_circle", "circle_id": circle["circle_id"],
+                                           "text": "Talk about anything."})
+    shown = data["subject"]["place"]["circle"]
+    assert shown["text"] == "Keep work out of here." and shown["text_author"] == "owner"
+    assert shown["places"] == [{"place_id": room.place_id, "place_label": "Friends chat", "place_state": "active",
+                                "placed_by": "owner"}]
+    other = places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id="w", label="Work chat")
+    data = bundle(h, "configure_presence", {"action": "set_circle", "place_id": other.place_id,
+                                           "circle_id": circle["circle_id"]})
+    assert data["subject"]["place"]["place_id"] == other.place_id and data["subject"]["place"]["circle"]["name"] == "Friends"
