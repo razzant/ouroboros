@@ -544,4 +544,4 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
     assert "cache_horizon_note" not in _wake("", 10_000)[1]
     replay = json.loads(supervised_wait(_ctx, "run-h", wait_once=lambda *_a: (_ for _ in ()).throw(
         AssertionError("an unacknowledged wake replays before any new observation"))).text)
-    assert replay == past
+    assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded
