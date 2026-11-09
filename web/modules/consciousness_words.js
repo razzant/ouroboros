@@ -101,36 +101,37 @@ export function heardFactWord(fact, labels = null) {
 export const signalLabels = (facts) => Object.fromEntries((Array.isArray(facts) ? facts : [])
     .filter((item) => item && typeof item === 'object' && item.id && item.label).map((item) => [item.id, item.label]));
 
-/** Lower an initial capital only in an otherwise lowercase first word; keep GitHub and PR intact. */
-export const sentenceLabel = (label) => /^\p{Lu}\p{Ll}+(?!\p{L})/u.test(label)
-    ? label[0].toLowerCase() + label.slice(1) : label;
-
-/** «wakes for direct messages, mentions and replies», or '' when nothing wakes it here. */
-export function wakesForText(wakes = [], declared = null, labels = null) {
-    const facts = [...new Set(wakes.map((item) => item?.fact).filter(Boolean))];
-    const kinds = facts.filter((fact) => fact !== 'from_bot');
-    const named = { ...signalLabels(declared), ...labels };
-    const word = (fact) => named[fact] ? sentenceLabel(named[fact]) : wakeFactWord(fact);
-    return [kinds.length ? fmt('wakes for {kinds}', { kinds: listWords(kinds.map(word)) }) : '',
-        facts.includes('from_bot') ? word('from_bot') : ''].filter(Boolean).join(' · ');
-}
-
 export const authorWord = (author) => AUTHOR_WORDS[author] || (author ? `added by ${author}` : '');
 
 /** The row's status word for a stored state; an unknown state says so instead of guessing. */
 export const placeStateWord = (state) => placeStateOf(state)?.word || tr('places.state.unknown', 'state unknown');
 
-/**
- * A place row's one status sentence: «active · wakes for direct messages, mentions and replies». A Silent place
- * keeps its list (it still wakes there to read and think; what it would say or change is held); a Paused place
- * says only its state. The count is open focus turns, not owed replies.
- */
-export function placeStatusText(place) {
-    const parts = [placeStateWord(place?.state)];
-    if (place?.state === 'active' || place?.state === 'silent') parts.push(wakesForText(place.wakes, place.facts, place.labels));
-    if (Number.isInteger(place?.unanswered) && place.unanswered > 0) parts.push(fmt('{n} open turns', { n: place.unanswered }));
-    return parts.filter(Boolean).join(' · ');
+/** Who wrote a circle's words or a description, and who placed a place in its circle (the stored author). */
+export const writtenByWord = (author) => (author === 'owner' || author === 'migration'
+    ? tr('places.written.owner', 'written by you') : tr('places.written.ouroboros', 'written by Ouroboros'));
+export const placedByWord = (author) => (author === 'owner' || author === 'migration'
+    ? tr('places.placed.owner', 'placed here by you') : tr('places.placed.ouroboros', 'placed here by Ouroboros'));
+
+const TITLE_SEP = ' · ';
+/** Two labels that read the same, case and spacing aside: «FRONT/OFFICE» and «Front / Office». */
+export const sameWords = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
+/** The service a place is on, as its row and its sheet name it quietly. */
+export const placeService = (place) => String(place.serviceLabel || place.provider || '');
+/** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
+ *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service
+ *  itself is the last resort. */
+export function placeTitle(place, { circle = null, status = null } = {}) {
+    const service = placeService(place);
+    let parts = String(place.label || '').split(TITLE_SEP).map((part) => part.trim()).filter(Boolean);
+    if (parts.length > 1 && sameWords(parts[0], service)) parts = parts.slice(1);
+    if (circle && parts.length > 1 && sameWords(parts[parts.length - 1], circle.name)) parts = parts.slice(0, -1);
+    if (circle && parts.length > 1 && sameWords(parts[0], circle.name)) parts = parts.slice(1);
+    let title = parts.join(TITLE_SEP);
+    if (!title || sameWords(title, service)) title = String(status?.workspace_name || status?.team_name || status?.account_label || '');
+    return title || service;
 }
+/** The instance a place is bound to (its conversation, else its account): what tells two same-titled rows apart. */
+export const placeInstance = (place) => String(place.conversationId || place.accountId || '');
 
 // The identifier a service knows its people by, for «Add mine» (from the place's provider).
 const ACCOUNT_ID_WORDS = Object.freeze({ slack: 'your member ID (U…)', telegram: 'your numeric user ID' });

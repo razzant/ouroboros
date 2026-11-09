@@ -656,10 +656,10 @@ SIDEBAR_FACTS = """() => {
     const side = document.getElementById('primary-sidebar');
     const rows = [...side.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden);
     const zone = document.getElementById('nav-projects').getBoundingClientRect();
-    const files = side.querySelector('[data-nav-page="files"]').getBoundingClientRect();
+    const tools = side.querySelector('.sidebar-foot > [data-nav-page]').getBoundingClientRect();  // the first tool
     const mark = document.querySelector('.nav-projects-facts .status-mark');
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
-            gapToTools: Math.round(files.top - zone.bottom), filesTop: Math.round(files.top),
+            gapToTools: Math.round(tools.top - zone.bottom), toolsTop: Math.round(tools.top),
             sidebarBottom: Math.round(side.getBoundingClientRect().bottom),
             // The foot: how far the version row's bottom sits above the column's content edge (0 = on the edge), and
             // whether the column itself scrolls (the short-window fallback, where the foot is pinned over it).
@@ -704,7 +704,7 @@ def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell
     assert collapsed['header'] == facts['open']['header'] == {'shape': 'moving', 'hue': 'ink', 'drawn': True}, facts
     # The tools follow the Projects zone: no empty room between them (owner 18.10). The version and the update rest on
     # the bottom edge in every state (owner 22.10): the free room lies between the tools and the foot.
-    assert collapsed['gapToTools'] <= 24 and collapsed['filesTop'] < collapsed['sidebarBottom'] - 200, facts
+    assert collapsed['gapToTools'] <= 24 and collapsed['toolsTop'] < collapsed['sidebarBottom'] - 200, facts
     for state in ('open', 'collapsed', 'expanded'):
         side = facts[state]
         assert side['footBelowTools'], (state, facts)

@@ -96,8 +96,8 @@ def focus_event_source(row: Any, metadata: Mapping[str, Any], notes: list) -> An
 
     Each row is compared on its own, so another turn's frame or a Continue order stays whole. A frame with the
     producer's attachment manifest and image blocks re-renders with them (the manifest, verified by that render, and
-    the images as facts ride with the records). Notes as they stood at the event are kept only where they differ
-    from those read now."""
+    the images as facts ride with the records). Notes and circle words as they stood at the event are kept only
+    where they differ from those read now (``notes``: the bundle's entries, ``place_guard.authored_notes``)."""
     from ouroboros.presence_context import focus_frame_sources
 
     typed, images, manifest = None, [], ""
@@ -119,11 +119,17 @@ def focus_event_source(row: Any, metadata: Mapping[str, Any], notes: list) -> An
     if typed is None:
         return without_pixels(row)
     at_event, place_id = typed.pop("notes_at_event", None) or [], (metadata.get("focus") or {}).get("place_id")
+    circle_then, now = typed.pop("circle_at_event", None), [n for n in notes if n["place_id"] == place_id]
 
     def versions(rows):
         return sorted((str(n.get("text")), str(n.get("author")), str(n.get("at") or "")) for n in rows)
-    if versions(at_event) != versions(n for n in notes if n["place_id"] == place_id):
+    if versions(at_event) != versions(n for n in now if "circle" not in n):
         typed["notes_at_event"] = at_event
+    circle_now = next(({"name": n["circle"], "text": n["text"], "text_author": n["author"], "placed_by": n["placed_by"]}
+                       for n in now if "circle" in n), None)
+    if (circle_then or {}).get("text") and circle_now != {key: circle_then.get(key) for key in (
+            "name", "text", "text_author", "placed_by")}:
+        typed["circle_at_event"] = circle_then
     typed["event"] = lean_event(typed["event"], str(typed.get("message_text") or ""))
     return {**{key: value for key, value in row.items() if key != "content"},
             "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance", **typed,

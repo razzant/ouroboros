@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import {
-    AUTONOMY_LEVELS, PLACE_STATES, SAFETY_LEVELS, SILENT_CARD, durationText, placeStatusText, usdText, wakesForText,
+    AUTONOMY_LEVELS, PLACE_STATES, SAFETY_LEVELS, SILENT_CARD, durationText, usdText,
 } from '../modules/consciousness_words.js';
 import {
     SAFETY_MODEL_KEYS, connectPlace, markRecheckRow, normalizeConsciousness, normalizePlacesResponse, parseRoster,
@@ -19,7 +19,7 @@ import {
 } from '../modules/settings_safety.js';
 import { chooseRecheckRow, recheckDraft, recheckMarkHtml, syncRecheckState } from '../modules/safety_recheck.js';
 import {
-    bindConsciousnessSettings, consciousnessModelText, consciousnessSectionHtml, migrationProblemLines, settingsPlacesHtml,
+    bindConsciousnessSettings, consciousnessModelText, consciousnessSectionHtml,
 } from '../modules/settings_consciousness.js';
 import { parseAvailableSubagentsSetting, buildAvailableSubagentsSetting } from '../modules/subagents_settings.js';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
@@ -51,13 +51,7 @@ test('the owner names stand with their notes; stored values never change', () =>
     assert.equal(SAFETY_LEVELS[1].note, 'A second model checks steps that reach other people and services: messages, posts, skills, connectors, starting work. Not shell commands.');
 });
 
-test('a place row says its state, what wakes it and what waits; absent money is the dash', () => {
-    const { places } = normalizePlacesResponse(FIXTURE.places);
-    assert.equal(placeStatusText(places[0]), 'active · wakes for direct messages, mentions and replies · 2 open turns');
-    assert.equal(placeStatusText(places[1]), 'silent · wakes for mentions', 'a Silent place still wakes for its list');
-    assert.equal(placeStatusText(places[2]), 'paused', 'a Paused place says only its state');
-    assert.equal(placeStatusText({ state: 'gone' }), 'state unknown');
-    assert.equal(wakesForText([]), '');
+test('absent money is the dash; a known zero and a known amount are said; durations need both ends', () => {
     assert.equal(usdText(null), '—');
     assert.equal(usdText(0), '$0.00');
     assert.equal(usdText(0.88), '$0.88');
@@ -492,82 +486,28 @@ test('Consciousness: Advises · Acts · Evolves with notes, the allowance and ta
     }
     assert.match(html, /<details class="consciousness-more"[^>]*>\s*<summary>.*More<\/summary>/s);
     assert.match(html, />Concurrent conversations</);
-    assert.match(html, />Connect a place</);
+    assert.match(html, /The places it lives in, their words and their circles: <button[^>]*data-circles-open>Circles ›<\/button>/);
+    assert.doesNotMatch(html, /Connect a place|data-place-list|data-place-open/, 'the places are listed once, on Circles');
     assert.equal(consciousnessModelText({}), 'Uses Main');
     assert.equal(consciousnessModelText({ OUROBOROS_MODEL_CONSCIOUSNESS: 'openai::gpt-5.6' }), 'gpt-5.6');
 });
 
-test('the Settings places list: icon, authored label, state word, open turns, readiness; each row opens its sheet', () => {
-    const { places } = normalizePlacesResponse(FIXTURE.places);
-    const html = settingsPlacesHtml({ places });
-    assert.equal((html.match(/data-place-open=/g) || []).length, 3);
-    assert.match(html, /<span class="consciousness-place-name" data-i18n-authored>Slack · Acme<\/span>\s*<span class="consciousness-place-facts">active · 2 open turns · Connector on<\/span>/);
-    assert.doesNotMatch(html, /aria-label="[^"]*Mail · inbox/, 'authored names stay in the protected visible label');
-    assert.match(settingsPlacesHtml({ places: [] }), /No place yet\. Connect one from an installed connector\./);
-    assert.match(settingsPlacesHtml({ error: 'Places could not be read: HTTP 404' }), /data-tone="warn"/);
-});
-
-test('an old connection the places migration could not move is said once, in Settings › Consciousness › Places', () => {
-    assert.deepEqual(normalizePlacesResponse(FIXTURE.places).migrationProblems, [], 'a server without the migration says nothing');
-    const { places, migrationProblems } = normalizePlacesResponse({ ...FIXTURE.places, migration_problems: [
-        { binding_id: 'b-1', code: 'connector_missing', detail: 'the connector telegram-bot is not installed.' },
-        { binding_id: 'b-2', code: 'connector_missing', detail: 'the connector telegram-bot is not installed' },
-        { binding_id: 'b-3', code: 'binding_unreadable', detail: '' },
-        { binding_id: '', code: '', detail: '' },
-    ] });
-    assert.deepEqual(migrationProblemLines(migrationProblems), [
-        'Could not move an old connection: the connector telegram-bot is not installed. Connect it again.',
-        'Could not move an old connection: binding unreadable. Connect it again.',
-    ]);
-    const html = settingsPlacesHtml({ places, problems: migrationProblems });
-    assert.equal((html.match(/Could not move an old connection/g) || []).length, 2);
-    assert.match(html, /<p class="settings-inline-note" data-tone="warn">Could not move/);
-    assert.match(settingsPlacesHtml({ places: [], problems: migrationProblems }), /Connect it again\.<\/p><p class="settings-inline-note">No place yet/);
-});
-
-test('Settings reads Places when visible and after a change, including recovery from a failed read', async (t) => {
+test('Settings › Consciousness lists no places: its one link opens Circles and nothing is read', async (t) => {
     const { window } = setup(t);
     const root = new NodeStub();
-    root.innerHTML = '<section data-consciousness-places><div data-place-list></div></section>';
+    root.innerHTML = consciousnessSectionHtml();
     root.dataset.activeSettingsTab = 'behavior';
-    const state = { activePage: 'chat' };
-    let reads = 0;
-    const dispose = bindConsciousnessSettings(root, { state, read: async () => {
-        if (++reads === 1) throw new Error('offline');
-        return normalizePlacesResponse(FIXTURE.places);
-    } });
-    const settled = () => new Promise((resolve) => setImmediate(resolve));
-    await settled();
-    assert.equal(reads, 0, 'no boot read while Settings is hidden');
-    state.activePage = 'settings';
+    const opened = [];
+    window.addEventListener('ouro:open-circles', (event) => opened.push(event.detail));
+    const dispose = bindConsciousnessSettings(root);
     window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
-    await settled();
-    assert.equal(reads, 1);
-    assert.match(root.textContent, /Places could not be read: offline/);
     window.dispatchEvent(new CustomEvent('ouro:places-changed'));
-    await settled();
-    assert.equal(reads, 2);
-    assert.match(root.textContent, /Slack · Acme/);
-    assert.match(root.textContent, /Connector on/);
-    assert.doesNotMatch(root.textContent, /offline/);
+    await new Promise((resolve) => setImmediate(resolve));
+    const link = root.querySelector('[data-circles-open]');
+    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-places]');  // where the listener is
+    await section.fire('click', { target: link });
+    assert.deepEqual(opened, [{}], 'the Circles page is asked to show itself');
     dispose();
-    window.dispatchEvent(new CustomEvent('ouro:places-changed'));
-    await settled();
-    assert.equal(reads, 2);
-});
-
-test('Settings reads Places on mount only in the visible Behavior tab', async (t) => {
-    setup(t);
-    for (const tab of ['behavior', 'models']) {
-        const root = new NodeStub();
-        root.innerHTML = '<section data-consciousness-places><div data-place-list></div></section>';
-        root.dataset.activeSettingsTab = tab;
-        let reads = 0;
-        const dispose = bindConsciousnessSettings(root, { state: { activePage: 'settings' }, read: async () => {
-            reads++; return normalizePlacesResponse(FIXTURE.places);
-        } });
-        await new Promise(resolve => setImmediate(resolve));
-        assert.equal(reads, tab === 'behavior' ? 1 : 0);
-        dispose();
-    }
+    await section.fire('click', { target: link });
+    assert.equal(opened.length, 1, 'the disposer unbinds the link');
 });

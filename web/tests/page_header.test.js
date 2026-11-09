@@ -229,6 +229,24 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         // A header with nothing of its own to place (Widgets) binds nothing.
         assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
         assert.equal(listeners.size, 0);
+        // A bar whose one action is already in it (Circles): nothing moves, yet on a desk it lays out as the band of
+        // every named page, and goes back to the base header in the stack layout.
+        const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
+        barOnly.clientWidth = 900;
+        let barReleased = false;
+        doc.defaultView = { ResizeObserver: class {
+            observe(target) { assert.equal(target, barOnly); }
+            disconnect() { barReleased = true; }
+        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
+        const offBar = bindPageHeader(barOnly);
+        assert.ok(barOnly.attrs.has('data-lead'), 'a desk: the desk band');
+        layout('stack');
+        assert.ok(!barOnly.attrs.has('data-lead'), 'the stack layout: the base header');
+        layout('docked');
+        assert.ok(barOnly.attrs.has('data-lead'));
+        offBar();
+        assert.ok(barReleased, 'its disposer releases the observer it took');
+        assert.equal(listeners.size, 0);
     } finally { delete globalThis.window; delete globalThis.document; }
 });
 

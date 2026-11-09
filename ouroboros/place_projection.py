@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from ouroboros.places import (STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place, load_places, place_summary,
-                              note_identity, migration_problems)
+from ouroboros.places import (AUTHOR_OWNER, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place, place_records,
+                              place_summary, note_identity, migration_problems)
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,9 @@ def place_declarations(root) -> list[dict]:
     return rows
 
 
-def connect_declared_place(root, connector: str, *, account_id: str = "", conversation_id: str = "", label: str = ""):
+def connect_declared_place(root, connector: str, *, account_id: str = "", conversation_id: str = "", label: str = "",
+                           first=None, author: str = AUTHOR_OWNER):
+    """Connect from the installed declaration; ``first`` is what an Add says about the new place (``places.connect_place``)."""
     if not isinstance(label, str):
         raise PlaceError("place_invalid_string", "label")
     declarations = [row for row in place_declarations(root) if row["skill"] == connector]
@@ -57,7 +59,7 @@ def connect_declared_place(root, connector: str, *, account_id: str = "", conver
     title = given if named else f"{word} · {given}" if given else word
     return connect_place(root, connector=connector, provider=provider, label=title, state=STATE_SILENT,
                          account_id=account_id, conversation_id=conversation_id, scope=row.get("scope", "account"),
-                         contribution_id=row["id"], wakes=row.get("wakes", []))
+                         contribution_id=row["id"], wakes=row.get("wakes", []), first=first, author=author)
 
 
 def said_once(label: str) -> str:
@@ -67,17 +69,24 @@ def said_once(label: str) -> str:
 
 
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
-               brief: bool = False, places: list | None = None) -> dict[str, Any]:
-    """Stored facts for status/launch; the owner surface also resolves connector capabilities."""
+               brief: bool = False, records=None) -> dict[str, Any]:
+    """Stored facts for status/launch; the owner surface also resolves connector capabilities. ``records`` is one
+    ``places.place_records`` read shared by a list; its circle and description facts join the place here, the
+    circle's words only in a brief view (the list names them once, ``places_view``)."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import account_candidates
     from ouroboros.places import place_room_index
     if allowance is None and not brief:
         allowance = allowance_window(root, allow_stale=True)
+    records = place_records(root) if records is None else records
     result = dict(place_summary(place))
     # Legacy notes predate ids; use stable content+ordinal ids without rewriting history.
     result["notes"] = [{**n, "note_id": note_identity(place.place_id, i, place.notes[i])}
                        for i, n in enumerate(result["notes"])]
+    circle = records.circle_context(place.place_id)
+    result["circle"] = circle if brief or circle is None else {
+        key: circle[key] for key in ("circle_id", "placed_by", "placed_at")}
+    result["description"] = records.description(place.place_id)
     cause = "place:" + place.place_id
     spend = next((item.get("usd") for item in (allowance or {}).get("spend_by_cause") or []
                   if item.get("cause") == cause), None)
@@ -116,22 +125,30 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     result["shared_owner_accounts"] = [
         {**{key: getattr(account, key) for key in ("platform_actor_id", "label", "confirmed_at", "account_id")},
          "place_id": other.place_id, "place_label": said_once(other.label or other.provider)}
-        for other, account in confirmed_elsewhere(load_places(root) if places is None else places, place)
+        for other, account in confirmed_elsewhere(records.places.values(), place)
         if not account.account_id or place.account_id in ("", "*", account.account_id)]
     return result
 
 
+def circle_summary(circle) -> dict[str, Any]:
+    """A circle once, with its whole words and who wrote them; its places name it by ``circle.circle_id``."""
+    return {key: circle[key] for key in ("circle_id", "name", "text", "text_author", "text_at", "revision")}
+
+
 def places_view(root) -> dict:
     declarations = place_declarations(root)
-    places = load_places(root)
+    records = place_records(root)
     from ouroboros.consciousness_allowance import allowance_window
     allowance = allowance_window(root, allow_stale=True) or {}
-    return {"migration_problems": migration_problems(root), "places": [place_view(root, p, declarations=declarations, allowance=allowance, places=places) for p in places],
+    return {"migration_problems": migration_problems(root),
+            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records)
+                       for p in records.places.values()],
+            "circles": [circle_summary(circle) for circle in records.circles],
             "connectors": [{"connector": r["skill"],
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],
                             "readiness": r.get("readiness") or {"text": "Connector unavailable", "tone": "warn"},
                             **{key: r[key] for key in ("facts", "source", "settings", "labels") if key in r},
-                            "wakes": r.get("wakes") or [], "connected": any(p.connector == r["skill"] for p in places)}
+                            "wakes": r.get("wakes") or [], "connected": any(p.connector == r["skill"] for p in records.places.values())}
                            for r in declarations]}
 
 
