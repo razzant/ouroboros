@@ -147,19 +147,20 @@ def timeout_dispatch_candidate(
 
 
 def bound_dispatch_candidate(
-    ctx: ToolContext, name: str,
+    ctx: ToolContext, name: str, *, consume: bool = True,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
-    """Consume this call's timeout-time resolution, or resolve fresh without one.
+    """Read this call's timeout-time resolution; the dispatcher resolves fresh without one.
 
-    The binding is taken once and only for the same tool context and name. The
+    By default the dispatcher takes the binding once; a pre-dispatch observation
+    uses ``consume=False`` without spending it or resolving an absent binding. Both require the same context and name. The
     physical dispatcher still observes liveness itself, so a revocation that
     lands after the timeout was chosen refuses before the handler runs.
     """
     slot = _CALL_RESOLUTION.get()
-    bound = slot.pop("bound", None) if slot is not None else None
+    bound = (slot.pop("bound", None) if consume else slot.get("bound")) if slot is not None else None
     if bound is not None and bound[0] is ctx and bound[1] == name:
         return bound[2]
-    return _extension_dispatch_candidate(ctx, name)
+    return _extension_dispatch_candidate(ctx, name) if consume else (None, False)
 
 
 def _dispatch_mcp_tool_result(
