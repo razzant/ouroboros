@@ -56,7 +56,7 @@ from ouroboros.server_process import (  # noqa: F401
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
-    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs,
+    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs, raise_open_file_limit,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -1445,6 +1445,7 @@ def main() -> int:
             return 2
     # Sole server.log writer; tests on the real default data root retain only the stream handler.
     configure_process_logging(drive_logs=None if _pytest_default_real_data_dir else DATA_DIR / "logs")
+    raise_open_file_limit()  # the body follows each live run on its own transport: hundreds of runs are hundreds of files
     if not _pytest_default_real_data_dir:  # a pending Panic sweep ends and the installation marker is planted before any child (§9)
         process_scope.initialize_installation_scope(DATA_DIR)
     if not automatic_launch_allowed(os.environ.get("OUROBOROS_LAUNCH_INTENT", "owner"), DATA_DIR, log):

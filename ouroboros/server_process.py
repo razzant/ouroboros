@@ -109,6 +109,25 @@ def record_applied_restart_settings(values: dict, *, server_host_source: str | N
             _applied_server_host_source = server_host_source or "unknown"
 
 
+def raise_open_file_limit() -> None:
+    """At startup the soft limit of open files rises to the hard one (POSIX; macOS takes ``min(OPEN_MAX, hard)``, as
+    its setrlimit(2) asks): the body follows each live run on its own transport, and a GUI-launched macOS process
+    starts at 256. The result is logged; there is no setting."""
+    try:
+        import resource
+    except ImportError:
+        return  # Windows: no POSIX file limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(hard, 10240) if sys.platform == "darwin" else hard
+    if soft != resource.RLIM_INFINITY and (target == resource.RLIM_INFINITY or target > soft):
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except (ValueError, OSError) as exc:
+            log.info("Open-file limit not raised to %s: %s", target, exc)
+    log.info("Open-file limit %s (hard %s)", soft, hard)
+
+
 def applied_restart_settings() -> dict:
     """Return process facts without deriving them from mutable saved intent."""
     with _applied_settings_lock:
