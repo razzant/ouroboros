@@ -23,11 +23,12 @@ does with the affordance is a separate, parent-owned live probe.
   when a participant addresses it to P).
 * S29 — SESSION, SAME RUN, TWO QUESTIONS. P starts one `[FAKE:TURN]` run that pauses
   on two sequential questions. P re-waits on the question it already saw — which is
-  the host's event-only sleep (`delegate_supervision.supervised_wait`): nothing wakes
-  the model until a meaningful event — and a native child C's original, held back
-  until the custody trail shows P parked there, IS that event: the addressed-message
-  wake carries the window payload's `continuation: same_session` plus C's exact text
-  under C's peer relation (`parent`). P relays it BYTE-EXACT through
+  a sleep on the run (`delegate_supervision.run_wait`): nothing wakes the model until
+  a meaningful event — and a native child C's original, held back until the custody
+  trail shows P's re-wait entered, IS that event: the sleep's notice names C's mail as
+  what woke it, C's exact text reaches P's next request at its round top under C's
+  peer relation (`parent`), and the re-wait's wake, owed to that request, carries the
+  run's `continuation: same_session`. P relays it BYTE-EXACT through
   `delegate_answer(free_text=...)`, the run resumes in the SAME session (a new
   interaction id, the same run id), P answers the second question with its own
   original, and the run's terminal echoes both originals with their sha256. The
@@ -611,8 +612,8 @@ _C_ORIGINAL_RE = re.compile(r"(C_ORIGINAL_BEGIN [0-9a-f]{10}\n.*?\nC_ORIGINAL_EN
 # The addressed-message wake event as rendered into the parked nanny's transcript: a
 # flat JSON object (indent=2), so the exact text rides JSON-escaped and is decoded back.
 _WAKE_EVENT_RE = re.compile(r'\{\s*"type": "addressed_message".*?\}', re.S)
-# C holds its original back until the custody trail shows P parked in its re-wait, so
-# the original is the EVENT that wakes the parked nanny (S29's point): an observed
+# C holds its original back until the custody trail shows P's re-wait entered, so
+# the original is the EVENT that wakes the sleeping nanny (S29's point): an observed
 # fact, not a sleep guess (a 45 s delay lost the ordering on a slow runner). Each
 # hold is a short await_messages window nothing addresses, re-polled until the
 # observation holds — bounded, so a parent that never parks fails by name.
@@ -622,8 +623,8 @@ _C_HOLD_ROUNDS_MAX = 40
 
 def _c_original_in(text: str) -> tuple[str, str]:
     """``(source_task_id, exact original)`` of C's contribution as the parent's model
-    saw it: injected at a round top under its peer prefix, or carried by the
-    supervised wait's addressed-message event (JSON-escaped). ``("", "")`` if absent."""
+    saw it: injected at a round top under its peer prefix, or carried by a wake's
+    addressed-message event (JSON-escaped). ``("", "")`` if absent."""
     match = re.search(_CHILD_PREFIX_RE.pattern + _C_ORIGINAL_RE.pattern, text, re.S)
     if match:
         return match.group(1), match.group(2)
@@ -734,7 +735,6 @@ def test_s29_session_run_resumes_twice_with_exact_relayed_originals_and_codex_tw
         daemon.install(data_root / "claudexor")
         settings = keyless_settings(
             model, OUROBOROS_SUBAGENTS=_roster(_SCOUT_ROW, _peer_row("peer-c")),
-            OUROBOROS_DELEGATE_WAIT_SEC=5,  # the re-wait returns its window payload quickly
             **_isolation_settings(pathlib.Path(root)))
         server = start_server(e2e_clone, root, settings)
         try:
@@ -742,10 +742,10 @@ def test_s29_session_run_resumes_twice_with_exact_relayed_originals_and_codex_tw
             parent_id, _chat = _room_task(server, "Run one session through two addressed turns, then a new run.", f"w7-s29-{n['pf']}")
 
             def p_entered_rewait() -> list:
-                """P's supervised waits so far, from the custody rows ``supervised_wait``
-                appends SYNCHRONOUSLY before its first quiet window: the second one is the
-                re-wait (the first is round 3's immediate waiting_on_user wait), so a message
-                C writes once two exist is a WAKE of the parked wait, never a round-top drain."""
+                """P's delegate_wait calls so far, from the custody rows ``run_wait`` appends
+                SYNCHRONOUSLY as each one answers or arms its sleep: the second one is the
+                re-wait (the first is round 3's waiting_on_user wait), so a message C writes
+                once two exist is what wakes the re-wait's sleep."""
                 return [row for row in oracle.events("delegate_supervision_wait_entered")
                         if str(row.get("task_id") or "") == parent_id]
 
@@ -813,11 +813,13 @@ def test_s29_session_run_resumes_twice_with_exact_relayed_originals_and_codex_tw
             assert all(payload.get("continuation_note") for payload in waiting)
             assert not any("contribution" in json.dumps(payload) for payload in turn_wakes)
             [rewait] = rewaits
-            events_in_wake = rewait.get("wake_events") or []
-            assert any(e.get("type") == "addressed_message" and e.get("source_task_id") == c_id
-                       and e.get("provenance") == "peer_task" and e.get("relation") == "parent"
-                       and e.get("text") == n["c_original"]
-                       for e in events_in_wake), "C's original did not arrive as the parked re-wait's wake"
+            # The re-wait's wake is published at P's next request, after its round top drained C's
+            # original (#2992 contract S1): the wake repeats no addressed message, the original reached
+            # P there under C's peer relation, and the sleep's notice names C's mail as its waker.
+            assert not any(e.get("type") == "addressed_message" for e in rewait.get("wake_events") or [])
+            p_text = "\n".join(body_text(body) for kind, body in model.calls if _s6_slot_binder(body) == "mock-model|tools")
+            assert _c_original_in(p_text) == (c_id, n["c_original"]), "C's original did not reach P's model"
+            assert f"were woken by mail from {c_id}" in p_text, "C's original did not wake the sleeping re-wait"
             inreq_rid = next(rid for rid, run in daemon.runs.items() if FAKE_INPUT_REQUIRED_MARKER in run["body"]["prompt"])
             inreq_terminal = [row["payload"] for row in wakes if str(row.get("run_id") or "") == inreq_rid][-1]
             assert inreq_terminal.get("status") == "terminal" and inreq_terminal.get("continuation") == "new_physical_run", inreq_terminal
@@ -825,7 +827,6 @@ def test_s29_session_run_resumes_twice_with_exact_relayed_originals_and_codex_tw
             # The tools.jsonl trail names every wait; the transcript the stub saw holds the full
             # results, so the fact is countable there too (2 immediate + 1 re-wait wake).
             assert len(_tool_rows(p_drive, "delegate_wait")) == 6
-            p_text = "\n".join(body_text(body) for kind, body in model.calls if _s6_slot_binder(body) == "mock-model|tools")
             assert p_text.count('"continuation": "same_session"') >= 3
             assert '"continuation": "new_physical_run"' in p_text and "input_required_note" in p_text
 

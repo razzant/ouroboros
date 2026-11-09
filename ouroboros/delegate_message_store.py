@@ -161,3 +161,50 @@ def journal(ctx: Any, run_id: str) -> list:
     return [{key: value for key, value in row.items() if key not in {"wire_text", "wire_sha256"}}
             for row in rows.values() if row.get("starter_task_id") == sender
             and row.get("frame", {}).get("source_task_id") != sender]
+
+
+def starter(root: Any, run: Any) -> Any:
+    """The run's starter as a placer context (the host's, the body's): its frames name it."""
+    from types import SimpleNamespace
+
+    from ouroboros.task_status import load_effective_task_result
+
+    meta = (load_effective_task_result(root, run.task_id) or {}).get("metadata")
+    return SimpleNamespace(drive_root=root, task_id=run.task_id, task_metadata={
+        **(meta if isinstance(meta, dict) else {}), "budget_drive_root": str(root)})
+
+
+def pending_frames(ctx: Any, run_id: str) -> list:
+    """The last frame of each of my human's rows in ``run_id`` that may still need sending (``PLACEMENT_REPLAYS``)."""
+    last = {str(row["frame"]["owner_words"].get("address") or ""): row for row in placed_words(ctx, run_id)}
+    return [row for row in last.values() if row.get("outcome") in PLACEMENT_REPLAYS]
+
+
+def replay_frames(root: Any, run: Any) -> bool:
+    """The body's send of my human's frames still pending for one run it observes: each replayed under its id
+    and bytes (``delegate_interactions._post_live_message``), its outcome recorded as the starter's round-top
+    catch-up records it, idempotent with it. True when none stays pending. Never raises."""
+    import logging
+    import time
+
+    from ouroboros.delegate_interactions import (_ANSWER_HANDSHAKE_MAX_SEC, _MESSAGE_DEADLINE_SEC, _message_result,
+                                                 _post_live_message)
+    from ouroboros.delegate_progress import poll_bound
+    from ouroboros.gateways.claudexor import ClaudexorGateway
+
+    try:
+        ctx = starter(root, run)
+        if pending := pending_frames(ctx, run.run_id):
+            deadline, gateway = time.monotonic() + _MESSAGE_DEADLINE_SEC, ClaudexorGateway()
+            try:
+                gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+                for row in pending:
+                    verdict, _body = _post_live_message(gateway, run.run_id, row, lambda: deadline - time.monotonic())
+                    _message_result(ctx, {"run_id": run.run_id, "message_id": row["frame"]["message_id"],
+                                          "text_chars": len(row["text"]), "frame": row["frame"]}, **verdict)
+            finally:
+                gateway.close()
+        return not pending_frames(ctx, run.run_id)
+    except Exception:  # noqa: BLE001 — what it could not send waits for its next answered pass or the round top
+        logging.getLogger(__name__).warning("owner words replay into run %s waits", run.run_id, exc_info=True)
+        return False

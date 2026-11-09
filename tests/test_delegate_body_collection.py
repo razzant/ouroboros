@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._delegate_capture_child import capture_child  # noqa: F401
+from tests._run_wait_shared import wake_now
 
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody as custody
@@ -157,7 +158,7 @@ def test_foreground_supervision_joins_collection_without_a_model_wake(tmp_path, 
         observations.append(payload)
         return json.dumps(payload)
     try:
-        result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=observed)
+        result = wake_now(ctx, entry.run_id, wait_once=observed)
     finally:
         if fd is not None:
             release_exclusive_file_lock(path, fd)
@@ -171,11 +172,11 @@ def test_foreground_supervision_wakes_on_terminal_custody_without_a_collector(tm
     from ouroboros import delegate_supervision
     from ouroboros.tools.registry import ToolContext
 
-    entry = started(tmp_path)
-    assert body.observe_run(tmp_path, entry, terminal())
+    entry = started(tmp_path)  # the body saw the run end before its output was retained here
+    assert body.observe_run(tmp_path, entry, {"summary": {"runId": entry.run_id, "state": "succeeded"}, "lastSeq": 4})
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     monkeypatch.setattr(delegate_supervision, "_leaf_live_input", lambda *args: "unknown")
-    result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=lambda *_a, **_k:
+    result = wake_now(ctx, entry.run_id, wait_once=lambda *_a, **_k:
         json.dumps({"status": "no_progress", "run_id": entry.run_id}))
     payload = json.loads(result.text)
     assert payload["status"] == "terminal_custody"
@@ -218,7 +219,7 @@ def test_foreground_supervision_returns_review_collection_refusal(tmp_path, monk
         fd = acquire_exclusive_file_lock(lock, timeout_sec=0)
         assert fd is not None
     try:
-        result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=observed)
+        result = wake_now(ctx, entry.run_id, wait_once=observed)
     finally:
         if fd is not None:
             release_exclusive_file_lock(lock, fd)

@@ -308,3 +308,60 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     entry = _mail(tmp_path, "root-b-helper")[f"relay:carry:{main_address}:root-b-helper"]
     assert entry["host_carried"] == {"went_to": ""} and entry["owner_rows"][0]["text"] == main_row["text"]
     assert entry["source_task_id"] == "root-b"
+
+
+def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_once_the_engine_answers(
+        tmp_path, monkeypatch):
+    """An engine that cannot be discovered at receipt sends nothing: the host writes the frames ahead (``prepared``,
+    untold) and owes them to the body of its process, which sends them on its own observation pass once the engine
+    answers the run again, one frame per row and run, with no timer of its own. The starter's round top stays the
+    idempotent catch-up: it sends nothing the body ended and tells the outcome once."""
+    import time
+
+    from ouroboros import delegate_collection, delegate_custody_current as current
+    from ouroboros import delegate_message_store as frames, delegate_supervision
+    from ouroboros.gateways import claudexor as gw
+
+    row, address = _tree(tmp_path)
+
+    class Engine:  # the body's observing transport: every held run answers that it runs
+        def get_run(self, run_id, timeout_sec=None):
+            return {"summary": {"runId": run_id, "state": "running", "effectiveAccess": "readonly"}, "lastSeq": 1,
+                    "pendingInteractions": []}
+
+        def close(self):
+            pass
+
+    def undiscovered(*_a, **_k):
+        raise gw.ClaudexorUnavailable("daemon_not_discovered", "no descriptor")
+
+    def written(run_id):
+        return [(f["outcome"], f.get("untold")) for f in frames.placed_words(
+            frames.starter(tmp_path, current.run(tmp_path, run_id)), run_id)]
+
+    def until(predicate):
+        deadline = time.monotonic() + 10
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return predicate()
+
+    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)  # the body's pass, quickened
+    monkeypatch.setattr(gw, "ClaudexorGateway", undiscovered)
+    runtime = delegate_collection.start_body_runtime(tmp_path, gateway_factory=Engine)
+    try:
+        _receive(tmp_path)
+        assert written("run-live") == written("run-root") == [("prepared", True)], "written ahead, nothing sent"
+        assert written("run-review") == written("run-foreign") == []
+        assert until(lambda: runtime.observation("run-live").get("answered")) and {"run-live", "run-root"} <= runtime.feed.owed
+        stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+        assert until(lambda: not {"run-live", "run-root"} & runtime.feed.owed), "the body sends what receipt could not"
+    finally:
+        delegate_collection.stop_body_runtime(tmp_path, wait=True)
+    posted = {(run, addr, line) for run, _key, addr, line in _posts(stub)}
+    assert {("run-live", address, row["text"]), ("run-root", address, row["text"])} <= posted
+    assert written("run-live") == written("run-root") == [("delivered", True)], "one frame each, ended, untold"
+    sent = len(stub.posts)
+    nanny, messages = _nanny(tmp_path), [{"role": "user", "content": "your assignment"}]
+    _round_top(nanny, messages)
+    assert len(stub.posts) == sent, "the round top sends nothing the body ended"
+    assert _said(messages).count(f"[Host fact: my human's row {address} for session run run-live: delivered]") == 1

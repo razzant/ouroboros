@@ -108,8 +108,6 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SUBAGENTS | "" | Configured-subagent roster (`configured_subagents.py`; §6 Delegated subagents) |
 | OUROBOROS_SUBAGENT_HARNESS | "" | Narrow harness input, read for migration |
 | OUROBOROS_SUBAGENT_PROFILE | "" | Narrow profile input, read for migration |
-| OUROBOROS_DELEGATE_WAIT_SEC | 120 | Default `delegate_wait` window |
-| OUROBOROS_DELEGATE_WAIT_MAX_SEC | 1800 | `delegate_wait` ceiling |
 | OUROBOROS_DELIVERABLES_ROOT | "" | Deliverables root (empty: basis default; `tool_access.py`) |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |

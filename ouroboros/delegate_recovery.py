@@ -943,7 +943,8 @@ def prepare_planned_restart_handoffs(
     restart_transaction_id: str = "",
     additional_task_ids: Optional[set[str]] = None,
 ) -> set[str]:
-    """Reserve only exact tasks durably in event-only supervising sleep."""
+    """Reserve only exact tasks with an unacknowledged wake or a deferred holder (``sleeping`` is the retired
+    supervising tick's status, read tolerantly; a nanny asleep on its runs returns through its own sleep)."""
 
     transaction_id = str(restart_transaction_id or uuid.uuid4().hex)
     preserved: set[str] = set(additional_task_ids or ())

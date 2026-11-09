@@ -520,9 +520,10 @@ def _settle(tmp_path, run_id="run-1", task_id="root", engine=None, **fields):
 
 
 def _terminal_wake(ctx, run_id="run-1", status="terminal"):
-    from ouroboros.delegate_supervision import supervised_wait
+    """The wake a delegate_wait on ``run_id`` publishes, its one read answering ``status``."""
+    from tests._run_wait_shared import wake_now
 
-    return supervised_wait(ctx, run_id, wait_once=lambda *_a: json.dumps({
+    return wake_now(ctx, run_id, wait_once=lambda *_a: json.dumps({
         "status": status, "run_id": run_id, "state": "interrupted", "last_seq": 9}))
 
 

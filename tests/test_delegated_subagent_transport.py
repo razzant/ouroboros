@@ -540,13 +540,15 @@ def test_settlement_follows_the_ledger_and_the_registration_debt_survives(tmp_pa
 
 
 def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime():
-    """The model cannot request a fake return window; the host renews quiet windows."""
+    """The model cannot request a fake return window: delegate_wait is a sleep on runs, and its retired window
+    settings bind nothing any more."""
     import os
 
     from ouroboros.config import (
         DELEGATE_WAIT_CEILING_SEC,
         DELEGATE_WAIT_WINDOW_MAX_SEC,
-        get_delegate_wait_max_sec,
+        RETIRED_SETTING_KEYS,
+        SETTINGS_DEFAULTS,
     )
     from ouroboros.delegate_progress import EXTERNAL_WAIT_LEASE_CEILING_SEC
     from ouroboros.loop_tool_execution import _DEADLINE_CLAMPED_TOOLS, _PER_CALL_TIMEOUT_TOOLS
@@ -577,18 +579,9 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
     assert "delegate_wait" not in _PER_CALL_TIMEOUT_TOOLS
     assert "delegate_wait" not in _DEADLINE_CLAMPED_TOOLS
 
-    previous = os.environ.get("OUROBOROS_DELEGATE_WAIT_MAX_SEC")
-    os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = "7200"
-    try:
-        # The configurable max clamps to the hard window max — NOT to the
-        # ToolEntry timeout: raising the executor timeout must never silently
-        # widen the askable window.
-        assert get_delegate_wait_max_sec() == DELEGATE_WAIT_WINDOW_MAX_SEC
-    finally:
-        if previous is None:
-            os.environ.pop("OUROBOROS_DELEGATE_WAIT_MAX_SEC", None)
-        else:
-            os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = previous
+    for key in ("OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC"):
+        # No window to configure: the two keys are retired, never read and never offered.
+        assert key in RETIRED_SETTING_KEYS and key not in SETTINGS_DEFAULTS
 
 
 # ---------------------------------------------------------------------------

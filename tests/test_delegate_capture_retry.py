@@ -111,7 +111,7 @@ def test_body_collects_changed_terminal_but_unchanged_debt_does_not_poll(
     assert len(reads) == before and attempts == [debt, debt]
 
 
-@pytest.mark.parametrize("surface", ["delivery", "wait", "supervised_wait"])
+@pytest.mark.parametrize("surface", ["delivery", "wait", "run_wait"])
 def test_explicit_wait_retries_owed_money_with_retained_output(tmp_path, monkeypatch, surface):
     from ouroboros import delegate_supervision, usage_accounting
     from ouroboros.tools import delegate
@@ -135,7 +135,7 @@ def test_explicit_wait_retries_owed_money_with_retained_output(tmp_path, monkeyp
     elif surface == "wait":
         result = json.loads(delegate._delegate_wait(ctx, entry.run_id))
     else:
-        result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+        result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     final = current.run(tmp_path, entry.run_id)
     assert result["settlement"]["settled"] and final.settled and len(attempts) == 2
     assert final.output_source == first.output_source

@@ -891,6 +891,7 @@ class BodyRuntime:
                     self.collection_failures.pop(rid, None)
             watch, ready, compact, gateway = [], None, self._compact_wait, self._observing
         self.feed.refresh(held)  # who hears a run speak: one look at the queue, outside this body's lock
+        self.feed.place(self, held)  # my human's frames the receipt could not send, once the engine answers
         speech = journal_listed(gateway) is True
         for run in held.values():
             if not (run.observe or run.collect) or not self.active:

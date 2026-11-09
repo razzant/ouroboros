@@ -43,12 +43,10 @@ from ouroboros.utils import truncate_within_limit
 
 log = logging.getLogger(__name__)
 
-# Which interaction ids each run has ALREADY had returned as an immediate
-# `waiting_on_user` payload. Process-local by design: the durable fact is the
-# engine's own pending-interaction store, and the only cost of losing this memo
-# (worker restart) is one duplicate immediate return. Without it, a nanny that
-# deliberately escalated a question up the task hierarchy and re-waited would busy-loop —
-# every delegate_wait would return instantly with the same known question.
+# Which interaction ids each run has ALREADY had returned as a `waiting_on_user` payload, process-local:
+# the durable fact is the engine's own pending-interaction store, and losing this memo (a new process)
+# costs one duplicate return. Without it a nanny that escalated a question up the task hierarchy and
+# waited again would get the same known question back, whole, at every wake.
 _REPORTED_INTERACTIONS: Dict[str, frozenset] = {}
 _REPORTED_INTERACTIONS_MAX_KEYS = 128
 
@@ -1101,29 +1099,33 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
     path (``_message_result``). A replay (prior ``prepared``/``delivery_unknown``) always reaches the engine, its
     recorded bytes under its id; a new frame on a route with no live input, or an engine without the operation,
     records ``unsupported`` with no POST. An engine that cannot be discovered or reached, or a read that fails,
-    frames nothing: the next pass places. ``(address, verdict, prior outcome, frame row)`` per frame sent."""
+    sends nothing; the host's frames then wait ``prepared`` for the body (``delegate_message_store.replay_frames``).
+    ``(address, verdict, prior outcome, frame row)`` per frame sent."""
     from ouroboros.delegate_message_store import PLACEMENT_REPLAYS, place_frame
     from ouroboros.delegate_progress import poll_bound
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 
     deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
     sent: List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]] = []
+
+    def waits(why: str) -> list:
+        log.warning("owner words placement into run %s waits: %s", run.run_id, why, exc_info=True)
+        for address, quote, went in owed if host else ():
+            place_frame(ctx, run, *_placement_text(quote, address, went), host=True)  # ahead of the engine's answer
+        return sent
     try:  # a missing or unreadable daemon descriptor is the engine's absence this pass, never the task's end
         gateway = ClaudexorGateway()
     except ClaudexorUnavailable:
-        log.warning("owner words placement into run %s waits: engine not discovered", run.run_id, exc_info=True)
-        return sent
+        return waits("engine not discovered")
     try:
         try:
             gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
         except ClaudexorUnavailable:
-            log.warning("owner words placement into run %s waits: engine handshake failed", run.run_id, exc_info=True)
-            return sent
+            return waits("engine handshake failed")
         reason, detail, live_input = _live_input_unsupported(
             gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
         if reason in ("capability_read_failed", "deadline_exhausted"):
-            log.warning("owner words placement into run %s waits: %s (%s)", run.run_id, reason, detail)
-            return sent
+            return waits(f"{reason} ({detail})")
         for address, quote, went in owed:
             try:  # the frame is the write-ahead record: no frame, no POST
                 record, prior = place_frame(ctx, run, *_placement_text(quote, address, went), host=host)
@@ -1222,18 +1224,14 @@ def place_at_receipt(root: Any, work_id: str, rows: List[Tuple[Any, ...]]) -> Op
 
 
 def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...]]) -> None:
-    from types import SimpleNamespace
-
     from ouroboros.delegate_continuation import line_start_bodies
-    from ouroboros.delegate_message_store import PLACEMENT_ENDED, placed_words
+    from ouroboros.delegate_feed import owe_placement
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, pending_frames, placed_words, starter
     from ouroboros.owner_relay import stamped_refs
-    from ouroboros.task_status import load_effective_task_result
 
     for run in runs:
         try:
-            meta = (load_effective_task_result(root, run.task_id) or {}).get("metadata")
-            ctx = SimpleNamespace(drive_root=root, task_id=run.task_id, task_metadata={  # its frames name its starter
-                **(meta if isinstance(meta, dict) else {}), "budget_drive_root": str(root)})
+            ctx = starter(root, run)
             bodies = line_start_bodies(root, run.run_id)
             seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
             ended = {row["frame"]["owner_words"].get("address") for row in placed_words(ctx, run.run_id)
@@ -1241,5 +1239,7 @@ def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...
             if owed := [(address, quote, went) for identities, address, quote, went, _before in rows
                         if not identities & seen and address not in ended]:
                 _place_into_run(ctx, run, owed, host=True)
+            if pending_frames(ctx, run.run_id):  # the body sends them once the engine answers the run again
+                owe_placement(root, run.run_id)
         except Exception:  # noqa: BLE001 — a host thread: what it could not place waits for the next pass
             log.warning("owner words placement into run %s failed at receipt", run.run_id, exc_info=True)

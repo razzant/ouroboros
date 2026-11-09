@@ -1,4 +1,7 @@
-"""Focused contract tests for the sleeping configured-session wake rail."""
+"""Focused contract tests for the sleeping configured-session wake rail: what one published wake carries.
+
+``wake_now`` publishes the wake a ready ``delegate_wait`` publishes (its replay first), with only the one addressed
+read of the run scripted; the wait's own readiness is ``test_delegate_run_wait``'s."""
 
 from __future__ import annotations
 
@@ -9,9 +12,9 @@ from ouroboros import task_tree_ledger
 from ouroboros.delegate_supervision import (
     acknowledge_pending_wake,
     delegate_wait_entry,
-    supervised_wait,
 )
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+from tests._run_wait_shared import held_run, scripted_reads, wake_now
 from tests._shared import write_queue_document
 from tests._store_shared import unreadable_result
 
@@ -53,7 +56,7 @@ def test_sleeping_nanny_wakes_for_only_a_direct_child_beacon(tmp_path):
         ).startswith("OK:")
         return json.dumps({"status": "no_progress", "run_id": "run-1", "last_seq": 1})
 
-    wake = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+    wake = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
     assert wake["status"] == "no_progress"
     assert [event["type"] for event in wake["wake_events"]] == ["child_attention_beacon"]
     assert wake["wake_events"][0]["beacon"]["task_id"] == "child"
@@ -71,17 +74,11 @@ def test_child_terminal_transition_coalesces_with_leaf_wake_and_replays_until_ac
         write_task_result(tmp_path, "child", STATUS_COMPLETED, result="verified child artifact")
         return json.dumps({"status": "no_progress", "run_id": "run-1", "last_seq": 2})
 
-    first = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+    first = json.loads(wake_now(ctx, "run-1", wait_once=wait_once).text)
     terminal = next(event for event in first["wake_events"] if event["type"] == "child_terminal")
     assert terminal["child_task_id"] == "child"
     assert terminal["status"] == STATUS_COMPLETED
-    replay = json.loads(supervised_wait(
-        ctx,
-        "run-1",
-        wait_once=lambda *_args: (_ for _ in ()).throw(
-            AssertionError("the unacknowledged child wake must replay before polling the leaf")
-        ),
-    ).text)
+    replay = json.loads(wake_now(ctx, "run-1").text)  # replayed before the leaf is read (no read scripted)
     # #2992: a replay says it is one (no fresh observation); its wake facts are the published ones.
     assert replay.pop("replay_of")["fresh_observation"] is False and replay == first
     assert acknowledge_pending_wake(ctx, replay)
@@ -101,7 +98,7 @@ def test_physical_terminal_wake_is_not_mislabeled_as_coordination(tmp_path):
     from ouroboros import delegate_custody as custody
 
     ctx = _ctx(tmp_path)
-    wake = supervised_wait(
+    wake = wake_now(
         ctx,
         "run-physical",
         wait_once=lambda *_args: json.dumps({
@@ -178,7 +175,7 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
         "deadline_at": (now + timedelta(minutes=10)).isoformat(),
     })
 
-    raw = supervised_wait(
+    raw = wake_now(
         ctx,
         "run-live",
         wait_once=lambda *_args: json.dumps({
@@ -201,13 +198,7 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
     # The acceptance-cycle capacity left with the task-acceptance machine.
     assert "review_capacity" not in facts
 
-    replay = supervised_wait(
-        ctx,
-        "run-live",
-        wait_once=lambda *_args: (_ for _ in ()).throw(
-            AssertionError("pending live facts must replay without recomputation")
-        ),
-    )
+    replay = wake_now(ctx, "run-live")  # pending live facts replay without recomputation (no read scripted)
     shown = json.loads(replay.text)  # #2992: the recorded facts exactly, labelled as a replay
     assert shown.pop("replay_of")["fresh_observation"] is False
     assert (replay.status, replay.code, replay.meta, shown) == (raw.status, raw.code, raw.meta, json.loads(raw.text))
@@ -241,7 +232,7 @@ def test_child_terminal_before_first_sleep_is_not_lost_as_cursor_baseline(tmp_pa
         data_root=canonical,
     ).startswith("OK:")
 
-    wake = json.loads(supervised_wait(
+    wake = json.loads(wake_now(
         ctx,
         "run-1",
         wait_once=lambda *_args: json.dumps({
@@ -278,7 +269,7 @@ def test_oversized_coordination_wake_is_valid_bounded_json_with_exact_source(tmp
             task_id=child_id, data_root=tmp_path,
         ).startswith("OK:")
 
-    raw = supervised_wait(
+    raw = wake_now(
         ctx,
         "run-large",
         wait_once=lambda *_args: json.dumps({
@@ -299,7 +290,7 @@ def test_oversized_coordination_wake_is_valid_bounded_json_with_exact_source(tmp
     assert len(full["coordination_context"]["parent_intent"]["text"]) > 30_000
     assert acknowledge_pending_wake(ctx, raw.text)
 
-    after = json.loads(supervised_wait(
+    after = json.loads(wake_now(
         ctx,
         "run-large",
         wait_once=lambda *_args: json.dumps({
@@ -428,7 +419,7 @@ def test_delegate_wait_entry_never_acks_an_undelivered_pending_wake(tmp_path, mo
 
     _child(tmp_path, status=STATUS_COMPLETED)
     ctx = _ctx(tmp_path)
-    first = supervised_wait(
+    first = wake_now(
         ctx,
         "run-1",
         wait_once=lambda *_args: json.dumps({
@@ -451,14 +442,9 @@ def test_delegate_wait_entry_never_acks_an_undelivered_pending_wake(tmp_path, mo
                                                                json.loads(first.text))
 
 
-def test_supervision_loop_holds_one_handshaken_gateway_and_drops_it_on_a_failed_tick(
-    tmp_path, monkeypatch,
-):
-    """N quiet ticks = ONE handshake: the loop owns one transport and lends it to every
-    observing wait, which handshakes it once (``engine_version`` is the receipt). A tick
-    that returned no observation (an unresolved read here) drops and closes it, so the
-    next tick re-reads the descriptor and re-handshakes; the loop's ``finally`` closes
-    whatever it still holds. Drives the REAL observing wait over a fake gateway."""
+def test_a_publication_reads_through_one_handshaken_transport_and_closes_it(tmp_path, monkeypatch):
+    """A wake makes ONE addressed read of its run through one transport, handshaken once by that read (its
+    ``engine_version`` is the receipt) and closed after the publication; nothing keeps a loop's transport."""
     import ouroboros.delegate_custody as custody
     import ouroboros.delegate_supervision as supervision
     import ouroboros.tools.delegate as delegate
@@ -469,8 +455,7 @@ def test_supervision_loop_holds_one_handshaken_gateway_and_drops_it_on_a_failed_
     entry = delegate._RunCustody(task_id=ctx.task_id, route_id="fixture", model="fixture",
                                 project_id="fixture", project_owned=False, access="readonly")
     monkeypatch.setitem(custody._CUSTODY, "run-loop", entry)
-    monkeypatch.setattr(supervision.time, "sleep", lambda _sec: None)
-    ticks, gateways = [], []
+    gateways = []
 
     class _Gateway:
         def __init__(self):
@@ -490,56 +475,50 @@ def test_supervision_loop_holds_one_handshaken_gateway_and_drops_it_on_a_failed_
         def get_run(self, rid, *, timeout_sec=None):
             assert rid == "run-loop" and timeout_sec is not None
             self.reads += 1
-            ticks.append(len(gateways))
-            if len(ticks) == 4:
-                raise gateway_module.ClaudexorUnavailable(
-                    "daemon_unreachable", "ConnectError: [Errno 61]", observation_timeout=True)
             return {"lastSeq": 0, "summary": {"state": "running", "effectiveAccess": "readonly"}}
 
         def close(self):
             self.closed = True
 
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", _Gateway)
-    monkeypatch.setattr(supervision, "_control_wakes",
-                        lambda _ctx: [{"type": "deadline"}] if len(ticks) >= 6 else [])
-    wake = json.loads(supervision.supervised_wait(ctx, "run-loop").text)
-    assert wake["wake_events"] == [{"type": "deadline"}]
-    assert ticks == [1, 1, 1, 1, 2, 2], ticks
-    first, second = gateways
-    assert (first.handshakes, first.reads, first.closed) == (1, 4, True)
-    assert (second.handshakes, second.reads, second.closed) == (1, 2, True)
+    wake = json.loads(supervision._publish(ctx, {"runs": ["run-loop"]}, "mail:peer").text)
+    assert wake["run_id"] == "run-loop" and wake["supervision_wake_id"]
+    (gateway,) = gateways
+    assert (gateway.handshakes, gateway.reads, gateway.closed) == (1, 1, True)
 
 
-def test_the_empty_checkpoint_pair_asks_for_no_checkpoint(tmp_path):
+def test_the_empty_checkpoint_pair_asks_for_no_checkpoint(tmp_path, monkeypatch):
     """Models fill both optional keys with 0 and "" (six live refusals in one day): that
     pair is the schema's empty form. A genuinely half-filled pair is still refused, and
     the refusal names the half that is missing and echoes what it received."""
     _child(tmp_path)
     ctx = _ctx(tmp_path)
+    held_run(tmp_path, "run-1", "parent", ended="succeeded")
 
     def wait_once(_ctx, _run_id, _timeout, _cursor):
         return json.dumps({"status": "completed", "run_id": "run-1", "last_seq": 1})
 
-    wake = json.loads(supervised_wait(
-        ctx, "run-1", checkpoint_after_sec=0, checkpoint_reason="", wait_once=wait_once).text)
+    scripted_reads(monkeypatch, wait_once)
+    wake = json.loads(delegate_wait_entry(ctx, "run-1", checkpoint_after_sec=0, checkpoint_reason="").text)
     assert wake["status"] == "completed" and "error" not in wake
     assert wake["ignored_arguments"] == [
         "checkpoint_after_sec=0 ignored: with an empty checkpoint_reason it asks for no checkpoint"]
 
     for args, missing in (({"checkpoint_after_sec": 60}, "checkpoint_reason is missing"),
                           ({"checkpoint_reason": "look again"}, "checkpoint_after_sec is missing")):
-        result = supervised_wait(ctx, "run-1", wait_once=wait_once, **args)
+        result = delegate_wait_entry(ctx, "run-1", **args)
         assert result.status == "error" and result.code == "TOOL_ARG_ERROR"
         assert missing in result.text and "checkpoint_requires_time_and_reason" in result.text
 
-    # 0 seconds WITH a reason genuinely asks for an immediate inspection: on a fresh run
-    # (no pending wake to replay) the checkpoint is really scheduled with that reason.
-    from ouroboros.delegate_supervision import _load_state
-
+    # 0 seconds WITH a reason genuinely asks for an immediate inspection: on a quiet run (no pending wake to
+    # replay) the sleep is armed with that inspection time and its reason rides the owed wait.
     fresh_root = tmp_path / "fresh"
     fresh_root.mkdir()
     _child(fresh_root)
     fresh = _ctx(fresh_root)
-    asked = supervised_wait(fresh, "run-2", checkpoint_after_sec=0, checkpoint_reason="look", wait_once=wait_once)
+    fresh.owner_wait_callback = lambda *_a, **_k: "timeout"
+    held_run(fresh_root, "run-2", "parent")
+    asked = delegate_wait_entry(fresh, "run-2", checkpoint_after_sec=0, checkpoint_reason="look")
     assert asked.status == "ok" and "ignored_arguments" not in json.loads(asked.text)
-    assert (_load_state(fresh, "run-2").get("checkpoint") or {}).get("reason") == "look"
+    assert json.loads(asked.text)["reason"] == "sleep_armed" and fresh._model_sleep["wake_at"]
+    assert fresh._pending_task_wait["checkpoint"] == {"reason": "look", "after_sec": 1}

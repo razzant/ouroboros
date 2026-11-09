@@ -251,8 +251,6 @@ _MOVED_OWNERS = {
     "_clamped_number_setting": runtime_limits,
     # get_acceptance_reserve_pct / get_acceptance_review_est_sec left with the task-acceptance launch
     # floor (the review fold); their two keys are retired in settings_defaults.
-    "get_delegate_wait_max_sec": runtime_limits,
-    "get_delegate_wait_sec": runtime_limits,
     "get_llm_transport_read_timeout_sec": runtime_limits,
     "get_claudexor_quota_refresh_timeout_sec": runtime_limits,
     "get_claudexor_harness_install_timeout_sec": runtime_limits,

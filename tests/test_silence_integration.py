@@ -361,7 +361,8 @@ def test_real_late_wait_consumers_wake(attention, monkeypatch, mode):
             assert early["reason"] == "owner_mailbox_pending"
             return {"early_return": early, "tasks": {}, "elapsed_sec": 0}
         monkeypatch.setattr(control_task_results, "wait_for_effective_tasks", wait)
-        assert "interrupted by an unread message" in control_task_results._wait_for_task(ctx, "root", 30)
+        assert "interrupted by an unread message" in control_task_results._wait_for_task(
+            ctx, "root", 30, sleep_mode="in_slot")  # the named slot adapter; an unnamed mode sleeps (owner Q2=A)
     assert len(drain_owner_entries(attention.root, "parent")) == 1
     assert sum(t["id"].startswith("silence-") for t in queue.PENDING) == 1
     assert child in queue.PENDING

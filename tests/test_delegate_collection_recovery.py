@@ -106,7 +106,7 @@ def test_public_wait_delivers_verified_local_output_without_any_gateway(tmp_path
     body.collect_terminal(tmp_path, entry.run_id, detail=terminal())
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: pytest.fail("available output opened transport"))
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     assert result["status"] == "terminal" and result["primary_output"]["text"] == "complete answer"
     assert result["current_observation"]["status"] == "retained"
     assert not current.run(tmp_path, entry.run_id).output_consumed
@@ -114,8 +114,11 @@ def test_public_wait_delivers_verified_local_output_without_any_gateway(tmp_path
 
 @pytest.mark.parametrize("source", ["missing", "incomplete"])
 def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tmp_path, monkeypatch, money, source):  # noqa: F811
+    """Its run ended with an incomplete local source, or a wake for another reason (here its inspection time) finds
+    no local source at all: the wake reads the engine once."""
     from ouroboros import delegate_supervision
     from ouroboros.gateways import claudexor
+    from tests._run_wait_shared import publish
     entry = started(tmp_path)
     if source == "incomplete":
         detail = terminal()
@@ -133,7 +136,8 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
         def close(self): pass
     monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads((delegate_supervision.run_wait(ctx, entry.run_id) if source == "incomplete"
+                         else publish(ctx, entry.run_id, woke_by="timeout")).text)
     assert calls == [entry.run_id] and result["status"] == "terminal"
     assert result["output_delivery"]["complete"]
 
@@ -141,7 +145,6 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
 @pytest.mark.parametrize("kind", ["review", "ordinary", "retained_review"])
 def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, money, kind):  # noqa: F811
     """The public string ABI must keep the native failure, not just wake the model."""
-    from ouroboros import delegate_supervision
     from ouroboros.gateways import claudexor
     from ouroboros.tools import delegate
     from ouroboros.tools.tool_result import (
@@ -151,6 +154,8 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
     entry = started(tmp_path, source="review_substrate_commit" if kind != "ordinary" else "")
     if kind == "retained_review":
         assert body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), allow_review=True)["status"] == "collected"
+    else:  # the body saw the run end; its output is the engine's to give
+        assert body.observe_run(tmp_path, entry, {"summary": {"runId": entry.run_id, "state": "succeeded"}, "lastSeq": 1})
     calls, closed = [], []
 
     class Gateway:
@@ -165,7 +170,6 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
             closed.append(True)
 
     monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     tool = next(item for item in delegate.get_tools() if item.name == "delegate_wait")
     sentinel = object()
@@ -204,7 +208,7 @@ def test_ready_local_result_does_not_override_owner_control_or_foreign_authority
     assert retained_terminal_result(foreign, entry.run_id) is None
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
     monkeypatch.setattr(delegate_supervision, "_control_wakes", lambda _: [{"type": "cancellation_intent"}])
-    result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+    result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     assert result["status"] == "no_progress" and result["wake_events"] == [{"type": "cancellation_intent"}]
     assert not current.run(tmp_path, entry.run_id).output_consumed
 

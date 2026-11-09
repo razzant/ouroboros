@@ -1,10 +1,10 @@
 """What the body tells a held run's owner while the run works: its speech and the engine's reach.
 
-A delegated run used to speak to the owner only while its author sat in ``delegate_wait``: the
-supervising tick read the run's journal on every beat and pushed each record to the task's progress
-(``delegate_observe``), and only that tick told the owner the engine had stopped answering. The body
-(``delegate_collection.BodyRuntime``) observes every held run whoever waits, so both are its own here,
-one owner each (pool-capacity D3):
+A delegated run once spoke to the owner only while its author sat in ``delegate_wait``'s supervising
+tick, which alone told the owner the engine had stopped answering; that tick is gone (``delegate_wait``
+is a sleep on runs). The body (``delegate_collection.BodyRuntime``) observes every held run whoever
+waits, so both are its own here, one owner each (pool-capacity D3), and its journal read is the only
+one made for a run:
 
 * **Speech.** A run the body observes, whose task is live (running, queued or asleep, or a direct
   turn), is followed: one journal read at a time (``gateways.claudexor_run_events``; the compact wait
@@ -18,6 +18,10 @@ one owner each (pool-capacity D3):
 * **Engine unreachable.** A pass nothing answered (a socket that carried nothing, never a slow read or
   a refusal) opens one episode; the first answer closes it. Each live task holding an observed run hears
   both once per episode through its own progress channel.
+* **My human's words owed to a run.** Frames the host's placement at receipt left pending (the engine
+  did not answer then, or the send's outcome was unknown) are sent by the body once the engine answers
+  the run again, on its own observation pass (``delegate_message_store.replay_frames``); the starter's
+  round top stays the idempotent catch-up.
 
 A frame reaches the owner as its worker's progress frame does (``Agent._emit_progress``): one
 ``send_message`` progress event on the supervisor's bus, with the task's chat and lineage.
@@ -141,6 +145,8 @@ class Feed:
         self.windows: Dict[str, _Cursor] = {}
         self.outage: Optional[tuple] = None  # the open episode: (its UTC start, its millisecond stamp)
         self.told: set = set()  # tasks told of the open episode
+        self.owed: set = set()  # runs my human's frames are still pending for (``owe``)
+        self.placing: Dict[str, Any] = {}  # run id -> its send in flight
 
     def refresh(self, held: Dict[str, Any]) -> None:
         """The body's latest listing, and the live tasks (with a chat their frames can go to: a worker drops a
@@ -153,6 +159,29 @@ class Feed:
             self.live = {task_id: target for task_id, target in targets.items() if target["chat_id"] is not None}
             for run_id in set(self.windows) - set(held):
                 del self.windows[run_id]
+            self.owed &= set(held)  # a run no longer held is owed nothing here; its next continuation carries the words
+            self.placing = {run_id: job for run_id, job in self.placing.items() if run_id in self.owed}
+
+    def owe(self, run_id: str) -> None:
+        with self.lock:
+            self.owed.add(str(run_id))
+
+    def place(self, runtime: Any, held: Dict[str, Any]) -> None:
+        """Send my human's pending frames into each owed run whose last observation the engine answered: one send
+        in flight per run, on the body's jobs; a run whose frames all reached an outcome is owed nothing more."""
+        from ouroboros.delegate_message_store import replay_frames
+
+        def send(entry: Any) -> None:
+            if replay_frames(self.root, entry):
+                with self.lock:
+                    self.owed.discard(entry.run_id)
+        with self.lock:
+            due = [run_id for run_id in self.owed if run_id in held
+                   and (run_id not in self.placing or self.placing[run_id].done())]
+        for run_id in due:
+            if runtime.observation(run_id).get("answered"):
+                with self.lock:
+                    self.placing[run_id] = runtime.observers.submit(send, held[run_id].entry)
 
     def follow(self, runtime: Any, run_id: str) -> None:
         """Read one run's journal beat after beat while the body holds it, observes it and its task is live;
@@ -302,3 +331,13 @@ def announce_working(entry: Any) -> None:
                                              current_chat_id=target["chat_id"]))
     except Exception:
         log.debug("Working-again announce unavailable for %s", entry.run_id, exc_info=True)
+
+
+def owe_placement(root: Any, run_id: str) -> None:
+    """The host's placement at receipt left frames pending for ``run_id``: the body of this process sends them."""
+    from ouroboros.delegate_collection import body_runtime
+
+    runtime = body_runtime(root)
+    if runtime is not None:
+        runtime.feed.owe(run_id)
+        runtime.changed.set()

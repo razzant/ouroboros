@@ -706,15 +706,15 @@ def _wait_for_task(
     ctx: ToolContext, task_id: str, timeout_sec: Any = None, known_result_sha256: str = "",
     view: str = "", sleep_mode: Any = None, wake_after_sec: Any = None, wake_at: Any = None,
 ) -> str:
-    """Wait for a subtask to reach a terminal status: in the slot for a window (an omitted window is
-    180 s), or asleep (``sleep_mode``; ``native_task_wait``)."""
+    """Wait for a subtask to reach a terminal status: asleep unless a mode is named (``native_task_wait``:
+    released once nothing live keeps it; ``timeout_sec`` is then the wake time), or in_slot for a window."""
     from ouroboros.native_task_wait import request, sleep_choice
     from ouroboros.tools.task_result_views import validate_result_view
 
     try:
         selected_view = validate_result_view(view)
         tid = validate_task_id(task_id)
-        sleep, refusal = sleep_choice(sleep_mode, timeout_sec, wake_after_sec, wake_at)
+        sleep, refusal = sleep_choice(sleep_mode, timeout_sec, wake_after_sec, wake_at, ctx)
         if refusal:
             raise ValueError(refusal)
     except ValueError as exc:
@@ -723,7 +723,8 @@ def _wait_for_task(
         ))
     if sleep != "in_slot":
         return request(ctx, tool="wait_task", task_ids=[tid], mode="all_terminal", sleep_mode=sleep, view=selected_view,
-                       known={tid: known_result_sha256}, wake_after_sec=wake_after_sec, wake_at=wake_at)
+                       known={tid: known_result_sha256}, wake_after_sec=wake_after_sec, wake_at=wake_at,
+                       timeout_sec=timeout_sec)
     try:
         requested = 180 if timeout_sec is None else int(timeout_sec)
     except (TypeError, ValueError):
@@ -937,38 +938,37 @@ def _wait_window(
     return window, bound
 
 
-def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot", senders: Any = None,
+def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: Any = None, senders: Any = None,
                     tasks: Any = None, runs: Any = None, wake_at: Any = None, wake_after_sec: Any = None,
                     services: Any = None) -> str:
-    """Hold this task's worker slot until an unread mailbox entry exists or the
-    window elapses. Delivers nothing: the round-top drain owns delivery and
-    acknowledgement, exactly as after a wait_task early return. The mailbox is
-    one Stop rail's carrier: Wrap up and a direct turn's Stop are controls that end
-    the wait like any message; Stop now of an in-process turn writes none for a
-    Presence turn, so each poll also reads the turn's open intent
-    (``owner_stop.in_process_stop_now``), and an unreadable one is recorded as
-    unknown; a pooled worker's Stop kills the process. ``_wait_window`` bounds it.
+    """Unless a mode is named, a selector or a positive ``timeout_sec`` (then the wake time) sleeps
+    (``_await_as_sleep``: released once nothing live keeps it, owner Q2=A). A named in_slot, a zero
+    window (a peek) and a task with no continuation owner instead hold this task's worker slot until an
+    unread mailbox entry exists or the window elapses. Delivers nothing: the round-top drain owns delivery and
+    acknowledgement, exactly as after a wait_task early return. The mailbox is one Stop rail's carrier: Wrap
+    up and a direct turn's Stop end the wait like any message; Stop now of an in-process Presence turn writes
+    none, so each poll also reads the turn's open intent (``owner_stop.in_process_stop_now``), an unreadable
+    one recorded as unknown; a pooled worker's Stop kills the process. ``_wait_window`` bounds it.
 
-    Idle rail, honestly: the supervisor stamps ``last_progress_at`` on completed
-    model rounds, on narration and, when a tool's typed lease closes, on the
-    completed tool call (``supervisor/cognitive_operations``); the wait's own length
-    never keeps a round inside the configured silence window. What spares a task while this
-    tool runs is the executor's typed cognitive-operation lease that EVERY tool
-    call holds while physically in flight (``loop_tool_execution._emit_live_log``,
-    kind ``tool``; it ends at the deadline or a finite execution bound, else
-    ``IDLE_LEASE_MAX_SEC`` after the call starts: the exemption ends there, never the wait), and the
-    close of that lease is the progress stamp the next model round starts from —
-    a full idle window even after a wait as long as it asked, so the
-    supervisor tick between the finished wait and the next model call never
-    dates the turn the wait was for as silent. Its separate in_slot_wait mark identifies
-    the wait for reply-preparation readers, adds no idle exemption and lends no
-    slot; tests/test_await_messages.py drives that lifecycle.
+    Idle rail, honestly: the supervisor stamps ``last_progress_at`` on completed model rounds, on narration
+    and, when a tool's typed lease closes, on the completed tool call (``supervisor/cognitive_operations``);
+    the wait's own length never keeps a round inside the silence window. What spares a task meanwhile is the
+    typed cognitive-operation lease EVERY tool call holds while in flight (``loop_tool_execution._emit_live_log``,
+    kind ``tool``; it ends at the deadline or a finite execution bound, else ``IDLE_LEASE_MAX_SEC`` after the
+    call starts: the exemption ends there, never the wait), and its close is the progress stamp the next model
+    round starts from, so the tick between the finished wait and the next model call never dates the turn as
+    silent. Its separate in_slot_wait mark identifies the wait for reply-preparation readers, adds no idle
+    exemption and lends no slot; tests/test_await_messages.py drives that lifecycle.
     """
     from ouroboros.model_sleep import wake_reason
     from supervisor.owner_stop import in_process_stop_now
 
-    if mode != "in_slot" or senders or tasks or runs or services or wake_at or wake_after_sec:
-        return _await_as_sleep(ctx, mode, senders=senders, tasks=tasks, runs=runs, services=services,
+    named, timed = str(mode or "").strip().lower(), str(timeout_sec or 0) != "0"
+    sources = senders or tasks or runs or services or wake_at or wake_after_sec
+    if not named and (sources or timed) and callable(getattr(ctx, "owner_wait_callback", None)):
+        named, wake_after_sec = "default", (timeout_sec if timed and not (wake_at or wake_after_sec) else wake_after_sec)
+    if named not in ("", "in_slot") or sources:
+        return _await_as_sleep(ctx, named, senders=senders, tasks=tasks, runs=runs, services=services,
                                wake_at=wake_at, wake_after_sec=wake_after_sec)
     try:
         requested = int(timeout_sec)
@@ -1019,21 +1019,23 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
 
 
 def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
-    """The model's own warm/cold SLEEP (``ouroboros/model_sleep.py``): validate the
-    selected sources, answer at once when one is already ready, else arm the park
-    that follows this tool batch."""
+    """The model's own SLEEP (``ouroboros/model_sleep.py``; ``default`` takes its mode by
+    ``request_default_sleep``): validate the selected sources, answer at once when one is
+    already ready, else arm the park that follows this tool batch."""
     from ouroboros import model_sleep
 
     try:
-        if mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD):
-            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: requires mode=warm or cold; for example await_messages(mode=\"warm\", wake_after_sec=60)")
+        if mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
+            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep")
         if not callable(getattr(ctx, "owner_wait_callback", None)):
             raise ValueError("this task has no continuation owner to sleep under")
         from ouroboros.native_task_wait import armed_conflict
 
         if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
             raise ValueError(conflict)
-        outcome = model_sleep.request_sleep(ctx, model_sleep.selectors(ctx, **chosen), mode)
+        selected = model_sleep.selectors(ctx, **chosen)
+        outcome = (model_sleep.request_default_sleep(ctx, selected) if mode == "default"
+                   else model_sleep.request_sleep(ctx, selected, mode))
     except (TypeError, ValueError) as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}",
@@ -1053,52 +1055,46 @@ def await_messages_entry() -> ToolEntry:
     return ToolEntry("await_messages", {
         "name": "await_messages",
         "description": (
-            "Wait without model rounds for this task's mail, or use mode=warm/cold for event-driven sleep. In-slot (the default) "
-            "waits until THIS task has unread mail (a peer task's addressed contribution, a parent's steering, "
-            "an owner message, a child's escalation) or the window elapses. Use it when you have "
-            "asked a peer or your parent for its next turn and have nothing useful to do until "
-            "it arrives; you decide when waiting is worth it. The wait holds your worker slot "
-            "and releases nothing for as long as you ask; only your deadline or execution budget narrows "
-            "the window, to the finalization emit window (the result names the bound); "
-            "the ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) "
-            f"off you until that bound, or for at most {IDLE_LEASE_MAX_SEC // 3600} hours without one (a longer "
-            "wait keeps running and may draw that notice), and its completion counts as progress, so your next round "
-            "starts inside a full silence window — call again to keep waiting. It delivers nothing itself: the message "
-            "reaches you at the next round top, exactly as after a wait_task early return. The "
-            "result says when the applied prompt-cache horizon elapsed since the last model response. "
-            "mode=warm/cold instead SLEEPS without holding your model slot, until what you select: "
-            "mail from `senders`, the terminal of `tasks` you can read or the host's silence notice about one of "
-            "them or its subtree, the terminal of delegated `runs` you "
-            "own, the exit of your own `services` (warm only: the start each has now; a replaced, stopped "
-            "or lost one wakes you as unknown, never as success), and/or `wake_at`/`wake_after_sec`; with "
-            "nothing selected any addressed mail wakes you. A place event the host marks as a wake wakes any wait past its selectors; one marked as context ends none and stays unread for your next round. The "
-            "owner's messages, controls and typed descendant escalations always wake you; other unselected mail waits unread. Warm keeps your "
-            "process and browser (a pooled slot is lent meanwhile). Cold saves your continuation and releases "
-            "the process only after the body accepts custody of your bound external runs; its wake captures your "
-            "context again, so the first request after it re-reads everything past the leading system items; local services "
-            "still need warm sleep. A new question from any ordinary run you own also wakes you, even "
-            "if not selected; reviewer runs stay with their panel. Question sources are delivered, not answered. "
-            "Retained external runs and live children keep your tree's project lane. A source that is "
-            "already ready answers at once; so does a selected task or sender held by a current stop you have "
-            "not yet been shown (dependency_held, with its current_stop): the same request then sleeps. "
-            "Sleep does not count as execution time; an explicit deadline "
-            "still applies. A settled task is not a successful one: read its result when you wake."
+            "Wait without model rounds for this task's mail or for what you select. With no mode named it SLEEPS: no "
+            "slot is held and your process is released once nothing live in it keeps it (what does is named and it "
+            "stays). Without selectors any addressed mail wakes you; timeout_sec (or wake_at/wake_after_sec) adds a "
+            "wake time. Selectors narrow it: mail from `senders`, the terminal of `tasks` you can read or the host's "
+            "silence notice about one of them or its subtree, the terminal of delegated `runs` you own, the exit of "
+            "your own `services` (warm only: the start each has now; a replaced, stopped or lost one wakes you as "
+            "unknown, never as success). A place event the host marks as a wake wakes any wait past its selectors; one "
+            "marked as context ends none and stays unread for your next round. The owner's messages, controls and "
+            "typed descendant escalations always wake you; other unselected mail waits unread. A new question from any "
+            "ordinary run you own also wakes you, even if not selected; reviewer runs stay with their panel. Question "
+            "sources are delivered, not answered. mode=warm keeps your process and browser; mode=cold saves your "
+            "continuation and releases the process only after the body accepts custody of your bound external runs "
+            "(its wake re-reads everything past the leading system items; local services need warm). Retained "
+            "external runs and live children keep your tree's project lane. A source already ready answers at once; "
+            "so does a selected task or sender held by a current stop you have not yet been shown (dependency_held, "
+            "with its current_stop): the same request then sleeps. Sleep is not execution time; an explicit deadline "
+            "still applies. A settled task is not a successful one: read its result when you wake. mode=in_slot (and "
+            "a zero timeout_sec, a peek) instead holds your worker slot until THIS task has unread mail or the window "
+            "elapses, narrowed only by your deadline or execution budget (the result names the bound), and delivers "
+            "nothing itself: the message reaches you at the next round top, exactly as after a wait_task early return. "
+            "The ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) off "
+            f"you until that bound, or for at most {IDLE_LEASE_MAX_SEC // 3600} hours without one (a longer wait keeps "
+            "running and may draw that notice). The result says when the applied prompt-cache horizon elapsed since "
+            "the last model response."
         ),
         "parameters": {"type": "object", "properties": {
-            "timeout_sec": {"type": "integer", "description": "In-slot wait only: seconds to wait (at least 1)."},
-            "mode": {"type": "string", "enum": ["in_slot", "warm", "cold"],
-                     "description": "in_slot (default) holds your slot for timeout_sec; warm/cold is a sleep."},
+            "timeout_sec": {"type": "integer", "description": "Seconds: a sleep's wake time, or the in_slot window."},
+            "mode": {"type": "string", "enum": ["in_slot", "warm", "cold"], "description":
+                     "Omitted: a sleep, released once nothing live keeps your process. in_slot holds your slot."},
             "senders": {"type": "array", "items": {"type": "string"},
-                        "description": "Requires mode=warm or cold. Sleep: task ids whose ordinary mail wakes you."},
+                        "description": "Sleep: task ids whose ordinary mail wakes you."},
             "tasks": {"type": "array", "items": {"type": "string"},
-                      "description": "Requires mode=warm or cold. Sleep: task ids whose terminal (any settled status), "
+                      "description": "Sleep: task ids whose terminal (any settled status), "
                                      "or a host silence notice about them or a descendant, wakes you."},
             "runs": {"type": "array", "items": {"type": "string"},
-                     "description": "Requires mode=warm or cold. Sleep: your delegated run ids whose terminal wakes you."},
+                     "description": "Sleep: your delegated run ids whose terminal wakes you."},
             "services": {"type": "array", "items": {"type": "string"},
-                         "description": "Requires mode=warm or cold. Warm sleep: names of your own running services whose exit wakes you."},
-            "wake_at": {"type": "string", "description": "Requires mode=warm or cold. Sleep: an absolute ISO-8601 wake time (with timezone). A time your human names for this work's return belongs here."},
-            "wake_after_sec": {"type": "integer", "description": "Requires mode=warm or cold. Sleep: wake after this many seconds."},
+                         "description": "Warm sleep: names of your own running services whose exit wakes you."},
+            "wake_at": {"type": "string", "description": "Sleep: an absolute ISO-8601 wake time (with timezone). A time your human names for this work's return belongs here."},
+            "wake_after_sec": {"type": "integer", "description": "Sleep: wake after this many seconds."},
         }},
     }, _await_messages, timeout_sec=None)
 
@@ -1369,8 +1365,8 @@ def _wait_for_tasks(
     A wait set whose ids were ALL unminted at entry ends after the registration
     grace instead of the full requested window (disclosed as
     ``wait_short_circuited``); any id that turns real during the grace makes it
-    an ordinary wait again, with the remaining window intact. A warm/cold
-    ``sleep_mode`` sleeps instead and refuses unminted ids (``native_task_wait``)."""
+    an ordinary wait again, with the remaining window intact; that is the named
+    in_slot wait. Otherwise it sleeps and refuses unminted ids (``native_task_wait``)."""
     if not isinstance(task_ids, list) or not task_ids:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
@@ -1408,7 +1404,7 @@ def _wait_for_tasks(
 
     try:
         selected_view = validate_result_view(view)
-        sleep, refusal = sleep_choice(sleep_mode, timeout_sec, wake_after_sec, wake_at)
+        sleep, refusal = sleep_choice(sleep_mode, timeout_sec, wake_after_sec, wake_at, ctx)
         if refusal:
             raise ValueError(refusal)
     except ValueError as exc:
@@ -1417,7 +1413,7 @@ def _wait_for_tasks(
     if sleep != "in_slot":
         return request(ctx, tool="wait_tasks", task_ids=normalized_ids, mode=normalized_mode, sleep_mode=sleep,
                        view=selected_view, known=known_result_sha256_by_task, wake_after_sec=wake_after_sec,
-                       wake_at=wake_at)
+                       wake_at=wake_at, timeout_sec=timeout_sec)
     try:
         # The normalized RAW request, kept before the clamp: an expiry that
         # reports the ceiling as the asked-for window hides the very fact the

@@ -191,11 +191,12 @@ def _child_attempt(tmp_path, attempt):
 
 def test_failed_direct_wake_ack_records_no_exposure(tmp_path, monkeypatch):
     import ouroboros.delegate_supervision as supervision
+    from tests._run_wait_shared import wake_now
     from ouroboros.owner_mailbox import write_owner_message
 
     assert write_owner_message(tmp_path, "held owner words", "child1", msg_id="owner-held")
     ctx = _child_attempt(tmp_path, 1)
-    wake = json.loads(supervision.supervised_wait(
+    wake = json.loads(wake_now(
         ctx, "run-1",
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,
@@ -226,6 +227,7 @@ def test_failed_direct_wake_ack_records_no_exposure(tmp_path, monkeypatch):
 @pytest.mark.parametrize("control_kind", ["finalize_now", "hurry"])
 def test_sleeping_control_wakes_then_loop_routes_without_supervision_ack(tmp_path, control_kind):
     import ouroboros.delegate_supervision as supervision
+    from tests._run_wait_shared import wake_now
     from ouroboros.loop import _drain_incoming_messages
     from ouroboros.owner_mailbox import (
         KIND_FINALIZE_NOW,
@@ -261,7 +263,7 @@ def test_sleeping_control_wakes_then_loop_routes_without_supervision_ack(tmp_pat
         task_id="child1", drive_root=tmp_path, budget_drive_root=str(tmp_path),
         task_metadata={}, task_attempt=1,
     )
-    wake = json.loads(supervision.supervised_wait(
+    wake = json.loads(wake_now(
         ctx, "run-1",
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,

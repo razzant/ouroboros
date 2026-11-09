@@ -7,6 +7,7 @@ import pytest
 from ouroboros import delegate_supervision as supervision
 from ouroboros import delegate_supervision_state as checkpoints
 from ouroboros.delegate_shared import delegate_payload
+from tests._run_wait_shared import held_run, wake_now
 
 
 def context(root):
@@ -14,7 +15,7 @@ def context(root):
 
 
 def wake(ctx, run_id, sequence=1):
-    return supervision.supervised_wait(ctx, run_id, wait_once=lambda _ctx, rid, *_a, **_k: json.dumps({
+    return wake_now(ctx, run_id, wait_once=lambda _ctx, rid, *_a, **_k: json.dumps({
         "status": "waiting_on_user", "run_id": rid, "last_seq": sequence,
         "pending_interactions": [{"interaction_id": f"q-{rid}"}]}))
 
@@ -78,16 +79,24 @@ def test_failed_ack_persistence_never_marks_an_unseen_sibling(tmp_path, monkeypa
 
 
 def test_plural_wait_wakes_on_any_selected_run_without_acking_others(tmp_path):
+    """The wake of a plural wait speaks for the selected run whose terminal the body recorded, read once; the
+    quiet sibling is neither read nor given a wake."""
+    from ouroboros import model_sleep
+
     ctx = context(tmp_path)
+    held_run(tmp_path, "a", "nanny")
+    held_run(tmp_path, "b", "nanny", ended="succeeded")
     observed = []
 
     def observer(_ctx, run, *_args, **_kwargs):
         observed.append(run)
         return json.dumps({"status": "terminal" if run == "b" else "progress", "run_id": run, "last_seq": 1})
 
-    result = delegate_payload(supervision.supervised_wait(ctx, ["a", "b"], wait_once=observer))
-    assert result["run_id"] == "b" and observed == ["a", "b"]
-    assert supervision.supervision_checkpoint(ctx)["runs"]["a"].get("pending_wake") is None
+    woke_by = model_sleep.wake_reason(ctx, supervision._choice({"runs": ["a", "b"]}))
+    assert woke_by == "run:b"
+    result = delegate_payload(wake_now(ctx, ["a", "b"], wait_once=observer, woke_by=woke_by))
+    assert result["run_id"] == "b" and observed == ["b"]
+    assert supervision.supervision_checkpoint(ctx)["runs"].get("a", {}).get("pending_wake") is None
     assert delegate_payload(supervision.delegate_wait_entry(ctx, "a", runs=["b"]))["reason"] == "run_selector_conflict"
 
 
@@ -107,8 +116,8 @@ def test_singleton_migration_is_read_only_until_next_mutation(tmp_path):
     assert saved["schema"] == 2 and set(saved["runs"]) == {"a", "b"}
     assert saved["runs"]["a"]["pending_wake"] == {"wake_id": "held"}
     path.write_text('{"schema":2,"runs":null}')
-    refused = delegate_payload(supervision.supervised_wait(ctx, "a", wait_once=lambda *_a: pytest.fail("unknown state observed")))
-    assert refused["reason"] == "supervision_state_unknown"
+    refused = delegate_payload(supervision.run_wait(ctx, "a"))
+    assert refused["reason"] == "supervision_state_unknown" and not getattr(ctx, "_pending_task_wait", None)
 
 
 @pytest.mark.parametrize("corrupt", [False, True])

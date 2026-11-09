@@ -118,12 +118,63 @@ def test_a_parent_sleeps_cold_beside_running_and_queued_children_and_they_start(
     workers.assign_tasks()
     assert [task["id"] for task in sent] == ["kid-queued"], "the queued child starts while its parent sleeps"
     assert {"kid-queued", "kid-run"} <= set(workers.RUNNING)
-    # Only what no live row of the tree carries still holds a cold sleep: an ENDED child's open handoff.
-    _task(tmp_path, "other", project="")
-    _task(tmp_path, "other-kid", tree="other", status="failed", project="", launch_handoffs={"op-1": {"tool": "x"}})
+    # Only what no live row of the tree carries still holds a cold sleep, and only the sleep that releases the
+    # tree's project lane: a top-level project sleeper's, held by an ENDED child's open handoff.
+    _task(tmp_path, "other", project="other-room")
+    _task(tmp_path, "other-kid", tree="other", status="failed", project="other-room",
+          launch_handoffs={"op-1": {"tool": "x"}})
     other, _limit = _loop_ctx(tmp_path, "other")
+    other.task_metadata = {"root_task_id": "other", "project_id": "other-room"}
     with pytest.raises(model_sleep.ColdSleepBlocked, match="member_custody other-kid"):
         model_sleep.request_sleep(other, model_sleep.selectors(other, wake_after_sec=60), model_sleep.MODE_COLD)
+    # A helper of that tree, or a root with no project, releases no lane: the sibling's leftover is the sibling's.
+    _task(tmp_path, "other-helper", tree="other", project="other-room")
+    helper, _limit = _loop_ctx(tmp_path, "other-helper")
+    helper.task_metadata = {"root_task_id": "other", "parent_task_id": "other", "project_id": "other-room"}
+    assert model_sleep.request_sleep(helper, model_sleep.selectors(helper, wake_after_sec=60),
+                                     model_sleep.MODE_COLD)["reason"] == "sleep_armed"
+    other.task_metadata = {"root_task_id": "other"}
+    assert model_sleep.request_sleep(other, model_sleep.selectors(other, wake_after_sec=60),
+                                     model_sleep.MODE_COLD)["reason"] == "sleep_armed"
+
+
+def test_at_one_worker_a_parents_unnamed_wait_on_its_queued_child_frees_the_worker_for_it(tmp_path, monkeypatch):
+    """Owner Q2=A at C=1, through the public tool: while the parent runs, the queued child waits for the one
+    worker; ``wait_task(timeout_sec=600)`` with no named mode sleeps cold, the park releases that worker and the
+    child starts on it (an in-slot wait, the old default, kept the worker the child needed)."""
+    import json
+
+    from ouroboros import budget_pause as bp
+    from ouroboros.tools.control_task_results import _wait_for_task
+    from supervisor.events_budget import install_exact_budget_pause
+    from tests.worker_pool_support import affirm_ready
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    _run(workers, _task(tmp_path, "root"))
+    workers.PENDING.append(_task(tmp_path, "kid", tree="root", status="scheduled"))
+    sent = []
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id="root", reaping=False,
+                                                      in_q=SimpleNamespace(put=lambda task: sent.append(dict(task)))))
+    assert workers.MAX_WORKERS == 1
+    workers.assign_tasks()
+    assert sent == [], "the running parent holds the one worker"
+    ctx, limit = _loop_ctx(tmp_path, "root")
+    ctx.task_metadata = {"root_task_id": "root"}
+    _fast_hold(monkeypatch, bp)
+    _quiet_external(monkeypatch, bp)
+    armed = json.loads(_wait_for_task(ctx, "kid", timeout_sec=600))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == "cold" and "kept_process" not in armed, armed
+    try:
+        with pytest.raises(bp.BudgetPauseRequested) as raised:
+            bp.enter_cold_sleep(limit)
+    finally:
+        bp.end_dispatch_fence("root")
+    install_exact_budget_pause(_supervisor_ctx(tmp_path, workers, queue, [], []), "root",
+                               bp.exact_pause_marker(raised.value.pause)["checkpoint"])
+    workers.WORKERS[0].busy_task_id = None  # the parked parent's worker is free
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == ["kid"], "the queued child starts on the one worker its parent left"
 
 
 def test_the_owners_pause_of_the_tree_still_holds_a_sleeping_roots_members(tmp_path, monkeypatch):

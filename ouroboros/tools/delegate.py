@@ -1003,35 +1003,29 @@ _emit_external_wait_lease = progress.emit_external_wait_lease
 def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None,
                    since_seq: Optional[int] = None, *, observation_only: bool = False,
                    gateway: Any = None) -> str:
-    """Time-bounded, progress-aware wait (docs/DEVELOPMENT.md "Timeout & Wait Control").
+    """One run's read: a caller-named window, or the one addressed read of a wake (``observation_only``).
 
-    ``gateway`` is a transport BORROWED from the supervision loop: it replaces the
-    per-call ``ClaudexorGateway()``, is handshaken here only when it has not been yet
+    ``gateway`` is a transport BORROWED from its caller: it replaces the per-call
+    ``ClaudexorGateway()``, is handshaken here only when it has not been yet
     (``engine_version`` is the handshake receipt), and is never closed here; the
     owner closes it. Absent, the call builds, handshakes and closes its own.
 
-    HOLDS the window it was given. It returns early only on a terminal state or a
-    containment fault; a journal-cursor advance past ``since_seq`` is RECORDED and
-    streamed to the human live, and the model is woken once, at expiry, with the whole
-    sequence in ``advances``. Returning on first advance would buy a model round per
-    streaming batch. Only the journal cursor proves progress, never SSE ``: ping``.
+    A windowed read HOLDS the window its caller names (none named: one second; docs/DEVELOPMENT.md
+    "Timeout & Wait Control"). It returns early only on a terminal state or a containment fault; a
+    journal-cursor advance past ``since_seq`` is RECORDED and streamed live, and the caller gets the
+    whole sequence in ``advances`` at expiry. Only the journal cursor proves progress, never SSE
+    ``: ping``. NARROW-ONLY, like ``bounded_max_seconds``: it may not outlive the caller's deadline
+    minus finalization grace; a SPENT deadline clamps to the floor and every call is BOUNDED by what it
+    has left (``progress.poll_bound``). Legacy caller-sized waits keep their last-poll expiry contract.
 
-    NARROW-ONLY, like ``bounded_max_seconds``: the wait may not outlive the nanny's own
-    deadline minus finalization grace. This tool owns its ToolEntry outer bound and is
-    absent from ``_DEADLINE_CLAMPED_TOOLS``: clamping here preserves typed ``no_progress``
-    instead of an outer thread-kill. Only "no deadline set" is left
-    unclamped; a SPENT deadline clamps to the floor, the window is measured from before
-    the connection, and every call is BOUNDED by what it has left (``progress.poll_bound``)
-    so no read can outrun it as the 60s default could. The internal supervision
-    observer instead makes one read under the ordinary transport bound narrowed by
-    the real task deadline; its three-second beat is not a network deadline. A transport
-    failure that delivered no daemon answer there (typed per class:
-    ``observation_read_timeout`` for our own bound expiring, ``daemon_unreachable`` for a
-    socket that carried nothing, the engine's own ``DAEMON_BUSY_CODES`` answer to that GET)
-    retains unknown observation and the same run, without model wake.
-    Legacy caller-sized waits preserve their last-poll expiry contract.
+    ``observation_only`` is what ``delegate_wait``'s wake reads of the run it speaks for
+    (``delegate_supervision._observe_once``): ONE detail read under the ordinary transport bound
+    narrowed by the real deadline, with no window, no lease, no journal read and no speech (the body
+    observes runs and follows their speech). A transport failure that delivered no daemon answer
+    (``observation_read_timeout``, ``daemon_unreachable``, the engine's own ``DAEMON_BUSY_CODES``)
+    is an ``observation_pending`` fact, never a refusal.
     """
-    from ouroboros.config import get_delegate_wait_max_sec, get_delegate_wait_sec
+    from ouroboros.config import DELEGATE_WAIT_WINDOW_MAX_SEC
     from ouroboros.gateways.claudexor import (
         ClaudexorGateway,
         ClaudexorUnavailable,
@@ -1052,14 +1046,13 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     retained = retained_terminal_result(ctx, rid, retry_money=True)
     if retained is not None:
         return json.dumps(retained, ensure_ascii=False, indent=2)
-    ceiling = get_delegate_wait_max_sec()
     try:
-        window = int(wait_sec) if wait_sec is not None else get_delegate_wait_sec()
+        window = int(wait_sec) if wait_sec is not None else 1
     except (TypeError, ValueError):
-        window = get_delegate_wait_sec()
+        window = 1
     from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
 
-    window = window_within_deadline(ctx, max(1, min(window, ceiling)))
+    window = window_within_deadline(ctx, max(1, min(window, DELEGATE_WAIT_WINDOW_MAX_SEC)))
 
     # Handshake and first poll spend this call's window too; start its clock before connecting.
     started = time.monotonic()
@@ -1093,8 +1086,8 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     # every other rail (deadline, ceiling, budget, cancel) still cuts through.
     # The grant carries a unique lease_id (F5b) and the release names the SAME
     # id, so an abandoned, executor-killed wait thread's late release can never
-    # blank a newer grant made by this task's next wait. An observation beat
-    # leases nothing: its supervising hold holds one lease (``progress.HoldLease``).
+    # blank a newer grant made by this task's next wait. An observation read leases
+    # nothing: it is one bounded read, and a sleeping wait holds no slot to spare.
     _lease_id = uuid.uuid4().hex
     if not observation_only:
         _emit_external_wait_lease(ctx, rid, _external_wait_lease_until(ctx, window, _started_at, _run_max_seconds),
@@ -1104,14 +1097,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             gateway = ClaudexorGateway()
         if not getattr(gateway, "engine_version", ""):
             gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
-        step = None
-        if observation_only:
-            from ouroboros import delegate_observe  # speech from the journal, attention from the engine
-            step = delegate_observe.step(ctx, gateway, rid, window=window, since_seq=since_seq, read_window=read_window,
-                                         elapsed_seconds=_elapsed(), max_seconds=_run_max_seconds or None)
-            if step is not None and step.payload is not None:
-                return step.payload  # a quiet beat: nothing needed the detail
-        detail = step.detail if step is not None else progress.bounded_poll(gateway, rid, read_window())
+        detail = progress.bounded_poll(gateway, rid, read_window())
         baseline = int(since_seq) if since_seq is not None else int(detail.get("lastSeq") or 0)
         seen = progress.WindowObservations()
         seen.observe_baseline(detail, baseline)
@@ -1119,9 +1105,9 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             summary = custody.summary_of(detail)
             state = str(summary.get("state") or "")
             last_seq = int(detail.get("lastSeq") or 0)
-            # A supervised beat leaves the run's speech and its rights floor to the body, which holds them
-            # for every run it observes (``delegate_feed``, ``delegate_containment.hold_to_grant``); a row
-            # with no recorded grant has only this wait's live derivation to hold it to.
+            # A wake's read leaves the run's speech and its rights floor to the body, which holds them for
+            # every run it observes (``delegate_feed``, ``delegate_containment.hold_to_grant``); a row with
+            # no recorded grant has only this read's live derivation to hold it to.
             breach = None if observation_only and entry.access else _containment_breach(detail, authority)
             if breach:
                 return _halt_breached_run(ctx, gateway, entry, breach)
@@ -1156,9 +1142,9 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                                                     if entry.work_order_source_request else {}
                                                 ))
             def _expired() -> str:
-                # The window payload is a DICT; the supervising wake adds its own
-                # whole-sleep facts (``sleep``, one cache-horizon note) as fields at
-                # publication, never per tick and never after the rendered JSON.
+                # The window payload is a DICT; a wake adds its own whole-sleep facts
+                # (``sleep``, one cache-horizon note) as fields at its one publication,
+                # never after the rendered JSON.
                 payload = progress.window_payload(
                     run_id=rid, state=state, last_seq=last_seq,
                     window=(time.monotonic() - started) if observation_only else window,
@@ -1170,8 +1156,6 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                 return json.dumps(payload, ensure_ascii=False, indent=2)
 
             if observation_only or time.monotonic() >= deadline:
-                if observation_only:
-                    time.sleep(max(0.0, deadline - time.monotonic()))
                 return _expired()
             time.sleep(min(_POLL_INTERVAL_SEC, max(0.0, deadline - time.monotonic())))
             # BOUNDED whether or not the window is spent (the clamp must bound the waiting,
@@ -1408,16 +1392,16 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_wait", {
             "name": "delegate_wait",
             "description": (
-                "Sleep on a delegated run until it ends, asks a question or needs you. Quiet progress costs "
-                "no model rounds: the host renews quiet transport windows, and journal "
-                "progress streams to the human without waking you. An unreachable daemon is the "
-                "same quiet renewal (typed reason daemon_unreachable, told to the owner once per "
-                "outage); while such a read hangs, a finalize_now/hurry control is noticed only "
-                "when it returns, up to ~60 s later rather than on the 3 s beat. "
-                "An observed terminal, a new interaction, "
-                "fault, addressed owner/task message, a direct-child attention/terminal event, "
-                "cancel/deadline control, recovery judgment, or an explicit one-shot checkpoint "
-                "wakes exactly once. Host-marked context-only place arrivals stay unread until a genuine wake. "
+                "Sleep on delegated runs until one ends, asks a question or needs you. What is already there (its "
+                "terminal, a new question, mail, an unacknowledged earlier wake) answers in this result at once. "
+                "Otherwise it returns sleep_armed: the sleep starts after this tool batch and holds no slot; your "
+                "process is released once nothing live keeps it (what does is named, and it stays). The host "
+                "observes the runs; their progress streams to the human without waking you, and an unreachable "
+                "daemon is told to the owner once per outage. A selected run's terminal, a new question from any "
+                "run you own, addressed owner/task mail, a direct child's attention/terminal, a cancel, your "
+                "deadline or the one-shot checkpoint wakes you, and this wait's result is then owed to your next "
+                "model request: it arrives there as a host notice, with no further call. Each wake is delivered "
+                "once and counts as shown only when shown whole. Host-marked context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "

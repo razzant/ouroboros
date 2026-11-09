@@ -1,14 +1,18 @@
 """The model's own sleep: warm or cold, woken by what it chose, or at a time it chose.
 
-``await_messages`` keeps its bounded in-slot default; warm/cold sleep is the
-model's choice, never a duration threshold. It selects senders, readable task
-terminals, own run terminals, own service exits (warm only) and/or a wake time.
-Without selectors, any addressed mail wakes it. Owner words/controls and typed
-descendant escalations bypass sender filters; ordinary unselected mail waits.
+A wait whose mode the mind does not name sleeps (``request_default_sleep``, owner Q2=A):
+cold once nothing live keeps its process, else warm with what kept it named; an explicit
+``in_slot`` keeps the bounded slot wait, and warm/cold stay the model's choice, never a
+duration threshold. It selects senders, readable task terminals, own run terminals, own
+service exits (warm only) and/or a wake time, any number of each. Without selectors, any
+addressed mail wakes it. Owner words/controls and typed descendant escalations bypass
+sender filters; ordinary unselected mail waits.
 A sleeping ``wait_task``/``wait_tasks`` adds its descriptor (``task_wait``,
 ``native_task_wait``): its all/any mode decides the task terminal over the effective
 result its answer reads, a selected child's unseen attention beacon wakes it too and
-a selected source lost after arming wakes it as unknown.
+a selected source lost after arming wakes it as unknown. A sleeping ``delegate_wait``
+adds ``run_wait`` (``delegate_supervision``): the task's cancel or spent deadline and a
+direct child's attention or terminal wake it too.
 A place arrival's typed ``place_arrival.wake`` decides for itself (``owner_mailbox.place_arrival_wake``):
 ``True`` wakes its author past any selector, ``False`` never wakes, not even any mail; without it, mail.
 New questions from any ordinary run THIS author owns also wake it, never a
@@ -56,18 +60,16 @@ MODE_IN_SLOT = "in_slot"
 MODE_WARM = "warm"
 MODE_COLD = "cold"
 MODES = (MODE_IN_SLOT, MODE_WARM, MODE_COLD)
-_MAX_SELECTED = 32
 
 
 def _ids(value: Any, name: str) -> List[str]:
+    """The selected ids, each once; any number of them (no selection cap: a wait on many runs or
+    tasks is the mind's choice)."""
     if value in (None, ""):
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{name} must be a list of ids")
-    ids = list(dict.fromkeys(item.strip() for item in value))
-    if len(ids) > _MAX_SELECTED:
-        raise ValueError(f"{name} names more than {_MAX_SELECTED} ids")
-    return ids
+    return list(dict.fromkeys(item.strip() for item in value))
 
 
 def _wake_at(wake_at: Any, wake_after_sec: Any) -> str:
@@ -541,6 +543,11 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     if native:  # a waited child's beacon ends the sleep as it ends an in-slot wait
         if beacon := read_source(unseen_beacon, ctx, chosen["task_wait"]):
             return beacon
+    if isinstance(chosen.get("run_wait"), dict):  # a sleep on runs: a cancel, the deadline, a direct child
+        from ouroboros.delegate_supervision import run_wait_reason
+
+        if extra := read_source(run_wait_reason, ctx):
+            return extra
     for pin in chosen.get("services") or ():
         observed = _service_wake(pin)  # already returns an unknown wake on a read failure
         if observed:
@@ -563,7 +570,8 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     producers, services and unknown starts still keep the actor. A queued or running
     member of its tree never does: a sleep is this actor's wait, the member's own actor
     watches its custody and the tree keeps its project lane (``project_lease.lane_holders``).
-    An ended member's open custody, which no queued row carries to that lane, still holds.
+    An ended member's open custody, which no queued row carries to that lane, still holds a
+    top-level project sleeper (the one whose cold sleep releases the lane), never a helper.
     Arming may propose a transfer; release needs its exact accepted pairs.
     ``gaps`` receives the damaged rows the tree census tied to no tree: named, never a blocker, and
     only once its custody and model-request links were read; until then such a row holds.
@@ -600,8 +608,10 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
         records = [record for record in services._SERVICES.values() if record.task_id == str(ctx.task_id)]
     blockers.extend({"kind": "service", "name": record.name} for record in records
                     if record.proc.poll() is None)
-    # Only this actor's accepted external obligations transfer. An ended member's
-    # retained custody matters too: no queued row of its tree holds its lane.
+    # Only this actor's accepted external obligations transfer. An ended member's retained custody
+    # matters only to a top-level project sleeper: its cold sleep is the one that releases the tree's
+    # project lane, and no queued row of its tree carries that custody to the lane. A helper's (or a
+    # project-less root's) sleep releases no lane: a sibling's leftover run is that sibling's.
     from ouroboros.owner_pause import (tree_member_results, tree_model_requests, current_tool_operation,
                                        _member_coordinates)
     from ouroboros.delegate_custody_current import tree_task_ids
@@ -609,21 +619,26 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
 
     root = _canonical_root(ctx)
     tree_id = _member_coordinates(ctx)[1]
+    lane = tree_id == str(ctx.task_id) and bool(str(getattr(ctx, "project_id", "") or (
+        getattr(ctx, "task_metadata", None) or {}).get("project_id") or ""))
     members, links_known = {str(ctx.task_id)}, True  # a row is unlinked only once every link source answered
     try:
-        members.update(tree_task_ids(root, tree_id))  # the store answers or raises: unreadable is a blocker
+        members.update(tree_task_ids(root, tree_id) if lane else ())  # the store answers or raises: unreadable holds
     except Exception as exc:
         links_known = False
         blockers.append({"kind": "tree_custody_unreadable", "detail": str(exc)[:200]})
     linked = set(members)
     try:  # the root's open model requests tie their tasks here, as Continue's census reads them
-        linked.update(str(attempt.get("task_id") or "") for attempt in tree_model_requests(root, tree_id))
+        linked.update(str(attempt.get("task_id") or "") for attempt in (tree_model_requests(root, tree_id)
+                                                                         if lane else ()))
     except Exception as exc:
         links_known = False
         blockers.append({"kind": "attempt_custody_unreadable", "detail": str(exc)[:200]})
     try:  # each source answers alone: a failed body census leaves the custody members observed below
         census = tree_member_results(root, tree_id, linked=linked)
         for task_id, fact in census.unresolved.items():
+            if not lane and task_id != str(ctx.task_id):
+                continue
             if fact["linked"] or not links_known:  # its record is unknown; its runs and processes are still read by id
                 members.add(task_id)
                 blockers.append({"kind": "member_record_unreadable", "detail": f"{task_id}: {fact['reason']}"})
@@ -631,13 +646,14 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
                 gaps.append({"task_id": task_id, "reason": fact["reason"]})
         for task_id, row in census.members.items():
             own = task_id == str(ctx.task_id)
-            if not own and row.get("status") not in SETTLED_STATUSES:
+            if not own and (not lane or row.get("status") not in SETTLED_STATUSES):
                 members.discard(task_id)  # live: its own actor watches it, the tree's queued rows keep the lane
                 continue
             members.add(task_id)
             own_sleep = ""
-            if own:  # the in-flight call arming this very sleep (a native task wait too) is no custody
-                sleep_tools = ("continue_in_background",) if detach else ("await_messages", "wait_task", "wait_tasks")
+            if own:  # the in-flight call arming this very sleep (a native task or run wait too) is no custody
+                sleep_tools = (("continue_in_background",) if detach
+                               else ("await_messages", "wait_task", "wait_tasks", "delegate_wait"))
                 own_sleep = next((operation for tool in sleep_tools
                                   if (operation := current_tool_operation(ctx, tool))), "")
             from ouroboros.tool_custody import retained_tool_custody
@@ -748,6 +764,27 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
                     + "; owner input and a new question from your own executors always do."
                     + gap_words(unwatched, "This cold sleep does not watch"),
             **({"membership_gaps": unwatched} if unwatched else {})}
+
+
+def request_default_sleep(ctx: Any, chosen: Dict[str, Any]) -> Dict[str, Any]:
+    """A wait whose mode the mind did not name (owner Q2=A): the process is released once everything
+    it holds is exactly saved (cold); what cannot be handed over keeps it (warm), and the receipt names
+    that (``kept_process``). Services and a conversation turn (no project seat to release) sleep warm.
+    The answer is ``request_sleep``'s, with the mode taken."""
+    from ouroboros.task_carrier import LANE_CONVERSATION, execution_owner
+
+    kept: List[Dict[str, str]] = []
+    if not chosen.get("services") and execution_owner(ctx).get("lane") != LANE_CONVERSATION:
+        try:
+            return request_sleep(ctx, chosen, MODE_COLD)
+        except ColdSleepBlocked as exc:
+            kept = exc.blockers
+    outcome = request_sleep(ctx, chosen, MODE_WARM)
+    if kept and outcome.get("reason") == "sleep_armed":
+        named = [f"{b['kind']} {b.get('run_id') or b.get('name') or b.get('detail') or ''}".strip() for b in kept]
+        outcome.update(kept_process=named, note=outcome["note"] + " Your process stays (warm) for: "
+                       + "; ".join(named) + ".")
+    return outcome
 
 
 def begin(ctx: Any, *, started_at: float | None = None) -> None:
@@ -870,7 +907,7 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None, by: A
 
     ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed. ``by`` is the declared actor of
     the Resume grant that ended a cold sleep (``budget_resume``); it names that Resume instead of an unnamed control."""
-    native = isinstance(chosen.get("task_wait"), dict)  # its result follows in a host notice (``native_task_wait``)
+    native = isinstance(chosen.get("task_wait") or chosen.get("run_wait"), dict)  # its result: a host notice
     what = {
         "timeout": "the wake time you chose",
     }.get(outcome, "")
@@ -897,6 +934,8 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None, by: A
                     "lost to a restart, or an inconclusive backend probe) — its outcome is unknown, not success")
         elif outcome.startswith("mail:"):
             what = f"mail from {outcome[5:]}"
+        elif outcome.startswith("coordination:"):
+            what = f"direct child {outcome[13:]} needing you (its attention beacon or terminal)"
         elif outcome.startswith("control:") or outcome == "owner_text":
             what = "the owner's message or control"
         else:
@@ -907,7 +946,7 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None, by: A
         "[SYSTEM NOTICE]\nYou slept" + ("" if slept is None else f" {slept:.0f}s")
         + f" ({chosen.get('mode') or 'warm'}) and were woken by {what}. "
         "Mail you did not select stayed unread and reaches you now with everything else pending. "
-        + ("The task wait's current result follows in a separate notice. " if native else "")
+        + ("The wait's current result follows in a separate notice. " if native else "")
         + "The sleep did not count as execution time; an explicit deadline did not move."
         + (" A cold sleep ended your previous process: its browser and task-local services are gone; "
            "re-read files before building on them." if chosen.get("mode") == "cold" else ""))}

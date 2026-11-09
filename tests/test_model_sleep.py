@@ -52,16 +52,24 @@ def _mail(tmp_path, task_id, text, *, sender="", kind="task_message", msg_id=Non
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def test_the_default_in_slot_wait_is_unchanged_and_selectors_need_a_sleep_mode(tmp_path):
+def test_an_unnamed_mode_sleeps_and_a_named_in_slot_wait_is_unchanged(tmp_path):
+    """Owner Q2=A: with no mode named, a positive timeout_sec (the wake time) or a selector sleeps; a named
+    in_slot and a zero window hold the slot as before, and in_slot never takes a selector."""
     from ouroboros.tools.control_task_results import _await_messages
 
+    _result(tmp_path, "peer")
     ctx = _ctx(tmp_path)
-    out = json.loads(_await_messages(ctx, 1))
+    out = json.loads(_await_messages(ctx, 1, mode="in_slot"))
     assert out["reason"] == "timeout" and out["slot"] == "held"
-    refused = _await_messages(ctx, 1, senders=["x"])
-    assert "requires mode=warm or cold" in refused
-    assert 'await_messages(mode="warm", wake_after_sec=60)' in refused
-    assert not getattr(ctx, "_model_sleep", None)
+    assert json.loads(_await_messages(ctx, 0))["slot"] == "held", "a zero window is a peek in the slot"
+    refused = _await_messages(ctx, 1, mode="in_slot", senders=["peer"])
+    assert "in_slot takes only timeout_sec" in refused and not getattr(ctx, "_model_sleep", None)
+    armed = json.loads(_await_messages(ctx, 30))
+    assert armed["reason"] == "sleep_armed" and ctx._model_sleep["wake_at"] and ctx._model_sleep["any_mail"]
+    assert ctx._model_sleep["mode"] == armed["mode"] in {"cold", "warm"}
+    ctx._model_sleep, ctx._owner_wait_requested = None, ""
+    assert json.loads(_await_messages(ctx, senders=["peer"]))["reason"] == "sleep_armed"
+    assert ctx._model_sleep["senders"] == ["peer"] and not ctx._model_sleep["any_mail"]
 
 
 def test_selectors_are_validated_and_a_ready_source_answers_at_once(tmp_path):

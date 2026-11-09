@@ -527,14 +527,15 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
     import json
     from types import SimpleNamespace
 
-    from ouroboros.delegate_supervision import supervised_wait
+    from ouroboros.delegate_supervision import run_wait
+    from tests._run_wait_shared import wake_now
 
     def _wake(ttl, seconds_ago):
         ctx = SimpleNamespace(
             task_id=f"t-{ttl or 'none'}-{seconds_ago}", task_attempt=1, drive_root=tmp_path,
             _accumulated_usage={"_last_prompt_cache_ttl": ttl,
                                 "_last_llm_call_meta": _response_meta(seconds_ago)})
-        raw = supervised_wait(ctx, "run-h", wait_once=lambda *_a: json.dumps(
+        raw = wake_now(ctx, "run-h", wait_once=lambda *_a: json.dumps(
             {"status": "completed", "run_id": "run-h", "last_seq": 1})).text
         return ctx, json.loads(raw)
 
@@ -542,6 +543,5 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
     assert "1h" in past["cache_horizon_note"] and "may be cold" in past["cache_horizon_note"]
     assert "cache_horizon_note" not in _wake("1h", 3500)[1]
     assert "cache_horizon_note" not in _wake("", 10_000)[1]
-    replay = json.loads(supervised_wait(_ctx, "run-h", wait_once=lambda *_a: (_ for _ in ()).throw(
-        AssertionError("an unacknowledged wake replays before any new observation"))).text)
+    replay = json.loads(run_wait(_ctx, "run-h").text)  # replayed before any sleep is armed or the run read
     assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded

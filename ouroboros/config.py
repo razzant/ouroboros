@@ -110,7 +110,6 @@ from ouroboros.runtime_limits import (
     get_consciousness_autonomy,  # noqa: F401
     get_consciousness_daily_usd,  # noqa: F401
     get_consciousness_max_tasks,  # noqa: F401
-    get_delegate_wait_max_sec, get_delegate_wait_sec,  # noqa: F401
     get_finalization_grace_sec,  # noqa: F401
     get_direct_turn_stop_wait_sec,  # noqa: F401
     get_llm_transport_read_timeout_sec,  # noqa: F401

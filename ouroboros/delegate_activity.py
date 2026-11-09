@@ -121,7 +121,6 @@ def reset_process_memo() -> None:
     """Forget what this process showed and which engines list the stream (tests reuse ids)."""
     from ouroboros.gateways import claudexor_run_events
 
-    from ouroboros import delegate_observe
     from ouroboros.gateways import claudexor_observation
 
     with _MEMO_LOCK:
@@ -130,7 +129,6 @@ def reset_process_memo() -> None:
         claudexor_run_events._SUPPORT.clear()
     with claudexor_observation._SUPPORT_LOCK:
         claudexor_observation._SUPPORT.clear()
-    delegate_observe.reset_process_seen()
 
 
 def _memo(task_id: str, run_id: str) -> _RunMemo:

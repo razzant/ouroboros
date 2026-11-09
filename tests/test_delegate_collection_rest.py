@@ -157,7 +157,7 @@ def test_absence_fault_requires_an_unknown_terminal_outcome(
         assert fresh.containment_fault["reason"] == "run_absence_identity_unproven"
 
 
-@pytest.mark.parametrize("surface", ["delivery", "wait", "supervised_wait"])
+@pytest.mark.parametrize("surface", ["delivery", "wait", "run_wait"])
 def test_explicit_money_waits_use_the_live_capture_generation(
         tmp_path, monkeypatch, driven_runtime, surface):  # noqa: F811
     from ouroboros import delegate_supervision
@@ -195,7 +195,7 @@ def test_explicit_money_waits_use_the_live_capture_generation(
         elif surface == "wait":
             delegate._delegate_wait(ctx, entry.run_id)
         else:
-            result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+            result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
             assert delegate_supervision.acknowledge_pending_wake(ctx, result)
         tick()
         tick()

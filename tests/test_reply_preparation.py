@@ -349,43 +349,31 @@ def test_a_park_request_and_a_slot_held_on_mail_are_waits_not_work(world):
     assert not tool_calls_can_run_parallel(calls), "a wait tool never shares its round with working tools"
 
 
-class _Ticks:
-    """The delegated run as the supervision loop observes it: each tick returns the next
-    window payload the test supplies, with the shape ``_delegate_wait`` returns."""
-    def __init__(self, run_id):
-        self.run_id, self.payloads, self.calls = run_id, queue_module.Queue(), 0
+def _hold(world, ctx, run_id, monkeypatch):
+    """A turn that cannot sleep holds its delegated run in its slot (``delegate_wait`` with no continuation owner)
+    until the run's terminal, which the body observer records, ends the wait; the wake's one read is scripted."""
+    from ouroboros import delegate_custody as custody, delegate_supervision
+    from tests._run_wait_shared import scripted_reads
 
-    def __call__(self, _ctx, _run_id, _timeout, _cursor, **_kw):
-        self.calls += 1
-        return json.dumps(self.payloads.get(timeout=10))
-
-    def tick(self, *, state="running", waiting_on_user=False, status="no_progress", **extra):
-        calls = self.calls
-        self.payloads.put({"status": status, "run_id": self.run_id, "state": state, "last_seq": 1,
-                           "waiting_on_user": waiting_on_user, **extra})
-        assert _until(lambda: self.calls > calls), "the loop took the observation and waits for the next"
-
-    def end(self):
-        self.payloads.put({"status": "completed", "run_id": self.run_id, "state": "succeeded", "last_seq": 2})
-
-
-def _hold(ctx, ticks):
-    from ouroboros.delegate_supervision import supervised_wait
-
-    thread = threading.Thread(target=supervised_wait, args=(ctx, ticks.run_id), kwargs={"wait_once": ticks},
-                              daemon=True)
+    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda: None)
+    scripted_reads(monkeypatch, lambda _ctx, rid, *_a, **_k: json.dumps(
+        {"status": "completed", "run_id": rid, "state": "succeeded", "last_seq": 2}))
+    assert custody.emit(world.root, custody.STARTED, {
+        "run_id": run_id, "invocation_id": "invoke-" + run_id, "task_id": ctx.task_id,
+        "root_task_id": ctx.task_metadata.get("root_task_id") or ctx.task_id, "route": "route",
+        "source": "delegate_start", "access": "readonly"})
+    thread = threading.Thread(target=delegate_supervision.run_wait, args=(ctx, run_id), daemon=True)
     thread.start()
-    assert _until(lambda: ticks.calls == 1)
     return thread
 
 
-def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_waits(world):
-    """The nanny's supervised hold is a wait; the run it holds is a working helper only while
-    the supervision owner currently observes it running and not paused on its question."""
+def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_waits(world, body, monkeypatch):
+    """A held run is a working helper only while the body observer currently sees it running and not paused on
+    its question; the hold itself is a wait, and the run's terminal ends it."""
     from ouroboros.delegate_progress import emit_external_wait_lease
-    from ouroboros.delegate_supervision import _OBSERVATION_CURRENT_SEC
 
     supervisor = _Supervisor(world)
+    monkeypatch.setattr(world.workers, "get_event_q", lambda **_kw: supervisor)
     root = _pooled(world, "root-n", chat_id=6)
     root["owner_wait"] = {"wait_id": "w", "state": "waiting", "task_attempt": 1, "reason": "owner",
                           "source_ref": {"x": 1}}  # the root waits; only its helper can prepare
@@ -395,59 +383,48 @@ def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_w
                                          "delegation_role": "subagent"}, event_queue=supervisor, current_chat_id=6)
     emit_external_wait_lease(ctx, "run-1", time.time() + 60, lease_id="lease-1")
     assert _chats(world) == [6], "the idle-rail lease alone is no wait: its semantics stay the idle rail's"
-    ticks = _Ticks("run-1")
-    thread = _hold(ctx, ticks)
+    body.engine.fail = True
+    thread = _hold(world, ctx, "run-1", monkeypatch)
     try:
-        assert reply_preparation(world.root)["complete"] is False and _chats(world) == [], \
-            "held before any current observation: unknown, never a positive"
-        ticks.tick(state="running")
-        assert _chats(world) == [6], "an observed running run works for the reply"
+        assert _observed(world, "run-1", answered=False)
+        assert _until(lambda: _chats(world) == []), "held with no answered read: unknown, never a positive"
+        assert reply_preparation(world.root)["complete"] is False
+        body.engine.fail = False
+        assert _observed(world, "run-1", answered=True, run_state="running")
+        assert _until(lambda: _chats(world) == [6]), "an observed running run works for the reply"
         announced = supervisor.kinds().count("typing_start")
-        ticks.tick(state="running", waiting_on_user=True,
-                   pending_interactions=[{"interaction_id": "i", "questions": []}])
-        assert _chats(world) == [], "a run paused on its question prepares nothing"
-        ticks.tick(state="running")
-        assert _chats(world) == [6]
-        assert supervisor.kinds().count("typing_start") == announced + 1, "working again re-announces"
-        ticks.tick(state="queued")
-        assert _chats(world) == [], "a run queued for capacity is an access wait"
-        ticks.tick(status="observation_pending", state="", reason="daemon_unreachable")
-        state = reply_preparation(world.root)
-        assert state["complete"] is False and state["chats"] == [], "an unanswered read is unknown"
-        ticks.tick(state="running")
-        assert _chats(world) == [6]
-        path = world.root / "state" / "delegate_supervision" / "nanny.json"
-        record = json.loads(path.read_text())
-        record["runs"]["run-1"]["observation"]["at_unix"] -= _OBSERVATION_CURRENT_SEC + 1
-        path.write_text(json.dumps(record))
-        assert reply_preparation(world.root)["complete"] is False and _chats(world) == [], \
-            "an observation older than a few ticks says nothing current"
-        record["runs"]["run-1"]["observation"]["at_unix"] = time.time()
-        record["runs"]["run-1"]["observation"]["attempt"] = "2"
-        path.write_text(json.dumps(record))
-        assert _chats(world) == [], "another attempt's observation is not this attempt's"
+        body.engine.waiting = True
+        assert _observed(world, "run-1", waiting_on_user=True) and _chats(world) == [], \
+            "a run paused on its question prepares nothing"
+        body.engine.waiting = False
+        assert _observed(world, "run-1", waiting_on_user=False) and _chats(world) == [6]
+        assert _until(lambda: supervisor.kinds().count("typing_start") == announced + 1), "working again re-announces"
+        body.engine.state = "queued"
+        assert _observed(world, "run-1", run_state="queued") and _chats(world) == [], \
+            "a run queued for capacity is an access wait"
     finally:
-        ticks.end()
+        body.engine.state = "succeeded"
         thread.join(10)
     assert not thread.is_alive()
     assert _chats(world) == [6], "the hold ended: the nanny's own work goes on"
 
 
-def test_a_direct_turn_holds_its_delegated_run_on_its_live_context(world):
+def test_a_direct_turn_holds_its_delegated_run_on_its_live_context(world, body, monkeypatch):
     ctx = SimpleNamespace(task_id="turn-d", task_attempt=1, drive_root=world.root, budget_drive_root=str(world.root),
                           task_metadata={}, event_queue=None, current_chat_id=1)
     _direct(world, "turn-d", chat_id=1, actor=SimpleNamespace(tools=SimpleNamespace(_ctx=ctx)))
     assert _chats(world) == [1]
-    ticks = _Ticks("run-d")
-    thread = _hold(ctx, ticks)
+    body.engine.waiting = True
+    thread = _hold(world, ctx, "run-d", monkeypatch)
     try:
-        ticks.tick(state="running", waiting_on_user=True)
-        assert _chats(world) == [], "holding a run paused on its question is a wait"
-        ticks.tick(state="running")
-        assert _chats(world) == [1]
+        assert _observed(world, "run-d", waiting_on_user=True)
+        assert _until(lambda: _chats(world) == []), "holding a run paused on its question is a wait"
+        body.engine.waiting = False
+        assert _observed(world, "run-d", waiting_on_user=False) and _until(lambda: _chats(world) == [1])
     finally:
-        ticks.end()
+        body.engine.state = "succeeded"
         thread.join(10)
+    assert not thread.is_alive()
     assert ctx._in_slot_waits == {} and _chats(world) == [1]
     ctx._in_slot_waits = {"mail:stale": time.time() - 1}
     assert _chats(world) == [1], "an expired mark outlives nothing"
