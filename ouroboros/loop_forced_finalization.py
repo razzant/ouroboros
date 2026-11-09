@@ -80,7 +80,7 @@ def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
 
 # Child states that need no further author disposition before this task finishes.
 HANDLED_CHILD_DISPOSITIONS = frozenset({
-    "integrated", "irrelevant", "deferred", "discarded", "cancelled", "host_attention",
+    "integrated", "irrelevant", "deferred", "discarded", "cancelled",
 })
 
 

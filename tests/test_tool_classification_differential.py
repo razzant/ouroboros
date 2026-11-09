@@ -619,10 +619,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # Owner decision (PR #1636): an exact edit that leaves .py/.json unparsable is
     # applied and reported, never refused; the warning is a successful call.
     "SYNTAX_WARNING": (False, "ok"),
-    # #1376: a silence diagnostic's capability gate (registry_guards) is a new producer
-    # after the retired oracle; a refused tool never ran, as for its subagent peers.
-    "DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
-    "native:ACCESS_BLOCKED:DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
     # control_runtime `_send_user_message`: a relay answer that cannot be recorded as owed sends nothing and
     # keeps the relay open, published as native CAPABILITY_UNAVAILABLE. The bare warning names no suffix the
     # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.

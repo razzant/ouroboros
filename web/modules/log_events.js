@@ -911,7 +911,9 @@ export function summarizeLogEvent(evt) {
         // provenance says how it was framed (ancestor / relayed peer /
         // independent task / system / escalation).
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
-        return view('info', `Message from task ${source}`, {
+        // A host message (a silence fact, a control receipt) has no sending task: say who wrote it.
+        const host = evt.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
+        return view('info', host ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
             meta: taskMeta(
                 evt.provenance ? `provenance=${evt.provenance}` : '',
@@ -1409,9 +1411,11 @@ function summarizeChatLiveEventView(evt) {
         // visible row in the receiver's block (owner 5=A), named by value.
         const source = evt.source_task_id ? String(evt.source_task_id) : tr('task.progress.another_task', 'another task');
         const preview = String(evt.text_preview || '');
+        // A host message (a silence fact, a control receipt) has no sending task: say who wrote it.
+        const host = evt.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
         return chatView({
             phase: 'info',
-            headline: fmt('Message from task {source}', { source }),
+            headline: host ? tr('task.progress.system_message', 'System message') : fmt('Message from task {source}', { source }),
             body: shortText(preview, 200),
             fullBody: preview,
             visible: true,

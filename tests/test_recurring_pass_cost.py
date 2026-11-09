@@ -231,7 +231,7 @@ def test_l14_a_pass_walks_each_live_row_once_not_once_per_running_row(tmp_path, 
 
 @pytest.mark.parametrize("progressing, expect_observed", [(True, False), (False, True)])
 def test_l14_the_index_keeps_every_decision_a_scan_made(tmp_path, monkeypatch, progressing, expect_observed):
-    """The companion: a fresh grandchild still spares its root, a parked diagnostic never does, and a truly
+    """The companion: a fresh grandchild still spares its root, and a truly
     silent tree still reaches attention. Walked through the chain and through ``root_task_id`` alike."""
     from supervisor import queue_timeouts, silence_attention
 
@@ -245,8 +245,6 @@ def test_l14_the_index_keeps_every_decision_a_scan_made(tmp_path, monkeypatch, p
     workers.RUNNING["child-0"]["task"]["root_task_id"] = ""
     if progressing:
         workers.RUNNING["child-1"]["last_progress_at"] = now - 10.0
-    workers.PENDING.append({"id": "diag", "root_task_id": "root", "metadata": {"work_diagnostic": {
-        "kind": "silence", "task_id": "root", "root_task_id": "root", "episode_id": "episode", "task_attempt": 1}}})
     observed = []
     monkeypatch.setattr(silence_attention, "observe", lambda _q, tid, *_a: observed.append(tid))
     monkeypatch.setattr(silence_attention, "recovered", lambda *_a: None)

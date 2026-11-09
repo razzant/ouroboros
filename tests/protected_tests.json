@@ -1180,9 +1180,6 @@
   "tests/test_shell_run_shell.py::TestPerCallTimeout::test_schema_exposes_timeout_sec_and_registry_owns_the_timeout_alias": [
    2172
   ],
-  "tests/test_silence_attention.py::test_diagnostic_producer_to_worker_put_revalidates_source_off_queue_lock": [
-   2285
-  ],
   "tests/test_skill_discovery_reuse.py::test_a_manifest_written_in_a_connected_folders_standard_folder_is_seen": [
    2690
   ],
@@ -3100,9 +3097,6 @@
   ],
   "tests/test_shell_run_shell.py::test_run_shell_discloses_literal_env_refs_in_argv": [
    447
-  ],
-  "tests/test_silence_integration.py::test_owner_related_source_hands_its_diagnostic_no_place_authority": [
-   2482
   ],
   "tests/test_skill_catalogue.py::test_broken_counts_every_load_error_its_rows_show": [
    600

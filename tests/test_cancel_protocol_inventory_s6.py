@@ -84,10 +84,6 @@ TERMINAL_WRITERS = {
     # Preparation markers land only on a row still in the named non-terminal
     # status (requested by default); the projector refuses any other row.
     ('supervisor/workspace_preparation.py::_transition', 'status'): 'dynamic',
-    # #1376: the host-composed diagnostic's create-only "requested" receipt, the
-    # same seed a schedule_subagent request writes; create_only refuses any
-    # existing row, so it can neither end nor overwrite a task.
-    ('supervisor/silence_attention.py::_admit', '"requested"'): 'dynamic',
     # F6 upstream sync: the cursor/backfill refresh rewrites a stale stored
     # disclosure without changing the task's terminal status (same preserved
     # read as its record_terminal_reconciliation sibling).
