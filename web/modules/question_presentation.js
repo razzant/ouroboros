@@ -208,7 +208,7 @@ const CLOSE_GLYPH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
 // The same answer and explicit no-answer closure controls serve Main and Project. Closing is one
 // quiet × at the end of the card's head (a tall card's foot can be screens away), one tap with no
 // reason to type; it waits while an answer is typed, so a mis-tap never discards the owner's words.
-// The answer is one frame holding its words and its Send, as the composer holds its own.
+// The wrapper keeps the answer lifecycle together, while the textarea owns the visible field and Send follows below it.
 export function appendQuestionReplyControls(card, quiz, { submit, close, showToast, onDomWrite }) {
     const box = document.createElement('div');
     box.className = 'chat-quiz-comment-box';

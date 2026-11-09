@@ -1703,11 +1703,12 @@ Anatomy, top to bottom:
    green/meta flat treatment in light. Its accessible name identifies it; dark also shows `Your choice`.
    Recommendation is separate from the owner's answer. Options are capped by the shared Python↔JS constant
    (`MAX_QUIZ_OPTIONS`); with none, the free answer is the whole answer.
-5. **Free answer** — while the card is open, one always-visible frame (the field's
-   hairline and focus idiom) holds the words, named `Your answer`, and at its trailing
-   bottom edge the `Send my answer` crimson capsule at the composer's height, enabled
-   and standing only once something is typed; a narrow card gives Send its own line in
-   the frame. It is a message field: its words grow to one cap, then scroll; Enter sends and
+5. **Free answer** — while the card is open, the always-visible `Your answer` field
+   owns its hairline and focus idiom. The `Send my answer` crimson capsule is a
+   separate action row immediately below the field, aligned to its trailing edge,
+   enabled and standing only once something is typed. Keeping the action below the
+   field gives a multiline answer its full readable measure; the shared DOM wrapper
+   still owns drafts, feedback and settlement. It is a message field: its words grow to one cap, then scroll; Enter sends and
    Shift+Enter breaks the line (§3 "Controls and editable choices"). No option
    ever has to be the least wrong one: the text rides with an option click as
    the owner's remark, or goes alone as the owner's own answer. It uses the
