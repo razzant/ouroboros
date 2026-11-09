@@ -88,6 +88,11 @@ def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: 
         origin = (task or {}).get("origin_message_ref")
         if not origin and isinstance(metadata, dict):
             origin = metadata.get("origin_message_ref")
+        press = metadata.get("ui_control") if isinstance(metadata, dict) and isinstance(metadata.get("ui_control"), dict) else {}
+        if not origin and press.get("name") == "skill_repair" and constraint.has_selected_skill and press.get("pressed_at"):
+            # My human pressed Repair for this selected skill ("turns it on when it is ready"): the press is the
+            # request, held by the host at the door; its words were the host's, so nothing is quoted as theirs.
+            return "", {"kind": "control", "control": "skill_repair", "ts": str(press["pressed_at"]), "text": ""}
         owner_source = {"kind": "chat", "ref": origin}
     resolved = resolve_skill_owner_source(ctx, owner_source)
     if not resolved:

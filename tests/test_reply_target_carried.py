@@ -15,7 +15,7 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.chat_chain import format_address, row_address
 from ouroboros.loop_messages import _initialize_owner_directives, _record_owner_directive, owner_input_revision
-from ouroboros.owner_words import FIELD, REPLY_TARGET, governing_words_for_schedule
+from ouroboros.owner_words import FIELD, REPLY_TARGET, SCHEDULE_TEXT, governing_words_for_schedule
 
 PROPOSAL = "The exact proposed specification, step by step."
 
@@ -122,7 +122,10 @@ def test_a_scheduled_run_continues_with_the_words_and_reply_target_it_carried(tm
         "owner_corpus": owner_corpus_rows(sources)})
     _initialize_owner_directives(successor, [{"role": "user", "content": "[CONTINUE] work order"}])
     assert _targets(successor) == [PROPOSAL], "the successor reads the message my human replied to"
-    assert [row["content"] for row in successor._owner_directives] == ["Do this."]
+    assert [row["content"] for row in successor._owner_directives if row["source"] != SCHEDULE_TEXT] == ["Do this."]
+    # Beside it the schedule's own text rides as the assignment, a separate source, never my human's words.
+    assert [row["content"] for row in successor._owner_directives
+            if row["source"] == SCHEDULE_TEXT] == ["Check the plan weekly."]
 
 
 def test_mail_into_running_work_keeps_the_message_it_replies_to(tmp_path):

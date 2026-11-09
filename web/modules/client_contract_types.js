@@ -29,6 +29,7 @@
  * @property {Object=} client_surface
  * @property {"command"} type
  * @property {string} cmd
+ * @property {Object=} ui_control
  */
 /**
  * Emergency request accepted on this connection; does not prove process exit.

@@ -76,7 +76,7 @@ async function postCommand(fetchImpl, expectedSince, signal) {
         return await withinRequestLifetime(async (transport) => {
             const response = await fetchImpl('/api/command', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: transport,
-                body: JSON.stringify({ cmd: START_COMMAND, if_boot: expectedSince }),
+                body: JSON.stringify({ cmd: START_COMMAND, if_boot: expectedSince, ui_control: { name: 'setup_consciousness' } }),
             });
             const data = await response.json();
             return { accepted: response.ok && data?.status === 'ok', refused: !response.ok && data?.accepted === false,

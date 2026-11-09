@@ -111,6 +111,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
+    # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
+    "objective_author", "context_author", "owner_corpus", "ui_control",
+    "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
 })
 
 
