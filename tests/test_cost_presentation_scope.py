@@ -313,7 +313,7 @@ def test_first_terminal_root_frame_preserves_amount_but_not_finality_on_tree_fai
     assert output == {**original, 'cost_presentation': None, 'cost_final': False,
                       'cost_with_children_partial': True, 'cost_custody': {
                           'status': 'unavailable', 'open_run_ids': [], 'unrecorded_run_ids': [],
-                          'pending_invocation_ids': []}}
+                          'closed_unrecorded_run_ids': [], 'pending_invocation_ids': []}}
 
 
 @pytest.mark.parametrize('rollup, swarm, keeps_own', [

@@ -147,7 +147,9 @@ def build_cost_presentation(
       tracked amount is only a subtotal; it may itself include open bounds.
     * ``tracked_final`` — the tracked amount is exact. Estimates, retained
       reservation bounds and ledger-integrity gaps all leave it False.
-    * ``accounting_open`` — more can still arrive for this scope.
+    * ``accounting_open`` — more can still arrive for this scope. A delegated run
+      whose custody closed without a matching receipt cannot bring money: it keeps
+      ``has_unpriced`` (its cost is unknown) but never holds accounting open.
     * ``has_rows`` — this scope has any accountable row at all; without one there
       is nothing to say, not a free result.
 
@@ -166,13 +168,12 @@ def build_cost_presentation(
         return None
     amount = _as_amount(summary.get("accounted_usd")) if priced else None
     integrity_gap = bool(summary.get("integrity_degraded"))
-    from ouroboros.delegate_custody_usage import cost_coverage_open
-    custody_open = cost_coverage_open(summary)
-    open_accounting = open_rows > 0 or integrity_gap or custody_open
+    from ouroboros.delegate_custody_usage import cost_coverage_open, cost_coverage_pending
+    open_accounting = open_rows > 0 or integrity_gap or cost_coverage_pending(summary)
     return {
         "scope": str(scope),
         "tracked_amount": round(amount, 6) if amount is not None else None,
-        "has_unpriced": unpriced > 0 or custody_open,
+        "has_unpriced": unpriced > 0 or cost_coverage_open(summary),
         "tracked_final": amount is not None and tracked_nonfinal == 0 and not integrity_gap,
         "accounting_open": open_accounting,
         "has_rows": bool(priced or unpriced),
@@ -609,28 +610,35 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
     one; with nothing accounted, the reason as known: ``unknown (accounting
     unavailable)``, ``unknown (not settled yet)`` (its calls are still open),
     ``unknown (no price recorded for its calls)`` (the ledger read, its rows carry
-    no price, e.g. subscription work), else ``unknown (accounting unavailable or
-    not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
+    no price, e.g. subscription work), ``unknown (a delegated run closed without a
+    cost record)``, ``unknown (no usage recorded)`` (an intact, closed scope without
+    any row: the card's absent money line, never ``$0.00``), else ``unknown (accounting
+    unavailable or not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
     known subtotal when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
     amount = projection["accounted_upper_bound_usd"]
+    src = source if isinstance(source, Mapping) else {}
+    carrier = projection.get("cost_presentation") or src.get("cost_presentation")
+    carrier = carrier if isinstance(carrier, Mapping) else {}
+    if carrier.get("has_rows") is False:
+        amount = None  # no row in the carrier's scope (own or its tree): a legacy zero field proves nothing
     if amount is None:
-        src = source if isinstance(source, Mapping) else {}
-        carrier = projection.get("cost_presentation") or src.get("cost_presentation")
         custody = src.get("cost_custody") if isinstance(src.get("cost_custody"), Mapping) else {}
         # As the card says it (costPresentationMeta): an unreadable ledger, custody view or quarantined ledger.
         if (src.get("cost_accounting_status") == "unavailable" or src.get("ledger_integrity_degraded") is True
                 or custody.get("status") == "unavailable"):
             return "unknown (accounting unavailable)"
-        if isinstance(carrier, Mapping) and carrier.get("accounting_open"):
+        if carrier.get("accounting_open"):
             return "unknown (not settled yet)"  # a price may still arrive
-        if isinstance(carrier, Mapping) and carrier.get("has_rows"):
+        if carrier.get("has_rows"):
             return "unknown (no price recorded for its calls)"  # a readable ledger, rows without a price
+        if carrier.get("has_rows") is False:
+            return ("unknown (a delegated run closed without a cost record)" if carrier.get("has_unpriced")
+                    else "unknown (no usage recorded)")
         return "unknown (accounting unavailable or not settled)"
     text = usd_text(amount, decimals)  # $0.00 is a priced zero only
     from ouroboros.delegate_custody_usage import cost_coverage_open
-    carrier = projection.get("cost_presentation") or {}
     if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):
         return f"Tracked: {text} (total unknown)"
     if projection["cost_final"]:

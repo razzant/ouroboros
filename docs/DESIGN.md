@@ -2337,8 +2337,9 @@ unknown as a number: `$0.00` only where priced rows evidenced that zero,
 of the same scope has no price (`Tracked: up to $1.20` when that subtotal is
 inexact too), `Cost pending` while accounting is open without a tracked amount,
 and `Cost not priced` once settled usage has no tracked price. An
-empty, intact ledger has no money line; an empty view with an integrity gap
-stays unknown; neither proves a free result. The chip's short word (`Sending`,
+empty, intact ledger clears an earlier money line; a newer start may show
+`Cost pending` again. An integrity gap or a run settled without its cost record
+reads `Cost unknown`; neither proves a free result. The chip's short word (`Sending`,
 `Queued`) and `Tracked:` are explained in the card's details (exact phase;
 `some steps have no price`), not a tooltip; real ` · ` text separates meta parts
 for copies and assistive technology. The host's `_is_direct_chat` fact keeps its
