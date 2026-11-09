@@ -22,7 +22,8 @@ import { openConfirmDialog } from './confirm_dialog.js';
 const SEP = ' · ';
 const UNASSIGNED = 'none';
 const OWNER_VOICE = new Set(['owner', 'migration']);
-// The state word's tone: a live place is the ok dot, a silent or paused one the muted dot.
+// The state word's tone: a live place is the ok dot, a silent or paused one the muted dot, and so is a place that only
+// hears because consciousness is off (the host's `only_hears`).
 const STATE_TONE = { active: 'ok', silent: 'muted', paused: 'muted' };
 
 /** «2 h ago» from the last captured event; a place without one says so (never «no activity»). */
@@ -35,14 +36,16 @@ export const lastEventText = (place) => (place.lastActivityAt
 export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const readiness = place.readiness && place.readiness.tone !== 'ok'
         ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
-    const state = tr(`places.state.${place.state}`, placeStateWord(place.state));
+    const word = tr(`places.state.${place.state}`, placeStateWord(place.state));
+    const state = place.onlyHears ? `${word}${SEP}${tr('places.only_hears.consciousness_off', 'consciousness off')}` : word;
     const when = lastEventText(place);
     const name = title || placeTitle(place);
     // The service as a quiet label, unless the name already is it (a whole account no status has named yet).
     const service = source || placeService(place);
     const where = sameWords(name, service) ? '' : service;
     const description = place.description?.text || '';
-    const facts = `<span class="ui-status" data-tone="${STATE_TONE[place.state] || 'muted'}">${escapeHtml(state)}</span>${readiness
+    const tone = place.onlyHears ? 'muted' : STATE_TONE[place.state] || 'muted';
+    const facts = `<span class="ui-status" data-tone="${tone}">${escapeHtml(state)}</span>${readiness
         ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${SEP}${escapeHtml(when)}`;
     const label = fmt(where ? 'Open {place} ({where}): {facts}' : 'Open {place}: {facts}', { place: name, where,
         facts: [state, readiness, fmt('last event {when}', { when })].filter(Boolean).join('; ') });

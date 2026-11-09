@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from ouroboros.places import (AUTHOR_OWNER, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place, place_records,
-                              place_summary, note_identity, migration_problems)
+from ouroboros.places import (AUTHOR_OWNER, STATE_PAUSED, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place,
+                              place_records, place_summary, note_identity, migration_problems)
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +68,24 @@ def said_once(label: str) -> str:
     return " · ".join(part for index, part in enumerate(parts) if not index or part != parts[index - 1])
 
 
+def consciousness_off(root) -> bool:
+    """Whether consciousness cannot focus in any place now: the owner's switch or a pending Panic, the check intake
+    applies (``presence_admission.focus_enabled``). A switch that cannot be read is no claim."""
+    from ouroboros.presence_admission import focus_enabled
+    try:
+        return not focus_enabled(root)
+    except Exception:
+        log.warning("Consciousness switch unreadable for the place views", exc_info=True)
+        return False
+
+
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
-               brief: bool = False, records=None) -> dict[str, Any]:
+               brief: bool = False, records=None, off: bool | None = None) -> dict[str, Any]:
     """Stored facts for status/launch; the owner surface also resolves connector capabilities. ``records`` is one
     ``places.place_records`` read shared by a list; its circle and description facts join the place here, the
-    circle's words only in a brief view (the list names them once, ``places_view``)."""
+    circle's words only in a brief view (the list names them once, ``places_view``). ``off`` is one
+    ``consciousness_off`` read shared by a list (read here when absent): while it holds, a place that is not Paused
+    only hears, and its view says so as ``only_hears`` (derived on every read, never stored)."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import account_candidates
     from ouroboros.places import place_room_index
@@ -80,6 +93,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
         allowance = allowance_window(root, allow_stale=True)
     records = place_records(root) if records is None else records
     result = dict(place_summary(place))
+    if (consciousness_off(root) if off is None else off) and place.state != STATE_PAUSED:
+        result["only_hears"] = True
     # Legacy notes predate ids; use stable content+ordinal ids without rewriting history.
     result["notes"] = [{**n, "note_id": note_identity(place.place_id, i, place.notes[i])}
                        for i, n in enumerate(result["notes"])]
@@ -140,8 +155,9 @@ def places_view(root) -> dict:
     records = place_records(root)
     from ouroboros.consciousness_allowance import allowance_window
     allowance = allowance_window(root, allow_stale=True) or {}
+    off = consciousness_off(root)
     return {"migration_problems": migration_problems(root),
-            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records)
+            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records, off=off)
                        for p in records.places.values()],
             "circles": [circle_summary(circle) for circle in records.circles],
             "connectors": [{"connector": r["skill"],

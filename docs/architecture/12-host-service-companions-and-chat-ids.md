@@ -49,7 +49,7 @@ Entry/receipt identity is `presence_bindings.conversation_key` (empty thread `0`
 
 `places.py` owns atomic revisioned `state/places.json`, for `ouroboros/gateway/places_api.py` and `configure_presence`. Connect starts Silent; repeats keep choices; low-level/migration defaults stay Active. Owner doors alone confirm accounts and activate; confirmations span their connector account, read when used, excluding my MCP posts by message id (`counted_owner_accounts`, `owner_event_now`, `own_sends`). Consciousness may set Silent/Paused. Migration copies bindings/instructions/topics/model/folder once, preserving sources/routes. Connection stamps and sibling `circles`/`place_choices`, read as one `PlaceRecords` snapshot, preserve old readers and queued custody (PERSISTENCE; older-writer gaps: CREATING_SKILLS).
 
-`place_projection` owns PlaceSummary (fields: CLIENT_CONTRACT “Places”). Status/launch keep brief stored views; display money may be stale, admission stays strict. Connect states/identities: CREATING_SKILLS.
+`place_projection` owns PlaceSummary (fields: CLIENT_CONTRACT “Places”), its `only_hears` derived for Off/Panic. Status/launch keep brief stored views; display money may be stale, admission stays strict.
 
 Contribution `facts` declares core kinds and labelled `signal.<slug>`, `wakes` defaults; `/identity.presence_wake_signals: 1` advertises them. Intake and new signal choices need the live declaration; saved choices stay removable while off. Connectors own signal logic; bot/self rules: CREATING_SKILLS.
 

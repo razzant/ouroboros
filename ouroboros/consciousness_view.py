@@ -61,8 +61,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     wake = snapshot.get("live_wake_task_id")
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
-    elif not requested_enabled:
-        status, detail = "disabled", "Background consciousness is off."
+    elif not requested_enabled:  # the places it already read: a Paused one does not hear either
+        hearing = sum(row.get("state") != "paused" for row in snapshot.get("places_brief") or [])
+        status, detail = "disabled", f"Off: no own wakes; {_hearing(hearing)}." if hearing else "Off: no own wakes."
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:
@@ -105,6 +106,49 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     return {**snapshot, "enabled": requested_enabled, "status": status, "detail": detail}
 
 
+def _hearing(n: int) -> str:
+    return f"{n} place only hears" if n == 1 else f"{n} places only hear"
+
+
+def off_sentence(places) -> str:
+    """The switch's first words as it turns consciousness off (owner 09.11, variant A). ``places`` is one read of the
+    place store, None when it could not be read; a Paused place does not hear either, so it is not counted."""
+    if places is None:
+        return "Consciousness off: no own wakes, and its places only hear until Start."
+    hearing = sum(place.state != "paused" for place in places)
+    return f"Consciousness off: no own wakes, and {_hearing(hearing)} until Start." if hearing else "Consciousness off: no own wakes."
+
+
+def stopping_words(task_ids, *, wake: str, rows: dict, authors, places) -> str:
+    """«Stopping now: …» naming each live item a stop ends, from what is in memory: its own wake-up, a reply in a
+    place (named from the place store read beside it, else «a place»), an autonomous task by its queue title, else
+    its id. ``rows`` maps a task id to its in-memory ``title`` and ``metadata``; ``authors`` are live place authors."""
+    from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
+    from ouroboros.place_projection import said_once
+
+    named: dict[str, str] = {}
+    for place in places or ():
+        for key in (place.place_id, *place.legacy_binding_ids):
+            named.setdefault(key, said_once(place.label or place.provider))
+    woke, replies, tasks = False, [], []
+    for task_id in task_ids:
+        row = rows.get(task_id) or {}
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        focus, presence = (meta.get(key) if isinstance(meta.get(key), dict) else {} for key in ("focus", "presence"))
+        if task_id == wake or is_own_clock_wake(meta):
+            woke = True
+        elif task_id in authors or is_focus_wake(meta) or presence:
+            cause = str(meta.get("consciousness_cause") or "")
+            key = str(focus.get("place_id") or (cause.removeprefix("place:") if cause.startswith("place:") else "")
+                      or presence.get("binding_id") or "")
+            replies.append(f"a reply in {named.get(key) or 'a place'}")
+        else:
+            tasks.append(f"«{row.get('title') or task_id}»")
+    items = (["its wake-up"] if woke else []) + replies + tasks
+    if not items:
+        return ""
+    return "Stopping now: " + (items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}") + "."
+
 
 def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
     """Read the same stored control as /api/state, including unknown and no-clock boot states."""
@@ -118,13 +162,14 @@ def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
-    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance, no connector
-    discovery."""
-    from ouroboros.place_projection import place_view
+    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance and one read of the
+    switch, no connector discovery."""
+    from ouroboros.place_projection import consciousness_off, place_view
     from ouroboros.places import place_records
 
     records = place_records(drive_root)
-    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records)
+    off = consciousness_off(drive_root)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off)
             for place in records.places.values()]
 
 
@@ -337,6 +382,7 @@ def recent_wakes(drive_root, places, *, live_wake_task_id: str = "", now: float 
                      **({"as": {"label": sending["label"], "owner": bool(focus.get("identity_owner"))}} if sending else {}),
                      "chat_id": row.get("chat_id"), "conversation": str(focus.get("conversation_key") or ""),
                      "place_label": cause_label(f"place:{place_id}", places or ()) if place_id else "",
+                     **({"place_id": place_id} if place_id else {}),  # the Shade's door to that place's sheet
                      "started_at": row.get("started_at"),
                      **({"first_reply_at": first_reply_at(drive_root, task_id)} if cause == "focus" else {}),
                      "ended_at": terminal_time_fact(row)["occurred_at"],

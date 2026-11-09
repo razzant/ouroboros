@@ -9,14 +9,16 @@
  * Pressing the chip opens the Shade and switches nothing: the host's state line (consciousness_dashboard.headlineView),
  * Start or Stop (the `/bg` command the Dashboard sends), the money of the last 24 hours, three own wakes and three wakes
  * in places in the Dashboard's phase words (one `GET /api/consciousness` per opening), `Dashboard ›` and, while
- * evolving, `Evolution ›`. The Shade is the room's work list material and gestures (room_work.js): it hangs under the
- * bar's capsules; an outside press, Escape or focus leaving it close it. The facts are the `/api/state` snapshot the
- * room already reads.
+ * evolving, `Evolution ›`. A wake in a place is a door to that place's sheet (its Active · Silent · Paused one press
+ * away), read from `/api/places` at the press. The Shade is the room's work list material and gestures (room_work.js):
+ * it hangs under the bar's capsules; an outside press, Escape or focus leaving it close it. The facts are the
+ * `/api/state` snapshot the room already reads.
  */
 import { headlineView } from './consciousness_dashboard.js';
-import { normalizeConsciousness, readConsciousness } from './consciousness_api.js';
+import { failureText, normalizeConsciousness, readConsciousness, readPlaces } from './consciousness_api.js';
 import { allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
+import { openPlaceSheet } from './place_sheet.js';
 import { controlIcon } from './page_icons.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { hangUnderCapsules } from './room_work.js';
@@ -52,12 +54,14 @@ export function chipView(data = {}) {
     return { word, mark, off, evolving, said, headline, snapshot };
 }
 
-/** The three last wakes, newest first: time, its one short line, and its phase in the Dashboard's words. */
+/** The three last wakes, newest first: time, its one short line, and its phase in the Dashboard's words; a wake in a
+ *  place also names that place (`placeId`, `place`), whose sheet its row opens. */
 export function wakeRows(wakes) {
     return (Array.isArray(wakes) ? wakes : []).slice(0, WAKES_SHOWN).map((wake) => ({
         time: clockText(wake.startedAt) || '—',
         text: wake.summary || (wake.cause === 'focus' ? wake.placeLabel || 'A place' : 'Own time'),
         outcome: wakePhaseText(wake),
+        ...(wake.cause === 'focus' && wake.placeId ? { placeId: wake.placeId, place: wake.placeLabel || 'A place' } : {}),
     }));
 }
 
@@ -67,7 +71,7 @@ export function wakeRows(wakes) {
  * every `/api/state` answer the room reads.
  */
 export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = null, refreshState = () => {},
-    read = readConsciousness } = {}) {
+    read = readConsciousness, readPlacesFn = readPlaces, openSheet = openPlaceSheet } = {}) {
     const doc = bar?.ownerDocument;
     if (!doc) return null;
     const element = (tag, className = '', text = '') => {
@@ -188,12 +192,23 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         for (const group of groups) {
             const rows = wakeRows(split[group.key]);
             group.wakes.replaceChildren(...rows.map((row) => {
-                const item = element('li', 'cx-wake');
+                const item = element('li', row.placeId ? 'cx-wake-item' : 'cx-wake');
                 const time = element('span', 'cx-wake-time', row.time);
                 const text = element('span', 'cx-wake-text', row.text);
                 const outcome = element('span', 'cx-wake-outcome', row.outcome);
                 outcome.hidden = !row.outcome;
-                item.append(time, text, outcome);
+                if (!row.placeId) {
+                    item.append(time, text, outcome);
+                    return item;
+                }
+                // A wake in a place is a door to that place's sheet; the row keeps its words, and its name says them.
+                const door = element('button', 'cx-wake cx-wake-door');
+                door.type = 'button';
+                door.setAttribute('aria-label', fmt('Open {place}: {facts}', { place: row.place,
+                    facts: [row.time, row.text === row.place ? '' : row.text, row.outcome].filter(Boolean).join(' · ') }));
+                door.append(time, text, outcome);
+                door.addEventListener('click', () => { void openPlace(door, row.placeId); });
+                item.append(door);
                 return item;
             }));
             group.wakes.hidden = !rows.length;
@@ -211,6 +226,27 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (destroyed || seq !== readSeq || !open) return;
         if (!snapshot || !Array.isArray(snapshot.recentWakes)) paintWakes(null, snapshot?.coverage, true);
         else paintWakes(snapshot.recentWakes, snapshot.coverage);
+    }
+
+    // A place wake's door reads the places at the press (the place as it stands now), one press at a time. A failed
+    // read says so in the Shade's one note line and keeps the door for another try; a place gone since disables it.
+    async function openPlace(door, placeId) {
+        if (door.dataset.pending) return;
+        door.dataset.pending = '1';
+        let place = null, failed = '';
+        try { place = (await readPlacesFn()).places.find((entry) => entry.id === placeId) || null; }
+        catch (error) { failed = fmt('Places could not be read: {reason}', { reason: failureText(error) }); }
+        finally { delete door.dataset.pending; }
+        if (destroyed || !open) return;
+        if (place) {
+            close({ restoreFocus: false });
+            openSheet(place, { returnFocus: chip });
+            return;
+        }
+        door.disabled = !failed;
+        coverageNote.textContent = failed || tr('places.disconnected', 'This place is disconnected.');
+        coverageNote.removeAttribute('data-i18n-authored');
+        coverageNote.hidden = false;
     }
 
     function foldAway() {

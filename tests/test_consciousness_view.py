@@ -66,6 +66,21 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
 
 
+@pytest.mark.parametrize("brief,detail", [
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
+    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
+    ([{"state": "paused"}], "Off: no own wakes."),
+    (None, "Off: no own wakes."),
+])
+def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+    """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    snapshot = {} if brief is None else {"places_brief": brief}
+    described = view.describe_consciousness_state(snapshot, False)
+    assert (described["status"], described["detail"]) == ("disabled", detail)
+    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+
+
 def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):
     """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
     circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
@@ -523,6 +538,7 @@ def test_durable_automatic_release_and_receipts_survive_result_updates(tmp_path,
     assert row["conversation"] == "chat:a:r" and row["chat_id"] == -7
     labelled, = view.recent_wakes(tmp_path, [{"place_id": "mail", "label": "Inbox"}])
     assert labelled["cause"] == "focus" and labelled["place_label"] == "Inbox"
+    assert labelled["place_id"] == "mail", "the Shade's door opens this place's sheet; an own wake carries none"
 
 
 def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):

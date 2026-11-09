@@ -194,17 +194,24 @@ def test_counted_roots_are_exactly_autonomous_independent_roots(tmp_path, monkey
 
 def test_stop_reaches_direct_pool_children_and_lent_focus_but_leaves_owner(clock, monkeypatch):
     from supervisor import queue
-    from ouroboros import conversation_lease
+    from ouroboros import conversation_lease, places
     turns = {"own": _task("own", OWN), "focus": _task("focus", FOCUS), "owner": _task("owner", OWNER),
              "commissioned": _task("commissioned", {**STARTED, "work_kind": "owner"})}
     _direct(monkeypatch, turns)
-    monkeypatch.setattr(queue, "PENDING", [_task("started", STARTED), _task("kid", STARTED), _task("owner-root", OWNER)])
+    monkeypatch.setattr(queue, "PENDING", [_task("started", STARTED, title="Triage the inbox"), _task("kid", STARTED),
+                                           _task("owner-root", OWNER)])
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(conversation_lease, "live_authors", lambda **kw: ["focus", "lent"])
+    places.connect_place(clock.root, place_id="mail", connector="bridge", provider="chat", label="Slack · Acme",
+                         state="active")
     stopped = []
     monkeypatch.setattr(clock.clock, "_stop_live_wake", stopped.append)
     monkeypatch.setattr(clock_module.threading, "Thread", lambda *, target, args, **kw: SimpleNamespace(start=lambda: target(*args)))
-    assert clock.clock.stop().startswith("Background consciousness disabled")
+    # Each live item it ends is named from memory (owner 09.11, variant A): its wake-up, a reply in a place (the
+    # place's label from the one store read; a lent author with no row in hand is «a place»), an autonomous task by
+    # its queue title, else its id. The owner's work is neither stopped nor named.
+    assert clock.clock.stop() == ("Consciousness off: no own wakes, and 1 place only hears until Start. Stopping now: its "
+                                  "wake-up, a reply in Slack · Acme, a reply in a place, «Triage the inbox» and «kid».")
     assert sorted(stopped) == ["focus", "kid", "lent", "own", "started"]
     assert clock.clock.enabled is False
 
