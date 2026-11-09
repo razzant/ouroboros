@@ -328,13 +328,14 @@ def test_text_log_records_carry_the_json_logs_clock(monkeypatch, zone):
         record = logging.LogRecord("probe", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
         record.created, record.msecs = 1762648451.032, 32.0
         text = process_logging.utc_log_formatter().format(record)
+        local_hour = time.strftime("%H", time.localtime(1762648451))  # read while that zone holds
     finally:
         monkeypatch.undo()
         time.tzset()
     utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(1762648451))
     assert text == f"{utc}.032Z [WARNING] probe: hello world"
-    if zone != "UTC":  # the local clock of that zone reads another hour: the zone-less default would have lied
-        assert time.strftime("%H", time.localtime(1762648451)) != utc[11:13]
+    if zone != "UTC":  # that zone's local clock reads another hour: a zone-less local time would have lied
+        assert local_hour != utc[11:13]
 
 
 def test_the_module_loads_only_the_standard_library():

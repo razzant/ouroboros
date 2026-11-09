@@ -28,6 +28,8 @@ PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"
 # db=current READ admits these tables; the authorizer and the failed-statement hint share the one list
 # (task bodies and cards are documents: op=json kind=task_result).
 CURRENT_TABLES = ("tasks", "sqlite_master", "sqlite_schema")
+# pragma_table_info('t') and its siblings read exactly what the admitted PRAGMAs read.
+_PRAGMA_TABLES = frozenset("pragma_" + name for name in PRAGMAS)
 # Executor lifecycle allowances, never SQL phase budgets. After the operation deadline the parent
 # waits FINISH_SEC while the child may still hold its source, so a stuck reader is reaped promptly;
 # once the child has released it, RESPONSE_SEC lets a contended host deliver the typed answer.
@@ -158,7 +160,7 @@ def _authorizer(db):
     def authorize(action, first, second, database, origin):
         allowed = action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE}
         if action == sqlite3.SQLITE_READ:
-            allowed = db != "current" or first in CURRENT_TABLES
+            allowed = db != "current" or first in CURRENT_TABLES or str(first).lower() in _PRAGMA_TABLES
         elif action == sqlite3.SQLITE_FUNCTION:
             allowed = str(second).lower() != "load_extension"
         elif action == sqlite3.SQLITE_PRAGMA:

@@ -526,37 +526,50 @@ def test_registered_log_and_show_do_not_invoke_signature_verifier(world, tmp_pat
 
 
 @pytest.mark.parametrize("args, named", [
-    ({"action": "show", "stat": True}, "stat=true applies only to action=diff; for action=show omit stat"),
-    ({"action": "show", "name_only": True}, "name_only=true applies only to action=diff; for action=show omit name_only"),
-    ({"action": "status", "staged": True}, "staged=true applies only to action=diff; for action=status omit staged"),
-    ({"action": "diff", "ref": "HEAD"}, "ref='HEAD' does not apply to action=diff; diff and merge_base take base/head"),
-    ({"action": "identity", "ref": "HEAD"}, "ref='HEAD' does not apply to action=identity; identity takes no revision"),
-    ({"action": "log", "base": "HEAD~1", "head": "HEAD"}, "base/head apply to diff and merge_base; for action=log name the revision with ref"),
+    ({"action": "status", "staged": True}, "staged=true applies only to diff; for action=status omit staged"),
+    ({"action": "log", "stat": True}, "stat=true applies only to diff and show; for action=log omit stat"),
+    ({"action": "diff", "ref": "HEAD"}, "ref='HEAD' does not apply to action=diff; diff takes base and head"),
+    ({"action": "identity", "ref": "HEAD"}, "ref='HEAD' does not apply to action=identity; omit ref"),
+    ({"action": "status", "ref": 5}, "ref='5' does not apply to action=status; omit ref"),
+    ({"action": "log", "base": "HEAD~1", "head": "HEAD"},
+     "base='HEAD~1', head='HEAD': base and head apply to diff and merge_base; for action=log name the revision with ref"),
+    ({"action": "status", "base": "main"},
+     "base='main': base and head apply to diff and merge_base; action=status takes no revision; omit base and head"),
+    ({"action": "identity", "head": "HEAD"},
+     "head='HEAD': base and head apply to diff and merge_base; action=identity takes no revision; omit base and head"),
+    ({"action": "diff", "head": "HEAD"}, "head='HEAD' compares two trees: diff needs base beside it and staged=false"),
     ({"action": "refs", "path": "note.txt"}, "path='note.txt' applies to blame, diff, file, log, show, status; action=refs takes no path"),
     ({"action": "file"}, "action=file requires path (the file's repository-relative path)"),
     ({"action": "merge_base", "base": "HEAD"}, "action=merge_base requires both base and head"),
-    ({"action": "status", "max_count": 500}, "max_count=500: an integer from 1 to 200 (log reads that many commits; other actions ignore it)"),
+    ({"action": "status", "max_count": 500}, "max_count=500: an integer from 1 to 200 (the number of commits log reads)"),
     ({"action": "log", "max_chars": -1}, "max_chars=-1: 0 (no limit) or a positive integer"),
     ({"action": "refs", "ref": "heads/"}, "ref='heads/': for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/"),
     ({"action": "show", "ref": " "}, "ref=' ': a nonempty local Git revision"),
+    ({"action": "log", "ref": ["HEAD"]}, "ref=['HEAD']: a local Git revision, written as text"),
 ])
 def test_an_argument_refusal_names_the_field_its_value_and_the_repair(world, args, named):
-    """One phrase for every violated constraint was retried unchanged (37 refusals in 05–08.11): the
-    refusal now names the field, the value received and the repair, and says what the call did not do."""
+    """One phrase for every violated constraint was retried unchanged: the refusal names the field, the
+    value received and a repair that the tool then serves, and says what the call did not do."""
     _registry, ctx, _system, _project = world
     text = read(ctx, **args)
     assert text.startswith("⚠️ TOOL_ARG_ERROR (vcs_read): ") and text.endswith(". Nothing was read."), text
     assert named in text, text
 
 
-def test_every_violated_constraint_of_one_call_is_named_in_one_reply(world):
+def test_every_violated_constraint_of_one_call_is_named_in_one_reply_and_never_twice(world):
     _registry, ctx, _system, _project = world
-    text = read(ctx, action="show", stat=True, max_count=0)
-    assert "max_count=0: an integer from 1 to 200 (log reads that many commits; other actions ignore it); stat=true applies only to action=diff; for action=show omit stat" in text
+    text = read(ctx, action="status", stat=True, max_count=0)
+    assert ("max_count=0: an integer from 1 to 200 (the number of commits log reads); "
+            "stat=true applies only to diff and show; for action=status omit stat") in text, text
+    text = read(ctx, action="refs", ref="   ")  # the refs filter is not a revision: one problem, not two
+    assert "for action=refs the filter is a literal refs/ prefix" in text and "nonempty local Git revision" not in text
+    text = read(ctx, action="diff", ref="HEAD", head="HEAD")
+    assert "ref='HEAD' does not apply to action=diff" in text and "head='HEAD' compares two trees" in text, text
 
 
 def test_the_served_shapes_beside_those_refusals_keep_reading(world):
-    """The other direction of the guard: every accepted combination still reads, with no refusal of any kind."""
+    """The other direction of the guard: every accepted combination reads, with no refusal of any kind;
+    a repair the refusals name (omit the revision, name it with ref) is served."""
     _registry, ctx, system, _project = world
     head = git(system, "rev-parse", "HEAD")
     for args in ({"action": "diff", "stat": True}, {"action": "diff", "staged": True, "name_only": True},
@@ -564,22 +577,50 @@ def test_the_served_shapes_beside_those_refusals_keep_reading(world):
                  {"action": "show", "path": "note.txt", "ref": "HEAD"}, {"action": "log", "ref": "HEAD", "max_count": 1},
                  {"action": "log", "path": "note.txt"}, {"action": "refs", "ref": "refs/heads/"},
                  {"action": "merge_base", "base": "HEAD", "head": "HEAD"}, {"action": "file", "path": "note.txt"},
-                 {"action": "blame", "path": "note.txt", "ref": "HEAD"}, {"action": "identity"}, {"action": "status"}):
+                 {"action": "blame", "path": "note.txt", "ref": "HEAD"}, {"action": "identity"}, {"action": "status"},
+                 {"action": "log", "ref": "HEAD~0"}):
         output = read(ctx, root="system_repo", **args)
         assert "TOOL_ARG_ERROR" not in output and "GIT_ERROR" not in output, (args, output)
     assert read(ctx, root="system_repo", action="rev_parse", ref="HEAD").split("\n")[0].strip() == head
     assert read(ctx, root="system_repo", action="merge_base", base="HEAD", head="HEAD").split("\n")[0].strip() == head
 
 
-def test_an_unresolved_revision_names_the_argument_and_what_was_not_read(world):
-    """Git's "fatal: Needed a single revision" (42 reads in 05–08.11) now arrives behind the fact the
-    caller can act on: which argument named nothing here, that nothing was read, and where to look."""
+def test_show_summarizes_a_commit_like_diff(world):
+    """Owner 09.11 (answer A): show takes stat and name_only, as git show does; staged stays diff's."""
     _registry, ctx, _system, _project = world
+    stat = read_ok(ctx, root="system_repo", action="show", ref="HEAD", stat=True)
+    assert "note.txt | 1 +" in stat and "1 file changed" in stat and "+first" not in stat, stat
+    names = read_ok(ctx, root="system_repo", action="show", ref="HEAD", name_only=True, stat=True)
+    assert "\nnote.txt" in names and "|" not in names.split("VCS target:")[0].split("first", 1)[-1], names
+    plain = read_ok(ctx, root="system_repo", action="show", ref="HEAD")
+    assert "+first" in plain, plain
+    assert "staged=true applies only to diff" in read(ctx, root="system_repo", action="show", staged=True)
+
+
+def test_an_unresolved_revision_names_the_argument_with_gits_whole_answer(world, monkeypatch):
+    """Git's "fatal: Needed a single revision" arrives behind the fact the caller can act on (which
+    argument did not resolve, that nothing was read, where to look), with Git's earlier lines kept; a
+    failure that is not Git's answer is not described as an unresolved revision."""
+    _registry, ctx, system, _project = world
     text = read(ctx, action="show", ref="no-such-revision")
-    assert text.startswith("⚠️ GIT_ERROR: ref='no-such-revision' names no commit in this repository ("), text
+    assert text.startswith("⚠️ GIT_ERROR: ref='no-such-revision' did not resolve to a commit here (git: "), text
     assert "); nothing was read; list revisions with action=refs or action=log" in text
-    text = read(ctx, action="merge_base", base="HEAD", head="nope")
-    assert "head='nope' names no commit in this repository (" in text, text
-    text = read(ctx, action="diff", base="nope")
-    assert "base='nope' names no tree in this repository (" in text and "nothing was read" in text, text
+    assert "head='nope' did not resolve to a commit here (git: " in read(ctx, action="merge_base", base="HEAD", head="nope")
+    blob = git(system, "rev-parse", "HEAD:note.txt")
+    text = read(ctx, root="system_repo", action="diff", base=blob)
+    assert f"base='{blob}' did not resolve to a tree here (git: " in text, text
+    assert "expected tree type" in text and "Needed a single revision" in text, "every line of Git's answer is kept"
     assert read(ctx, action="show", ref="HEAD").startswith("commit "), "a resolved revision keeps its plain output"
+    from ouroboros.tools import vcs_read
+
+    real = vcs_read._run_read_git
+
+    def refuse_resolution(repo, args, **kwargs):  # the revision lookup itself fails, not Git's answer
+        if args[:2] == ["rev-parse", "--verify"]:
+            raise PermissionError("operation not permitted")
+        return real(repo, args, **kwargs)
+
+    monkeypatch.setattr(vcs_read, "_run_read_git", refuse_resolution)
+    for args in ({"action": "show", "ref": "HEAD"}, {"action": "diff", "base": "HEAD"}):
+        text = read(ctx, **args)
+        assert "operation not permitted" in text and "did not resolve" not in text, (args, text)

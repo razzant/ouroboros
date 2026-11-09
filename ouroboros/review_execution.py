@@ -594,7 +594,8 @@ _OWN_WINDOW = object()  # an executor no custody bound: it resolves its slot's o
 def _retire_orphaned_review_registration(
     custody: Any, gateway: Any, custody_drive: Any, project_id: str, *,
     definite_refusal: bool, reason: str, invocation_id: str = "",
-    surface: str = "", slot_id: str = "", task_id: str = "", root_task_id: str = "", parent_task_id: str = "",
+    surface: str = "", slot_id: str = "",
+    task_id: str = "", root_task_id: str = "", parent_task_id: str = "",
 ) -> bool:
     """Retire a registration this start created but never bound to a run.
 
@@ -606,8 +607,6 @@ def _retire_orphaned_review_registration(
     this very registration — an unverified outcome is never grounds for destroying
     state. The START_FAILED row is written either way, so every failing branch
     reaches ONE path instead of one retiring while its twin silently abandons.
-
-    The row names task, root and parent, the ids the task feed selects custody rows by (``gateway/task_events``).
     """
     retired = False
     if project_id and definite_refusal:
