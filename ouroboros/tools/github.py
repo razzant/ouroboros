@@ -73,27 +73,10 @@ _GH_STATUS_RE = re.compile(
     r"|^(?:[a-z][a-z ]*: )*HTTP (\d{3})(?::| \(|[ \t\r]*$)",
     re.MULTILINE,
 )
-# gh v2.86.0 ``canMerge`` (pkg/cmd/pr/merge) prints exactly these non-TTY refusals
-# and exits 1 BEFORE ``merge()``: BLOCKED/BEHIND advise --auto then --admin; DIRTY
-# advises --auto, then only without --repo a local conflict hint for the method.
-_PR_MERGE_REFUSAL_RE = re.compile(
-    r"X Pull request [\w.-]+/[\w.-]+#(?P<number>\d+) is not mergeable: (?:"
-    r"(?:the base branch policy prohibits the merge|the head branch is not up to date with the base branch)\.\n"
-    r"To have the pull request merged after all the requirements have been met, add the `--auto` flag\.\n"
-    r"To use administrator privileges to immediately merge the pull request, add the `--admin` flag\."
-    r"|the merge commit cannot be cleanly created\.\n"
-    r"To have the pull request merged after all the requirements have been met, add the `--auto` flag\."
-    r"(?:\nRun the following to resolve the merge conflicts locally:\n"
-    r"  gh pr checkout (?P<checkout>\d+) && git fetch (?P<remote>\S+) (?P<base>\S+)"
-    r" && git (?P<action>merge|rebase) (?P=remote)/(?P=base))?)"
-)
-# GitHub's own answer to the SENT merge mutation, as gh prints it (`GraphQL: <message> (<path>)`, exit 1): only these
-# two whole answers prove the request merged nothing (cli/cli#8092: a conflict, or the base moving under the merge).
-# Any other answer (permission, internal error, the head-moved answer to a stale --match-head-commit) stays unknown.
-_PR_MERGE_SERVER_REFUSALS = frozenset({
-    "GraphQL: Pull Request has merge conflicts (mergePullRequest)",
-    "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)",
-})
+# The synchronous merge endpoint's documented answers that merge nothing: 405 the PR cannot be merged, 409 its head
+# is not the expected sha, 422 validation failed or the endpoint was rate limited. Any other status (401, 403, 404,
+# 429, 5xx) or a lost answer stays unknown: the request may have been applied.
+_MERGE_REFUSED_STATUSES = frozenset({405, 409, 422})
 
 
 @dataclass(frozen=True)
@@ -114,7 +97,7 @@ class GhResult:
     exit_code: int | None
     http_status: int | None
     # "target" is a local refusal and "deadline" a request the checks reader never sent; neither is a subprocess
-    # exit or exception. "pre_effect" / "server_refused" are the merge's proven refusals (``_merge_refusal``).
+    # exit or exception. "server_refused" / "malformed_response" type the merge's answer (``_merge_answer``).
     failure: str
     # The exact branch's capture; None for the text transport and for every failure.
     capture: Optional[GhCapture] = None
@@ -139,28 +122,21 @@ _CAPTURE_CHUNK = _CAPTURE_STDERR_CAP = 65536
 _CAPTURE_STDERR_WITHHELD = b"[stderr exceeded 64 KiB; diagnostics withheld]"
 
 
-def _merge_refusal(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> str:
-    """Which proven refusal the complete stderr of the merge ``merge_receipts`` sends is, else ``"exit"``.
-
-    Only ``pr merge N --METHOD --match-head-commit SHA [--body-file -] [--repo R]``, exit 1 with empty
-    stdout and nothing else in stderr: gh's own pre-merge refusal for N (``pre_effect``, nothing sent) or
-    one of GitHub's exact refusals of the sent mutation (``server_refused``); a status, prefix or suffix
-    proves nothing."""
-    args = cmd[1:]
-    if args[6:8] == ["--body-file", "-"]:
-        args = args[:6] + args[8:]
-    if (res.returncode != 1 or res.stdout.strip() or args[:2] != ["pr", "merge"] or len(args) not in (6, 8)
-            or args[3] not in ("--merge", "--squash", "--rebase") or args[4] != "--match-head-commit"
-            or args[6:7] not in ([], ["--repo"])):
-        return "exit"
-    if stderr.strip() in _PR_MERGE_SERVER_REFUSALS:
-        return "server_refused"
-    match = _PR_MERGE_REFUSAL_RE.fullmatch(stderr.strip())
-    if match is None or match["number"] != args[2]:
-        return "exit"
-    return "pre_effect" if match["checkout"] is None or (
-        len(args) == 6 and match["checkout"] == args[2]
-        and match["action"] == ("rebase" if args[3] == "--rebase" else "merge")) else "exit"
+def _merge_answer(res: GhResult) -> GhResult:
+    """The merge request's answer for its receipt: a 2xx only as ``merged: true`` with a full SHA (``text`` is that
+    SHA), else ``malformed_response``; the endpoint's documented refusal statuses are ``server_refused``."""
+    if not res.ok:
+        return replace(res, failure="server_refused") if (
+            res.failure == "exit" and res.http_status in _MERGE_REFUSED_STATUSES) else res
+    try:
+        answer = json.loads(res.text)
+    except ValueError:
+        answer = None
+    sha = str(answer.get("sha") or "").lower() if isinstance(answer, dict) else ""
+    if isinstance(answer, dict) and answer.get("merged") is True and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        return replace(res, text=sha)
+    return replace(res, ok=False, failure="malformed_response",
+                   text="⚠️ GH_ERROR: unrecognized merge answer: " + truncate_within_limit(res.text, 300))
 
 
 def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> GhResult:
@@ -171,13 +147,14 @@ def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str)
     else: ``gh: <msg> (HTTP NNN)`` at the end of a line (``gh api`` with a message), ``gh: HTTP NNN``
     (``gh api`` without one) and ``HTTP NNN: <msg> (<url>)`` — optionally wrapped as ``failed to fork:
     HTTP NNN: …`` — from every other command. A marker quoted mid-sentence is prose, not a status.
-    HTTP status alone proves nothing about which CLI step failed."""
+    HTTP status alone proves nothing about which CLI step failed; a caller that knows its command sent one
+    request reads it (``_merge_answer``)."""
     err = redact_known_values(stderr or "", [github_token_from_env_or_settings()])
     status = _GH_STATUS_RE.search(err)
     head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
     head = truncate_within_limit(head, 600)
     return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
-                    int(status.group(1) or status.group(2)) if status else None, _merge_refusal(cmd, res, err))
+                    int(status.group(1) or status.group(2)) if status else None, "exit")
 
 
 
@@ -639,7 +616,7 @@ def _send_facts(res: GhResult) -> str:
 
     A nonzero exit alone does not prove GitHub rejected the request (gh can fail after the server acted), so
     callers report the effect as unconfirmed and read it back instead of calling it refused."""
-    if res.failure in ("exit", "pre_effect", "server_refused"):
+    if res.failure == "exit":
         facts = ", ".join(filter(None, [f"exit {res.exit_code}" if res.exit_code is not None else "",
                                         f"HTTP {res.http_status}" if res.http_status else ""]))
         return f"ended with {facts or 'a nonzero exit'}: {res.text}"
@@ -652,7 +629,8 @@ def _send_facts(res: GhResult) -> str:
 def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str,
               review_task_ids: Optional[List[str]] = None, reviewed_head_sha: str = "",
               reviewed_base_sha: str = "", review_scope: str = "full", review_verdict: str = "",
-              review_record_id: str = "", repo: str = "", checks: Optional[List[dict]] = None) -> str:
+              review_record_id: str = "", repo: str = "", checks: Optional[List[dict]] = None,
+              continue_receipt_id: str = "") -> str:
     """Thin transport binding; the receipt contract lives in ``merge_receipts``."""
     from ouroboros.merge_receipts import REVIEW_SCOPES, _VERDICT_RE, _sha, run_pr_merge
     from ouroboros.tool_access import canonical_data_root
@@ -677,8 +655,9 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
                 if (reviewed_head_sha or review_verdict or (review_task_ids and not record_id)) else None)
     receipt = run_pr_merge(
         ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, **kw), lambda args, **kw: _gh_run(args, ctx, **kw),
+        lambda args, **kw: _merge_answer(_gh_run(args, ctx, **kw)),
         drive_root=canonical_data_root(ctx), task_id=str(ctx.task_id or ""), number=int(number or 0),
-        expected_head_sha=expected_head_sha, method=method,
+        expected_head_sha=expected_head_sha, method=method, continue_receipt_id=str(continue_receipt_id or "").strip(),
         review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id, "checks": checks})
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
@@ -689,12 +668,24 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     # The stored outcome is GitHub's readback; the receipt's own request may still be proven to have changed nothing.
     ended = no_effect_request(receipt).removeprefix("request ")
     refused = bool(ended) and status != "merged"
+    effect = receipt.get("effect") or {}
+    # While an earlier request of this PR stays unconfirmed a plain call only reads back; a decision may send one.
     after = ("GitHub shows the PR merged by another request." if status == "merged" else
+             "Plain repeat calls only read it back; to decide one new request for the same head and method, call "
+             f"pr_merge with continue_receipt_id='{receipt['receipt_id']}'." if receipt.get("plain_held")
+             and status in ("unknown", "refused") and not effect.get("ok") and not receipt.get("continued_by") else
              "A new pr_merge call for the PR's current head may send one." if status == "refused" else
              "Until GitHub shows the PR open without a queue, repeat calls only read it back.")
     lines = [card_row_text(receipt, codes=True), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
+    if receipt.get("continues"):
+        lines.append(f"This request continues receipt {receipt['continues']}, whose own outcome stays as recorded"
+                     + ("; the merge GitHub shows is not attributed to either request." if status == "merged" else "."))
     prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
-    if prior == "merged":
+    if receipt.get("rejoined"):
+        lines.append("This decision already sent its request as this receipt, so this call only read GitHub back "
+                     "and sent no new merge request. " + (f"Receipt {receipt['continued_by']} continued it since; "
+                     "plain pr_merge calls observe that latest attempt." if receipt.get("continued_by") else after))
+    elif prior == "merged":
         lines.append("This PR's merge is already recorded in this receipt, so this call only read GitHub back "
                      "and sent no new merge request.")
     elif prior == "":
@@ -706,12 +697,13 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     elif prior is not None:
         lines.append("An earlier request for this PR had no confirmed outcome, so this call only read GitHub back "
                      "and sent no new merge request. " + ("GitHub now shows the PR merged." if status == "merged"
-                                                         else "Unknown and queued requests remain observation-only."))
-    elif ended and status != "refused":
+                                                         else after))
+    elif ended and (status != "refused" or receipt.get("plain_held")):
         lines.append(f"This merge request was {ended} and changed nothing, so it holds no task custody. {after}")
+    elif status == "unknown" and not effect.get("ok"):
+        lines.append(after)
     # The receipt's retained, already bounded and redacted gh facts belong in this local
     # response (#1555); the public PR-body block never carries them.
-    effect = receipt.get("effect") or {}
     if effect and not effect.get("ok"):
         facts = ", ".join([f"failure={effect.get('failure') or 'unknown'}"] + [
             f"{key}={effect[key]}" for key in ("exit_code", "http_status") if effect.get(key) is not None])
@@ -770,11 +762,13 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("pr_merge", {
             "name": "pr_merge",
             "description": (
-                "Merge a GitHub pull request so a receipt exists: states the exact head you expect "
-                "and the method (never auto-merge or admin, nor past auto-merge already on), records the host "
-                "review record you name or the review you declare beside what the host observes, reads GitHub back, and writes the "
-                "receipt to this task's record, its card and the PR body. A missing review is recorded loudly, never a lock. "
-                "An unknown or queued merge stays observation/publication-only on repeat calls; no resend. "
+                "Merge a GitHub pull request so a receipt exists: one synchronous merge request for the exact head you "
+                "expect and the method (never auto-merge, a merge queue or admin; nothing is sent while GitHub shows "
+                "auto-merge or the PR blocked, behind or conflicting), records the host review record you name or the "
+                "review you declare beside what the host observes, reads GitHub back, and writes the receipt to this "
+                "task's record, its card and the PR body. A missing review is recorded loudly, never a lock. A plain "
+                "repeat after an unknown or queued merge only reads GitHub back and publishes; continue_receipt_id is "
+                "the explicit decision to send one new request after an unconfirmed one. "
                 "Distinct from stage_pr_merge, which stages a local merge for a reviewed commit."
             ),
             "parameters": {"type": "object", "properties": {
@@ -796,6 +790,11 @@ def get_tools() -> List[ToolEntry]:
                 "review_verdict": {"type": "string", "default": "", "maxLength": 40,
                                    "description": "Your declared verdict, recorded as your statement, never as the host "
                                                   "review result; must match ^[A-Za-z][A-Za-z0-9_ -]{0,39}$, e.g. PASS"},
+                "continue_receipt_id": {"type": "string", "default": "", "description": (
+                    "receipt_id of this task's latest unconfirmed or refused merge request for this PR: decide one "
+                    "new request for its same head and method while GitHub shows the PR open without a queue. That "
+                    "receipt keeps its own outcome; repeating this decision returns its request without sending "
+                    "again. Review arguments left empty reuse that receipt's review.")},
                 "review_record_id": {"type": "string", "default": "",
                                      "description": "Id of the host review record to bind (e.g. the review_record_id commit_reviewed "
                                                     "returns); the host then reads the reviewed subject and verdict from it instead "
