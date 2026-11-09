@@ -1412,7 +1412,7 @@ status ink (a turn still preparing adds the start step it stands at, `Preparing 
 Building context`, and nothing reads `Thinking` before a model call is sent),
 then one mark, as on the sidebar's rows; no frame at rest, a neutral
 tint on hover and while open, a caret when it opens. A working work the host dated as silent
-says so first in its quiet line, `No recorded progress since 14:02`, in status ink (no amber, no
+says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
 new mark), until its own progress. A work is one request with
 its Continue episodes and whatever of them still lives (helpers, delegated
 runs still working, post-answer upkeep); the server gives each work and each room

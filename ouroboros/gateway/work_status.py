@@ -331,18 +331,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
-        if step := _start_step(row):
-            state["reasons"].append(reason(f"turn_{step}"))
+        # The owner's recorded Stop leads: a working work, a silent one above all, may not reach the step that ends
+        # it soon. The dated silence follows (owner 09.11, Q2 A) until the work's own progress ends the episode, a
+        # fact for whoever waits, never a stop or a mark; then where its turn started.
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))
         silence = raw.get("silence_attention")
         if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
-            # The timeout pass dated a silence (owner 09.11, Q2 A): the work's line says since when, first, until its
-            # own progress ends the episode; a fact for whoever waits, never a stop or a mark. The owner's recorded
-            # Stop still leads: a silent work is the one that never reaches the step that would end it.
-            codes = [item["code"] for item in state["reasons"]]
-            at = codes.index("stop_requested") + 1 if "stop_requested" in codes else 0
-            state["reasons"].insert(at, reason("no_progress", since=silence["last_progress_at"]))
+            state["reasons"].append(reason("no_progress", since=silence["last_progress_at"]))
+        if step := _start_step(row):
+            state["reasons"].append(reason(f"turn_{step}"))
         return state
     state["confirmed"] = False
     return state

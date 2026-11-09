@@ -859,8 +859,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
         from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
-            if task_id in census_ids:
-                continue  # a conversation turn the lane carries is already its own direct row
+            if task_id in census_ids:  # a conversation turn the lane carries is already its own direct row,
+                if work_facts is not None and not owners_only and row.get("silence_attention"):  # its silence: RUNNING's
+                    work_facts.setdefault(task_id, {})["silence_attention"] = row["silence_attention"]
+                continue
             if task_id:
                 root = _is_root(task_id, row)
                 if root:

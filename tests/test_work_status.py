@@ -787,15 +787,22 @@ def test_a_silent_working_member_says_since_when_until_its_own_progress():
     # The owner's recorded Stop leads the line; the silence fact stays right behind it.
     stopped = ws.classify_member(row("t", "working"), {"running": True, "cancel_pending": True, **silent})["reasons"]
     assert [r["code"] for r in stopped[:2]] == ["stop_requested", "no_progress"]
+    # ...also over the step its turn stands at, which follows both.
+    building = row("t", "preparing", turn_phase="context_building")
+    assert [r["code"] for r in ws.classify_member(building, {"running": True, "cancel_pending": True, **silent})["reasons"]] == [
+        "stop_requested", "no_progress", "turn_context_building"]
+    assert ws.classify_member(building, {"running": True})["reasons"][0]["code"] == "turn_context_building"
     moved = {"silence_attention": {**silent["silence_attention"], "state": "progress_observed"}}
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("q", "queued"), {**silent})["reasons"])
 
 
-def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_path, monkeypatch):
+@pytest.mark.parametrize("carrier", ["managed", "lane_turn"])
+def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_path, monkeypatch, carrier):
     """The fact lives on the RUNNING row (``silence_attention.observe``), never on its task: the census carries it to
-    the work projection, so the line says since when while the episode is open and drops it at the source's progress."""
+    the work projection, so the line says since when while the episode is open and drops it at the source's progress.
+    An owner turn the conversation lane carries is listed as its own direct row first; its silence joins that row."""
     from ouroboros.gateway.state import _chat_activities_snapshot_safe
     from ouroboros.gateway.work_projection import works_snapshot
     from ouroboros.task_results import write_task_result
@@ -806,6 +813,10 @@ def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_pa
     write_task_result(tmp_path, "quiet", "running", chat_id=7)
     meta = {"task": {"id": "quiet", "type": "task", "chat_id": 7, "root_task_id": "quiet"}, "attempt": 1,
             "started_at": 1794190000.0, "last_progress_at": 1794190200.0}
+    if carrier == "lane_turn":
+        from supervisor.conversation_lane import LANE_CONVERSATION
+        meta["task"].update(chat_id=1, _is_direct_chat=True)
+        meta.update(lane=LANE_CONVERSATION, worker_id=3)
     workers.RUNNING["quiet"] = meta
 
     def reasons():
