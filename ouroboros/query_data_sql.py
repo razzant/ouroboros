@@ -171,6 +171,17 @@ def _authorizer(db):
 
 def _fetch(conn, request):
     conn.execute("PRAGMA query_only=ON").close()
+    # Older SQLite (3.37.0 and 3.40.1 seen; 3.51.0 no longer) authorizes a connection's first use of a
+    # pragma table as an UPDATE of sqlite_master, which the authorizer refuses. Declaring the admitted
+    # ones first lets their table-valued forms read on every SQLite. Only a pragma table this SQLite
+    # lacks is passed over (the query then gets SQLite's own answer); a busy store or the deadline's
+    # interrupt stops the read here as it would stop the query.
+    for name in sorted(_PRAGMA_TABLES):
+        try:
+            conn.execute(f"SELECT * FROM {name} LIMIT 0").close()
+        except sqlite3.OperationalError as exc:
+            if not str(exc).startswith("no such table"):
+                raise
     conn.set_authorizer(_authorizer(request["db"]))
     cursor = conn.cursor()
     try:
