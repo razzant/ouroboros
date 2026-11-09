@@ -7,6 +7,7 @@ the ledger record, and its own paid-cycle count beside change reviews. Task revi
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -249,7 +250,8 @@ def test_nothing_is_forced_for_a_child_auto_off_or_a_plain_text_answer(tmp_path,
     from ouroboros.tools.review_result import result_review_at_delivery
 
     sends: list[dict] = []
-    for kwargs, protocol in (({"root": False}, True), ({"mode": "auto"}, True), ({"mode": "off"}, True), ({}, False)):
+    for kwargs, protocol in (({"root": False}, True), ({"root": False, "mode": "auto", "enforcement": "blocking"}, True),
+                             ({"mode": "auto"}, True), ({"mode": "off"}, True), ({}, False)):
         ctx = _floor_ctx(tmp_path / str(len(sends)) / repr(sorted(kwargs.items())).replace("/", ""), monkeypatch, **kwargs)
         if protocol:
             _produced_answer_protocol(monkeypatch)
@@ -302,7 +304,7 @@ def test_required_reviews_presence_results_without_holding_them_and_ignores_a_de
                          "task_contract": {"expected_output": "A report with three findings",
                                            "acceptance_criteria": ["three findings"]}}
     answer = "The report lists three findings."
-    assert required_material(ctx, {"tool_calls": []}, answer) is False
+    assert required_material(ctx, {"tool_calls": []}, answer) == ""
     assert result_review_at_delivery(ctx, answer, {"tool_calls": []}, lambda text: None) is False
     assert sends == []
 
@@ -340,10 +342,36 @@ def test_an_advisory_finish_over_findings_is_the_authors_own_decision(tmp_path, 
     [run] = trace["review_runs"]
     assert not run.get("informed_finish"), "findings shown, nothing decided yet"
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, lambda text: None) is False
-    assert run["informed_finish"] is True and run["enforcement"] == "advisory"
+    finish = run["informed_finish"]  # bound to the exact subject delivered and the outcome that reached the author
+    assert finish["subject_sha"] == run["binding_hash"] and finish["record_ids"] == [run["record_id"]]
+    assert finish["outcomes"] and run["enforcement"] == "advisory"
     review = _review_axis(trace)
-    assert (review["status"], review["source"], review.get("author_finish")) == ("fail", "result_review", True)
+    assert (review["status"], review["source"], review.get("author_finish")) == ("fail", "result_review", "author_finish")
     assert _objective_axis(review)["source"] == "author_acceptance" and _objective_axis(review)["status"] == "pass"
+
+
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_money_refusal_keeps_its_recovery_not_the_review_cycle_ceiling(tmp_path, monkeypatch, enforcement):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
+    _produced_answer_protocol(monkeypatch)
+    monkeypatch.setattr(ua, "_reservation_cost", lambda *_a, **_kw: 1.)
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    scope = ua.UsageScope(drive_root=str(ctx.drive_root), task_id=ctx.task_id,
+                          root_task_id=ctx.task_id, root_limit_usd=1., global_limit_usd=10.)
+    trace, shown = {"tool_calls": []}, []
+    with ua.usage_scope(scope):
+        ua.execute_physical_attempt(ua.AttemptRequest(model="fake", provider="test", reservation_usd=1.),
+                                    lambda: {}, extractor=lambda _: ({"prompt_tokens": 1}, 1., True))
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
+    assert not sends
+    assert trace["review_runs"][0]["dispatch_refusal"] == "review_wave_budget_insufficient"
+    assert "raises the review ceiling" not in shown[-1]
+    assert "per-task budget" in shown[-1]
+    assert "was reviewed before delivery" not in shown[-1]
 
 
 def test_blocking_with_no_review_left_to_buy_reads_blocked(tmp_path, monkeypatch):
@@ -386,8 +414,8 @@ def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(
     assert "You decide" in shown[-1]
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False, "the mind decided"
     current = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
-    assert [run.get("informed_finish") for run in current] == [True] and len(sends) == 3
-    assert _objective_axis(_review_axis(trace))["source"] == "author_acceptance"
+    assert [run["informed_finish"]["subject_sha"] for run in current] == [current[0]["binding_hash"]]
+    assert len(sends) == 3 and _objective_axis(_review_axis(trace))["source"] == "author_acceptance"
 
 
 @pytest.mark.parametrize(("checkpointed", "owner_message"), [(False, False), (True, True)])
@@ -438,7 +466,10 @@ def test_delivery_collects_the_running_review_the_mind_started_without_buying_an
         assert bool(marks) is (not checkpointed), "only a whole saved host handback makes the unwaited mark redundant"
 
 
-def test_a_delivered_answer_never_keeps_an_earlier_answers_run_current(tmp_path, monkeypatch):
+def test_an_earlier_answers_pass_stands_beside_the_delivered_one_as_that_versions(tmp_path, monkeypatch):
+    """Advisory, 1=B (16 Sep 2026): the PASS of A, received, accompanies the revised B's delivery as an earlier
+    version's PASS; it never becomes a review of B's bytes and buys nothing."""
+    from ouroboros.outcomes import _objective_axis, _review_axis
     from ouroboros.tools.review_result import result_review_at_delivery
 
     ctx = _floor_ctx(tmp_path, monkeypatch, mode="auto")
@@ -448,9 +479,14 @@ def test_a_delivered_answer_never_keeps_an_earlier_answers_run_current(tmp_path,
     trace = {"tool_calls": []}
     assert result_review_at_delivery(ctx, "Report A", trace, lambda text: None) is True  # handed back once
     assert result_review_at_delivery(ctx, "Report A", trace, lambda text: None) is False
-    assert result_review_at_delivery(ctx, "Report B", trace, lambda text: None) is False
+    reviewed = trace["review_runs"][0]["binding_hash"]
+    assert result_review_at_delivery(ctx, "Report B", trace, lambda text: None) is False and len(sends) == 3
     [run] = trace["review_runs"]
-    assert run["superseded_by_revision"], "A's review speaks only for A"
+    assert run["earlier_revision"] is True and run["reviewed_subject_sha"] == reviewed != run["binding_hash"]
+    review = _review_axis(trace)
+    assert (review["status"], review["author_finish"]) == ("pass", "previous_revision_accepted")
+    assert _objective_axis(review) == {"status": "pass", "source": "author_acceptance", "review_status": "pass",
+                                       "reason": "previous_revision_accepted"}
 
 
 @pytest.mark.parametrize("enforcement, delivered", [("advisory", True), ("blocking", False)])
@@ -546,6 +582,114 @@ def test_a_manual_review_after_a_raised_ceiling_also_delivers(tmp_path, monkeypa
     assert run_review_change(ctx, subject="result", answer="FINAL ANSWER: 3")["aggregate"] == "PASS"
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, lambda _: None), "its PASS, handed back once"
     assert not rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, lambda _: None)
+
+
+def _sibling_spent_allowance(tmp_path, monkeypatch, enforcement):
+    """Two children of one root under Auto with one paid result review in the tree: the first child's PASS spends
+    it, so the second child's own call is refused at $0 (``review_change._refuse_exhausted``)."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, mode="auto", enforcement=enforcement, root=False)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    ctx.task_id = "first-child"
+    assert run_review_change(ctx, subject="result", answer="The first child's answer.")["aggregate"] == "PASS"
+    ctx.task_id = "second-child"
+    refused = run_review_change(ctx, subject="result", answer=ANSWER_2, goal="Check the second child's count")
+    assert refused["aggregate"] == "NOT_DISPATCHED" and refused["dispatch_refusal"]["cap"] == 1
+    return ctx, sends, refused
+
+
+ANSWER_2 = "The second child counted 2."
+
+
+def test_a_chosen_review_refused_at_a_sibling_spent_ceiling_holds_blocking_until_its_author_retries(tmp_path, monkeypatch):
+    """Astra, 9 Nov 2026: Auto chose the call, Blocking gives it force (owner, 8 Nov 2026). The second child's own
+    review, refused because a sibling spent the shared allowance, is its result's outcome: every delivery is held
+    while that ceiling stands, without buying a wave or writing another refusal, and the refusal is the outcome's
+    blocked reason. A raised ceiling permits the author's explicit retry and never buys a wave by itself (root, 9 Nov
+    2026); that retry's PASS then delivers, the refusal superseded, never deleted."""
+    from ouroboros.outcomes import _review_axis
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx, sends, _refused = _sibling_spent_allowance(tmp_path, monkeypatch, "blocking")
+    trace, shown = {"tool_calls": []}, []
+    rows = lambda: review_ledger.recent_records(ctx.drive_root, ctx.task_id, limit=50, surface="result")  # noqa: E731
+    for _ in range(3):
+        assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is True
+        assert "raises the review ceiling" in shown[-1] and len(sends) == 3 and len(rows()) == 1
+    assert _review_axis(trace)["blocked_reason"] == "review_cycles_exhausted"
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    for _ in range(2):
+        assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is True, "no review passed it yet"
+        assert "ask for that review again" in shown[-1] and len(sends) == 3 and len(rows()) == 1, "never a host wave"
+    assert run_review_change(ctx, subject="result", answer=ANSWER_2)["aggregate"] == "PASS" and len(sends) == 6
+    assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is True and ": PASS." in shown[-1]
+    assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is False
+    review = _review_axis(trace)
+    assert review["status"] == "pass" and "blocked_reason" not in review
+    assert [run["aggregate"] for run in trace["review_runs"] if run.get("superseded_by_revision")] == ["NOT_DISPATCHED"]
+
+
+REVISED_2 = "The second child counted 2 apples."
+
+
+@pytest.mark.parametrize("case", ["same_request", "new_task", "advisory"])
+def test_a_revision_keeps_the_review_chosen_for_its_result_after_a_refusal_as_after_a_fail(tmp_path, monkeypatch, case):
+    """Root, 9 Nov 2026 (owner Q3, Auto chooses and Blocking gives force): revising the same requested result after
+    its chosen review was refused does not erase that choice, as revising after a FAIL does not (``_other_version``).
+    Blocking holds the revision until a review passes it; a raised ceiling permits the author's explicit retry, never
+    a host wave. Controls: another task of the same root (a new request, its own ownership) that chose no review is
+    not held by this one's refusal; under Advisory the received refusal leaves the revision to its author's reasoned
+    finish, beside the refusal (Done with warnings), with no wave."""
+    from ouroboros.outcomes import _review_axis
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx, sends, refused = _sibling_spent_allowance(tmp_path, monkeypatch, "advisory" if case == "advisory" else "blocking")
+    receipt = {"record_id": refused["record_id"], "outcome_states": []}  # the tool's whole return of the refusal
+    trace, shown = {"tool_calls": [{"tool": "review_change", "tool_result_meta": {"review_delivery": receipt}}]}, []
+    if case == "new_task":
+        ctx.task_id = "third-child"
+        assert result_review_at_delivery(ctx, REVISED_2, {"tool_calls": []}, shown.append) is False and shown == []
+        assert len(sends) == 3
+        return
+    ctx._completion_selected = {"action": "finish", "answer": REVISED_2, "rationale": "Named the unit; the count stands."}
+    if case == "advisory":
+        assert result_review_at_delivery(ctx, REVISED_2, trace, shown.append) is False and shown == [] and len(sends) == 3
+        [run] = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+        assert run["aggregate"] == "NOT_DISPATCHED" and run["earlier_revision"] is True and run["informed_finish"]
+        assert _review_axis(trace)["author_finish"] == "author_finish"
+        return
+    assert result_review_at_delivery(ctx, REVISED_2, trace, shown.append) is True
+    assert "An earlier version of your result was reviewed" in shown[-1] and "raises the review ceiling" in shown[-1]
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    assert result_review_at_delivery(ctx, REVISED_2, trace, shown.append) is True
+    assert "ask for that review again" in shown[-1] and len(sends) == 3, "a raised ceiling buys nothing by itself"
+    assert run_review_change(ctx, subject="result", answer=REVISED_2)["aggregate"] == "PASS" and len(sends) == 6
+    assert result_review_at_delivery(ctx, REVISED_2, trace, shown.append) is True and ": PASS." in shown[-1]
+    assert result_review_at_delivery(ctx, REVISED_2, trace, shown.append) is False
+
+
+@pytest.mark.parametrize("returned", [True, False])
+def test_an_advisory_author_delivers_beside_its_chosen_reviews_refusal(tmp_path, monkeypatch, returned):
+    """The same refusal under Advisory is evidence, never a hold or a wave: the review tool's whole return of it is its
+    author's receipt, so delivery is at once its informed decision (``returned``); one it never received is shown
+    once first. Either way the result is Done with warnings beside the refusal, the chosen review that never ran."""
+    from ouroboros.outcomes import _objective_axis, _review_axis
+    from ouroboros.project_dialogue import outcome_phase
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx, sends, refused = _sibling_spent_allowance(tmp_path, monkeypatch, "advisory")
+    receipt = {"record_id": refused["record_id"], "outcome_states": []}  # ``review_waiting.publish_delivery``'s shape
+    trace = {"tool_calls": [{"tool": "review_change", "tool_result_meta": {"review_delivery": receipt}}] if returned else []}
+    shown = []
+    if not returned:
+        assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is True and "NOT_DISPATCHED" in shown[0]
+    assert result_review_at_delivery(ctx, ANSWER_2, trace, shown.append) is False
+    assert len(shown) == (0 if returned else 1) and len(sends) == 3
+    review = _review_axis(trace)
+    assert review["status"] == "degraded" and review["author_finish"] == "author_finish" and "blocked_reason" not in review
+    axes = {"execution": {"status": "ok"}, "review": review, "objective": _objective_axis(review)}
+    assert outcome_phase({"status": "completed", "outcome_axes": axes}, {}) == "warn"
 
 
 @pytest.mark.parametrize("change", ["owner_requirement", "late_artifact"])
@@ -844,10 +988,11 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
 
 def test_a_refusal_is_no_review_of_any_request(tmp_path, monkeypatch):
     """A $0 refusal froze no reviewed request: once the ceiling allows, the floor reviews the request as it is now
-    (the owner's later words included), never the one the refusal happened to carry."""
+    (the owner's later words included), never the one the refusal happened to carry. Blocking, where the floor
+    re-reviews a revised result (Advisory leaves that to the author)."""
     from ouroboros.tools import review_result as rr
 
-    ctx = _floor_ctx(tmp_path, monkeypatch, mode="required", enforcement="advisory")
+    ctx = _floor_ctx(tmp_path, monkeypatch, mode="required", enforcement="blocking")
     _produced_answer_protocol(monkeypatch)
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     sends: list[dict] = []
@@ -935,7 +1080,8 @@ def test_findings_shown_before_a_cold_continuation_are_not_shown_again(tmp_path,
     assert ctx._result_review_shown == before, "a token beside a record id, value for value and in order"
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "the mind decided"
     [run] = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
-    assert run["informed_finish"] is True and len(shown) == 1 and len(sends) == 3, "shown once, reviewed once"
+    assert run["informed_finish"]["subject_sha"] == run["binding_hash"]
+    assert len(shown) == 1 and len(sends) == 3, "shown once, reviewed once"
 
 
 def test_a_changed_request_is_asked_about_once_per_subject_across_a_cold_continuation(tmp_path, monkeypatch):
@@ -1061,3 +1207,544 @@ def test_auto_blocking_composes_a_named_subset_and_a_child_is_not_widened(tmp_pa
     widened = run_review_change(child, subject="result", answer="A child keeps the named row.", reviewers=["t1"])
     assert widened["panel"]["assigned"] == ["t1"] and widened["panel"]["widened_from"] == []
     assert sorted(send["slot_id"] for send in sends) == ["t1", "t1"]
+
+
+# --- Owner choices of 8 Nov 2026: production, exact material, the author's decision, enforcement ---------------
+
+def _baselined(ctx):
+    """The host's own root-start capture (``agent._capture_mutation_baseline`` -> ``capture_root_baseline``)."""
+    from ouroboros.mutation_attribution import capture_root_baseline
+
+    return capture_root_baseline(ctx.drive_root, {"id": ctx.task_id}, system_repo=ctx.repo_dir,
+                                 workspace=ctx.active_repo_dir(), conversation=False)
+
+
+def _write(ctx, path, content):
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    return str(registry.execute("write_file", {"path": path, "content": content}))
+
+
+def _observed_write(ctx, path, root="active_workspace"):
+    """The loop's own record of a successful native write (what ``reviewable_effect_projection`` reads)."""
+    trace = ctx._execution_trace = getattr(ctx, "_execution_trace", None) or {"tool_calls": []}
+    trace.setdefault("tool_calls", []).append({"tool": "write_file", "args": {"path": path, "root": root},
+                                               "is_error": False, "status": "ok", "result": "Written 1 file"})
+    return trace
+
+
+def test_an_external_git_write_reaches_the_floor_with_its_exact_copy_and_none_without_its_baseline(tmp_path, monkeypatch):
+    """The CyberGym class (8 Nov 2026): a file written into the admitted external Git folder is production the
+    Required floor reviews before delivery, no terminal capture needed; the subject names its exact copy, which a
+    later write to the live path never changes. Without the folder's baseline (the defect) nothing was reviewed."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.tools.review_result import produced_material, result_review_at_delivery
+
+    for baselined in (False, True):
+        ctx = _floor_ctx(tmp_path / str(baselined), monkeypatch)
+        sends: list[dict] = []
+        monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+        if baselined:
+            assert [row["surface_type"] for row in _baselined(ctx)["baseline"]["surfaces"]] == [
+                "external_workspace", "system_repo"]
+        _write(ctx, "report.md", "# Findings\n\n1. the first\n2. the second\n3. the third\n")
+        trace, shown = {"tool_calls": []}, []
+        held = result_review_at_delivery(ctx, "The report is in report.md.", trace, shown.append)
+        if not baselined:
+            assert held is False and sends == [] and trace["review_decision"]["trigger"] == "no_production"
+            continue
+        assert held is True and len(sends) == 3 and ": PASS." in shown[0]
+        [item] = [file for file in produced_material(ctx)["files"] if file["path"].endswith("report.md")]
+        copy = pathlib.Path(item["retained"])
+        assert item["kind"] == "workspace change" and copy.read_text(encoding="utf-8").startswith("# Findings")
+        assert hashlib.sha256(copy.read_bytes()).hexdigest() == item["sha256"]
+        record = review_ledger.load_record(review_ledger.ledger_root(ctx), trace["review_runs"][0]["record_id"])
+        from ouroboros.tools.review_result import _retained_subject_text
+
+        subject = _retained_subject_text(ctx, record["subject"]["diff_sha"])
+        assert f"exact copy: {copy}" in subject and "1. the first" in subject, "both seat kinds read the bytes"
+        (ctx.workspace_root / "report.md").write_text("rewritten later\n", encoding="utf-8")
+        assert copy.read_text(encoding="utf-8").startswith("# Findings"), "the reviewed copy never follows the live path"
+
+
+def test_a_produced_symbolic_link_is_its_own_output_never_its_target(tmp_path, monkeypatch):
+    """Astra, 9 Nov 2026: a link the task made is listed by its own path and exact link text (``readlink``), never by
+    its target's path or bytes, which making the link did not produce. Two aliases of one target, a broken link and a
+    relative one are each their own output; a rename or a retarget is a new subject that selects no earlier review."""
+    import hashlib
+    import os
+    import pathlib
+
+    from ouroboros.tools.review_result import produced_material, result_subject, running_result_review
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _baselined(ctx)
+    owner_file = tmp_path / "owner-input.txt"
+    owner_file.write_text("AN OWNER FILE THE TASK NEVER PRODUCED\n", encoding="utf-8")
+    folder = ctx.workspace_root
+    for name, target in (("a.txt", owner_file), ("alias.txt", owner_file), ("broken.txt", folder / "never-made.txt"),
+                         ("relative.txt", "alias.txt")):
+        (folder / name).symlink_to(target)
+
+    def subject():
+        return result_subject(ctx, SimpleNamespace(answer=""), governance_root=ctx.repo_dir, answer="Links made.")
+
+    material = produced_material(ctx)
+    links = {pathlib.Path(item["path"]).name: item for item in material["files"]}
+    assert set(links) == {"a.txt", "alias.txt", "broken.txt", "relative.txt"}, material
+    for name, item in links.items():
+        text = os.readlink(folder / name)
+        assert item["link"] == json.dumps(text) and "retained" not in item, item
+        assert (item["size"], item["sha256"]) == (len(os.fsencode(text)), hashlib.sha256(os.fsencode(text)).hexdigest())
+    first = subject()
+    assert "AN OWNER FILE" not in json.dumps(material) and "AN OWNER FILE" not in first.diff_text
+    assert f'symbolic link, its exact link text "{owner_file}"' in first.diff_text
+    reviewing = [{"record_id": "review-of-a", "state": "pending", "subject": {"diff_sha": first.diff_sha}}]
+    (folder / "a.txt").rename(folder / "b.txt")
+    renamed = subject()
+    assert renamed.diff_sha != first.diff_sha and running_result_review(reviewing, renamed.diff_sha) == ""
+    (folder / "b.txt").unlink()
+    (folder / "b.txt").symlink_to(folder / "another-target.txt")
+    assert subject().diff_sha not in {first.diff_sha, renamed.diff_sha}, "a retargeted link is another output"
+
+
+def test_registered_regular_file_does_not_cover_same_text_symlink(tmp_path):
+    """A captured regular file and a later link with the same bytes are different output kinds."""
+    from ouroboros.result_material import _file_identity, _same_file_kind
+
+    regular = tmp_path / "result.txt"
+    regular.write_text("target.txt", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to("target.txt")
+    regular_identity = _file_identity(regular)
+    link_identity = _file_identity(link)
+    assert regular_identity["sha256"] == link_identity["sha256"]
+    assert _same_file_kind(regular_identity, link_identity) is False
+
+
+def test_a_process_write_in_an_unborn_admitted_folder_reaches_the_floor_before_any_commit(tmp_path, monkeypatch):
+    """Astra, 8 Nov 2026: a root admitted to a freshly initialized Git folder (no commit yet) whose command writes
+    its result. The real admission step baselines that folder against the empty tree beside the system repo, so the
+    Required floor reviews the file a process created, with its exact copy. Before, the missing HEAD lost both
+    baselines and the delivery read no_production with no review."""
+    import pathlib
+    import subprocess
+    import sys
+
+    from ouroboros.agent import OuroborosAgent
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.review_result import produced_material, result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    fresh = ctx.workspace_root.parent / "fresh"
+    fresh.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=fresh, check=True)
+    ctx.workspace_root = fresh
+    host = SimpleNamespace(env=SimpleNamespace(repo_dir=ctx.repo_dir, budget_drive_root=None, drive_root=ctx.drive_root))
+    OuroborosAgent._capture_mutation_baseline(host, {"id": ctx.task_id}, {}, ctx)  # the host's own admission step
+    surfaces = load_task_result(ctx.drive_root, ctx.task_id)["mutation_evidence"]["baseline"]["surfaces"]
+    assert sorted(row["surface_type"] for row in surfaces) == ["external_workspace", "system_repo"]
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))  # no safety LLM offline
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    registry.execute("run_command", {"cmd": [sys.executable, "-c", "open('first.txt', 'w').write('made by a process\\n')"]})
+    assert (fresh / "first.txt").read_text(encoding="utf-8") == "made by a process\n"
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    trace, shown = {"tool_calls": []}, []
+    assert result_review_at_delivery(ctx, "The result is in first.txt.", trace, shown.append) is True
+    assert trace["review_decision"]["trigger"] == "observed_production" and len(sends) == 3 and ": PASS." in shown[0]
+    [item] = [file for file in produced_material(ctx)["files"] if file["path"].endswith("first.txt")]
+    assert item["kind"] == "workspace change"
+    assert pathlib.Path(item["retained"]).read_text(encoding="utf-8") == "made by a process\n"
+
+
+def test_an_observed_write_is_production_even_where_attribution_misses_it(tmp_path, monkeypatch):
+    """No baseline, then a commit through the shell: Git attribution sees nothing, but the loop observed the native
+    write, so the floor still reviews and names the file's current bytes; a read changes nothing."""
+    from ouroboros.tools.review_result import produced_material, required_material, result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    trace = ctx._execution_trace = {"tool_calls": [{"tool": "read_file", "args": {"path": "README.md"},
+                                                    "is_error": False, "status": "ok", "result": "text"}]}
+    assert required_material(ctx, trace, "Read it.") == "", "a read and a named old README are not production"
+    _write(ctx, "final.txt", "the produced bytes\n")
+    shared.git(ctx.workspace_root, "add", "final.txt")
+    shared.git(ctx.workspace_root, "commit", "-qm", "task output")
+    trace = _observed_write(ctx, "final.txt")
+    produced = produced_material(ctx)
+    [item] = [file for file in produced["files"] if file["path"].endswith("final.txt")]
+    assert item["kind"] == "written file" and item["retained"] and produced["observed"]
+    assert required_material(ctx, trace, "Done.") == "observed_production"
+    assert result_review_at_delivery(ctx, "Done.", trace, lambda _text: None) is True and len(sends) == 3
+
+
+def _loop_call(ctx, tool, args):
+    """One model call as the loop runs it (``_execute_single_tool`` -> ``process_tool_results``): the trace row the
+    result review reads, with the producer's typed outcome (``tool_result_meta``)."""
+    import json
+    import pathlib
+    from unittest import mock
+
+    from ouroboros import loop_tool_execution as execution
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    trace = ctx._execution_trace = getattr(ctx, "_execution_trace", None) or {"tool_calls": []}
+    call = {"id": f"call-{len(trace['tool_calls'])}", "function": {"name": tool, "arguments": json.dumps(args)}}
+    with mock.patch("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, "")):
+        row = execution._execute_single_tool(registry, call, pathlib.Path(ctx.drive_root) / "logs", ctx.task_id)
+    execution.process_tool_results([row], [], trace, lambda *_a, **_kw: None, registry)
+    return trace["tool_calls"][-1]
+
+
+def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_wave(tmp_path, monkeypatch):
+    """A same-byte native write (8 Nov 2026 follow-up): write_file, edit_text, apply_patch and edit_batch find the exact
+    bytes already there, write nothing and type the call ``completed_no_effect``, so no reader counts it and Required
+    buys nothing; a mixed batch lists only its changed member. The controls stay production: changed bytes, and a
+    changed write in an ordinary folder whose capture failed."""
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_result import produced_material, required_material, result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _baselined(ctx)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    target = ctx.workspace_root / "app.py"
+    before = (target.read_bytes(), target.stat().st_mtime_ns)
+    for tool, args in (("write_file", {"path": "app.py", "content": "VALUE = 1\n"}),
+                       ("edit_text", {"path": "app.py", "old_str": "VALUE = 1", "new_str": "VALUE = 1"}),
+                       ("apply_patch", {"patch": "*** Update File: app.py\n-VALUE = 1\n+VALUE = 1\n"}),
+                       ("edit_batch", {"edits": [{"path": "app.py", "old_str": "VALUE = 1", "new_str": "VALUE = 1"}]})):
+        row = _loop_call(ctx, tool, args)
+        assert row["is_error"] is False and row["tool_result_meta"]["operation_outcome"] == "completed_no_effect", row
+        assert row["result"].startswith("✅ Unchanged: active_workspace:app.py already held exactly this content")
+    assert (target.read_bytes(), target.stat().st_mtime_ns) == before, "nothing was written"
+    trace = ctx._execution_trace
+    assert produced_material(ctx)["observed"] == [] and produced_material(ctx)["files"] == []
+    assert result_review_at_delivery(ctx, "app.py already holds VALUE = 1.", trace, lambda _t: None) is False
+    assert sends == [] and trace["review_decision"]["trigger"] == "no_production"
+
+    changed = _loop_call(ctx, "write_file", {"files": [{"path": "app.py", "content": "VALUE = 2\n"},
+                                                      {"path": "lib.py", "content": "LIB = 'base'\n"}]})
+    assert changed["tool_result_meta"] == {"unchanged_paths": ["lib.py"]} and not changed["is_error"]
+    assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in produced_material(ctx)["files"]] == [
+        ("workspace change", "app.py")], "the batch's unchanged member is no produced material"
+    assert required_material(ctx, trace, "VALUE is 2.") == "observed_production"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "notes.txt").write_text("kept\n", encoding="utf-8")
+    folder = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.repo_dir, drive_root=ctx.drive_root,
+                         workspace_root=plain, workspace_mode="external", task_id="task-plain")
+    same = _loop_call(folder, "write_file", {"path": "notes.txt", "content": "kept\n"})
+    assert same["tool_result_meta"]["operation_outcome"] == "completed_no_effect" and "Retained" not in same["result"]
+    assert required_material(folder, folder._execution_trace, "Kept.") == "", "no new result is captured either"
+
+    def full_disk(*_a, **_kw):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr("ouroboros.artifacts.copy_file_to_task_artifacts", full_disk)
+    failed = _loop_call(folder, "write_file", {"path": "notes.txt", "content": "changed\n"})
+    assert "OUTPUT_CAPTURE_FAILED" in failed["result"] and "operation_outcome" not in failed["tool_result_meta"]
+    produced = produced_material(folder)
+    assert produced["observed"] and [item["kind"] for item in produced["files"]] == ["written file"]
+    assert required_material(folder, folder._execution_trace, "Changed.") == "observed_production"
+
+
+@pytest.mark.parametrize("letter", ["a", "я"])
+def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_changes(tmp_path, monkeypatch, letter):
+    """The typed metadata limit measures serialized bytes. An incomplete unchanged-path list cannot turn its
+    omitted members into produced files; known Git changes remain available with the trace coverage gap."""
+    from ouroboros.tools.review_result import produced_material, required_material
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    names = [f"{i:02d}-{letter * 90}.txt" for i in range(50)]
+    for name in names:
+        (ctx.workspace_root / name).write_text("kept\n", encoding="utf-8")
+    shared.git(ctx.workspace_root, "add", ".")
+    shared.git(ctx.workspace_root, "commit", "-qm", "fixture inputs")
+    _baselined(ctx)
+    row = _loop_call(ctx, "write_file", {"files": [{"path": "app.py", "content": "VALUE = 2\n"}]
+                    + [{"path": name, "content": "kept\n"} for name in names]})
+    assert row["is_error"] is False, row
+    assert row["tool_result_meta"]["unchanged_paths_omitted"] > 0
+    material = produced_material(ctx)
+    assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in material["files"]] == [
+        ("workspace change", "app.py")]
+    assert any("unchanged-path list is incomplete" in gap for gap in material["issues"])
+    assert required_material(ctx, ctx._execution_trace, "Changed.") == "observed_production"
+
+
+def test_an_answer_its_contract_requires_reviewed_is_reviewed_without_any_file(tmp_path, monkeypatch):
+    """``task_contract.review_answer``: Required reviews the whole answer (owner, 8 Nov 2026); without it a plain
+    text answer stays the mind's own call, and the record says why nothing ran."""
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    for required in (False, True):
+        ctx = _floor_ctx(tmp_path / str(required), monkeypatch)
+        ctx.task_contract = {"review_answer": True} if required else {}
+        sends: list[dict] = []
+        monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+        trace = {"tool_calls": []}
+        held = result_review_at_delivery(ctx, "The conclusion: X causes Y, for three reasons.", trace, lambda _t: None)
+        assert held is required and len(sends) == (3 if required else 0)
+        assert trace["review_decision"]["trigger"] == ("answer_required" if required else "no_production")
+
+
+def test_after_a_received_fail_the_fixed_result_is_the_authors_explicit_acceptance_and_buys_nothing(tmp_path, monkeypatch):
+    """Required + Advisory (owner, 8 Nov 2026): A fails, the author fixes it as B. B is not reviewed again: the
+    earlier critique is put before the author once, its next finish accepts B with its reason, beside A's verdict.
+    That acceptance never passes to C or to B under new owner words."""
+    from ouroboros.outcomes import _objective_axis, _review_axis
+    from ouroboros.project_dialogue import completion_status_label
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
+    trace, shown = {"tool_calls": []}, []
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # A's FAIL, first
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True  # B: the choice, once
+    assert "An earlier version of your result was reviewed" in shown[-1] and "three findings" in shown[-1]
+    ctx._completion_selected = {"action": "finish", "rationale": "Counted again: three findings are listed now."}
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False and len(sends) == 3
+    [run] = trace["review_runs"]
+    finish = run["informed_finish"]
+    assert run["earlier_revision"] is True and finish["subject_sha"] == run["binding_hash"] != run["reviewed_subject_sha"]
+    assert finish["rationale"].startswith("Counted again") and finish["outcomes"] and run["aggregate_signal"] == "FAIL"
+    review = _review_axis(trace)
+    assert (review["status"], review["author_finish"]) == ("fail", "author_finish")
+    assert review["acceptance_decision"]["author_disposition"]["rationale"].startswith("Counted again")
+    objective = _objective_axis(review)
+    assert (objective["status"], objective["source"]) == ("pass", "author_acceptance")
+    record = {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": review, "objective": objective}}
+    assert completion_status_label(record, {}) == "Done with warnings"
+
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 4", trace, shown.append) is True, "C asks again"
+    assert "author_finish" not in _review_axis(trace) and len(sends) == 3, "B's acceptance never covers C"
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "State the units too.", "msg_id": "m-9"}]
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True, "new words: asked again"
+    assert "author_finish" not in _review_axis(trace) and len(sends) == 3
+    assert "State the units too." in shown[-1] and "do they change what was asked?" in shown[-1], "asked, LLM-first"
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False and len(sends) == 3
+
+
+def test_blocking_holds_any_completed_review_short_of_pass_whoever_called_it(tmp_path, monkeypatch):
+    """Auto + Blocking (owner, 8 Nov 2026: Auto selects the call, Blocking sets its strength): the mind's own
+    review FAIL holds its delivery, and a revision or an earlier version's PASS is no approval of the delivered
+    bytes; nothing is bought for it automatically."""
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch, mode="auto", enforcement="blocking")
+    sends: list[dict] = []
+    answers = {"t1": CRITICAL}
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, answers))
+    assert run_review_change(ctx, subject="result", answer="Two findings are in report.md.")["aggregate"] == "FAIL"
+    trace, shown = {"tool_calls": []}, []
+    for _ in range(2):
+        assert result_review_at_delivery(ctx, "Two findings are in report.md.", trace, shown.append) is True
+        assert "not delivered until a review passes it" in shown[-1] and "review_change(subject=" in shown[-1]
+    answers.clear()
+    assert run_review_change(ctx, subject="result", answer="Three findings are in report.md.")["aggregate"] == "PASS"
+    assert result_review_at_delivery(ctx, "Three findings are in report.md.", trace, shown.append) is True  # PASS shown
+    assert result_review_at_delivery(ctx, "Three findings are in report.md.", trace, shown.append) is False
+    assert result_review_at_delivery(ctx, "Three findings, see report.md.", trace, shown.append) is True, \
+        "an earlier version's PASS is never Blocking authority for other bytes"
+    assert "earlier version" in shown[-1] and len(sends) == 6
+
+
+def test_an_acceptance_never_authorizes_another_candidate_and_a_legacy_one_stays_readable():
+    """F1: an informed finish (legacy ``True`` or bound to its subject) counts only on a current run of the subject
+    it accepted; a superseded run keeps its critique and never carries its acceptance to the delivered answer."""
+    from ouroboros.outcomes import _objective_axis, _review_axis
+
+    def run(**facts):
+        return {"surface": "result", "authority": "host_root", "panel_id": "rl-a", "record_id": "rl-a",
+                "binding_hash": "subject-a", "aggregate_signal": "FAIL", "aggregate": "FAIL", **facts}
+
+    for finish in (True, {"subject_sha": "subject-a", "record_ids": ["rl-a"], "outcomes": ["x"]}):
+        stale = {"review_runs": [run(informed_finish=finish, superseded_by_revision="candidate-2")]}
+        review = _review_axis(stale)
+        assert review["status"] == "fail" and "author_finish" not in review, "the stale FAIL stands, unaccepted"
+        assert _objective_axis(review)["status"] == "fail"
+        current = _review_axis({"review_runs": [run(informed_finish=finish)]})
+        assert current["author_finish"] == "author_finish", "on its own current subject the acceptance reads"
+    misbound = _review_axis({"review_runs": [run(informed_finish={"subject_sha": "subject-b"})]})
+    assert "author_finish" not in misbound, "an acceptance of another subject authorizes nothing here"
+
+
+def test_a_stale_capture_never_hides_a_rewritten_original_and_a_large_file_keeps_its_exact_copy(tmp_path, monkeypatch):
+    """A registered capture stands for its original only while the original holds its bytes; a 17 MiB result keeps
+    an exact readable copy, never a gap (the existing verified copy, a clone where the filesystem gives one)."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+    from ouroboros.tools.review_result import produced_material
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _baselined(ctx)
+    original = ctx.workspace_root / "out.txt"
+    original.write_text("version A\n", encoding="utf-8")
+    copy_file_to_task_artifacts(ctx, original, kind="user_file")
+
+    def listed():
+        produced = produced_material(ctx)
+        assert not [issue for issue in produced["issues"] if "could not" in issue], produced["issues"]
+        return {(pathlib.Path(item["path"]).name, item["kind"]): item for item in produced["files"]}
+
+    (ctx.workspace_root / "other.txt").write_text("a second, distinct result\n", encoding="utf-8")
+    _observed_write(ctx, "out.txt")  # the native write that produced the original, as the loop recorded it
+    files = listed()
+    assert ("out.txt", "workspace change") not in files and ("out.txt", "written file") not in files, \
+        "the healthy capture stands for the original, however it is named again"
+    assert ("other.txt", "workspace change") in files, "a covered original never stops the attribution after it"
+    original.write_text("version B\n", encoding="utf-8")
+    files = listed()
+    assert pathlib.Path(files[("out.txt", "artifact")]["retained"]).read_text() == "version A\n"
+    assert pathlib.Path(files[("out.txt", "workspace change")]["retained"]).read_text() == "version B\n"
+    large = ctx.workspace_root / "data.bin"
+    large.write_bytes(b"\1" * (17 * 1024 * 1024))
+    item = listed()[("data.bin", "workspace change")]
+    assert "retained_gap" not in item and hashlib.sha256(pathlib.Path(item["retained"]).read_bytes()).hexdigest() == item["sha256"]
+    (ctx.workspace_root / "latin.txt").write_bytes("caf\u00e9 cr\u00e8me\n".encode("latin-1"))
+    contents = produced_material(ctx)["contents_section"]
+    assert f"### {ctx.workspace_root.resolve() / 'latin.txt'} (not shown: not UTF-8 text" in contents
+    assert "caf" not in contents.split("latin.txt", 1)[1].split("###", 1)[0], "no bytes silently dropped as exact"
+
+
+def test_an_excerpt_says_the_true_cut_and_files_past_the_spent_budget_are_named_unread(tmp_path):
+    """Opus, 8 Nov 2026: a text file with no line break in its read (one-line JSON, minified code), only CR breaks,
+    or a first line longer than its share shows a bounded prefix cut on a character boundary and says so, never
+    "budget is spent" with the budget unused. Once the budget is spent, the remaining files are named without being
+    read; a file that is not UTF-8 stays a named gap."""
+    from ouroboros.result_material import _contents_section
+
+    def retained(name, data, live=True):
+        path = tmp_path / name
+        if live:
+            path.write_bytes(data)
+        return {"path": f"/work/{name}", "retained": str(path), "size": len(data)}
+
+    one_line = retained("one.json", ('{"key": "' + "é" * 40000 + '"}').encode("utf-8"))
+    cr_only = retained("cr.txt", b"first\rsecond\r" + b"x" * 70000)
+    whole = retained("whole.txt", b"alpha\nbeta\n")
+    latin = retained("latin.txt", "café\n".encode("latin-1") * 10)
+    section = _contents_section([one_line, cr_only, whole, latin], 6000)
+    assert "budget is spent" not in section, section[:400]
+    head, rest = section.split("### /work/one.json (its first 1500 characters shown; the rest is in its retained copy)\n")
+    assert rest.split("\n", 2)[1] == ('{"key": "' + "é" * 40000)[:1500], "an exact prefix on a character boundary"
+    assert "### /work/cr.txt (its first 2 lines shown; the rest is in its retained copy)" in section
+    assert "### /work/whole.txt (the whole file shown)" in section
+    assert "### /work/latin.txt (not shown: not UTF-8 text; it is in its retained copy)" in section
+
+    lines = retained("lines.txt", ("z" * 99 + "\n").encode("utf-8") * 200)
+    ghost = retained("never-read.txt", b"0123456789", live=False)  # a read would fail and drop it unnamed
+    spent = _contents_section([lines, ghost], 1000)
+    assert "### /work/lines.txt (its first 10 lines shown; the rest is in its retained copy)" in spent
+    assert spent.endswith("Not shown: this packet's excerpt budget is spent; each is in its retained copy above: "
+                          "/work/never-read.txt")
+
+
+def test_every_delivery_says_why_its_result_was_not_reviewed(tmp_path, monkeypatch):
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    for mode, trigger in (("off", "mode_off"), ("auto", "not_requested"), ("required", "no_production")):
+        ctx = _floor_ctx(tmp_path / mode, monkeypatch, mode=mode)
+        trace = {"tool_calls": []}
+        assert result_review_at_delivery(ctx, "A short reply.", trace, lambda _text: None) is False
+        assert trace["review_decision"] == {"mode": mode, "trigger": trigger}
+        from ouroboros.outcomes import _review_axis
+        assert _review_axis(trace)["eligibility"] == "not_eligible"
+        assert _review_axis(trace)["mode"] == mode
+
+
+@pytest.mark.parametrize("late, warning", [("PASS", ""), ("PASS", "receipt_absent"), ("FAIL", "receipt_absent")])
+def test_a_reasoned_pending_finish_warns_until_a_late_pass_of_its_exact_subject_resolves_it(tmp_path, monkeypatch, late,
+                                                                                           warning):
+    """Required + Advisory (owner, 8 Nov 2026): the author may finish while the floor's review still runs, with its
+    reason; the task is Done with warnings and the review stays owed. When that review settles after the task ended,
+    the real late path keeps its mark, and only a PASS of exactly the delivered subject clears the warning it caused.
+    A warning the review never answered (Astra, 8 Nov: ``receipt_absent``, no host-attested verification) stays."""
+    from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
+    from ouroboros.late_review_marks import replay_owed_late_reviews
+    from ouroboros.outcomes import _merge_objective_warning, _objective_axis, _review_axis
+    from ouroboros.project_dialogue import completion_status_label, outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools import review_result as rr
+    from tests.test_review_change_end_to_end import _pending_then_answering_seat
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    pending, _starts = _pending_then_answering_seat("t2", "invocation-t2")
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        actor = pending(request, slot, actor, retry_state=retry_state, pending_invocation_checkpoint=pending_invocation_checkpoint)
+        if late == "FAIL" and slot.slot_id == "t2" and retry_state.get("pending_invocation_id") == "invocation-t2":
+            actor.raw_text = CRITICAL  # the late answer of the seat that was still running
+        return actor
+
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    trace, shown = {"tool_calls": []}, []
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
+    assert "still running" in shown[-1] and "pending_review=finish and a rationale" in shown[-1]
+    assert '"seat_id": "t1"' not in shown[-1], "the seats that answered were not handed back by that hold"
+    for decision in ("first", "after reading"):
+        ctx._acceptance_pending_review_choice = "finish"
+        ctx._completion_selected = {"action": "finish", "pending_review": "finish",
+                                    "rationale": "The owner asked for the number now; the review's verdict will follow."}
+        if decision == "first":  # t1 and s1 answered and t2 still runs: their answers reach the author first
+            assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
+            assert "1 still answering" in shown[-1] and all(f'"seat_id": "{seat}"' in shown[-1] for seat in ("t1", "s1"))
+            assert '"seat_id": "t2"' not in shown[-1] and ctx._acceptance_pending_review_choice == "" and len(sends) == 3
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "finished beside it"
+    assert len(sends) == 3 and trace["review_decision"]["trigger"] == "pending_finish", "no new paid panel"
+    review = _review_axis(trace)
+    assert (review["status"], review["author_finish"]) == ("awaiting", "author_finish_pending")
+    assert review["acceptance_decision"]["author_disposition"]["rationale"].startswith("The owner asked")
+    record_id = review["pending_review"]["record_id"]
+    axes = {"execution": {"status": "ok"}, "review": review, "objective": _objective_axis(review)}
+    if warning:  # what ``apply_receipt_absent_flag`` adds at the end of a turn with effects and no verification
+        _merge_objective_warning(axes["objective"], warning)
+    assert completion_status_label({"status": "completed", "outcome_axes": axes}, {}) == "Done with warnings"
+
+    # The running seat answers later; then the task has ended and the owed duty is replayed.
+    subject = rr.result_subject(ctx, SimpleNamespace(answer=""), governance_root=ctx.repo_dir, answer="FINAL ANSWER: 2")
+    assert rr._collect_running(ctx, "FINAL ANSWER: 2", record_id, subject)["state"] == "settled"
+    write_task_result(ctx.drive_root, ctx.task_id, "completed", chat_id=1, outcome_axes=axes)
+    assert replay_owed_late_reviews(ctx.drive_root)["settled"] == 1
+    marks = [mark for mark in ChronicleStore(ctx.drive_root).active_marks(None) if is_late_review_mark(mark)]
+    assert marks, "the late verdict reaches its room either way"
+    stored = load_task_result(ctx.drive_root, ctx.task_id)
+    objective = stored["outcome_axes"]["objective"]
+    assert objective.get("warnings", []) == ([warning] if warning else []), "an independent warning is never cleared"
+    events = (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    announced = [row for row in map(json.loads, events) if row.get("type") == "review_late_result" and row.get("current_outcome")]
+    if late == "PASS":  # the open card reads what this reload reads; a FAIL announces no outcome and keeps the warning
+        [event] = announced
+        assert (event["task_id"], event["record_id"]) == (ctx.task_id, record_id)
+        assert event["current_outcome"]["outcome_phase"] == outcome_phase(stored, {}) == ("warn" if warning else "done")
+    else:
+        assert announced == []
+    if late == "PASS":
+        assert completion_status_label(stored, {}) == ("Done with warnings" if warning else "Done"), \
+            "a PASS of exactly the delivered subject resolves the warning it caused, and only that one"
+        resolved = stored["outcome_axes"]["review"]
+        assert resolved["status"] == "pass" and resolved["late_verdict"]["record_id"] == record_id
+        assert resolved["pending_finish_resolved"]["review"]["author_finish"] == "author_finish_pending"
+        assert (objective["status"], objective["source"], objective["review_status"]) == ("pass", "result_review", "pass")
+        assert "reason" not in objective, "the author's pending acceptance is history now, kept beside the PASS"
+    else:
+        assert completion_status_label(stored, {}) == "Done with warnings", "a late FAIL keeps the warning"
+        assert stored["outcome_axes"]["review"]["status"] == "awaiting"

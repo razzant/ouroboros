@@ -259,6 +259,7 @@ def _start_task(
     destination: str = "",
     owner_quote: str = "",
     owner_words: str = "",
+    review_answer: bool = False,
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     from ouroboros.owner_words import cited_owner_basis
@@ -389,6 +390,7 @@ def _start_task(
         # Absent is not false: only an explicit answer overrides the subject-of-work rule (BIBLE P1).
         **({"context_requires_development": bool(context_requires_development)}
            if isinstance(context_requires_development, bool) else {}),
+        **({"review_answer": True} if review_answer is True else {}),  # task_contract.review_answer
         **effort_fields,
         "chat_id": current_chat_id,
         **({"resource_intent": {"kind": "system_repo"}} if intent_system_repo else {}),

@@ -7,6 +7,7 @@ stays the one tests monkeypatch.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 from typing import Dict, List, Optional
@@ -30,6 +31,51 @@ def _git():
 
 
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
+
+
+def _holds_exactly(target: pathlib.Path, content: str) -> bool:
+    """The regular file already holds exactly the bytes ``write_text`` would leave (UTF-8, byte-exact). A symlink
+    (the atomic write would replace it) or anything unreadable is not, so the ordinary write decides."""
+    data = content.encode("utf-8")
+    try:
+        return (not target.is_symlink() and target.is_file() and target.stat().st_size == len(data)
+                and target.read_bytes() == data)
+    except OSError:
+        return False
+
+
+def _unchanged_result(ctx: ToolContext, paths: List[str], base: pathlib.Path) -> str:
+    """A write whose every target already held its exact bytes changed nothing: the producer says so as the typed
+    ``completed_no_effect`` outcome, which no effect reader counts as production (owner, 8 Nov 2026)."""
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result
+
+    return _publish_tool_result(ctx, ToolResult(
+        status=TOOL_CODE_SPECS["OK"].status, code="OK", meta={"operation_outcome": "completed_no_effect"},
+        text=f"✅ Unchanged: {', '.join(paths)} already held exactly this content; nothing was written.\n"
+             f"Resolved root: {base}"))
+
+
+def _with_unchanged(ctx: ToolContext, tool_name: str, text: str, unchanged: List[str]) -> str:
+    """A call that changed some targets and found the rest already holding their exact bytes names those as the typed
+    ``unchanged_paths`` (base-relative). Beyond the typed-result byte budget, disclose the incomplete list; omitted
+    unchanged paths must never be inferred to have changed. The text keeps its own classification."""
+    if not unchanged:
+        return text
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter, _publish_tool_result, _replace_tool_result
+
+    kept: List[str] = []
+    size = 2
+    for rel in unchanged:
+        encoded_size = len(json.dumps(rel, ensure_ascii=True)) + 1
+        if size + encoded_size > 4096:
+            break
+        kept.append(rel)
+        size += encoded_size
+    meta = {"unchanged_paths": kept}
+    if len(kept) < len(unchanged):
+        meta["unchanged_paths_omitted"] = len(unchanged) - len(kept)
+    return _publish_tool_result(ctx, _replace_tool_result(LegacyTextResultAdapter.from_text(tool_name, text),
+                                                          meta_updates=meta))
 
 
 def _check_shrink_guard(
@@ -169,6 +215,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
 
     written = []
     written_paths: List[str] = []
+    unchanged: List[str] = []  # already held exactly this content: not rewritten, not captured as a new result
     overwrite_diffs: List[str] = []
     capture_notes: List[str] = []
     from ouroboros.workspace_file_outputs import capture_known_workspace_outputs
@@ -201,6 +248,9 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 )
                 if note:
                     capture_notes.append(note)
+                continue
+            if _holds_exactly(target, e["content"]):
+                unchanged.append(rel_path)
                 continue
             old_content: Optional[str] = None
             if target.exists():
@@ -235,6 +285,8 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 + ("\n" + "\n".join(capture_notes) if capture_notes else "")
             )
 
+    if unchanged and not written:
+        return _unchanged_result(ctx, [f"{display_root}:{rel}" for rel in unchanged], binding_items[0].base_path)
     _git()._invalidate_advisory(
         ctx,
         changed_paths=written_paths,
@@ -260,6 +312,9 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             f"✅ Written {len(written)} file(s): {summary}\n"
             "Files are on disk but NOT committed. Run commit_reviewed when ready."
         )
+    if unchanged:
+        result += "\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(
+            f"{display_root}:{rel}" for rel in unchanged)
     result += f"\nResolved root: {binding_items[0].base_path}"
     if syntax_bypass_notes:
         result += (
@@ -284,7 +339,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     protected_written = _git().protected_paths_in(written_paths) if system_target else []
     if protected_written and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice(protected_written)
-    return result
+    return _with_unchanged(ctx, "write_file", result, unchanged)
 
 
 def _str_replace_editor(
@@ -390,6 +445,8 @@ def _str_replace_editor(
     new_content, _match_err = _git()._str_match_replace(content, old_str, new_str, path, "EDIT_TEXT_ERROR")
     if _match_err:
         return publish_no_effect(ctx, _match_err, tool_name="edit_text")
+    if new_content == content and _holds_exactly(target, new_content):
+        return _unchanged_result(ctx, [f"{display_root}:{rel_path}"], invalidation_root)
     from ouroboros.tools.edit_ops import (
         EXACT_EDIT_SHRINK_RECOVERY,
         _edit_content_block,

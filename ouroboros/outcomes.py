@@ -473,7 +473,8 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
     tool that registered a canonical artifact (including partial output on error;
     artifact_registered — a
     stopped service's outputs or a user_files write). Pure scratch (root=task_drive)
-    write_file/edit_text does NOT count. Cognitive-memory updates go through
+    writes and a call its producer typed ``completed_no_effect`` (a write of the bytes a
+    file already held) do NOT count. Cognitive-memory updates go through
     update_identity/update_scratchpad/knowledge_write (not write tools) and are
     intentionally not effects; a light-mode generic cognitive write is
     advisory-redirected and never succeeds here. This is a P3 deterministic immune
@@ -490,8 +491,9 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
         if observed_only and not (artifact or isinstance(call.get("is_error"), bool)):
             continue
         succeeded = not call.get("is_error") and str(call.get("status") or "ok") in _OK_TOOL_STATUSES
-        if not (succeeded or artifact):
-            continue
+        meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
+        if not (succeeded or artifact) or (meta.get("operation_outcome") == "completed_no_effect" and not artifact):
+            continue  # the producer proved this call changed nothing (a same-byte write): an outcome, no effect
         tool = str(call.get("tool") or "")
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         is_effect = succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS)
@@ -580,6 +582,7 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
         axis = {
             "status": "degraded" if selection.superseded_only_acceptance_gap else "skipped",
             "eligibility": str(review_decision.get("eligibility") or "not_eligible"),
+            **({"mode": review_decision["mode"]} if review_decision.get("mode") else {}),
             "trigger": str(review_decision.get("trigger") or "not_evaluated"),
             "run_count": 0,
         }
@@ -595,6 +598,8 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
     if "FAIL" in signals:
         status = "fail"
+    elif all(run.get("pending_finish") for run in runs):  # the author finished while its review still ran
+        status = AWAITING_PROJECTION
     elif "DEGRADED" in signals or any(bool(run.get("degraded")) for run in runs):
         # A panel that was only awaited holds no verdict yet: a gap, not a degraded review.
         status = AWAITING_PROJECTION if _outcome_receipts.review_runs_only_awaited(runs) else "degraded"
@@ -605,23 +610,36 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     axis = {
         "status": status,
         "eligibility": str(review_decision.get("eligibility") or "eligible"),
+        **({"mode": review_decision["mode"]} if review_decision.get("mode") else {}),
         "trigger": str(review_decision.get("trigger") or "review_run"),
         "run_count": len(runs),
         "aggregate_signals": signals,
     }
     if all(run.get("surface") == "result" for run in runs):
         axis["source"] = "result_review"  # review_change(subject="result") bound to the delivered answer
-        if status != "pass" and any(run.get("informed_finish") for run in runs):
-            axis["author_finish"] = True  # the mind read the findings and delivered under advisory enforcement
+        # The author's own acceptance counts only on a current run and for the exact subject it accepted: a
+        # superseded run kept for its critique never carries its acceptance to another answer (owner, 8 Nov 2026).
+        accepted = [run for run in runs if run.get("informed_finish") and not run.get("superseded_by_revision") and (
+            not isinstance(run["informed_finish"], dict) or run["informed_finish"].get("subject_sha") == run.get("binding_hash"))]
+        if accepted and (status != "pass" or any(run.get("earlier_revision") for run in accepted)):
+            axis["author_finish"] = ("author_finish_pending" if status == AWAITING_PROJECTION else
+                                     "previous_revision_accepted" if status == "pass" else "author_finish")
+            if status == AWAITING_PROJECTION:  # the review its late verdict will be read from (``late_review_marks``)
+                axis["pending_review"] = {"record_id": str(accepted[0].get("record_id") or ""),
+                                          "subject_sha": str(accepted[0].get("binding_hash") or "")}
         if any(run.get("enforcement") == "blocking" and run.get("dispatch_refusal") == REASON_REVIEW_CYCLES_EXHAUSTED
                for run in runs):
             axis["blocked_reason"] = REASON_REVIEW_CYCLES_EXHAUSTED  # no review of this result could be bought
         if axis.get("author_finish") or axis.get("blocked_reason"):
             # The task card's cause sentence reads the decision shape (project_dialogue / log_events twins).
+            finish = (accepted[0]["informed_finish"] if accepted else None) if axis.get("author_finish") else None
             axis["acceptance_decision"] = {
-                "status": ACCEPTANCE_FINALIZED_UNACCEPTED, "source": "result_review",
-                "reason": "author_finish" if axis.get("author_finish") else REASON_REVIEW_CYCLES_EXHAUSTED,
-                "enforcement": "advisory" if axis.get("author_finish") else "blocking"}
+                "status": ACCEPTANCE_ACCEPTED if axis.get("author_finish") == "previous_revision_accepted"
+                else ACCEPTANCE_FINALIZED_UNACCEPTED, "source": "result_review",
+                "reason": axis.get("author_finish") or REASON_REVIEW_CYCLES_EXHAUSTED,
+                "enforcement": "advisory" if axis.get("author_finish") else "blocking",
+                **({"author_disposition": {"action": "finish", "rationale": finish["rationale"]}}
+                   if isinstance(finish, dict) and finish.get("rationale") else {})}
     tier = _aggregate_outcome_tier(_extract_outcome_tiers(runs))
     if tier and status != AWAITING_PROJECTION:  # a minority answer is not the panel's tier
         axis["outcome_tier"] = tier
@@ -643,7 +661,8 @@ def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
     tier = str(review.get("outcome_tier") or "")
     if review.get("source") == "result_review" and review.get("author_finish"):
         # The author's own informed finish, not a grade: the host derives no tier from it.
-        return {"status": OBJECTIVE_PASS, "source": "author_acceptance", "review_status": status, "reason": "author_finish"}
+        reason = review["author_finish"] if isinstance(review["author_finish"], str) else "author_finish"
+        return {"status": OBJECTIVE_PASS, "source": "author_acceptance", "review_status": status, "reason": reason}
     if review.get("source") == "result_review" and review.get("blocked_reason"):
         # Blocking enforcement with no review of this result left to buy: never approved, never green.
         return {"status": OBJECTIVE_FAIL, "source": "result_review", "review_status": status,
@@ -1141,6 +1160,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "verification_failures": verification_failures[:20],
         }
     review = _review_axis(llm_trace)
+    if usage_reason in ACCEPTANCE_BYPASS_REASON_BY_RAIL:  # a rail ended the task before its delivery's review step
+        review.update(trigger="forced_rail", rail=usage_reason)
     objective = _objective_axis(review)
     # The planning gate holds or releases the final answer; it names no objective of its
     # own (plans have no cycle cap, no quorum and no author stop: the stop path is the

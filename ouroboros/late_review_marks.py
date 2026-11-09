@@ -27,6 +27,9 @@ its waiting line (``memory_waiting``: how many, in how many rooms, the oldest) a
 releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it, a tool read or a
 mailbox acknowledgement of a notice is not that release.
 
+A result review its author finished before (``pending_review=finish``) whose late verdict is a PASS of exactly
+the delivered subject also resolves that task's missing-conclusion warning (``resolve_pending_result_review``).
+
 A publication that could not be placed (``failed``) and every duty only the end of its author's
 task can discharge stay owed as owner-held rows of the existing obligations table (``OWED_SET``,
 immutable facts): a record a running author may still read itself (``owe_late_review``), and a
@@ -157,6 +160,12 @@ def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateRevie
     except ValueError as exc:
         return LateReviewMark("invalid", detail=str(exc))
     mark_id = late_review_mark_id(facts["surface"], facts["task_id"], facts["publication_id"])
+    if facts["surface"] == "result" and facts["subject"].get("record_id"):
+        try:
+            resolve_pending_result_review(drive_root, facts["task_id"], str(facts["subject"]["record_id"]))
+        except Exception:  # the mark still carries the verdict; the stored outcome keeps its warning
+            log.warning("late result review %s of task %s could not update its outcome", facts["publication_id"],
+                        facts["task_id"], exc_info=True)
     try:
         outcome = _publish(pathlib.Path(drive_root), mark_id, facts)
     except Exception as exc:  # a store that cannot serve (StoreError, …): the publication stays owed
@@ -166,6 +175,156 @@ def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateRevie
                     facts["task_id"], outcome.status, outcome.detail)
     _owed(drive_root, mark_id, {"record": facts} if outcome.status == "failed" else None)
     return outcome
+
+
+# The objective keys ``outcomes._objective_axis`` derives from the review axis; any other key on the objective (its
+# ``warning``/``warnings``: ``receipt_absent``, custody) is another producer's independent fact, and so is one of these
+# keys another producer set over that derivation (a publication receipt veto, deferred child results, delivery control).
+_REVIEW_DERIVED_OBJECTIVE = frozenset({"status", "source", "review_status", "reason", "outcome_tier"})
+
+
+def _pending_review(row: Mapping[str, Any], record_id: str) -> tuple:
+    """``(axes, review, pending)`` of a stored row; ``pending`` is empty unless it names this review."""
+    axes = row.get("outcome_axes") if isinstance(row.get("outcome_axes"), dict) else {}
+    review = axes.get("review") if isinstance(axes.get("review"), dict) else {}
+    pending = review.get("pending_review") if isinstance(review.get("pending_review"), dict) else {}
+    return axes, review, pending if pending.get("record_id") == record_id else {}
+
+
+def resolve_pending_result_review(drive_root: Any, task_id: str, record_id: str) -> bool:
+    """A result review its author finished before (``pending_review=finish``) settled after the task ended (owner,
+    8 Nov 2026). A PASS of exactly the subject the task delivered supplies the conclusion missing at delivery: the
+    ended task's review axis becomes that PASS, with what was stored before kept beside it
+    (``pending_finish_resolved``), and the objective takes what ``_objective_axis`` derives from it where it held the
+    pending review's derivation; every other objective fact (``receipt_absent``; a key another producer set over that
+    derivation, such as a publication receipt veto or deferred child results) is kept. The store's own write applies this
+    over the current row, so an outcome write that landed meanwhile is never lost; the existing late-review event
+    then carries that current outcome to an open card (``announce_current_outcome``). Any other verdict, or a review
+    of another version, leaves the stored outcome and its warning as they were and announces nothing; the late mark
+    carries the verdict either way. A replay finds nothing pending and changes nothing. True on a change."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, write_task_result
+
+    row = ended_task_row(drive_root, task_id) or {}
+    if not _pending_review(row, record_id)[2]:
+        return False
+    record = ledger.load_record(drive_root, record_id) or {}
+    subject = str((record.get("subject") or {}).get("diff_sha") or "")
+    if str((record.get("verdict") or {}).get("aggregate") or "") != "PASS":
+        return False
+    changed: list = []
+
+    def resolve(current: Dict[str, Any], _incoming: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        axes, review, pending = _pending_review(current, record_id)
+        if str(current.get("status") or "") not in _TRULY_TERMINAL_STATUSES or subject != pending.get("subject_sha"):
+            return None  # another version, or resolved or changed meanwhile: nothing is written
+        kept = {key: value for key, value in review.items()
+                if key not in {"pending_review", "acceptance_decision", "author_finish"}}
+        resolved = {**kept, "status": "pass", "aggregate_signals": ["PASS"],
+                    "pending_finish_resolved": {key: axes[key] for key in ("review", "objective")
+                                                if isinstance(axes.get(key), dict)},
+                    "late_verdict": {"record_id": record_id, "aggregate": "PASS", "subject_sha": subject,
+                                     "settled_at": str(record.get("ts") or "")}}
+        objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else {}
+        derived = _objective_axis(review)  # what the pending review gave the objective
+        changed.append(True)
+        return {"status": current["status"], "outcome_axes": {**axes, "review": resolved, "objective": {
+            **{key: value for key, value in objective.items() if key not in _REVIEW_DERIVED_OBJECTIVE},
+            **_objective_axis(resolved), **{key: value for key, value in objective.items()
+                                             if key in _REVIEW_DERIVED_OBJECTIVE and value != derived.get(key)}}}}
+
+    written = write_task_result(drive_root, task_id, str(row["status"]), _field_projector=resolve)
+    if changed:
+        try:
+            announce_current_outcome(drive_root, task_id, record_id, subject, written)
+        except Exception:  # the stored outcome stands; an open card reads it at its next history read
+            log.warning("late result review %s of task %s: its current outcome was not announced", record_id, task_id,
+                        exc_info=True)
+    return bool(changed)
+
+
+# What a finished card's status and cause sentence read of an outcome (``project_dialogue.outcome_phase`` and
+# ``_completion_verdict``, their ``log_events.js`` twins ``taskOutcomeSeverity`` and ``taskReasonDetail``): the
+# stored axes whole, as the ending row and event carry them (``terminal_projection._project_row``,
+# ``agent_task_pipeline``'s ``task_done``), less the late resolution's record of what it replaced; of the row, the
+# facts those readers take, of two mappings the one key they read. Never the row's answer, traces or evidence.
+_CARD_FACTS = ("task_id", "parent_task_id", "root_task_id", "status", "task_terminal_status", "reason_code",
+               "reason_detail", "artifact_status", "review_status", "task_completion", "cancel_origin",
+               "terminal_origin", "terminal_plan_review_open", "delegated_runs_unreconciled")
+_CARD_PARTS = {"artifact_bundle": "status", "root_phase_checkpoint": "post_task_synthesis"}
+_RESOLUTION_FACTS = ("pending_finish_resolved", "late_verdict")
+
+
+def current_outcome(row: Mapping[str, Any], delivery: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """A stored task row's current outcome as its finished card reads it (``_CARD_FACTS``), with an exhausted or
+    unknown delivery of its answer merged as the ending row merges it (``terminal_projection._project_row``: a
+    row-level warning and the saved-answer pointer, never the task's own axes), the phase ``outcome_phase`` computes
+    from them and the row's revision."""
+    from ouroboros.outcomes import _merge_objective_warning
+    from ouroboros.project_dialogue import outcome_phase  # D15->D17 is lazy-only
+    from ouroboros.task_finalization import quiet_finish
+
+    delivery = {key: str(value or "") for key, value in (delivery or {}).items() if key in ("state", "preserved_path")}
+    if delivery.get("state") in {"exhausted", "unknown"}:
+        stored = dict(row.get("outcome_axes") or {}) if isinstance(row.get("outcome_axes"), dict) else {}
+        objective = dict(stored.get("objective") or {}) if isinstance(stored.get("objective"), dict) else {}
+        _merge_objective_warning(objective, f"terminal_delivery_{delivery['state']}")
+        row = {**row, "outcome_axes": {**stored, "objective": objective}}
+    else:
+        delivery = {}
+    axes = dict(row.get("outcome_axes") or {}) if isinstance(row.get("outcome_axes"), dict) else {}
+    if isinstance(axes.get("review"), dict):
+        axes["review"] = {key: value for key, value in axes["review"].items() if key not in _RESOLUTION_FACTS}
+    answered = (isinstance(row.get("result"), str) and bool(row["result"])) if "result" in row else row.get(
+        "_result_text_present") is True  # the answer's existence, as the ending row states it, never its words
+    return {**{key: row[key] for key in _CARD_FACTS if row.get(key) not in (None, "")},
+            **{key: {part: row[key][part]} for key, part in _CARD_PARTS.items()
+               if isinstance(row.get(key), dict) and part in row[key]},
+            "_result_text_present": answered, "quiet_effective": quiet_finish(dict(row)), "outcome_axes": axes,
+            **({"terminal_delivery": delivery} if delivery else {}),
+            "outcome_phase": outcome_phase(dict(row), {}), "revision": str(row.get("updated_at") or "")}
+
+
+def late_current_outcome(drive_root: Any, row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The current outcome of an ended task a late review revised (``late_verdict``), with its answer's delivery
+    as it stands (``terminal_projection._delivery_disposition``), else ``None``: the card's and a reload's one
+    reading (``announce_current_outcome``; ``history_paging.replay_evidence_rows``)."""
+    review = ((row or {}).get("outcome_axes") or {}).get("review") if isinstance((row or {}).get("outcome_axes"), dict) else None
+    if not isinstance(review, dict) or not isinstance(review.get("late_verdict"), dict):
+        return None
+    from ouroboros.terminal_projection import _delivery_disposition  # D15->D17 is lazy-only
+
+    try:
+        delivery = _delivery_disposition(drive_root, str(row.get("task_id") or ""))
+    except Exception:  # an unreadable delivery registry is unknown, as the ending row reads it
+        delivery = {"state": "unknown"}
+    return current_outcome(row, delivery)
+
+
+def announce_current_outcome(drive_root: Any, task_id: str, record_id: str, subject: str,
+                             row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The existing late-review event (``review_late_result``) with the task's current outcome after a late PASS
+    resolved it, bound to the exact task, record and subject, so an open finished card repaints what a reload of the
+    stored row reads. The durable append lands first; the one live frame is pushed where a bridge exists (the
+    server process, as ``post_task_checkpoint`` pushes a finalized cost; the log sink's copy of this type is
+    suppressed). Never a chat row, a task summary or a notification."""
+    from ouroboros.utils import append_jsonl, utc_now_iso
+
+    event = {"ts": utc_now_iso(), "type": "review_late_result", "task_id": str(task_id), "surface": "result",
+             "record_id": str(record_id), "subject_sha": str(subject), "status": "settled", "aggregate": "PASS",
+             # Its audience by value, as a worker's recorded row is stamped: the task left RUNNING long ago.
+             **{key: row[key] for key in ("chat_id", "root_task_id", "parent_task_id") if row.get(key) not in (None, "")},
+             "current_outcome": late_current_outcome(drive_root, row)}
+    append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", event)
+    from supervisor.message_bus import try_get_bridge  # D15->D08 is lazy-only
+
+    bridge = try_get_bridge()
+    if bridge is not None:
+        from supervisor.log_addressing import address_handler_push
+
+        bridge.push_log(address_handler_push(pathlib.Path(drive_root), dict(event)))
+    return event
 
 
 def owe_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:

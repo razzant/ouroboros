@@ -1528,7 +1528,7 @@ def _assemble_history_response(
 
     # Hidden source evidence shares ordinary keyed replay. It carries no new
     # review/cost authority and never consumes the conversation quota.
-    messages.extend(replay_evidence_rows(messages, replay_evidence))
+    messages.extend(replay_evidence_rows(messages, replay_evidence, result_cache, data_dir))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})

@@ -200,7 +200,7 @@ function behaviorPanel() {
         ${settingsSection({
             title: 'Task Result Review',
             lead: 'When a finished task gets a second look.',
-            details: 'Auto reviews a result when Ouroboros requests it. Required also reviews material actually produced or observed effects. Off starts no new task-result review, including manual or historical requests; already running reviews can still return feedback. Waiting works in every access mode; Cyber feedback remains advisory.',
+            details: 'Auto reviews a result when Ouroboros requests it. Required also reviews what a task actually produced, and an answer its task requires checked. With Advisory, Ouroboros decides after a review whether a revised result needs another; with Blocking, a reviewed result that did not pass is held until a review passes it. Off starts no new task-result review, including manual or historical requests; already running reviews can still return feedback. Waiting works in every access mode; Cyber feedback remains advisory.',
             body: choice({ id: 's-task-review-mode', value: 'auto', options: [
                 { value: 'off', label: 'Off' },
                 { value: 'auto', label: 'Auto' },
@@ -211,7 +211,7 @@ function behaviorPanel() {
         ${settingsSection({
             title: 'Max Review Cycles',
             lead: 'How many paid review rounds one change may take.',
-            details: 'Limits paid review waves, including dispatched technical failures: plan and task review per task, commit review per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval outside Cyber Pro. <strong>&infin;</strong> removes the count cap, while deadlines, budgets and lifecycle limits still apply.',
+            details: 'Limits paid review waves, including dispatched technical failures: result review and commit review per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval outside Cyber Pro. <strong>&infin;</strong> removes the count cap, while deadlines, budgets and lifecycle limits still apply.',
             body: choice({ id: 's-review-max-cycles', value: '2', modifier: 'data-review-cycles-group', options: [
                 { value: '1', label: '1' },
                 { value: '2', label: '2' },

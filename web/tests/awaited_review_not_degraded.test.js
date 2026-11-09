@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    taskOutcomeSeverity, taskPresentation, taskReasonDetail, taskTerminalPhase, taskTerminalSummary,
+    isGroupedTaskEvent, lateOutcomeIsCurrent, summarizeChatLiveEvent, taskOutcomeSeverity, taskPresentation,
+    taskReasonDetail, taskTerminalPhase, taskTerminalSummary,
 } from '../modules/log_events.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 
@@ -70,8 +71,9 @@ test('an independent awaited fact coexists with review provenance but not a rail
     assert.equal(taskReasonDetail(done({ execution: { status: 'ok', plan_review: 'open' } })), '');
 });
 
-test('an acceptance panel that was only awaited is not a warning', () => {
+test('an acceptance panel that was only awaited is not a warning; the author accepting beside it is', () => {
     assert.equal(taskOutcomeSeverity(done({ execution: { status: 'ok' }, review: { status: 'awaiting' } })), 'done');
+    // The author's acceptance of a result whose review has no conclusion yet is always flagged (owner, 8 Nov 2026).
     const authored = done({
         execution: { status: 'ok' },
         objective: { status: 'pass', source: 'author_acceptance', review_status: 'awaiting' },
@@ -80,7 +82,7 @@ test('an acceptance panel that was only awaited is not a warning', () => {
             acceptance_decision: { status: 'finalized_unaccepted', reason: 'author_finish' },
         },
     });
-    assert.equal(taskOutcomeSeverity(authored), 'done');
+    assert.equal(taskOutcomeSeverity(authored), 'warn');
     assert.equal(taskReasonDetail(authored), TASK_CAUSE_PHRASES.author_finish);
     // The legacy top-level mirror of the review axis reads the same way.
     assert.equal(taskOutcomeSeverity({ status: 'completed', review_status: { status: 'awaiting' } }), 'done');
@@ -100,4 +102,54 @@ test('every real review outcome keeps the chip it had', () => {
         objective: { status: 'not_evaluated', warning: 'residual_tool_errors_without_review' },
     }), 'warn');
     assert.equal(chip({ execution: { status: 'ok' }, objective: { status: 'fail' }, review: { status: 'awaiting' } }), 'error');
+});
+
+// A late review that resolved its ended task (late_review_marks.announce_current_outcome) carries the task's CURRENT
+// outcome on the existing review_late_result event: the open card repaints exactly what its reload reads.
+const lateOutcome = (warnings = []) => ({
+    status: 'completed', reason_code: 'final_message', outcome_phase: warnings.length ? 'warn' : 'done',
+    outcome_axes: {
+        lifecycle: { status: 'completed' }, execution: { status: 'ok', reason_code: 'final_message' },
+        objective: { status: 'pass', source: 'result_review', review_status: 'pass',
+            ...(warnings.length ? { warning: warnings[0], warnings } : {}) },
+        review: { status: 'pass', source: 'result_review' }, artifacts: { status: 'not_applicable' },
+    },
+});
+const lateEvent = (current) => ({ type: 'review_late_result', task_id: 't1', surface: 'result', record_id: 'rec-1',
+    subject_sha: 's1', status: 'settled', aggregate: 'PASS', current_outcome: current });
+
+test('a late PASS repaints the finished card with the current outcome its reload reads', () => {
+    const event = lateEvent(lateOutcome());
+    assert.equal(isGroupedTaskEvent(event), true);
+    const live = summarizeChatLiveEvent(event);
+    assert.deepEqual([live.terminal, live.phase, live.headline, live.body, live.dedupeKey, live.currentOutcome],
+        [true, 'done', 'Done', '', 'task_done|t1', true]);
+    const reloaded = taskTerminalSummary({ ...lateOutcome(), task_id: 't1', system_type: 'task_summary' });
+    assert.deepEqual([live.phase, live.headline, live.body], [reloaded.phase, reloaded.headline, reloaded.body]);
+    assert.equal(taskPresentation(taskTerminalPhase(lateOutcome())).phase, lateOutcome().outcome_phase, 'host phase twin');
+    assert.deepEqual(summarizeChatLiveEvent(event), live, 'a replayed event paints the same outcome again');
+});
+
+test('an independent receipt_absent stays through a late PASS: Done with warnings and its own cause', () => {
+    const live = summarizeChatLiveEvent(lateEvent(lateOutcome(['receipt_absent'])));
+    assert.deepEqual([live.phase, live.headline, live.body, live.activityPreview],
+        ['warn', 'Done with warnings', TASK_CAUSE_PHRASES.receipt_absent, TASK_CAUSE_PHRASES.receipt_absent]);
+});
+
+test('a late seat result without a current outcome never reaches the card, so a late FAIL clears nothing', () => {
+    const seat = { type: 'review_late_result', task_id: 't1', surface: 'result', slot_id: 's1', status: 'complete' };
+    assert.equal(isGroupedTaskEvent(seat), false);
+    const view = summarizeChatLiveEvent(seat);
+    assert.deepEqual([view.terminal, view.visible, Boolean(view.currentOutcome)], [false, false, false]);
+});
+
+test('a late outcome repaints only a shown finished card, never over a newer frame of it (the card clock)', () => {
+    const evt = { ts: '2026-11-09T00:10:00+00:00' };
+    const card = (finished, latestSourceTs) => ({ finished, latestSourceTs });
+    assert.equal(lateOutcomeIsCurrent(undefined, evt), false, 'no card in this page: none is created');
+    assert.equal(lateOutcomeIsCurrent(card(false, ''), evt), false, 'a card still running waits for its own end');
+    assert.equal(lateOutcomeIsCurrent(card(true, '2026-11-09T00:00:00+00:00'), evt), true);
+    assert.equal(lateOutcomeIsCurrent(card(true, evt.ts), evt), true, 'the same frame again paints the same outcome');
+    assert.equal(lateOutcomeIsCurrent(card(true, '2026-11-09T00:20:00+00:00'), evt), false,
+        'a delayed late frame never paints over a newer state, its warnings included');
 });

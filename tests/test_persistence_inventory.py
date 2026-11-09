@@ -73,6 +73,9 @@ TOP_LEVEL = frozenset({
 # recognizable root expressions, and an alias is a human promise, not a fact
 # the scan re-derives.
 SUBROOT_ALIASES = {
+    # released_subject validates its checkout under state/review_checkouts/<token>/;
+    # its relative .review-drive names belong there (repo or repo.noindex), not at data/.
+    ".review-drive/*/*.txt": "state/review_checkouts/*/*/.review-drive/*/*.txt",
     # _run_go_skill's only caller passes skill_state_dir(drive_root, loaded.name).
     # These are per-skill caches, not directories at the canonical data root.
     "go": "state/skills/*/go",
@@ -932,7 +935,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
 # 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
-EXPECTED_SCAN_PATHS = 457
+# 457 -> 458 (result review): result_material retains exact produced bytes under the existing tool_results plane.
+# 458 -> 461 (composition with #3032): restored .review-drive views and source_handles;
+# the two nested view spellings replace the earlier view-family wildcards.
+EXPECTED_SCAN_PATHS = 461
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1135,9 +1141,8 @@ def test_every_scanned_path_has_an_inventory_row():
 
 
 # Rows the backward check must NOT demand a scanned writer for, each with its
-# audited reason: the row itself states there is no writer in this tree, or (one
-# entry) its live writers name every file through a dynamic source id, which the
-# scan refuses to name. Asserted by equality below, so an entry that acquires a
+# audited reason: the old plane has no current writer, or its maintenance
+# resolves the name only at runtime. Asserted by equality below, so an entry that acquires a
 # scanned writer (or a row that quietly loses one) surfaces.
 STALE_ROW_EXEMPTIONS = frozenset({
     # PERSISTENCE.md documents this plane as an orphan of a removed feature:
@@ -1153,15 +1158,6 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
     # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
-    # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
-    # and ``delegate_collection._retain`` spell each source id as an f-string over a
-    # run id, and ``artifacts.persist_exact_text_source`` (the result review's
-    # ``review_result.subject_source`` and every other exact-text writer) takes it as
-    # a parameter — never an exact string, and a dynamic id names no file here
-    # (``test_dynamic_source_handle_arguments_do_not_certify_named_rows``). The
-    # population saw this plane only through the retired acceptance tool-trajectory
-    # literal.
-    "task_results/artifacts/*/source_handles/tool_results",
     # The row states no writer in this tree: the automatic post-task reflection and
     # its routed store (``ouroboros/reflection.py``) are gone. The history is still
     # read (``journal_read(source='reflections')``, ``read_file``), and server.py
@@ -1195,10 +1191,8 @@ def test_every_inventory_row_is_still_real():
     rotating handlers (`logs/server.log`, `logs/launcher.log`) and the
     oversized-task-text sink (`logs/tasks/*`) were resolved instead of
     exempted — a real writer must be SEEN, not excused. The exempted rows are
-    named in ``STALE_ROW_EXEMPTIONS`` with their reasons: planes the document
-    itself says nothing in this tree writes, and the one live plane whose
-    writers name every file through a dynamic source id the scan refuses to
-    name.
+    named in ``STALE_ROW_EXEMPTIONS`` with their reasons. A plane that acquires
+    a scanned writer must leave those exemptions.
     """
     text = DOC.read_text(encoding="utf-8")
     stale = stale_rows(text)

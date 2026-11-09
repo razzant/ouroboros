@@ -986,6 +986,8 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
                 status="error",
                 code="ARTIFACT_OUTPUT_ERROR",
                 text=text,
+                # Another output this stop did register stays observed production beside the failure.
+                meta={"artifact_registered": True} if artifact_registered else {},
             ),
         )
     return _publish_tool_result(

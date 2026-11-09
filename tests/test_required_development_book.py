@@ -992,3 +992,21 @@ def test_the_book_beside_the_nano_target_never_shrinks_the_reply(tmp_path, fixed
     assert 0 < raised.value.deficit_tokens < raised.value.required_book_tokens  # without it, this request fits
     (plain_window, plain_window_sent), (held_window, held_window_sent) = pair(1_000_000, 100_000)
     assert held_window.reply_allowance_tokens == plain_window.reply_allowance_tokens and held_window_sent == plain_window_sent
+
+
+def test_a_starts_answer_review_requirement_rides_its_contract_through_promotion_and_continue(tmp_path, monkeypatch):
+    """``start_task(review_answer=true)`` (owner, 8 Nov 2026) is the mind's recorded "this answer itself must be
+    checked": the new root's own contract carries it, and its Continue keeps it; absent stays absent."""
+    from supervisor.continuation_admission import admit_continuation
+
+    task, row, _workers = _promoted(tmp_path / "start", monkeypatch, review_answer=True)
+    assert task["task_contract"]["review_answer"] is True and row["task_contract"]["review_answer"] is True
+    plain, _row, _w = _promoted(tmp_path / "plain", monkeypatch)
+    assert "review_answer" not in plain["task_contract"]
+
+    _queue_module, _state, workers = _install_queue(tmp_path / "continue", monkeypatch)
+    _interrupted(tmp_path / "continue", task_contract={"context": "predecessor", "review_answer": True})
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    successor = next(row for row in workers.PENDING if row["id"] == ack["successor_task_id"])
+    assert successor["task_contract"]["review_answer"] is True

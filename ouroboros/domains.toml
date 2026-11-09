@@ -636,6 +636,7 @@ D20 = "Presence"
 "ouroboros/review_slot_cancel.py" = "D06"
 "ouroboros/review_state.py" = "D06"
 "ouroboros/review_words.py" = "D06"
+"ouroboros/result_material.py" = "D06"  # what a task produced for its result review, with exact retained copies
 "ouroboros/review_history.py" = "D06"
 "ouroboros/review_history_view.py" = "D03"
 "ouroboros/review_state_custody.py" = "D06"

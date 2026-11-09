@@ -39,6 +39,7 @@ import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
     isTerminalTaskDetail,
+    lateOutcomeIsCurrent,
     normalizeLogTs,
     ownerHurryProjection,
     summarizeChatLiveEvent,
@@ -245,7 +246,7 @@ export function createChatInstance({
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
     let _remoteActivityDepth = 0;
-    // The composer (composer.js), wired once the room's feed owners exist; Main's bar (chat_header.js) once its status is.
+    // The composer (composer.js), wired once the room's feed owners exist; Main's bar (chat_header.js), once its status.
     let composer = null, header = null;
 
     // Destroyed instances ignore late async work and animation frames.
@@ -298,7 +299,7 @@ export function createChatInstance({
         }
     }
 
-    // Sent attachment messages not yet confirmed saved: "Send again" with the same id, kept by this tab across a reload.
+    // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
         root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: replies.compose,
         storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
@@ -310,8 +311,8 @@ export function createChatInstance({
     let _historyAppending = false;
     // During a page replay, the keys its mounted bubbles carry (createReplayKeys)...
     let replayKeys = null;
-    // ...and the selection as the reader left it: every mounted row the page moves keeps it (one read for the page, not
-    // one per move: in Chromium a selection read lays the page out).
+    // ...and the selection as the reader left it: every mounted row the page moves keeps it (one read per page, not
+    // per move: in Chromium a selection read lays the page out).
     let replaySelection = null;
     function noteBubbleKeys(node) { replayKeys?.note(node); }
 
@@ -325,9 +326,9 @@ export function createChatInstance({
     let sourceHydrated = false;
     let historySyncPromise = null;
     let lastHistorySyncSucceeded = false;
-    // STICKY single-flight hydration promise: unlike historySyncPromise it survives success, so hydration triggers
-    // (bootstrap IIFE, first non-reconnect socket open, refreshHistory without a new revision) short-circuit instead of
-    // refetching. A FAILED sync resets it; scheduleHistorySync and the reconnect path never consult it.
+    // STICKY single-flight hydration promise: unlike historySyncPromise it survives success, so a trigger (bootstrap,
+    // first non-reconnect socket open, refreshHistory with no new revision) reuses it, never refetching. A FAILED sync
+    // resets it; scheduleHistorySync and reconnect never read it.
     let initialHydrationPromise = null;
     // one-shot idle gate for Main's deferred first hydration.
     let hydrationGatePromise = null;
@@ -345,14 +346,14 @@ export function createChatInstance({
     // The server's work projection (work_status.js), re-read on facts only.
     let roomWork = null, workState = emptyWorkState();
     const reread = () => void refreshHeaderControlState();
-    // A wait creates its task record; its open/closed state is one input of the block predicate, so the block appears
-    // with the controls and leaves with them (the record and its no-reopen wait ledger stay).
+    // A wait creates its task record; its open/closed state feeds the block predicate, so the block appears and leaves
+    // with the controls (the record and its no-reopen wait ledger stay).
     const modelWaits = createModelWaitController({
         getRecord: (id, create = true) => (create ? getLiveCardRecord(id) : liveCardRecords.get(id)),
         openSettings: openSettingsTab, onDomWrite: withStableViewport, notify: showToast,
         onChange: (id) => { ensureLiveCardVisible(liveCardRecords.get(id)); syncChatStatus(); },
     });
-    // A card let go for good: its node and the per-card facts kept beside it (a reusable slot keeps them, disposeLiveCard).
+    // A card let go for good: its node and per-card facts beside it (a reusable slot keeps them: disposeLiveCard).
     function forgetLiveCard(id) {
         disposeLiveCard(id);
         for (const facts of [subagentChildParents, subagentTerminalChildren, explicitCardExpansion, reviewDisclosureByTask]) facts.delete(id);
@@ -439,7 +440,7 @@ export function createChatInstance({
         }
     }
     // Root census rows omit children; complete work membership can admit their own result read before the root ends.
-    // Unknown/nonterminal replies retry on the existing refresh; a confirmed 404 waits for new card evidence or reconnect.
+    // Unknown/nonterminal replies retry on the next refresh; a confirmed 404 waits for new card evidence or reconnect.
     function settleAbsentChildren(snapshotRequestedAt) {
         for (const [childId, record] of liveCardRecords) {
             if (!record.isSubagent || record.finished || !record.root?.isConnected) continue;
@@ -519,7 +520,7 @@ export function createChatInstance({
         header?.update(data);
     }
 
-    // Main: a moved work's card is its portal (work_portal.js); Continue episodes share one card (task_episodes.js).
+    // Main: a moved work's card is its portal (work_portal.js); Continue episodes share a card (task_episodes.js).
     const portals = createWorkPortals({ isMain, feed: messagesDiv, records: liveCardRecords, onDomWrite: withStableViewport,
         isConnected: () => ws.isConnected?.() !== false, onConverted: () => composer?.signalFreed(), remember: rememberMessageKey,
         append: (msg, text, opts) => appendProjectRow(addMessage, msg, text, opts), actionsOf: ensureLiveActionsEl,
@@ -616,11 +617,11 @@ export function createChatInstance({
 
     const { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady } =
         createTimelineAnchors({ messagesDiv, liveCardRecords });
-    // Far rows skipped once laid out (style.css); after a restyle every row's size may change at once, and the reading
-    // owner places the passage again.
+    // Far rows skipped once laid out (style.css); a restyle may change every row's size at once, and the reading owner
+    // places the passage again.
     let rowSleep = createRowSleep({ feed: messagesDiv, onRestyle: () => reading.reflow() });
     // A fitted line re-fits on the frame after its width changed (text_fit.js): a reader at the newest message is placed
-    // there again once the room's lines have their size (Main shown again laid out its newest message before).
+    // there again once the room's lines are sized (Main shown again laid out its newest message first).
     const offRefit = onRefit((els) => { if (reading.stick && els.some((el) => messagesDiv.contains(el))) reading.reflow(); });
     const reading = createChatReadingPosition({
         feed: messagesDiv, alive: () => !destroyed,
@@ -733,8 +734,8 @@ export function createChatInstance({
             || (record.finished && record.phaseEl?.dataset?.phase !== 'done');
     }
 
-    // Work chooses card chrome (owner 16.09): title and Main conversion, whatever the lane. Attention-only or non-Done
-    // endings have neither. Bare outcome/receipts are not work; _is_direct_chat retains its host duties.
+    // Work chooses card chrome (owner 16.09): title and Main conversion, whatever the lane; attention-only or non-Done
+    // endings have neither. Bare outcome/receipts are not work; _is_direct_chat keeps its host duties.
     function blockHasWork(record) {
         const id = record.groupId;
         // Visibility depends on work, never the lane.
@@ -796,7 +797,7 @@ export function createChatInstance({
     }
 
     // P5: task ids whose progress carried the supervisor's host-attested `cancelable` marker (queue tasks the cancel
-    // endpoint can reach), learned from live frames and replay alike, possibly before their card: kept beside the records.
+    // endpoint reaches), from live frames and replay alike, maybe before their card: kept beside the records.
     const cancelableTaskIds = new Set();
 
     function queueTaskLiveUpdate(summary, taskId, rawTs) {
@@ -1388,8 +1389,8 @@ export function createChatInstance({
             container.dataset.subagentsFor = parentId;
             parentRecord.subagentsEl = container;
         }
-        // Children follow what the card's Details opens (its facts and notes): it opens under the card's own lines, never
-        // behind them; earlier episodes follow the children, and an episode's disclosure keeps them after its Reviews.
+        // Children follow what the card's Details opens (its facts and notes), under the card's own lines, never behind
+        // them; earlier episodes follow the children, an episode's disclosure keeping them after its Reviews.
         const own = parentRecord.timelineEl?.parentNode === parentRecord.root;
         const anchor = own ? parentRecord.timelineEl : parentRecord.reviewsHostEl || parentRecord.timelineEl;
         if (container.parentNode !== parentRecord.root || container.previousElementSibling !== anchor) {
@@ -1535,8 +1536,8 @@ export function createChatInstance({
         if (record.countEl.textContent !== text) record.countEl.textContent = text;
     }
 
-    // A window shown again keeps the reading intent (data readiness positions it), hidden it ends an unread opening
-    // still owed; a room away stays put (its return is `resume`).
+    // A window shown again keeps the reading intent (data readiness positions it); hidden, it ends an unread opening
+    // still owed; a room away stays put (its return: `resume`).
     const handleVisibility = () => {
         if (leaving) return;
         if (document.hidden) reading.land(() => 0, reading.arriving);
@@ -1600,8 +1601,8 @@ export function createChatInstance({
         return withStableViewport(() => applyLiveCardStateMutation(summary, groupId, rawTs, options));
     }
 
-    // Authored naming has its own clock: newer execution or a terminal outcome may already own the card when its saved
-    // narration reaches this instance. A root's collapsed line keeps it while showing narration (a cause holds).
+    // Authored naming has its own clock: newer execution or a terminal outcome may own the card before its saved
+    // narration arrives here. A root's collapsed line shows narration unless a cause holds.
     function reconcileAuthoredHeadline(record, summary, rawTs) {
         if (!summary.human || !summary.headline) return;
         const previous = record.lastHumanHeadlineSource, shown = previous?.preview || '';
@@ -1692,8 +1693,8 @@ export function createChatInstance({
         const desiredPhase = desiredLiveCardPhase(record, closedPhase || (record.finished ? summary.phase || 'done' : ''));
         setLiveCardPhase(record, desiredPhase.phase, desiredPhase.text, desiredPhase.className,
             desiredPhase.secondary);
-        // Collapsed activity comes only from the turn's voice, including child cards;
-        // host notes and terminal Done cannot overwrite it. Expand keeps full activity.
+        // Collapsed line: the turn's voice (children too) or its outcome's cause, never a host note or bare Done; a late
+        // current outcome with no cause gives the narration back. Expand keeps all activity.
         const activityCandidate = (record.isSubagent && summary.human !== false
             ? String(summary.activityPreview ?? summary.body ?? '')
             : String(!summary.human && summary.terminal && summary.activityPreview || '')).trim();
@@ -1701,6 +1702,8 @@ export function createChatInstance({
             record.collapsedActivity = boundActivityPreview(activityCandidate);
             record.collapsedActivityLead = summary.activityLead || '';  // a child's "Report to parent"
             record.causeHeld = !record.isSubagent;  // a root's line is its outcome's cause
+        } else if (summary.currentOutcome && record.causeHeld) {
+            record.collapsedActivity = record.lastHumanHeadlineSource?.preview || '', record.causeHeld = false;
         }
         syncCardHeadline(record);
 
@@ -1888,9 +1891,9 @@ export function createChatInstance({
         return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
     }
 
-    // A child's title is its lineage identity plus, for twins (same displayed identity
-    // under one parent), the short id; re-projected on every title write and lineage
-    // change (terminal children included).
+    // A child's title is its lineage identity plus, for twins (one displayed identity under
+    // one parent), the short id; re-projected on every title write and lineage change
+    // (terminal children too).
     function childTitle(record) {
         const twin = subagentTwin(subagentChildParents, record.groupId);
         return subagentIdentityTitle(subagentChildParents.get(record.groupId))
@@ -1952,8 +1955,8 @@ export function createChatInstance({
         const event = String(evt.subagent_event || '').toLowerCase();
         const role = taskKey(evt.subagent_role);
         setSubagentParent(childId, { parentId, role, model: evt.model });
-        // Worker narration carries subagent_event="progress" too: activity, not a lifecycle row. The progress key keeps
-        // the later terminal frame from overwriting the only full narration disclosure.
+        // Worker narration also carries subagent_event="progress": activity, not a lifecycle row. Its key keeps a later
+        // terminal frame from overwriting the only full narration disclosure.
         if (!SUBAGENT_LIFECYCLE_EVENTS.has(event)) {
             return routeSubagentProgressToCard(childId, evt);
         }
@@ -1984,8 +1987,8 @@ export function createChatInstance({
             content,
             text: content,
             subagent_event: 'running',
-            // A replayed progress row may follow a terminal record (the history pre-pass already knows the child's final
-            // state): no contradictory `status=running` metadata then.
+            // A replayed progress row may follow a terminal record (the history pre-pass knows the child's final state):
+            // no contradictory `status=running` metadata then.
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
@@ -2027,8 +2030,7 @@ export function createChatInstance({
         return queueTaskLiveUpdate(summary, childId, rawTs);
     }
 
-    // Resolve a child's card from the child's terminal task_done
-    // (which arrives on the log channel without subagent metadata).
+    // A child's card from its task_done or a late review's current outcome (log frames without subagent metadata).
     function routeSubagentTerminalToCard(childId, evt) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
@@ -2071,14 +2073,14 @@ export function createChatInstance({
             return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
         }
         if (!isGroupedTaskEvent(evt)) return false;
-        const taskId = getLogTaskGroupId(evt) || '';
-        if (!taskId) return false;
+        const taskId = getLogTaskGroupId(evt) || '', late = evt.current_outcome;
+        if (!taskId || (late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt))) return false;
         const rawTs = evt.ts || evt.timestamp || new Date().toISOString();
         // Skill lifecycle belongs to its explicit owner.
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
         const childInfo = subagentChildParents.get(taskId);
-        if (childInfo && eventType === 'task_done') return routeSubagentTerminalToCard(taskId, evt);
+        if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late });
         const summary = summarizeChatLiveEvent(evt);
         // Settled children ignore new work, but their money may arrive after the outcome.
         if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
@@ -2335,7 +2337,7 @@ export function createChatInstance({
                 noteBubbleKeys(messagesDiv);
                 replaySelection = keepSelection(document);
                 // A formerly unbound final can gain its real child lineage on a
-                // deeper page. Keep a selected old bubble until it can move: every old bubble is judged before one leaves.
+                // deeper page. A selected old bubble stays until it can move: every old one is judged before one leaves.
                 const olds = new Map(messages.filter(row => row.history_id && row.delegation_role === 'subagent' && !row.is_progress
                     && replayKeys.history.has(row.history_id))
                     .map(row => [row, historyNodes(row.history_id).find(node => node.classList.contains('chat-bubble'))])
@@ -2367,7 +2369,7 @@ export function createChatInstance({
 
                 const historicalTerminalProjections = new Set();
                 for (const msg of messages) if (msg.historical_terminal && msg.task_id) {
-                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name });
+                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, ...(msg.current_outcome && { phase: msg.current_outcome.outcome_phase }), wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name });
                     if (msg.summary_kind === 'terminal_root_projection' || msg.outcome_final === true) {
                         historicalTerminalProjections.add(msg.task_id);
                     }
@@ -2655,8 +2657,8 @@ export function createChatInstance({
             } finally {
                 if (historyReadAbort === abort) historyReadAbort = null;
                 historySyncPromise = null;
-                // A reconnect caller waiting on the active promise owns replay of pendingReconnectSync above: its own
-                // promise resolves only after the authoritative rebuild.
+                // A reconnect caller waiting on the active promise owns replay of pendingReconnectSync above; its promise
+                // resolves only after the authoritative rebuild.
             }
         })();
         return historySyncPromise;
@@ -2698,7 +2700,7 @@ export function createChatInstance({
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
         if (destroyed) return;
-        // A message this tab kept across a reload that the first read (or its preview) did not show saved is in doubt.
+        // A message this tab kept across a reload is in doubt until the first read (or its preview) shows it saved.
         const reconcileUnsaved = () => !destroyed && unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content,
             'user', false, ts || null, false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
         if (await awaitInitialHydration()) return reconcileUnsaved();
@@ -2755,8 +2757,8 @@ export function createChatInstance({
 
     // Scroll events observe position; only positive navigation changes follow intent.
     messagesDiv?.addEventListener('scroll', () => { reading.scroll(); settleHistoryViewport(); readReceipt.note(); }, { passive: true });
-    // An image's load reflows in the next frame, after that frame's scroll events: a load between a move (a wheel step,
-    // a scrollIntoView) and the scroll event it still owes would otherwise restore the anchor of the place just left.
+    // An image's load reflows in the next frame, after its scroll events: a load between a move (a wheel step, a
+    // scrollIntoView) and the scroll event it still owes would else restore the anchor of the place just left.
     let loadReflowQueued = false;
     messagesDiv?.addEventListener('load', () => {
         if (loadReflowQueued) return;
@@ -2801,9 +2803,9 @@ export function createChatInstance({
         ? (_hasNewActivity ||= arrive, reading.position(), updateScrollButton()) : showLatest({ arrive }));
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
-    // The composer's height once its reply strip has moved (chat_reply.js `data-motion`): opening, the strip at full
-    // height (`--reply-h`) plus the wrap's gap; leaving, none. The reserve moves once per motion, not per frame: each
-    // write restyles the whole room (~90 ms on a 34k-element Main in WebKit; four in a row stuttered the strip's close).
+    // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
+    // (`--reply-h`) plus the wrap's gap; leaving, none. One reserve move per motion, never per frame: each write
+    // restyles the whole room (~90 ms on a 34k-element WebKit Main; four in a row stuttered the close).
     function composerHeightAtRest() {
         const strips = inputArea.querySelectorAll('.chat-quote--composer[data-motion]');
         if (!strips.length) return inputArea.offsetHeight || 0;
@@ -2842,7 +2844,7 @@ export function createChatInstance({
             return changed;
         };
         const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
-        // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
+        // The scrollbar this feed draws (none where scrollbars overlay): a Project's focus corners keep off it.
         if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
         updateScrollButton();
         return changed;
@@ -2874,9 +2876,9 @@ export function createChatInstance({
 
     installChatResizeObservers();
 
-    // An open Project room's feed holds the keys (app.js focusProjectRoom), its focus drawn as two corners (style.css). A
-    // pointer in the panel quiets them; any key in the room restores them (Back to reading from the composer too),
-    // except lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
+    // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
+    // pointer in the panel quiets them; any key in the room restores them (Back to reading from the composer too) but
+    // lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
     const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
     const quietFocus = () => messagesDiv.classList.add('is-quiet-focus');
     const showFocus = ({ key, metaKey, ctrlKey, altKey }) => {
@@ -2958,7 +2960,7 @@ export function createChatInstance({
             byId.get(key).push(node);
         }
         // The page as the reader sees it decides, before any row leaves: a row or card read, focused or selected stays,
-        // and a card keeps its timeline's selection. Read for all of them first, one layout for all.
+        // a card keeps its timeline's selection. All are read first, in one layout.
         const due = new Set([...ids].filter(id => !retained.has(id)));
         const held = new Set([...due].filter(id => (byId.get(id) || []).some(node => historyNodeIsProtected(node, messagesDiv))));
         const kept = keepSelection(document);
@@ -3074,9 +3076,9 @@ export function createChatInstance({
         if (snapshot.error) return historyPager.retry();
         return loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older messages, ↓ the present (owner decisions 2026-09-14, 2026-10-05). Empty pages
-    // cross the server read ceiling: it reads on until rows land or the chat ends. A grown room re-anchors unless its
-    // reader still walks its older chain. Openings guard each request with `current`.
+    // `Load more history` reads older messages, ↓ the present (owner, 2026-09-14 and 2026-10-05). Empty pages cross the
+    // server read ceiling: reading goes on until rows land or the chat ends. A grown room re-anchors unless its reader
+    // still walks its older chain; `current` guards each request.
     async function loadHistoryAtEdge(direction, current = () => true) {
         const { canNewer, canOlder } = historyPager.getState();
         if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
@@ -3270,7 +3272,7 @@ export function createChatInstance({
     onWs('typing', (msg) => {
         if (!isMyThread(msg)) return;  // each column shows typing only for its own thread
         // A typing frame is a submission receipt, never liveness: it re-reads the state at once and retires the linked
-        // `Sending...` only once that read answers, so the room steps from Sending... to the server's word.
+        // `Sending...` only when that read answers: the room steps from Sending... to the server's word.
         const cmid = String(msg.client_message_id || '');
         if (!cmid) return;
         void refreshHeaderControlState().then(() => {
@@ -3322,7 +3324,7 @@ export function createChatInstance({
         if (msg.role === 'assistant' || msg.role === 'system') {
             return withRemoteActivity(() => {
             const explicitTaskId = msg.task_id || '';
-            // Every path ends by syncing status. Main's number is its room revision, as a Project's (DESIGN "Unread").
+            // Every path syncs status last. Main's number is its room revision, as a Project's (DESIGN "Unread").
             const settled = (result) => {
                 syncChatStatus();
                 return result;
@@ -3421,8 +3423,8 @@ export function createChatInstance({
 
     onWs('log', (msg) => {
         if (!msg?.data) return;
-        // Log frames carry the task's canonical Project chat_id, so the Project panel alone builds/animates/finalizes that
-        // card. Legacy frames without chat_id default to the main chat.
+        // A log frame carries its task's canonical Project chat_id: only that panel builds/animates/finalizes its
+        // card; a legacy frame without one goes to Main.
         if (!isMyLogThread(msg)) return;
         withRemoteActivity(() => updateLiveCardFromLogEvent({ ...msg.data, _live_tool_frame: !msg.data._historical }));
         if (!msg.data._historical && ['task_done', 'task_model_wait'].includes(msg.data.type)) reread();
@@ -3554,19 +3556,19 @@ export function createChatInstance({
         revealSource: replies.reveal,
         drawsSource: replies.draws,
         cancelHistoryPaint: readReceipt.cancel,
-        // app.js offers every room its /api/state snapshots (it polls); a room away takes none and catches up on return.
+        // app.js offers each room its /api/state snapshots (it polls); a room away takes none, catching up on return.
         hydrateStateSnapshot,
         // True once a history snapshot has actually been fetched and painted;
         // app.js uses it to decide whether a reopen needs a forced repaint.
         hasPaintedHistory: () => historyLoaded && lastHistorySyncSucceeded,
-        // Unsendable state (staged Files, an upload in flight, a send not yet saved and its Send again): room_retire.js
-        // keeps such a room even when its project goes away.
+        // Unsendable state (staged Files, an upload in flight, an unsaved send and its Send again): room_retire.js keeps
+        // such a room even when its project goes away.
         hasPendingWork: () => composer.hasPendingWork() || unconfirmed.count > 0,
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
         closeTransient: (pause) => { roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
-        // A room leaving the screen (room_retire.js), for its exit and while away: its place is kept, its paint receipt
-        // and reads stop, it is neither shown nor read (its reader and playback are `closeTransient`'s); `stay` returns.
+        // A room leaving the screen (room_retire.js), on exit and while away: its place kept, its paint receipt and reads
+        // stopped, neither shown nor read (its reader and playback are `closeTransient`'s); `stay` returns.
         leave: () => {
             if (leaving) return;
             catchUp.cancel();  // its return reads, and says so, anew
@@ -3584,9 +3586,8 @@ export function createChatInstance({
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
-        // Full teardown (P3): every resource this instance acquired (ws subscriptions, window/document listeners, the
-        // ResizeObserver, all timers), then the buffered collections, the DOM last. Idempotent; late rAF/async
-        // continuations no-op on `destroyed`.
+        // Full teardown (P3): every acquired resource (ws subscriptions, window/document listeners, ResizeObserver,
+        // timers), then buffered collections, the DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
         destroy() {
             if (destroyed) return;
             destroyed = true;

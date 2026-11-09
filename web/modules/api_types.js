@@ -1104,6 +1104,7 @@
  * @property {boolean=} allow_partial_attachments Explicit raw-API opt-in; browser/UI task admission remains atomic.
  * @property {Object[]=} acceptance_claims Advisory Observable Acceptance Claims (`claim`/`surface`/`support`/`priority`).
  * @property {string=} answer_protocol  // "" | "final_answer_line" — machine-extractable answer line (v6.60.0)
+ * @property {boolean=} review_answer true: task review Required reviews the whole final answer even without files.
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
  * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).

@@ -408,6 +408,7 @@
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
  * @property {Object=} historical_terminal
+ * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group

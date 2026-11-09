@@ -42,7 +42,8 @@ from ouroboros.task_store import patch_document
 
 # ``tools.review_result``'s facts of what its delivery step already showed (findings, a changed request asked
 # about, a refusal), each JSON at its owner; carried by value, never decided here.
-_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused")
+_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused",
+                        "_result_review_revision_asked")
 
 log = logging.getLogger(__name__)
 

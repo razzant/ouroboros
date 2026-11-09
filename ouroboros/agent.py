@@ -616,34 +616,21 @@ class OuroborosAgent:
             emit_dispatch_resolution(self._event_queue, task, dispatch)
         return dispatch, amended
 
-    def _capture_mutation_baseline(self, task: Dict[str, Any], task_metadata: Dict[str, Any]) -> None:
-        """Mutation-attribution baseline: snapshot the system repo's clean/dirty
-        state once, when a queued ROOT task starts. Evidence only — a capture
-        failure never blocks the task; commit staging then simply has no
-        attributed candidate set to consume."""
-        if (
-            str(task.get("id") or "").strip()
-            and not conversation_origin(task)  # a queued root, never an owner's or correspondent's turn
-            and str(task_metadata.get("delegation_role") or "").lower() != "subagent"
-        ):
+    def _capture_mutation_baseline(self, task: Dict[str, Any], task_metadata: Dict[str, Any],
+                                   ctx: Optional[ToolContext] = None) -> None:
+        """Mutation-attribution baseline of a root's admitted resources before its first operation
+        (``mutation_attribution.capture_root_baseline``): the system repo for a queued root, the admitted Git
+        folder for any root. Evidence only — a capture failure never blocks the task; commit staging and the
+        result review then name the missing baseline."""
+        if str(task.get("id") or "").strip() and str(task_metadata.get("delegation_role") or "").lower() != "subagent":
             try:
-                from ouroboros.mutation_attribution import capture_mutation_baseline
+                from ouroboros.mutation_attribution import capture_root_baseline
 
-                predecessor = (task.get("predecessor_authority") or {}).get("source")
-                if not isinstance(predecessor, dict):
-                    predecessor = None
-                capture_mutation_baseline(
-                    pathlib.Path(
-                        str(task.get("budget_drive_root") or "")
-                        or self.env.budget_drive_root
-                        or self.env.drive_root
-                    ),
-                    str(task.get("id") or ""),
-                    [{"surface_type": "system_repo", "host_root": str(self.env.repo_dir)}],
-                    owner_kind="task_root",
-                    owner_id=str(task.get("root_task_id") or task.get("id") or ""),
-                    predecessor_source=predecessor,
-                )
+                capture_root_baseline(
+                    pathlib.Path(str(task.get("budget_drive_root") or "") or self.env.budget_drive_root or self.env.drive_root),
+                    task, system_repo=self.env.repo_dir,
+                    workspace=ctx.active_repo_dir() if ctx is not None else task.get("workspace_root"),
+                    conversation=conversation_origin(task))  # an owner's or correspondent's turn: its folder only
             except Exception:
                 log.warning("mutation baseline capture failed for %s", task.get("id"), exc_info=True)
 
@@ -803,7 +790,7 @@ class OuroborosAgent:
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
-        self._capture_mutation_baseline(task, task_metadata)  # before the rebind records the candidate in it
+        self._capture_mutation_baseline(task, task_metadata, ctx)  # before the rebind records the candidate in it
         body_candidate.restore(ctx)  # a retry, Resume or new worker authors the candidate this lineage owns
         # Existing ToolContext stays the loop's carrier; these process-local
         # references are not serialized state or a new routing authority.
