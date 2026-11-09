@@ -1195,7 +1195,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             const resp = await apiFetch('/api/command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cmd: '/restart' }),
+                body: JSON.stringify({ cmd: '/restart', ui_control: { name: 'restart' } }),
             });
             if (!resp.ok) throw new Error(`restart command refused (HTTP ${resp.status})`);
             showToast('Restart requested.', 'success');

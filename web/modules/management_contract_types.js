@@ -806,6 +806,7 @@
  * @property {string=} visible_text
  * @property {string=} visible_task_id
  * @property {Object=} task_constraint
+ * @property {Object=} ui_control
  */
 
 /**

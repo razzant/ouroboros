@@ -152,7 +152,8 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         assert.deepEqual(doors.map((door) => [door.textContent, door.hidden]), [['Dashboard ›', false], ['Evolution ›', true]]);
 
         toggle.click();
-        assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop' }], 'Stop is the Dashboard\'s own command');
+        assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } }],
+            'Stop is the Dashboard\'s own command, not typed owner text');
         assert.equal(toggle.disabled, true, 'it waits for the readback');
         await new Promise((resolve) => setTimeout(resolve, 450));
         assert.equal(refreshed, 1, 'the room\'s state clock is asked again');

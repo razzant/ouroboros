@@ -345,7 +345,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
             toggling = button.dataset.enabled === '1' ? 'stop' : 'start';
             toggledAt = Date.now();
             paint();
-            ws?.send?.({ type: 'command', cmd: `/bg ${toggling}` });
+            ws?.send?.({ type: 'command', cmd: `/bg ${toggling}`, ui_control: { name: 'consciousness_toggle' } });
             await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
             await refresh();
         }

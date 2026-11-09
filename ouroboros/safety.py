@@ -634,8 +634,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         if not place.get("targets"):
             place["targets"] = {"destination": arguments.get("destination")}
     occasion = "unknown"
-    if metadata.get("schedule_writer_kind"):
-        occasion = metadata["schedule_writer_kind"] + "-written schedule"
+    if metadata.get("schedule_writer_kind"):  # whose work; who supplied its text is its ``schedule_text`` sources' fact
+        occasion = metadata["schedule_writer_kind"] + " work's schedule"
     elif focus:  # read at this check: a confirmation made after the admission ``focus`` records counts
         from ouroboros.presence_context import focus_owner_now
         occasion = "confirmed owner account" if focus_owner_now(ctx) else "person in a place"

@@ -377,7 +377,9 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     item.get("content"),
                     str(item.get("msg_id") or ""),
                     {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                    "client_message_id", "chat_id")},
+                                                    "client_message_id", "chat_id",
+                                                    # a schedule's text keeps its schedule, field and supplier
+                                                    "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
                     item.get("reply_to"), {key: item[key] for key in ("words",) if key in item},
                 )
 

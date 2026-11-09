@@ -79,6 +79,7 @@ def test_a_second_continue_of_a_scheduled_run_keeps_one_row_per_message(tmp_path
 def test_every_further_continue_keeps_the_carried_message_once(tmp_path):
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_words import SCHEDULE_TEXT
     from ouroboros.review_evidence_sections import _accept_owner_directives
     from ouroboros.tools.followup import _handle_schedule_followup
     from supervisor import queue as schedules
@@ -99,14 +100,18 @@ def test_every_further_continue_keeps_the_carried_message_once(tmp_path):
     record.update(metadata=scheduled["metadata"], owner_mailbox={"rows": [], "read_complete": True},
                   review_evidence={"task_inputs": {"owner_requirements_and_decisions":
                                                   _accept_owner_directives(live, None, "root")}})
-    sources, predecessor, counts = owner_sources(ctx.drive_root, record, "root"), "root", []
+    sources, predecessor, counts, schedule_text = owner_sources(ctx.drive_root, record, "root"), "root", [], []
     for index in range(1, 4):
         successor = SimpleNamespace(task_id=f"s{index}", task_metadata={
             "objective_author": {"kind": "continuation", "predecessor_task_id": predecessor},
             "owner_corpus": owner_corpus_rows(sources)})
         _initialize_owner_directives(successor, [{"role": "user", "content": "[CONTINUE] work order"}])
         successor_record = _successor_record(sources, predecessor, f"s{index}", successor)
-        counts.append(len(successor_record["metadata"]["owner_corpus"]))
+        corpus = successor_record["metadata"]["owner_corpus"]
+        counts.append(len([row for row in corpus if row["source"] != SCHEDULE_TEXT]))
+        schedule_text.append([(row.get("field"), row["content"]) for row in corpus if row["source"] == SCHEDULE_TEXT])
         sources, predecessor = owner_sources(ctx.drive_root, successor_record, f"s{index}"), f"s{index}"
     counts.append(len(sources["later"]))
     assert counts == [1, 1, 1, 1]
+    # Beside it the schedule's own text rides once per field on every hop, as the assignment, never their message.
+    assert schedule_text == [[("objective", "Check the plan weekly.")]] * 3

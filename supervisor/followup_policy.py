@@ -421,7 +421,9 @@ def bind_task(root, task, record):
     origin = origin_of(record)
     if origin:
         meta.update(origin_task_id=origin["task_id"], origin_root_task_id=origin["root_task_id"])
-        meta["objective_author"] = {"kind": "task", "task_id": origin["task_id"]}
+        # The task's own record of who supplied its text stands (a later Schedules API edit, an accepted
+        # occurrence's frozen author); only a template that recorded none is the follow-up's task's.
+        meta.setdefault("objective_author", {"kind": "task", "task_id": origin["task_id"]})
     meta["followup_origin"] = origin
     meta["followup_relation"] = copy.deepcopy(record.get("followup_relation") or {"kind": relation_kind(record)})
     if relation_kind(record) != "related":

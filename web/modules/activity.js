@@ -717,7 +717,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 const on = btn.dataset.enabled === '1';
                 // Reuse the existing direct control command (same as the chat header
                 // toggle); /bg is a control slash-command, not a chat message to the agent.
-                ws?.send?.({ type: 'command', cmd: `/bg ${on ? 'stop' : 'start'}` });
+                ws?.send?.({ type: 'command', cmd: `/bg ${on ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' } });
                 await new Promise((resolve) => setTimeout(resolve, 400));
             }
         } catch (exc) {

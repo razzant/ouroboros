@@ -97,11 +97,13 @@ class TaskConstraintInbound(TypedDict, total=False):
 
 
 class CommandInbound(TypedDict):
-    """Inbound WS command message."""
+    """Inbound WS command message. ``ui_control`` (``{name, owner_text?}``) marks a command a host-drawn
+    control composed: the press is the owner's, its words are not, so no owner row is written for it."""
 
     type: Literal["command"]
     cmd: str
     client_surface: NotRequired[dict]
+    ui_control: NotRequired[dict]
 
 
 class PanicAcceptedOutbound(TypedDict):

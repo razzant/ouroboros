@@ -6,6 +6,8 @@ turn execute in worker processes like any task, but they are admitted by routing
 and the readiness-exhaustion fence. Their slots live in the same ``WORKERS``
 table as project workers with ``lane="conversation"``, so health, custody, Panic
 and quiescence retirement iterate every slot alike; the project fences filter by lane.
+My human's own turn that a stop door, a Resume or its own sleep returns to the queue
+(``resumes_on_lane``) is assigned from PENDING like queued work, onto this lane's carrier.
 
 Admission (``admit_turn``, under Q and the repo-writer gate lock the caller holds)
 writes the RUNNING row first — ``execution_owner.kind="direct"`` is the origin,
@@ -54,6 +56,8 @@ PREPARE_KEY = "_conversation_prepare"  # the carrier's first-step facts, consume
 # The last carrier spawn this generation could not make (the exception's name), cleared by a
 # carrier that started: the physical fact the degraded executor reads (owner decision 2A).
 _SPAWN_REFUSED = [""]
+# The returned turns the last assignment pass found dispatchable with no idle carrier (``note_returns_waiting``).
+_RETURNS_WAITING = [0]
 
 
 def spawn_refusal() -> str:
@@ -63,10 +67,12 @@ def spawn_refusal() -> str:
 def arm(table: Any) -> None:
     """Arm replenishment for ``table`` (the live ``WORKERS`` dict); ``None`` disarms.
 
-    A generation starts with no spawn refusal on record: the fact belongs to the generation that observed it."""
+    A generation starts with no spawn refusal or waiting return on record: both belong to the generation
+    that observed them."""
     global _ARMED_TABLE
     _ARMED_TABLE = id(table) if table is not None else None
     _SPAWN_REFUSED[0] = ""
+    _RETURNS_WAITING[0] = 0
 
 
 def armed() -> bool:
@@ -351,6 +357,85 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     return meta
 
 
+def resumes_on_lane(task: Any) -> bool:
+    """A queued row this lane carries again: my human's own Main or room turn, returned by a stop door, a Resume
+    or its own sleep (owner choice of 9 November 2026: the conversation path survives every permitted return).
+
+    The facts the host stamped, as ``conversation_lease.owner_conversation_key`` reads them for Main: the direct
+    origin with the owner door's ingress (``dialogue_provenance.run_origin``: a wake or the auto-resume has none),
+    this lane as its recorded carrier, any executor but a live call's. A Presence turn, a turn the mind sent to the
+    pool (``detached_at``) and pooled work keep their project slot."""
+    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.task_carrier import EXECUTOR_INLINE_CALL, carrier_executor, execution_kind, execution_owner
+
+    if not isinstance(task, dict):
+        return False
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return bool(execution_kind(task) == "direct" and execution_owner(task).get("lane") == LANE_CONVERSATION
+                and carrier_executor(task) != EXECUTOR_INLINE_CALL and run_origin(task)["owner_ingress"]
+                and not is_presence_task(task) and not (task.get("detached_at") or metadata.get("detached_at")))
+
+
+def saved_carrier(task: Dict[str, Any], drive_root: Any) -> Dict[str, Any]:
+    """The carrier record a saved queued row lacks, from the same task's own result; else ``{}``. Never raises.
+
+    A release before #2870 saved PENDING rows without ``_execution_owner``: my human's returned turn waiting in the
+    queue then came back pooled. Only the row's own facts qualify it (direct, the owner door's ingress, never
+    Presence or detached), and only a positive record restores it: this task's conversation-lane direct carrier,
+    undetached and not terminal, for the attempt the row carries (its saved work's or seed's, else its own; a first
+    direct launch records 0 for 1, unmarked). No label or source is read as a carrier."""
+    import pathlib
+
+    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.task_carrier import EXECUTORS
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
+    from supervisor.task_admission import SEED_RETURN
+
+    task_id = str(task.get("id") or "")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if ("_execution_owner" in task or task.get("_is_direct_chat") is not True or not task_id or is_presence_task(task)
+            or task.get("detached_at") or metadata.get("detached_at") or not run_origin(task)["owner_ingress"]):
+        return {}
+    source = next((v for v in (task.get("_working_recovery"), task.get(SEED_RETURN)) if isinstance(v, dict)), None)
+    saved = task.get("_attempt") if source is None else source.get("from_attempt")
+    try:
+        stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or drive_root), task_id, strict=True) or {}
+    except Exception:
+        log.warning("The saved carrier of %s is unreadable; its row returns as saved", task_id, exc_info=True)
+        return {}
+    owner, recorded = stored.get("execution_owner"), stored.get("task_attempt")
+    if (not isinstance(owner, dict) or stored.get("task_id") != task_id or owner.get("task_id") != task_id
+            or (source or {}).get("source_task_id", task_id) != task_id or stored.get("detached_at")
+            or (owner.get("kind"), owner.get("lane")) != ("direct", LANE_CONVERSATION)
+            or owner.get("executor") not in EXECUTORS or type(saved) is not int or type(recorded) is not int
+            or owner.get("task_attempt") != recorded
+            or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}):
+        return {}
+    first_direct = saved == 1 and recorded == 0 and "admitted_dispatch_attempt" not in stored
+    if not (first_direct or recorded == saved and stored.get("admitted_dispatch_attempt") == saved):
+        return {}
+    return {"_execution_owner": dict(owner)}
+
+
+def returned_row_facts(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Under Q: a returned turn's RUNNING facts once a carrier holds it (``worker_assignment._bind_running``): the
+    lane's row shape (``_awaiting_row``) with its admission's client id and the owner door's reply fact. The fresh
+    identity of its first admission does not return: it grants a later attempt nothing."""
+    from supervisor.active_activity import reply_expected
+    from supervisor.worker_chat_lane import _client_message_id
+
+    facts = task.get(PREPARE_KEY) if isinstance(task.get(PREPARE_KEY), dict) else {}
+    return {"lane": LANE_CONVERSATION, "fresh_identity": False, "dispatched_at": time.time(),
+            "client_message_id": str(facts.get("client_message_id") or _client_message_id(task.get("metadata"))),
+            "reply_expected": reply_expected(task)}
+
+
+def note_returns_waiting(count: int) -> None:
+    """Under Q: the returned turns an assignment pass found dispatchable with no idle carrier; the lane starts one
+    carrier for each, as for a turn awaiting one (``reconcile_conversation_lane``)."""
+    _RETURNS_WAITING[0] = max(0, int(count))
+
+
 def hand_to_carrier(meta: Dict[str, Any], slot: Any) -> bool:
     """Under Q: put the turn on the carrier's queue, then bind the row and slot to each other.
 
@@ -447,7 +532,8 @@ def reconcile_conversation_lane() -> None:
             return
         idle = [w for w in carriers if w.busy_task_id is None and worker_ready(w) and not w.retiring]
         booting = [w for w in carriers if w.busy_task_id is None and w.booting and not w.retiring]
-        wanted = 1 + len(awaiting_turns())  # the reserved spare, plus one carrier per turn still waiting
+        # The reserved spare, plus one carrier per turn still waiting: admitted, or returned and dispatchable.
+        wanted = 1 + len(awaiting_turns()) + _RETURNS_WAITING[0]
         missing = max(0, wanted - len(idle) - len(booting))
         if len(idle) > 1:
             # Ask every idle carrier: a resident with late duties is not the spare. Only

@@ -96,23 +96,30 @@ def test_repair_button_records_owner_intent_and_runs_the_installed_skill(tmp_pat
                         dialog.get_by_role("button", name="Ask Ouroboros", exact=True).click()
                     request = command.value.post_data_json
                     assert "visible_text" not in request
+                    assert request["ui_control"] == {"name": "skill_repair"}  # the page names the press (#2778)
+                    assert "Repair and run" in request["cmd"]
                     assert request["task_constraint"]["allow_enable"] is False
                     admission = wait_until(lambda: oracle._json(f"state/skills/{name}/repair_admission.json"), 45)
                     task_id = admission["task_id"]
                     result = server.wait_task(task_id, timeout=240)
                     assert result["status"] == "completed", result
                     stored = oracle.task_result(task_id)
-                    ref = stored["origin_message_ref"]
+                    # The press is my human's request; the prompt the page composed is the host's words, never quoted
+                    # as theirs: no owner row carries it and the task's objective names its author.
+                    press = stored["metadata"]["ui_control"]
+                    assert press["name"] == "skill_repair" and press["pressed_at"]
+                    assert stored["metadata"]["objective_author"] == {"kind": "ui_control", "control": "skill_repair"}
+                    assert not stored.get("origin_message_ref"), stored.get("origin_message_ref")  # no owner message names it
+                    assert stored["metadata"].get("origin_suppressed") is True  # my human's own act started it
                     rows = [json.loads(line) for line in oracle.chat_bytes().splitlines() if line]
-                    owner = next(row for row in rows if row.get("client_message_id") == ref["client_message_id"] and row.get("direction") == "in")
-                    assert owner["text"] == request["cmd"] == stored["origin_message_text"]
-                    assert "Repair and run" in owner["text"]
+                    assert not [row for row in rows if row.get("direction") == "in"], "no owner row speaks the prompt"
                     assert stored["task_constraint"]["allow_enable"] is False
                     assert admission["base_content_hash"] == initial_hash
                     actions = [row for row in oracle.events("owner_api_action") if row.get("task_id") == task_id]
                     enabled = next(row for row in actions if row.get("action") == "skill_enable" and row.get("ok"))
-                    assert enabled["source_ref"]["ref"] == ref
+                    assert enabled["source_ref"] == {"kind": "control", "control": "skill_repair", "ts": press["pressed_at"]}
                     assert enabled["actor"] == "agent_tool"
+                    ref = enabled["source_ref"]
                     assert stub.script_consumed() and stub.kinds().count("skill_review") >= 3
                     assert "repair shell works" in json.dumps(oracle.tools_rows())
                     wait_until(lambda: oracle._json(f"state/skills/{name}/enabled.json").get("enabled"), 30)
