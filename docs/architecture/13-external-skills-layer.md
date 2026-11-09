@@ -18,7 +18,7 @@ Preflight failure persists as PENDING, never advisory-overridable BLOCKERS. Reco
 
 ### Telegram built-in
 
-The thoughts menu and completion notifier read bounded chat/progress windows of `state/dialog.sqlite` (legacy log paths: addresses only); an unavailable one (import, failed segment, invalid interval) never sets or advances seen IDs; thoughts keep preview limits.
+The completion notifier reads bounded chat windows of `state/dialog.sqlite` (legacy log paths: addresses only); an unavailable one (import, failed segment, invalid interval) never sets or advances seen IDs. A child's untyped final stays unsent.
 
 `skills/telegram/` owns the in-process bridge, supervised companion (sidecar/tunnel/menu rollback/heartbeat/singleton). The built-in (`skill_builtin.py`) needs grants; Colab enables after its executable install (auto-grants eligible items if allowed). `data/state/skills/telegram/` keeps binding, companion, rollback, cursors, tunnel cache, bounded bot-qualified refs (write faults only warn). Confined files enter `/chat/inject` then `data/uploads`, quiz answers `/chat/decision`; oversized ones point in-app or to a live Mini App, no new tunnel/URL. `lib/telegram_i18n.py` follows `OUROBOROS_UI_LANGUAGE` (§7; `/language`: `/ui/language`) except host lines. `lib/telegram_token.py` applies token saves/clears to all clients and the companion (a missing one waits); `lib/telegram_connection.py` shows what runs. Events wake one `TypingCue` (`gateway/reply_preparation.py`, DESIGN §9). `TELEGRAM_PROXY` covers only Telegram's API (locked `httpx[socks]`). `SKILL.md`: replies, notices, completion toggle, native quotes, Silent Mode, limits, proxy forms, self-hosted Bot API (`TELEGRAM_API_BASE`, `TELEGRAM_API_FILES_DIR`).
 
