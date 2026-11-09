@@ -3,7 +3,8 @@
 A paid review that settles after its author can no longer receive it is advice for Ouroboros,
 never a decision, a veto or a wake (owner decision on late review delivery, 2026-10-11, #1738):
 it waits in the next ordinary turn of the room the work came from, and consciousness reads it
-when that room stays quiet. Its record writer (a plan council reply that settled after its task
+when that room stays quiet: counted in its waiting line and listed on request, since the owner's
+09.11.2026 audit decision (item 10, «Брать») replaced one wake pointer per mark. Its record writer (a plan council reply that settled after its task
 ended, a left change, result or commit review; marks of the deleted acceptance panel stay as
 history) persists the full source first, then calls ``publish_late_review`` once per settled
 publication with immutable facts: no live context, no clock.
@@ -20,10 +21,11 @@ bounded with a disclosed omission (``utils.truncate_within_limit``); the target 
 source itself, read whole from any focus with ``memory_read(source_ref=…)`` unless the writer
 names another reader (``source_read``).
 
-``memory_view`` shows its words only in that room; consciousness gets one source-pointer line
-per foreign mark. Only the integrating mind releases it, with a reason
-(``chronicle_store._rule_mark_release``). Showing it,
-a tool read or a mailbox acknowledgement of a notice is not that release.
+``memory_view`` shows its words only in that room; every integrating start counts the others in
+its waiting line (``memory_waiting``: how many, in how many rooms, the oldest) and
+``memory_read(room_id='late_reviews')`` lists them by room and work. Only the integrating mind
+releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it, a tool read or a
+mailbox acknowledgement of a notice is not that release.
 
 A publication that could not be placed (``failed``) and every duty only the end of its author's
 task can discharge stay owed as owner-held rows of the existing obligations table (``OWED_SET``,
