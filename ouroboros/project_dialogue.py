@@ -548,9 +548,9 @@ def append_chat_annotation(
 
 def routing_target_label(
     drive_root: Any, action: str, target: str, *, task: Any = None,
-    project_id: str = "",
+    project_id: str = "", fallback: str = "Task",
 ) -> str:
-    """Resolve one deterministic event-time label for an existing raw target."""
+    """Resolve one deterministic event-time label for an existing raw target (``fallback``: an unnamed task's)."""
     target = str(target or "").strip()
     if not target:
         return ""
@@ -562,11 +562,11 @@ def routing_target_label(
             project = get_reserved_project(drive_root, target) or {}
             return project_display_name(project.get("name"), target) or "Project"
         return task_presentation_snapshot(
-            drive_root, target, task=task, project_id=project_id,
+            drive_root, target, task=task, project_id=project_id, fallback=fallback,
         )["target_label"]
     except Exception:
         log.debug("Routing target label resolution failed for %s", target, exc_info=True)
-        return "Task"
+        return fallback
 
 
 # Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One factual PHRASE per typed reason (what the

@@ -114,6 +114,7 @@ def _routing_receipt_fields(
     options: Optional[list] = None,
     attachment_manifest: Optional[list] = None,
     reasoning_effort: str = "",
+    unnamed_label: str = "Task",
     **supplied: Any,
 ) -> Dict[str, Any]:
     """The fields one routing receipt states, read once (#968).
@@ -127,12 +128,14 @@ def _routing_receipt_fields(
     whose work cannot be read fails as it always did; for any other act the work's
     facts are added enrichment, so the receipt falls back to that address rather
     than being lost. ``supplied`` is the caller's own presentation, forwarded as
-    given and never chosen here; only ``ROUTING_RECEIPT_FIELDS`` reach the durable row.
+    given and never chosen here; only ``ROUTING_RECEIPT_FIELDS`` reach the durable row. ``unnamed_label``: a nameless
+    work's label ("" for a Main turn's saved words: no placeholder name).
     """
     from ouroboros.project_dialogue import routing_refusal_cause, routing_target_label
 
     if target and not str(target_label or "").strip():
-        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target, task=evt, project_id=str(evt.get("project_id") or ""))
+        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target, task=evt, project_id=str(evt.get("project_id") or ""),
+                                            fallback=unnamed_label)
     fields: Dict[str, Any] = {**supplied, "action": action, "target": target, "target_label": target_label, "status": status}
     optional = {
         "routing_token": str(evt.get("routing_token") or "").strip(),
