@@ -69,13 +69,12 @@ def said_once(label: str) -> str:
 
 
 def consciousness_off(root) -> bool:
-    """Whether consciousness cannot focus in any place now: the owner's switch is known Off or a Panic is pending, the
-    facts intake applies (``presence_admission.focus_enabled``). A switch this read cannot know is no claim: intake
-    stays closed on it, the view says nothing."""
-    from ouroboros.consciousness import panic_blocks_wake
-    from supervisor.state import control_is, read_state
+    """Whether consciousness cannot focus in any place now (``presence_admission.focus_state`` is ``off``: the owner's
+    switch known Off or a pending Panic). A switch this read cannot know is no claim: intake stays closed on it, the
+    view says nothing."""
+    from ouroboros.presence_admission import focus_state
     try:
-        return panic_blocks_wake(root) or control_is(read_state(root).projection(), "bg_consciousness_enabled", False)
+        return focus_state(root) == "off"
     except Exception:
         log.warning("Consciousness switch unreadable for the place views", exc_info=True)
         return False

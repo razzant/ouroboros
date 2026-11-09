@@ -465,6 +465,11 @@ def owner_contact_refusal(ctx: ToolContext, chat_id: object) -> str:
     return ""
 
 
+# The refusal for a root already in Main: it names destination='current' itself, so the caller adds no remedy.
+_IN_MAIN = ("this root already runs in Main, its current room, so destination='current' reaches your human there; "
+            "'main' is for a Project or owner-started root, and this one is neither")
+
+
 def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool = False) -> str:
     """Why this caller may not address Main, or "" when it may.
 
@@ -508,8 +513,7 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool 
             # A wake or scheduled root already runs in Main: the host set its current room to the
             # owner's main chat, so destination='current' reaches the owner there. Saying so grants no
             # owner voice (the refusal stands); it only names the room the caller is in.
-            return ("this root already runs in Main, its current room, so destination='current' reaches "
-                    "your human there; 'main' is for a Project or owner-started root, and this one is neither")
+            return _IN_MAIN
         return "this root is neither bound to a registered Project nor started by the owner"
     return ""
 
@@ -545,7 +549,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
     if target == "main":
         refusal = _main_notice_refusal(ctx, chat_id, asked_main=True)
         if refusal:
-            remedy = "" if "destination='current'" in refusal else "; destination='current' still writes this work's own room"
+            remedy = "" if refusal == _IN_MAIN else "; destination='current' still writes this work's own room"
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
                 f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent{remedy}.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message

@@ -104,11 +104,11 @@ export function hostSentenceText(text) {
     return fmt(`${head}{words}${source.slice(end)}`, { words: source.slice(head.length, end) });
 }
 
-// Authored narration outranks a stale host type, on both bubble and timeline paths.
 /** A task-mailbox message the host wrote (a silence fact, a control receipt): system provenance and no sending
  *  task, so its row says who wrote it instead of «Message from task unknown». */
 export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
 
+// Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {
     if (row.role !== 'system' || row.narration === true) return shown;
     let text = String(row.text ?? row.content ?? '');

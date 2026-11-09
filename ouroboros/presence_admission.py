@@ -75,10 +75,21 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
                              circle=records.circle_context(place.place_id))
 
 
-def focus_enabled(drive_root: Path) -> bool:
+def focus_state(drive_root: Path) -> str:
+    """``on``; ``off`` (the owner's switch known Off, or a pending Panic); ``unknown`` (a switch this read cannot
+    know). Intake admits only ``on``; a view claims Off only for ``off``."""
     from ouroboros.consciousness import panic_blocks_wake
-    from supervisor.state import control_is, read_state
-    return not panic_blocks_wake(drive_root) and control_is(read_state(drive_root).projection(), "bg_consciousness_enabled", True)
+    from supervisor.state import control_is, control_value, read_state
+    if panic_blocks_wake(drive_root):
+        return "off"
+    projection = read_state(drive_root).projection()
+    if control_is(projection, "bg_consciousness_enabled", True):
+        return "on"
+    return "off" if control_value(projection, "bg_consciousness_enabled")[0] else "unknown"
+
+
+def focus_enabled(drive_root: Path) -> bool:
+    return focus_state(drive_root) == "on"
 
 
 def focus_allowance(drive_root: Path) -> dict:

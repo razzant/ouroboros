@@ -5,7 +5,7 @@ import pytest
 
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import queue
-from tests.test_silence_diagnostic_boundaries import (
+from tests.test_silence_attention_boundaries import (
     attention as attention, host as host,
     no_external_effects as no_external_effects,
 )
