@@ -177,7 +177,12 @@ def _git_diff(
         revisions = []
         for name, ref in (("base", base), ("head", head)):
             if ref:
-                tree = _git().run_cmd(["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], cwd=repo_dir).strip()
+                try:
+                    tree = _git().run_cmd(["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], cwd=repo_dir).strip()
+                except Exception as exc:  # the same fact vcs_read._object gives: which argument named nothing here
+                    detail = (str(exc).strip().splitlines() or [str(exc)])[-1]
+                    raise RuntimeError(f"{name}={ref!r} names no tree in this repository ({detail}); nothing was read; "
+                                       "list revisions with action=refs or action=log") from exc
                 revisions.append(tree)
                 comparison.update({f"{name}_ref": ref, f"{name}_tree": tree})
         cmd = ["git", "diff"]

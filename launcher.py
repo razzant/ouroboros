@@ -44,7 +44,7 @@ if __name__ == "__main__":
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
-from ouroboros.process_logging import utc_log_formatter
+from ouroboros.process_logging import install_exception_hooks, utc_log_formatter
 from ouroboros.config import (
     AGENT_SERVER_PORT,
     DATA_DIR,
@@ -155,7 +155,6 @@ try:
     from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
     for _handler in _handlers:
         _handler.addFilter(_RedactFilter())
-    from ouroboros.process_logging import install_exception_hooks
     install_exception_hooks()
 except Exception:
     pass  # defensive: a broken observability import must not kill the launcher

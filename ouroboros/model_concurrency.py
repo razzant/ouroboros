@@ -197,9 +197,9 @@ class _Waiter:
                 raise _PhysicalSendNotStarted(RAIL_OWNER_PAUSE)
         remaining = self.until - time.monotonic()
         if remaining <= 0:
-            # The install's own per-model slot, never a provider: the raw llm_api_error row read
-            # "Provider capacity" for 140 waits of 05–08.11 that no provider ever saw. The wait is
-            # the measured one; the bound was the slot setting or the caller's deadline, whichever came first.
+            # The install's own per-model slot, never a provider: the raw llm_api_error row used to read
+            # "Provider capacity" for waits no provider ever saw. The wait is the measured one; the bound
+            # was the slot setting or the caller's deadline, whichever came first.
             raise ModelSlotTimeout(f"Local model slot wait expired before dispatch{self._subject()}; no slot freed within "
                                    f"{time.monotonic() - self.started:.0f} s; the request was not sent")
         return remaining

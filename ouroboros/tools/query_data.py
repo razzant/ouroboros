@@ -461,8 +461,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                                      snapshot=use_snapshot, timeout_sec=timeout_sec)
                 if result.get("code") == "query_failed" and result.get("phase") == "sql":
                     # Every failed statement carries the way to learn the real schema, whatever failed in
-                    # it: a fact of the class, read from the typed phase, never from SQLite's message
-                    # (16 "no such column" and 10 table-valued pragma denials in 05–08.11 pointed nowhere).
+                    # it: a fact of the class, read from the typed phase, never from SQLite's message.
                     result["schema"] = sql.schema_hint(db)
             value = result.get("data")
             raw, reconstructed = _canonical(value), True

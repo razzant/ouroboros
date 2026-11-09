@@ -40,7 +40,7 @@ from typing import Any
 
 # Text records keep the JSON logs' clock (``utc_now_iso``): UTC with an explicit ``Z``, so one
 # moment reads the same in ``server.log`` and ``events.jsonl`` on every install (a local ``asctime``
-# without a zone put the text logs three hours off the JSON ones on a UTC+3 Mac; audit 05–08.11).
+# without a zone put the text logs three hours off the JSON ones on a UTC+3 Mac).
 LOG_FORMAT = "%(asctime)s.%(msecs)03dZ [%(levelname)s] %(name)s: %(message)s"
 LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 SERVER_LOG_MAX_BYTES = 2 * 1024 * 1024

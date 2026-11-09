@@ -107,8 +107,8 @@ def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref") -> s
         oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
     except RuntimeError as exc:
         # The fact the caller can act on: which argument named nothing here and where to look; Git's
-        # own line ("fatal: Needed a single revision") stays beside it (42 such reads in 05–08.11).
-        raise RuntimeError(f"{field}={ref!r} does not name a {kind} in this repository ({exc}); nothing was read; "
+        # own line ("fatal: Needed a single revision") stays beside it.
+        raise RuntimeError(f"{field}={ref!r} names no {kind} in this repository ({exc}); nothing was read; "
                            "list revisions with action=refs or action=log") from exc
     if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
         raise ValueError("Git did not resolve one exact object")
@@ -228,13 +228,13 @@ def _identity(repo: pathlib.Path) -> str:
 def _argument_problems(action: str, *, path: str, ref: str, base: str, head: str, staged: bool, stat: bool,
                        name_only: bool, max_count: object, max_chars: object) -> list[str]:
     """Every constraint one call violates, each naming field, value and repair (DEVELOPMENT "LLM-first
-    affordances"): one phrase for all of them was retried unchanged (37 refusals of 39 tasks in 05–08.11).
+    affordances"): one phrase for all of them was retried unchanged.
     Only what the call says about itself is judged here; Git's answers stay Git's."""
     problems = []
     if action not in _ACTIONS:
         problems.append(f"action={action!r}: use one of {', '.join(sorted(_ACTIONS))}")
     if not isinstance(max_count, int) or not 1 <= max_count <= 200:
-        problems.append(f"max_count={max_count!r}: an integer from 1 to 200 (log only)")
+        problems.append(f"max_count={max_count!r}: an integer from 1 to 200 (log reads that many commits; other actions ignore it)")
     if not isinstance(max_chars, int) or max_chars < 0:
         problems.append(f"max_chars={max_chars!r}: 0 (no limit) or a positive integer")
     if path and action not in _PATH_ACTIONS:
