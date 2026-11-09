@@ -386,8 +386,9 @@ def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
     scope = pathlib.Path(engine.starts[2]["scope"]["root"])
     lineage = {pathlib.Path(item["source"]).name: (scope / item["local"]).read_bytes()
                for item in json.loads((scope / "inputs.json").read_text(encoding="utf-8")) if "selected_path" not in item}
-    assert lineage == {"brief.md": b"parent brief\n", "notes.txt": b"own notes\n", "first.md": b"first\n",
-                       "second.md": b"second\n", "unrelated-archive.md": b"unrelated\n"}
+    texts = {"brief.md": scratch.parent / "parent" / "brief.md", "notes.txt": scratch / "notes.txt"}  # text mode
+    assert lineage == {**{name: path.read_bytes() for name, path in texts.items()}, "first.md": b"first\n",
+                       "second.md": b"second\n", "unrelated-archive.md": b"unrelated\n"}  # exact: CRLF on Windows
     assert scope not in (pathlib.Path(engine.starts[0]["scope"]["root"]), pathlib.Path(request["scope"]["root"]))
     custody._CUSTODY.clear()
 

@@ -1166,9 +1166,10 @@ def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
 
 
 def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
-    """The text of every git object spec (`rev:path`, `:path`), None where it is missing: one
-    `git cat-file --batch` for all of them (a spec holding whitespace is read with its own `git show`)."""
-    from ouroboros.reference_books import _git_bytes
+    """The text of every git object spec (`rev:path`, `:path`), None where it is missing or absent from a
+    partial clone (never fetched): one `git cat-file --batch` for all of them (a spec holding whitespace is
+    read with its own `git show`)."""
+    from ouroboros.reference_books import _OFFLINE_GIT, _git_bytes
 
     texts: dict[str, str | None] = {}
     batched = [spec for spec in specs if not any(char.isspace() for char in spec)]
@@ -1180,7 +1181,8 @@ def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
         return texts
     try:
         done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root), timeout=120,
-                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True)
+                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True,
+                              env={**os.environ, **_OFFLINE_GIT})
         out = done.stdout if done.returncode == 0 else b""
     except (OSError, subprocess.SubprocessError):
         out = b""
@@ -1259,7 +1261,9 @@ def diff_pulse(
 
     The base is the book balance's (``reference_books.contribution_base``), so a branch's
     earlier commits stay in the totals and the files they created stay listed as new;
-    without a cached official ref the line says so and measures from HEAD. ``staged``
+    without a cached official ref the line says so and measures from HEAD; it measures from
+    HEAD too, naming the base, when the base's side cannot be read here (a partial clone never
+    fetches it). With no diff readable at all, the touched books' balance stands alone. ``staged``
     reads the index (what a commit or a review subject holds), otherwise the worktree and
     its untracked files. ``paths`` names the modules and books shown (an edit's files);
     omitted, every changed path is. A shown test source adds the suite's facts (declared
@@ -1272,13 +1276,17 @@ def diff_pulse(
     root = pathlib.Path(repo_dir)
     upstream, merge_base = contribution_base(root)
 
-    def diff(*options: str) -> bytes | None:
+    def diff(base: str, *options: str) -> bytes | None:
         return _git_bytes(root, "--no-optional-locks", "diff", *(("--cached",) if staged else ()),
-                          "--no-renames", "-z", *options, merge_base or "HEAD")
+                          "--no-renames", "-z", *options, base)
 
-    numstat, created = diff("--numstat"), diff("--name-only", "--diff-filter=A")
-    if numstat is None or created is None:
-        return ""
+    for base in ((merge_base, "HEAD") if merge_base else ("HEAD",)):
+        numstat = diff(base, "--numstat")
+        created = diff(base, "--name-only", "--diff-filter=A") if numstat is not None else None
+        if created is not None:
+            break
+    else:  # nothing to diff against here; the touched books keep whatever balance they have
+        return book_balance_note(root, [str(path) for path in paths or ()])
     changed: dict[str, tuple[int, int]] = {}
     for row in numstat.decode("utf-8", "replace").split("\0"):
         plus, _, rest = row.partition("\t")
@@ -1311,11 +1319,12 @@ def diff_pulse(
     rows = {path: changed[path] for path in shown if path in changed and path.endswith((".py", ".js"))
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
     if rows:
-        facts, test_sizes = _suite_facts(root, merge_base or "HEAD", staged, rows, new)
+        facts, test_sizes = _suite_facts(root, base, staged, rows, new)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
 
     added, deleted = sum(plus for plus, _ in changed.values()), sum(minus for _, minus in changed.values())
-    since = (f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}" if merge_base
+    named = f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}"
+    since = (named if base == merge_base else f"HEAD (contribution diff from {named} unavailable)" if merge_base
              else "HEAD (contribution base unavailable)")
     sizes = [f"{module.path} {module.line_count} (+{plus}/-{minus})" for module, plus, minus in modules]
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "

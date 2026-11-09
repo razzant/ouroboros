@@ -300,7 +300,7 @@ def test_a_child_checkpoint_held_only_in_its_pack_is_copied_without_a_second_dec
     decoding the member again and nothing damaged is linked into the parent."""
     from ouroboros import evidence_packer, source_retention
     from ouroboros import evidence_packs as packs
-    from tests._packed_read_probe import count_packed_reads
+    from tests._packed_read_probe import count_packed_reads, release_pack_readers
 
     parent, task = tmp_path / "canonical", "packed-child"
     parent.mkdir()
@@ -328,6 +328,7 @@ def test_a_child_checkpoint_held_only_in_its_pack_is_copied_without_a_second_dec
                    if member["kind"] == packs.CHECKPOINT}
     assert len(checkpoints) == len(refs) and {reads[member] for member in checkpoints} == {1}, reads
     assert damaged not in links, "a damaged loose file is never linked into the parent"
+    assert release_pack_readers(child) == 1  # the child's own pack, held open by these reads (WinError 32 below)
     remove_store_tree(child)
     for ref in refs:
         assert artifacts.read_actor_source_bytes(parent, task, ref) == originals[ref["path"]]
@@ -349,7 +350,7 @@ def test_a_loose_child_checkpoint_is_still_linked_once_its_own_bytes_compare_equ
 def test_historical_manifest_keeps_exact_bytes_without_a_second_packed_read(tmp_path, monkeypatch):
     from ouroboros import evidence_packer, source_retention
     from ouroboros import evidence_packs as packs
-    from tests._packed_read_probe import count_packed_reads
+    from tests._packed_read_probe import count_packed_reads, release_pack_readers
 
     parent, task = tmp_path / "canonical", "packed-manifest"
     child = headless.prepare_task_drive(parent, task, "empty")
@@ -373,6 +374,7 @@ def test_historical_manifest_keeps_exact_bytes_without_a_second_packed_read(tmp_
     assert state["status"] == "complete", state
     # The historical manifest is decoded once; its exact version is then available in the parent's CAS.
     assert reads[member] == 1, reads
+    assert release_pack_readers(child) == 1  # the child's own pack, held open by this read (WinError 32 below)
     remove_store_tree(child)
     assert packs.blob_bytes(parent, source_retention.manifest_version_ref(parent, old["sha256"])) == raw
     manifest = observability.read_call_manifest_ref(parent, old, task_id=task)

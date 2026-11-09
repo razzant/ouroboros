@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from ouroboros.repo_remotes import follow_former_official_home
+from ouroboros.repo_remotes import follow_former_official_home, remote_fetch_urls
 from ouroboros.workspace_copies import admitted_copy_metadata, same_directory, source_is_system_repo
 
 BODY_TRUE = "true"
@@ -150,17 +150,8 @@ def normalize_remote_url(url: str) -> str:
 
 
 def _remotes(root: Path) -> List[Tuple[str, str]]:
-    """``(name, fetch URL)`` for every remote of ``root``."""
-    out = _git(root, "remote", "-v") or ""
-    remotes: List[Tuple[str, str]] = []
-    for line in out.splitlines():
-        if not line.endswith("(fetch)"):
-            continue
-        name, _tab, rest = line.partition("\t")
-        url = rest[: -len("(fetch)")].strip()
-        if name and url:
-            remotes.append((name, url))
-    return remotes
+    """``(name, fetch URL)`` for every remote of ``root``; a git failure raises :class:`_GitUnavailable`."""
+    return [(name, url.strip()) for name, url in remote_fetch_urls(lambda *args: _git(root, *args)) if url.strip()]
 
 
 def repository_root(path: Any, *, probe_cache: Optional[dict] = None) -> Optional[Path]:
