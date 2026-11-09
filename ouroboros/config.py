@@ -135,7 +135,7 @@ from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update
 
 # Physical safety budgets, not test-value judgments or kernel-enforced quotas.
 TEST_WORKER_PEAK_RSS_BYTES = 1024**3  # Provisional 1 GiB; loaded P0 observed 690 MiB/worker.
-TEST_MEMORY_RESERVE_FRACTION = 0.10  # Keep physical headroom for the OS and other work.
+HOST_MEMORY_RESERVE_FRACTION = 0.10  # Kept out of every physical-memory admission for the OS and other work.
 TEST_PROCESS_SAMPLE_SEC = 1.0  # Poll latency; allocations between samples can outrun the stop.
 TEST_PROCESS_TOKEN_SCAN_SEC = 5.0  # Detached members are found by token this often; the scan reads every environment.
 

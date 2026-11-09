@@ -291,11 +291,11 @@ def _under_reserve(monkeypatch, receipt):
     """Once the child published its identity, the watch sees a 16 GiB machine with 1 GiB free,
     under its 1.6 GiB reserve; before that, 8 GiB free, so interpreter startup cannot race the
     stop. No pressure experiment against the real machine: only the watch's view is injected."""
-    from ouroboros import test_parallelism
+    from ouroboros import host_memory
 
     gib = 1024 ** 3
-    monkeypatch.setattr(test_parallelism, "physical_memory",
-                        lambda: test_parallelism.MemorySnapshot(16 * gib, gib if receipt.exists() else 8 * gib))
+    monkeypatch.setattr(host_memory, "physical_memory",
+                        lambda: host_memory.MemorySnapshot(16 * gib, gib if receipt.exists() else 8 * gib))
 
 
 def test_overload_stops_bounded_allocator_with_largest_member(tmp_path, owned, sentinel, monkeypatch):
@@ -322,7 +322,7 @@ def test_overload_stops_bounded_allocator_with_largest_member(tmp_path, owned, s
 
 @pytest.mark.parametrize("unreadable", ["sampler", "memory"])
 def test_an_unavailable_sampler_degrades_the_watch_instead_of_failing_the_run(owned, monkeypatch, capfd, unreadable):
-    from ouroboros import config, process_overload, test_parallelism
+    from ouroboros import config, host_memory, process_overload
 
     def no_sampler(container, detached=None):
         raise FileNotFoundError("ps")  # a slim Linux image ships no ps; /proc is read there instead
@@ -332,7 +332,7 @@ def test_an_unavailable_sampler_degrades_the_watch_instead_of_failing_the_run(ow
         monkeypatch.setattr(process_overload, "member_memory", no_sampler)
     else:  # no free-memory reading: no pressure signal, so the stop is skipped, never guessed
         monkeypatch.setattr(config, "TEST_WORKER_PEAK_RSS_BYTES", 1)
-        monkeypatch.setattr(test_parallelism, "physical_memory", lambda: None)
+        monkeypatch.setattr(host_memory, "physical_memory", lambda: None)
     container, proc = owned("import time; time.sleep(1)", lifeline=True, overload=True)
     assert proc.wait(timeout=15) == 0  # the healthy run is not stopped
     assert container.reap() == ""
@@ -366,13 +366,13 @@ def test_a_transient_sample_failure_does_not_end_the_watch(tmp_path, owned, sent
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows membership is the held Job, read every sample")
 def test_the_token_scan_keeps_its_own_cadence_and_its_members_stay_counted(monkeypatch, sentinel):
-    from ouroboros import config, process_containment, process_overload, test_parallelism
+    from ouroboros import config, host_memory, process_containment, process_overload
 
     scans, seen = [], []
     monkeypatch.setattr(process_containment, "pids_with_env_marker",
                         lambda token, *a: scans.append(token) or [sentinel[0]])  # a member only its token finds
     gib = 1024 ** 3
-    monkeypatch.setattr(test_parallelism, "physical_memory", lambda: test_parallelism.MemorySnapshot(16 * gib, 8 * gib))
+    monkeypatch.setattr(host_memory, "physical_memory", lambda: host_memory.MemorySnapshot(16 * gib, 8 * gib))
     monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.01)
     monkeypatch.setattr(config, "TEST_PROCESS_TOKEN_SCAN_SEC", 3600.0)
     watch = process_overload.OverloadWatch(SimpleNamespace(_token="token", _birth=None, _root=0), slots=1)
@@ -402,14 +402,14 @@ def test_the_token_scan_keeps_its_own_cadence_and_its_members_stay_counted(monke
     (2, 3.03, 2.6, 7, False, False),     # 17.10 macOS CI runner: two workers at 3.03 GiB with 2.6 GiB free
 ])
 def test_overload_stops_growth_only_under_machine_pressure(monkeypatch, slots, tree, now, machine, pressure, stops):
-    from ouroboros import config, process_overload, test_parallelism
+    from ouroboros import config, host_memory, process_overload
 
     gib = 1024 ** 3
     monkeypatch.setattr(config, "TEST_WORKER_PEAK_RSS_BYTES", gib)
     watch = process_overload.OverloadWatch(object(), slots=slots)
     assert watch.floor_bytes == (slots + 1) * gib
-    reserve = int(machine * gib * config.TEST_MEMORY_RESERVE_FRACTION)
-    memory = test_parallelism.MemorySnapshot(machine * gib, int(now * gib), pressure)
+    reserve = int(machine * gib * config.HOST_MEMORY_RESERVE_FRACTION)
+    memory = host_memory.MemorySnapshot(machine * gib, int(now * gib), pressure)
     reason = process_overload.stop_reason(int(tree * gib), memory, floor=watch.floor_bytes, reserve=reserve)
     assert bool(reason) is stops, reason
     assert not process_overload.stop_reason(int(tree * gib), None, floor=watch.floor_bytes, reserve=reserve)

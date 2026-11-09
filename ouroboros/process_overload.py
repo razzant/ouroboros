@@ -144,8 +144,8 @@ class OverloadWatch:
         self._thread = thread  # A failed start must never leave an unjoinable thread.
 
     def _run(self) -> None:
-        from ouroboros.config import TEST_MEMORY_RESERVE_FRACTION, TEST_PROCESS_TOKEN_SCAN_SEC
-        from ouroboros.test_parallelism import physical_memory
+        from ouroboros.config import HOST_MEMORY_RESERVE_FRACTION, TEST_PROCESS_TOKEN_SCAN_SEC
+        from ouroboros.host_memory import physical_memory
 
         detached, scanned = None, None
         while not self._done.is_set():
@@ -164,7 +164,7 @@ class OverloadWatch:
                     print(self.degraded, file=sys.stderr, flush=True)
             else:
                 total = sum(member.rss_bytes for member in members)
-                reserve = int(memory.total_bytes * TEST_MEMORY_RESERVE_FRACTION)
+                reserve = int(memory.total_bytes * HOST_MEMORY_RESERVE_FRACTION)
                 why = stop_reason(total, memory, floor=self.floor_bytes, reserve=reserve)
                 if members and why:
                     largest = max(members, key=lambda member: member.rss_bytes)

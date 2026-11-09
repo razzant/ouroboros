@@ -577,14 +577,14 @@ ouroboros/ — agent core and shared runtime (§6)
     subagent_integration.py — integrate_subagent_patch (sha256, 3-way --index, protected-path gated, genesis refused), external-workspace audited verdict, compare_subagent_patches
     patch_verdict.py, patch_staging.py — both patch pipelines' verdict writer (`run_<rid>` subjects; artifact plus typed `delegate_run_patch_verdict` custody row) and index staging
   delegate_start_claims.py — Serializes custody recheck and `START_REQUESTED`; transport/run waits are outside locks. Unsent retries may hold actor/payload locks, never root/store locks
-  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop; unconfirmed cleanup blocks; not a quota (DEVELOPMENT §9)
+  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop (DEVELOPMENT §9)
   process_scope.py, process_census.py — work scopes (membership, records, task-end/Panic reap, engine index); kernel-state readers (§9)
   process_custody.py, launch_custody.py — `spawn_supervised`, ledger, `retained_purposes`; stops need measured identity and confirmed exit (§1, §9)
   obligations.py — Atomic current sets (incl. `owner_questions`); owning transitions publish before work and retire after discharge
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
   owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
-  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py — OS locks/processes, native ABI, held targets and birth tokens (Platform substrate below)
+  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py, host_memory.py — OS locks/processes/memory, native ABI, held targets and birth tokens (Platform substrate below)
   verified_download.py — exact-size/digest-verified atomic cached downloads
   node_runtime.py — Execution-probed Node runtime health (`node_runtime_health`; a missing binary is never cached), `select_skill_node_runtime`, `skill_node_emergency_path_dir`
 

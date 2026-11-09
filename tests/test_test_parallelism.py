@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import config, preflight_runner, test_parallelism as budget
+from ouroboros import config, host_memory, preflight_runner, test_parallelism as budget
 from ouroboros.process_containment import ProcessContainer
 from ouroboros import platform_layer as pl
 from tests import conftest
@@ -23,46 +23,9 @@ from ouroboros.process_containment import pid_is_zombie
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
-def test_native_memory_reports_reclaimable_bytes_without_double_counting(monkeypatch, platform):
-    monkeypatch.setattr(budget.sys, "platform", platform)
-    if platform == "darwin":
-        outputs = iter(["65536\n", 'Mach Virtual Memory Statistics: (page size of 4096 bytes)\n'
-                        'Pages free: 2.\nPages inactive: 3.\nPages speculative: 1.\nPages purgeable: 2.\n',
-                        "1\n"])  # kern.memorystatus_vm_pressure_level: normal
-        monkeypatch.setattr(budget, "_native_output", lambda argv: next(outputs))
-    elif platform == "linux":
-        monkeypatch.setattr(budget.Path, "read_text", lambda self, **kwargs: "MemTotal: 64 kB\nMemAvailable: 24 kB\n")
-        monkeypatch.setattr(budget.Path, "is_file", lambda self: False)  # no cgroup limit on this host
-    else:
-        monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(
-            virtual_memory=lambda: SimpleNamespace(total=65536, available=24576)))
-    assert budget.physical_memory() == budget.MemorySnapshot(65536, 24576)
-
-
-@pytest.mark.parametrize("level, pressure", [("1\n", False), ("2\n", False), ("4\n", True), (None, False)])
-def test_macos_kernel_pressure_counts_although_inactive_pages_look_free(monkeypatch, level, pressure):
-    """XNU keeps refilling the inactive queue with anonymous pages it then compresses, so free +
-    inactive + speculative barely moves under pressure: the kernel's critical level is read too.
-    Warn is routine on a busy small Mac running a healthy battery. An unreadable level leaves the
-    free-memory reading alone."""
-    vm = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 2.\nPages inactive: 3.\nPages speculative: 1.\n"
-
-    def native(argv):
-        if argv[-1] == "kern.memorystatus_vm_pressure_level":
-            if level is None:
-                raise subprocess.CalledProcessError(1, argv)
-            return level
-        return "65536\n" if argv[-1] == "hw.memsize" else vm
-
-    monkeypatch.setattr(budget.sys, "platform", "darwin")
-    monkeypatch.setattr(budget, "_native_output", native)
-    assert budget.physical_memory() == budget.MemorySnapshot(65536, 24576, pressure)
-
-
 def test_native_probe_failure_admits_one_worker(monkeypatch):
-    monkeypatch.setattr(budget.sys, "platform", "darwin")
-    monkeypatch.setattr(budget, "_native_output", lambda argv: "unreadable")
+    monkeypatch.setattr(host_memory, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(host_memory, "_native_output", lambda argv: "unreadable")
     assert budget.physical_memory() is None
     assert budget.admission(16, env={budget.WORKERS_ENV: "24"}).workers == 1
 
@@ -270,7 +233,7 @@ def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypa
 def test_the_gate_pins_the_worker_count_it_verified(tmp_path, monkeypatch, capacity):
     """The requested three slots still obey measured memory, not a hostile pytest override."""
     total = 20 * config.TEST_WORKER_PEAK_RSS_BYTES
-    memory = budget.MemorySnapshot(total, int(total * config.TEST_MEMORY_RESERVE_FRACTION)
+    memory = budget.MemorySnapshot(total, int(total * config.HOST_MEMORY_RESERVE_FRACTION)
                                    + capacity * config.TEST_WORKER_PEAK_RSS_BYTES)
     monkeypatch.setattr(budget, "physical_memory", lambda: memory)
     monkeypatch.setenv(budget.WORKERS_ENV, "3")
@@ -386,33 +349,6 @@ def _run_pytest(tmp_path, files, *, workers, extra=(), owned=True):
         proc.wait(timeout=10)
     assert not reap_error, reap_error
     return code, evidence, log.read_text(encoding="utf-8"), time.monotonic() - started
-
-
-def test_a_cgroup_limit_bounds_physical_memory_and_credits_reclaimable_cache(monkeypatch):
-    gib = 1024 ** 3
-    files = {"/proc/meminfo": "MemTotal: 33554432 kB\nMemAvailable: 16777216 kB\n",  # a 32 GiB host, 16 free
-             "/sys/fs/cgroup/memory.max": f"{4 * gib}\n",  # a 4 GiB container
-             "/sys/fs/cgroup/memory.current": f"{3 * gib}\n",  # 3 GiB charged, 1 GiB of it file cache
-             "/sys/fs/cgroup/memory.stat": f"anon {2 * gib}\ninactive_file {gib}\n"}
-    real_read, real_is_file = Path.read_text, Path.is_file
-
-    def faked(path):  # POSIX spelling: a Windows host renders these paths with backslashes
-        return path.as_posix().startswith(("/proc/", "/sys/fs/cgroup/"))
-
-    def read_text(self, *args, **kwargs):
-        if not faked(self):
-            return real_read(self, *args, **kwargs)
-        if self.as_posix() not in files:  # absent here, never this host's real cgroup file
-            raise FileNotFoundError(self.as_posix())
-        return files[self.as_posix()]
-
-    monkeypatch.setattr(budget, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(Path, "read_text", read_text)
-    monkeypatch.setattr(Path, "is_file", lambda self: self.as_posix() in files if faked(self) else real_is_file(self))
-    memory = budget.physical_memory()
-    assert (memory.total_bytes, memory.available_bytes) == (4 * gib, 2 * gib)  # the cap, minus anon only
-    del files["/sys/fs/cgroup/memory.stat"]  # without the stat file the cache is not credited
-    assert budget.physical_memory().available_bytes == gib
 
 
 @pytest.mark.parametrize("slots", [1, 2])

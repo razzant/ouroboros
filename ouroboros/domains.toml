@@ -529,6 +529,7 @@ D20 = "Presence"
 "ouroboros/platform_win32_abi.py" = "D18"
 "ouroboros/platform_darwin_abi.py" = "D18"  # macOS kernel birth and waitable child status
 "ouroboros/platform_process_target.py" = "D18"  # held native process/group witnesses, re-exported by the platform layer
+"ouroboros/host_memory.py" = "D18"  # physical memory within the own cgroup's limits; test admission and the overload stop read it
 "ouroboros/post_task_checkpoint.py" = "D01"
 "ouroboros/post_task_synthesis.py" = "D01"
 "ouroboros/post_task_evolution.py" = "D15"
