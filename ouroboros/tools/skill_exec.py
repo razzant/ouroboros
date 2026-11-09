@@ -32,6 +32,7 @@ from ouroboros.skill_loader import (
     skill_state_dir,
     summarize_skills,
 )
+from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.skill_review_status import executable_review_requirement, normalize_skill_review_status
@@ -983,6 +984,28 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
     )
 
 
+def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
+    """The execution refusal while the owner has not granted the request for these bytes: what is
+    missing, and the plain-words cause when the grant belongs to an earlier version of the files
+    (``grant_gap_sentence``). Empty when nothing is missing."""
+    missing_core = list(grants.get("missing_keys") or [])
+    missing_permissions = list(grants.get("missing_permissions") or [])
+    if not (missing_core or missing_permissions):
+        return ""
+    requested = []
+    if missing_core:
+        requested.append(f"core settings keys {missing_core}")
+    if missing_permissions:
+        requested.append(f"permissions {missing_permissions}")
+    cause = grant_gap_sentence(grants)
+    return (
+        "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
+        f"{skill_name!r} requests {' and '.join(requested)}. "
+        "Its review gate already permits these bytes; grant them from the Skills UI before execution."
+        + (f" {cause}" if cause else "")
+    )
+
+
 def _handle_skill_exec(
     ctx: ToolContext,
     skill: str = "",
@@ -1145,19 +1168,9 @@ def _handle_skill_exec(
 
     state_dir = skill_state_dir(drive_root, loaded.name)
     grants = grant_status_for_skill(drive_root, loaded)
-    missing_core = list(grants.get("missing_keys") or [])
-    missing_permissions = list(grants.get("missing_permissions") or [])
-    if missing_core or missing_permissions:
-        requested = []
-        if missing_core:
-            requested.append(f"core settings keys {missing_core}")
-        if missing_permissions:
-            requested.append(f"permissions {missing_permissions}")
-        return (
-            "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
-            f"{loaded.name!r} requests {' and '.join(requested)}. "
-            "Its review gate already permits these bytes; grant them from the Skills UI before execution."
-        )
+    refusal = _grant_refusal(loaded.name, grants)
+    if refusal:
+        return refusal
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
         skill_state_dir_path=state_dir,

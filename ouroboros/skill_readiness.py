@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import datetime as _dt
 import pathlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,31 @@ _SKILL_PAYLOAD_SELECTOR_KEYS = {
     "run_command": "cwd", "run_script": "cwd", "delegate_start": "root",
 }
 _ROOT_TASK_PROJECTION_MAX_RECORDS = 512
+
+
+def _grant_stamp(iso: str) -> str:
+    try:
+        when = _dt.datetime.fromisoformat(iso).astimezone(_dt.timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    return f" (grant last updated {when.strftime('%Y-%m-%d %H:%M')} UTC)"
+
+
+def grant_gap_sentence(grants: Any) -> str:
+    """The plain-words cause behind a missing grant, shared by every producer that names one (the readiness
+    line, the execution refusal, the toggle refusal): the owner's grant exists for an earlier version of the
+    skill's files (``grant_status_for_skill`` ``earlier_grant``). Empty when nothing beyond "not granted yet"
+    is known. Never a hash: the mind and the owner read versions of files, not digests."""
+    earlier = grants.get("earlier_grant") if isinstance(grants, Mapping) else None
+    if not isinstance(earlier, Mapping):
+        return ""
+    items = [str(item) for item in list(earlier.get("keys") or []) + list(earlier.get("permissions") or [])]
+    if not items:
+        return ""
+    names = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+    verb = "was" if len(items) == 1 else "were"
+    return (f"{names} {verb} granted to an earlier version of this skill's files{_grant_stamp(str(grants.get('updated_at') or ''))}; "
+            "the files changed since, so that grant does not cover the current files. The saved Settings values are untouched.")
 
 
 def _skill_tool_identity_mapping() -> Dict[str, str]:
@@ -262,10 +288,16 @@ def skill_readiness_for_execution(
         if not grants.get("all_granted", True):
             missing_keys = grants.get("missing_keys") or []
             missing_permissions = grants.get("missing_permissions") or []
-            msg = f"missing_grants:keys={missing_keys},permissions={missing_permissions}"
+            cause = grant_gap_sentence(grants)
+            msg = f"missing_grants:keys={missing_keys},permissions={missing_permissions}" + (f"; {cause}" if cause else "")
             blockers.append(msg)
             owner_action.append(msg)
-            next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": "Grant only manifest items covered by expressed owner intent; repeating review does not supply owner permission."})
+            reason = "Grant only manifest items covered by expressed owner intent; repeating review does not supply owner permission."
+            if cause:
+                reason += (" A grant for the current files restores it: skill_owner_action grant carrying the owner's words, "
+                           "or, for a skill installed from a source, an accepted release (skill_update), which re-grants when "
+                           "automatic grants for reviewed skills are on; its replace mode also replaces in-place edits of the payload.")
+            next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})
 
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash

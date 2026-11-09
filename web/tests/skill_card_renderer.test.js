@@ -443,3 +443,19 @@ test('a declared secret that is not set is a neutral tray with Open Secrets and 
     assert.equal(installedSkillModel(ungranted).needs, true);
     assert.deepEqual(chipOf(renderInstalledSkillCard(ungranted)).slice(1), ['warn', 'Needs access']);
 });
+
+test('a grant left behind by a byte change is named as the earlier version’s grant, never as missing keys', () => {
+    const earlier = { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'],
+        earlier_grant: { keys: ['GOOGLE_OAUTH_CLIENT_ID'], permissions: [] } };
+    const named = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: earlier })));
+    assert.match(named, /Wants to use GOOGLE_OAUTH_CLIENT_ID\./);
+    assert.match(named, /class="skills-tray-note">You granted this to an earlier version of the skill/);
+    // A new version asking for more than the earlier grant covered: the note does not claim all of it.
+    const wider = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { ...earlier, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID', 'NEW_KEY'] } })));
+    assert.match(wider, /Wants to use GOOGLE_OAUTH_CLIENT_ID, NEW_KEY\./);
+    assert.match(wider, /You granted some of this to an earlier version/);
+    assert.match(named, /data-skill-action="grant" data-keys="GOOGLE_OAUTH_CLIENT_ID"/, 'the same Grant access button restores it');
+    // Never granted: the tray asks, and says nothing about an earlier version.
+    const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
+    assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
+});
