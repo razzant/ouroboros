@@ -9,7 +9,7 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView } from './verification_presentation.js';
-import { hostRowDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, hostTaskMessage } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -911,7 +911,7 @@ export function summarizeLogEvent(evt) {
         // provenance says how it was framed (ancestor / relayed peer /
         // independent task / system / escalation).
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
-        return view('info', `Message from task ${source}`, {
+        return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
             meta: taskMeta(
                 evt.provenance ? `provenance=${evt.provenance}` : '',
@@ -1411,7 +1411,7 @@ function summarizeChatLiveEventView(evt) {
         const preview = String(evt.text_preview || '');
         return chatView({
             phase: 'info',
-            headline: fmt('Message from task {source}', { source }),
+            headline: hostTaskMessage(evt) ? tr('task.progress.system_message', 'System message') : fmt('Message from task {source}', { source }),
             body: shortText(preview, 200),
             fullBody: preview,
             visible: true,

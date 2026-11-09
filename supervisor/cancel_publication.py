@@ -52,8 +52,8 @@ CANCEL_SOURCE_PHRASES = {
     "snapshot_restore": "The server stopped while this task was still running",
     # ``join_ledger`` cancel_task, Ouroboros's own tool; the asking run is below.
     "agent_tool": "Stopped by Ouroboros",
-    # ``work_diagnostics.withdraw_revoked`` and the unsent withdrawals (#1376): a
-    # silence diagnostic whose observed work moved on, settled or stopped.
+    # Historical rows of the retired silence diagnostic (#1376, removed 09.11.2026):
+    # a silence check whose observed work moved on, settled or stopped.
     "silence_resolved": "Silence check withdrawn: the observed work no longer needed it",
 }
 # The fixed label a producer writes as ``reason`` restates its phrase, so that

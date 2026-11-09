@@ -89,7 +89,6 @@ from ouroboros.workspace_executor import normalize_executor_ref
 log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
-    "work_diagnostic",
     "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
     "task_id",
     "parent_task_id",

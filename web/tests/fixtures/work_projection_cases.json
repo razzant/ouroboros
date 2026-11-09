@@ -3733,6 +3733,9 @@
   "owner_answer": {
    "": "Waiting for your answer"
   },
+  "no_progress": {
+   "": "No recorded progress"
+  },
   "model_access": {
    "": "The model needs you: sign in or restore access"
   },
