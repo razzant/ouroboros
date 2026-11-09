@@ -472,10 +472,12 @@ def test_node_read_shows_stamp_original_and_corrections_with_the_acting_revision
     lines = text.split("\n")
     assert lines[0].startswith(f"[page {page['node_id']}; room 1;")
     assert f"revision {fix['node_id']} (corrected by mind (root root0001))" in lines[0]
-    assert "stamp: taskA001=not_recorded;" in lines[0] and lines[1].endswith("complete")
-    assert "stamp taskA001: status=not_recorded" in text
-    assert "text:\nORIGINAL" in text and f"correction {fix['node_id']} by mind (root root0001)" in text
-    assert text.rstrip().endswith("CORRECTED")
+    # The header counts the stamp and names no task; the words come first, the correction under them, then the
+    # host's line for each covered task.
+    assert "host stamp: 1 task — not_recorded 1;" in lines[0] and "taskA001" not in lines[0]
+    assert lines[1].endswith("complete")
+    assert (text.index("text:\nORIGINAL") < text.index(f"correction {fix['node_id']} by mind (root root0001)")
+            < text.index("CORRECTED") < text.index("stamp taskA001: status=not_recorded"))
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id="no-such-node")
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id=page["node_id"], rows=True)
 
@@ -738,7 +740,11 @@ def test_mark_view_and_release_including_an_imported_nomination(tmp_path):
     assert view["ok"] and view["operation"] == "mark_view" and view["mark_id"] == mark["mark_id"]
     listed = _memory_read(ctx)
     assert "visibility meaning" in listed and "quote: verbatim words" not in listed
-    assert "legacy-nomination-0123456789abcdef" in listed  # a global mark is in every room
+    # A global mark acts everywhere and every view holds it: a room's read lists the marks placed in it and counts
+    # the global ones in its first line; the global mark is listed in the room it was placed in.
+    assert "legacy-nomination-0123456789abcdef" not in listed
+    assert "global marks in force: 1 (" in listed.split("\n", 1)[0]
+    assert "legacy-nomination-0123456789abcdef" in _memory_read(ctx, room_id="legacy")
     released = json.loads(_memory_mark(ctx, release_ids=["legacy-nomination-0123456789abcdef"],
                                        reason="published the note myself"))
     assert released["ok"] and released["operation"] == "mark_release"

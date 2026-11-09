@@ -34,7 +34,7 @@ FOOT = """() => {
             opaque: getComputedStyle(meta).backgroundColor === getComputedStyle(side).backgroundColor
                 && getComputedStyle(meta).backgroundColor !== 'rgba(0, 0, 0, 0)',
             toolsClear: m.top >= box(side.querySelector('[data-nav-page="settings"]')).bottom - 0.5,
-            gapToTools: Math.round(box(side.querySelector('[data-nav-page="files"]')).top
+            gapToTools: Math.round(box(side.querySelector('.sidebar-foot > [data-nav-page]')).top
                 - box(document.getElementById('nav-projects')).bottom)};
 }"""
 SCROLL = "f => { const s = document.getElementById('primary-sidebar'); s.scrollTop = f * (s.scrollHeight - s.clientHeight); }"

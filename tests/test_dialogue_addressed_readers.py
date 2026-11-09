@@ -551,7 +551,9 @@ def test_addressed_room_summary_does_equal_sql_work_with_foreign_history(tmp_pat
 def test_telegram_tail_does_equal_sql_work_with_foreign_history(tmp_path, monkeypatch, stream):
     from tests.test_telegram_subagent_cards import _load_plugin
 
-    plugin = _load_plugin()
+    _load_plugin()
+    from tg_sub_test.lib.telegram_state import _jsonl_tail
+
     measurements = []
     for rooms in (1, 30):
         root = tmp_path / str(rooms)
@@ -560,7 +562,7 @@ def test_telegram_tail_does_equal_sql_work_with_foreign_history(tmp_path, monkey
         for index in range(4):
             ds.append(root, stream, {"chat_id": 1, "text": f"latest-{index}"})
         with metered(monkeypatch) as measured:
-            rows, omitted = plugin._jsonl_tail(root / f"logs/{stream}.jsonl", max_entries=3, tail_bytes=262144)
+            rows, omitted = _jsonl_tail(root / f"logs/{stream}.jsonl", max_entries=3, tail_bytes=262144)
         assert [row["text"] for row in rows] == ["latest-1", "latest-2", "latest-3"] and omitted
         measurements.append(dict(measured))
     assert measurements[0] == measurements[1] and measurements[0]["steps"] > 0

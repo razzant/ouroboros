@@ -434,6 +434,18 @@ def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str
     return _writer_alive(row.get("pid"))
 
 
+def author_intake_closed(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any) -> bool:
+    """The positive opposite of ``author_intake_accepting``: this conversation's fact for this attempt says its loop
+    reads no more (its final drain closed it, ``follow_loop_admission``). No fact, an unreadable or foreign one, or
+    another attempt's proves nothing."""
+    try:
+        row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(row, dict) and row.get("accepting") is False and row.get("conversation_key") == conversation_key
+            and row.get("attempt") == attempt)
+
+
 def _writer_alive(pid: Any) -> bool:
     from ouroboros.platform_layer import pid_is_alive  # never os.kill(pid, 0): CTRL_C_EVENT on Windows
 
@@ -489,6 +501,30 @@ def close_author_intake(drive_root: Any, task_id: str, *, own: bool = False, att
         return bool(locked)
 
 
+def retire_author_intake(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any) -> None:
+    """A failed open leaves no fact of this conversation and attempt standing, whichever process wrote it: a carrier's
+    failed take would leave the host's, which its loop's final close cannot move (``_own_row``) while its live writer
+    keeps it accepting. Another conversation's or attempt's fact stays. Removed as ``close_author_intake`` removes,
+    its lock refused or not: this attempt's loop has not read yet, so an arrival racing it waits for the first drain,
+    and no other writer can replace the fact meanwhile (the host wrote it before the row existed; a later attempt is
+    admitted only once this carrier is confirmed dead, ``worker_health.recover_confirmed_dead_worker``)."""
+    from ouroboros.task_custody import task_mail_lock
+
+    path = _intake_path(drive_root, task_id)
+    if not path.exists():
+        return
+    with task_mail_lock(drive_root, task_id) as locked:
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+            if (isinstance(row, dict) and row.get("conversation_key") == conversation_key
+                    and row.get("attempt") == attempt):
+                path.unlink()
+                if not locked:
+                    log.warning("author intake of %s retired without its mail lock", task_id)
+        except (OSError, ValueError):
+            log.debug("author intake of %s not retired", task_id, exc_info=True)
+
+
 def root_conversation_key(task: Any) -> str:
     """The conversation whose new text this live root reads, else "".
 
@@ -505,6 +541,42 @@ def root_conversation_key(task: Any) -> str:
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
     event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
     return str(event.get("conversation_key") or "")
+
+
+OWNER_CONVERSATION = "owner:"  # an owner turn's intake key: this prefix and its chat id
+
+
+def owner_conversation_key(task: Any) -> str:
+    """``owner:<chat>`` for my human's own foreground turn: the conversation whose ordinary messages it reads; else "".
+
+    Facts the host already stamps, never a mark of its own: the direct origin with the owner door's ingress
+    (``dialogue_provenance.run_origin``: a wake or an auto-resume has none), on the conversation lane or not yet
+    carried, any executor but a live call's (``inline_call``), in a chat of the owner's and bound to no Project.
+    Presence, detached, Project and pooled work read none. Its fact is the host's from admission, then its carrier's
+    (``worker_chat_lane.CarrierTurn``); the final drain closes it (``follow_loop_admission``)."""
+    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.task_carrier import (
+        EXECUTOR_INLINE_CALL,
+        LANE_CONVERSATION,
+        carrier_executor,
+        execution_kind,
+        execution_owner,
+    )
+
+    if not isinstance(task, dict):
+        return ""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    try:
+        chat_id = int(task.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if (chat_id <= 0 or execution_kind(task) != "direct"
+            or execution_owner(task).get("lane") not in (None, LANE_CONVERSATION)
+            or carrier_executor(task) == EXECUTOR_INLINE_CALL or not run_origin(task)["owner_ingress"]
+            or is_presence_task(task) or task.get("detached_at") or metadata.get("detached_at")
+            or str(task.get("project_id") or "").strip()):
+        return ""
+    return f"{OWNER_CONVERSATION}{chat_id}"
 
 
 def task_attempt(task: Any) -> int:
@@ -545,15 +617,15 @@ def root_intake(drive_root: Any, task: Any):
 
 
 def follow_loop_admission(ctx: Any, accepting: bool) -> None:
-    """A carried Presence author's or root's durable intake follows its loop's own admission (the final drain).
+    """A carried Presence author's, root's or owner turn's durable intake follows its loop's own admission.
 
-    A Host in another process reads only this fact, so it moves with the loop under the mail lock:
+    A Host or a server in another process reads only this fact, so it moves with the loop under the mail lock:
     closed BEFORE the final drain reads (an arrival either lands first and is drained, or is refused
     and becomes its own turn), reopened when the loop reads mail again (an owner follow-up, a reopened
     final). Only the writer's own process moves its fact; a turn with no intake row has none to follow."""
     metadata = getattr(ctx, "task_metadata", None)
     root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
-    if not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict) or root is None or not task_id:
+    if not isinstance(metadata, dict) or root is None or not task_id:
         return
     from ouroboros.task_custody import task_mail_lock
 
@@ -563,6 +635,9 @@ def follow_loop_admission(ctx: Any, accepting: bool) -> None:
             return
         with task_mail_lock(root, task_id) as locked:
             row = json.loads(path.read_text(encoding="utf-8"))
+            if not (isinstance(metadata.get("presence"), dict)
+                    or str(row.get("conversation_key") or "").startswith(OWNER_CONVERSATION)):
+                return
             attempt = task_attempt({"_attempt": getattr(ctx, "task_attempt", None)}) if "attempt" in row else None
             if not _own_row(row, attempt) or bool(row.get("accepting")) is bool(accepting):
                 return

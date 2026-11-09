@@ -408,6 +408,11 @@ def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str
     return rendered
 
 
+def outline_keeps_summary(note_type: Any) -> bool:
+    """Whether the outline keeps a note's summary (a person's note does); the receipt reads the same rule."""
+    return str(note_type or "").strip().casefold() == PERSON_TYPE
+
+
 def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: str = "", *,
                              scope: str = "global") -> str:
     """The index at a coarser resolution, never a selection: every active note keeps its line.
@@ -423,7 +428,7 @@ def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: s
         topic, title = str(row["topic"]), str(row.get("title") or row["topic"]).strip()
         line = f"- {topic}" + (f" — {_label(title)}" if title and title != topic else "")
         summary = row.get("summary")
-        if str(row.get("type") or "").strip().casefold() == PERSON_TYPE and isinstance(summary, str) and summary.strip():
+        if outline_keeps_summary(row.get("type")) and isinstance(summary, str) and summary.strip():
             line += "\n" + "\n".join("  " + part for part in summary.splitlines())
         if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
             line += " (source metadata unavailable; read the original note)"

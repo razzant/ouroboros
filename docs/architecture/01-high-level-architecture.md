@@ -54,7 +54,7 @@ supervisor/ — background thread inside server.py (§5)
   queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported through `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
   queue_publication.py — marks under Q; the tick publishes outside Q by revision (§5)
   cognitive_operations.py — operation leases and typed wait marks (`wait_for_tasks` picks a responsible parent) for silence attention and reply preparation; no durable ledger (§6)
-  silence_attention.py — silence episodes, their mail and one related diagnostic (§5)
+  silence_attention.py — silence episodes and their mail to the source and one waiting ancestor (§5)
   task_model_wait.py — live model-wait projection with quota-clock reads for liveness (§6 Quota and auth waits)
   task_admission.py — token-owned reservations fence duplicate ingress ids before Project, workspace and attachment effects (§5)
   task_lifecycle.py — the one settle owner of durable cancel intents; `sweep_cancel_intents`; root-budget admission fence (§5; §10 invariant 14)
@@ -115,9 +115,9 @@ ouroboros/ — agent core and shared runtime (§6)
   process_interpreters.py — Python and Node resolvers for the process launch surfaces (§2; CLI / Headless Boundary below)
   post_task_checkpoint.py — root phase/cost and saved late-work Pause (§6)
   terminal_projection.py, terminal_time.py — cognition-free settled-result projection and durable Main delivery; per-attempt end time (§3 Main rows; §6 Post-task work)
-  presence_admission.py, presence_context.py, presence_authority.py, presence_capabilities.py, presence_bindings.py — connector events resolved to a place, the focus metadata and its FOCUS assignment; frozen readers: old task ceilings and old bindings stay decodable for retained work and the one-time place migration (§12)
+  presence_admission.py, presence_context.py, presence_message_facts.py, presence_authority.py, presence_capabilities.py, presence_bindings.py — connector events resolved to a place, the focus metadata, its FOCUS assignment and message facts; frozen readers of old task ceilings and bindings (§12)
   place_intake.py, place_reply.py, place_projection.py, places_migration.py, presence_runner.py, presence_continuation.py, presence_observations.py, presence_delivery.py, presence_history.py, presence_recovery.py, presence_owner_contact.py, presence_carrier.py, presence_executions.py — model-free attention after capture, the automatic reply's Silent/Safety boundary, owner-facing place views, binding → place import; focus turns: conversation serialization, continuation, observations, receipts, retained facts, private Main contact, the body's carrier and the Host's waiters (§12)
-  places.py, conversation_lease.py, own_sends.py — the host place record (state, wake list, notes, owner accounts, folder, model), one author per place conversation with the physical conversation bound, and my posts as an account by provider id (§12)
+  places.py, conversation_lease.py, own_sends.py — the host place record (state, wake list, notes, owner accounts, folder, model) and circles, one author per place conversation with the physical conversation bound, and my posts as an account by provider id (§12)
   dialogue_provenance.py — exact transport-provenance rendering for history, memory and consolidation
   extension_companion.py, extension_reconcile_queue.py — host-supervised companion processes for transport skills; durable worker→server reconcile markers (§12; §13)
   event_bus.py — typed in-process event bus for skill subscriptions
@@ -156,7 +156,6 @@ ouroboros/ — agent core and shared runtime (§6)
   owner_wait.py — cognition serialization, native waits, acknowledged restart handoffs (§5, §6)
   model_sleep.py, model_detach.py, sleep_custody.py, native_task_wait.py — warm/cold sleep, same-id `continue_in_background`, body acceptance (§6)
   task_carrier.py — an attempt's origin (`kind`) and carrier (`lane`, `executor`) (§5)
-  work_diagnostics.py — diagnostic source binding, controls and revocation (§5)
   budget_pause.py, tool_custody.py — exact pause/Resume, invocation futures and durable residuals (§6)
   owner_pause.py, control_actor.py — whole-tree Pause fence, launch gate, per-attempt review episode, retained-member selection, mind-control attribution (§6 Owner Pause)
   review_pause.py, review_waiting.py, ouroboros/tools/review_collection.py — review custody, selected wakes, delivery cursors; collection by reference (§6)
@@ -341,7 +340,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_repair_admission.py — selected-skill development admission against an immutable `base_content_hash`; no long shell lock or rollback (§6 Skills and extensions)
   skill_owner_attestation.py — Skip review / Turn on anyway: the owner accepts exact bytes without LLM review (§13)
   skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_builtin.py, skill_discovery_reuse.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; the built-in source; exact discovery reuse (§13)
-  skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_client.py, skill_publish_eligibility.py, skill_publish_destination.py — Publication leaves: captured bytes, Betterleaks evidence, attempt/receipt, token HTTPS transport, author authority, destination and hub entry (§6 Skill publication)
+  skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_client.py, skill_publish_eligibility.py, skill_publish_destination.py — Publication leaves: captured bytes, Betterleaks evidence, attempt/receipt, token HTTPS transport, author authority, destination, hub entry, comparison (§6 Skill publication)
   skill_review_status.py — The review gate → `executable_review` (§13): verdicts, Advisory author acceptance, install-basis and owner facts
   skill_review.py — Skill review, the lifecycle verb: preflight and admission, then one `review_change(subject="skill")` wave projected into `review.json` (§13)
   skill_review_packs.py, skill_review_output.py — the payload a seat reads (binary policy, frozen copy) and the review block
@@ -390,7 +389,7 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility (the sets live in tool_capabilities.py)
-  tool_effects.py, place_guard.py — connector-declared effects (read · message · gesture · write), the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes beside a send
+  tool_effects.py, place_guard.py — connector-declared effects (read · message · gesture · write), the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes and circle words beside a send
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
   browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
   chromium_runtime.py — Pinned Chromium supply and sandbox selection (§6)
@@ -549,7 +548,7 @@ ouroboros/ — agent core and shared runtime (§6)
     governance_context.py — shared governance tiers for every change-review seat, preflight and deep review; every omitted inline body has an explicit disposition (§6 Governance delivery)
     query_code.py — Read-only code navigation (Code navigation below)
     edit_ops.py — `apply_patch` and `edit_batch` with the shared syntax check and unified diff backing write_file; the diff pulse in every system-repository edit result
-    media.py — `extract_pdf_text` (`ocr_pdf` alias; text layer, not OCR), `youtube_transcript`, `extract_video_frames` (dependency-optional, typed capability envelopes; a new `artifact_store/video_frames` directory per call)
+    media.py — `extract_pdf_text` (`ocr_pdf` alias; text layer, not OCR), `youtube_transcript`, `extract_video_frames`, `read_archive` (archive_reader.py: ZIP listing, one member's text, nothing extracted)
     verify.py — Independent checks through the shared pre-exec guards, not a process-command tool by design (§6 Tool capability and execution)
     review_helpers.py — shared review helpers: governance-doc loading, checklist slicing, the prompt-size SSOT, the density-calibrated input cap
     review_binary_context.py — Staged/parent Git object metadata for review packs
@@ -567,7 +566,7 @@ ouroboros/ — agent core and shared runtime (§6)
     skill_publish.py, skill_source_tools.py — PR-receipt-gated publish; source/search/install/update tools
     skill_preflight.py — Read-only syntax/schema preflight; widget entries keep classic grammar unless explicitly ESM (§3)
     project_journal.py — journal/workpad read and write, `update_focus`, journal_tail_digest; foreign project reads for roots, foreign writes refused; `mirror_tree_coordination_to_journal`
-    presence.py — configure_presence (the place verb: list, inspect, state, wakes, notes, folder, model, owner accounts) and presence_cancel_work
+    presence.py — configure_presence (the place verb: list, inspect, state, wakes, notes, circles, folder, model, owner accounts) and presence_cancel_work
     task_tree.py — tree_note/tree_read (storage SSOT: task_tree_ledger.py)
     followup.py — the agent's two schedule tools over `state/scheduled_tasks.json`: `manage_schedules` (list/get; root-only audited update/disable/delete/restore) and `schedule_followup` (`notify=true` leaves a note)
     join_ledger.py — direct children's tree-note dispositions, peek_task, discard_child_result (§6)

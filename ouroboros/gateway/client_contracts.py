@@ -348,6 +348,7 @@ class RecentWake(_RecentWakeIdentity):
     chat_id: Optional[int]
     cause: Literal["own", "focus"]
     place_label: str
+    place_id: NotRequired[str]  # a focus wake's place, for its sheet
     conversation: str
     started_at: Optional[str]
     first_reply_at: NotRequired[Optional[str]]
@@ -384,12 +385,62 @@ class RecentWakesView(TypedDict):
 
 
 class PlaceConnectRequest(TypedDict):
-    """Connect Silent; ids default to empty. An instance label is prefixed with the service."""
+    """Connect Silent; ids default to empty. An instance label is prefixed with the service. An Add's note,
+    description and circle_id land with a new place only; a connected one answers 409 place_exists."""
 
     connector: str
     account_id: NotRequired[str]
     conversation_id: NotRequired[str]
     label: NotRequired[str]
+    note: NotRequired[str]
+    description: NotRequired[str]
+    circle_id: NotRequired[str]
+
+
+class PlaceCircleChoice(TypedDict):
+    """The circle a place is in and who placed it there; the words and their author are the circle's."""
+
+    circle_id: str
+    placed_by: str
+    placed_at: str
+
+
+class PlaceDescription(TypedDict):
+    """A short purpose line under the place's name: never a rule or permission."""
+
+    text: str
+    author: str
+    at: str
+
+
+class CircleSummary(TypedDict):
+    """One circle, named once per list: its whole words and who wrote them."""
+
+    circle_id: str
+    name: str
+    text: str
+    text_author: str
+    text_at: str
+    revision: int
+
+
+class CircleCreateRequest(TypedDict):
+    """A new circle last in the order; its words are the owner's."""
+
+    name: str
+    text: NotRequired[str]
+
+
+class CircleUpdateRequest(TypedDict, total=False):
+    """Rename or reword; expected_revision compares the circle's revision before writing."""
+
+    name: str
+    text: str
+    expected_revision: int
+
+
+class CircleDeleteRequest(TypedDict, total=False):
+    expected_revision: int
 
 
 class PlaceIcon(TypedDict, total=False):
@@ -415,6 +466,7 @@ class PlaceSummary(TypedDict):
     conversation_id: str
     label: str
     state: Literal["active", "silent", "paused"]
+    only_hears: NotRequired[bool]  # derived per read: true while consciousness is off (or Panic) and the place not Paused
     wakes: List[Dict[str, str]]
     notes: List[Dict[str, str]]
     owner_accounts: List[Dict[str, str]]
@@ -443,6 +495,8 @@ class PlaceSummary(TypedDict):
     spent_24h_usd: Optional[float]
     account_candidates: List[Dict[str, Any]]
     shared_owner_accounts: List[Dict[str, str]]  # confirmed in another place of this bot/app; count here
+    circle: Optional[PlaceCircleChoice]
+    description: Optional[PlaceDescription]
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):
@@ -493,6 +547,8 @@ class PlaceUpdateRequest(TypedDict, total=False):
     model: str
     confirm_owner_account: PlaceOwnerAccountRequest
     revoke_owner_account: str
+    circle_id: str  # "" takes it out of its circle
+    description: str  # "" clears it
     expected_revision: int
 
 
@@ -777,7 +833,8 @@ __all__ = [
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
-    "PlaceOwnerAccountRequest", "PlaceUpdateRequest",
+    "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",
+    "CircleSummary", "CircleCreateRequest", "CircleUpdateRequest", "CircleDeleteRequest",
     "SettingsSecretRequest", "SettingsSecretResponse", "ChatUploadDeleteRequest", "ChatUploadDeleteResponse",
     "ProjectListResponse", "ProjectCreateResponse", "ProjectUpdateRequest", "ProjectUpdateResponse",
     "ProjectFromTaskRequest", "ProjectTaskBinding", "ProjectFromTaskResponse",

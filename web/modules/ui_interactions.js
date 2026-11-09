@@ -23,7 +23,8 @@ function focusable(root) {
  * Tab presses are intercepted, leaving native editing/radio behavior intact.
  * onEscape belongs to the caller's result contract (confirm/input/Project).
  * `preventScroll` returns focus without scrolling its container, for an opener
- * in a scrolled feed whose place must not move.
+ * in a scrolled feed whose place must not move. `returnFocus` may be a function
+ * read at close, for an opener a repaint may replace while the dialog is open.
  */
 export function bindDialogFocus(dialog, {
     initialFocus,
@@ -65,7 +66,8 @@ export function bindDialogFocus(dialog, {
         dialog.removeEventListener('keydown', onKey);
         const ownedFocus = dialog.contains(doc.activeElement) || doc.activeElement === doc.body;
         if (originalTabIndex === null) dialog.removeAttribute('tabindex');
-        if (restoreFocus && ownedFocus && returnFocus && available(returnFocus)) returnFocus.focus({ preventScroll });
+        const target = typeof returnFocus === 'function' ? returnFocus() : returnFocus;
+        if (restoreFocus && ownedFocus && target && available(target)) target.focus({ preventScroll });
     };
 }
 

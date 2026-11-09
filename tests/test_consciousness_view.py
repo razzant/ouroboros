@@ -66,6 +66,44 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
 
 
+@pytest.mark.parametrize("brief,detail", [
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
+    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
+    ([{"state": "paused"}], "Off: no own wakes."),
+    (None, "Off: no own wakes."),
+    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
+])
+def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+    """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
+    described = view.describe_consciousness_state(snapshot, False)
+    assert (described["status"], described["detail"]) == ("disabled", detail)
+    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+
+
+def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):
+    """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
+    circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    monkeypatch.setattr(places, "place_room_index", lambda *_a: [], raising=False)
+    rows = [places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id=cid, label=label)
+            for cid, label in (("a", "Team chat"), ("b", "Team mail"), ("c", "Family"))]
+    team = places.create_circle(tmp_path, name="Team", text="Shared words, line one.\nLine two.", author="owner")
+    places.edit_place(tmp_path, rows[0].place_id, "set_circle", author="owner", circle_id=team["circle_id"])
+    places.edit_place(tmp_path, rows[1].place_id, "set_circle", author="ouroboros", circle_id=team["circle_id"])
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert text.count("Shared words, line one.") == 1 and "\n    words (owner): Line two." in text
+    assert f'circle Team [{team["circle_id"]}]\n    words (owner): Shared words, line one.' in text
+    team_mail = next(line for line in text.splitlines() if "Team mail" in line)
+    team_chat = next(line for line in text.splitlines() if "Team chat" in line)
+    assert "you placed it in this circle" in team_mail and "you placed it" not in team_chat
+    # My human's words there still restrict; only consent needs their placement (prompts/SAFETY.md).
+    assert "your human's words there still restrict it, but consent needs their placement" in team_mail
+    assert "context" not in team_mail
+    assert text.index("not in a circle:") < text.index("Family") and text.index("Team chat") < text.index("not in a circle:")
+
+
 def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
     places.connect_place(tmp_path, connector="bridge", provider="chat")
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
@@ -501,6 +539,7 @@ def test_durable_automatic_release_and_receipts_survive_result_updates(tmp_path,
     assert row["conversation"] == "chat:a:r" and row["chat_id"] == -7
     labelled, = view.recent_wakes(tmp_path, [{"place_id": "mail", "label": "Inbox"}])
     assert labelled["cause"] == "focus" and labelled["place_label"] == "Inbox"
+    assert labelled["place_id"] == "mail", "the Shade's door opens this place's sheet; an own wake carries none"
 
 
 def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):

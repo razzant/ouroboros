@@ -155,3 +155,68 @@ def test_the_registered_finish_schema_does_not_claim_an_owner_only_reader(tmp_pa
     assert "a root's owner reads it as your reply" not in answer
     assert "a child's parent reads it as your report" in answer
     assert "the conversation a Presence root answers" in answer
+
+
+GUIDANCE = "## This place's guidance now (host-authored facts)"
+
+
+def test_place_guidance_now_reaches_scheduled_roots_never_inline_or_carrierless_ones(fired_context, monkeypatch):
+    """The place's notes and circle words as stored now reach a fired promise's first request, labelled by store
+    revisions; the inline turn keeps its FOCUS frame alone, and a child or a root without a reply carrier gets none."""
+    from supervisor.queue import check_scheduled_tasks
+    from ouroboros import places as p
+
+    root, pending, first_request = fired_context
+    registry, turn, binding = _turn(root, "team", "k1")
+    [place] = p.load_places(root)
+    circle = p.create_circle(root, name="Team", text="CIRCLE NOW: help by the facts.", author="owner")
+    p.edit_place(root, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "NOTE NOW: answer in English."}), ("set_circle", {"circle_id": circle["circle_id"]})])
+    inline = first_request(turn)
+    assert GUIDANCE not in inline and "CIRCLE NOW" not in inline  # admitted before: its frame is the event's
+    _due_promise(registry, "Check back on the report")
+    check_scheduled_tasks()
+    [fired] = pending
+    scheduled = first_request(fired)
+    section = scheduled.split(GUIDANCE, 1)[1].split("##", 1)[0]
+    stored = p.get_place(root, place.place_id)
+    assert scheduled.count(GUIDANCE) == 1 and "NOTE NOW" in section and "CIRCLE NOW" in section
+    assert f"place revision {stored.revision}" in section and f"circle revision {circle['revision']}" in section
+    child = {"id": "child-1", "delegation_role": "subagent", "parent_task_id": turn["id"], "root_task_id": turn["id"],
+             "type": "task", "text": "Count the rows", "metadata": {"presence_binding_authority": {"binding_id": binding}}}
+    lost = json.loads(json.dumps(turn["metadata"]["presence"]))
+    lost["event"].pop("conversation_key")
+    for task in (child, {"id": "root-x", "type": "task", "text": "Report", "metadata": {"presence": lost}}):
+        assert GUIDANCE not in first_request(task)
+
+
+@pytest.mark.parametrize("route", ["routed", "unknown", "routeless", "inline"])
+def test_place_guidance_follows_the_computed_route_and_the_inline_fact(tmp_path, route):
+    from ouroboros import places as p
+    from ouroboros.presence_context import build_presence_context_section
+
+    place = p.connect_place(tmp_path, connector="bridge", provider="chat", account_id="team")
+    p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="NOTE NOW")
+    value = {"place_id": place.place_id, "event": {"provider": "chat", "account_id": "team", "conversation_id": "k1"}}
+    section = build_presence_context_section(
+        tmp_path, value, "root-y", answers_conversation=route in {"routed", "unknown", "inline"},
+        unsettled="its source has not ended" if route == "unknown" else "",
+        routeless="it carries no place conversation" if route == "routeless" else "", inline=route == "inline")
+    assert (GUIDANCE in section) is (route in {"routed", "unknown"}), route
+
+
+def test_place_guidance_reads_the_canonical_root_and_names_an_absent_or_unreadable_place(tmp_path):
+    from ouroboros import places as p
+    from ouroboros.presence_context import build_presence_context_section
+
+    canonical, fork = tmp_path / "canonical", tmp_path / "fork"
+    place = p.connect_place(canonical, connector="bridge", provider="chat", account_id="team")
+    p.edit_place(canonical, place.place_id, "add_note", author="owner", text="CANONICAL NOTE")
+    value = {"place_id": place.place_id, "event": {"provider": "chat", "account_id": "team", "conversation_id": "k1"}}
+    forked = build_presence_context_section(fork, value, "root-y", status_root=canonical, answers_conversation=True)
+    assert "CANONICAL NOTE" in forked and not p.places_path(fork).exists()
+    absent = build_presence_context_section(canonical, {**value, "place_id": "gone"}, "root-y", answers_conversation=True)
+    assert "The place gone is not connected now" in absent.split(GUIDANCE, 1)[1]
+    p.places_path(canonical).write_text("{broken", encoding="utf-8")
+    unreadable = build_presence_context_section(canonical, value, "root-y", answers_conversation=True)
+    assert "Unknown: the place records cannot be read now" in unreadable.split(GUIDANCE, 1)[1]

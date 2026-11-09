@@ -3249,6 +3249,24 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     display: none;
 }
 
+/* Helpers' outcomes belong to their root's Details (owner 09.11, A): under a FINISHED root that is collapsed, a finished
+   helper card folds away (the Details disclosure's accessible name still counts "N children"); a helper still running,
+   or one with a running helper of its own, stays in view (the live picture of the work), and an open root shows every
+   helper under its facts and timeline as before. The same rule holds at every depth. A helper folds as the root settles,
+   at its own settle when it finishes later, or when the last running helper it holds finishes. */
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents > .chat-live-card.subagent[data-finished="1"]:not(:has(.chat-live-card[data-finished="0"])) {
+    display: none;
+}
+
+/* The folded container keeps no blank band of its own; while a helper stays in view under it, the inset stays. */
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents {
+    margin-block-end: 0;
+}
+
+.chat-live-card[data-finished="1"]:not([data-expanded="1"]) > .chat-subagents:has(> .chat-live-card.subagent[data-finished="0"], > .chat-live-card.subagent .chat-live-card[data-finished="0"]) {
+    margin-block-end: var(--space-3);
+}
+
 /* The one narrow-column rule: any chat column of 620px or less (a phone, a
    narrow Project panel) gives bubbles and root cards its full width, without the
    wide-screen gutters. It is owned by the COLUMN, not the viewport, and stays
@@ -9984,44 +10002,40 @@ body.keyboard-open .project-panel {
 .chat-quiz-option-chosen-name {
     position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
-/* Free answer: the owner's own words when no offered option fits, in one frame that holds its Send as the composer
-   holds its own. The frame wears the field's hairline and, while the words have focus, the field focus idiom; a card
-   too narrow for both gives Send its own line inside the frame, at its end. */
+/* Free answer: the owner's own words when no offered option fits. The textarea is the visible field frame and Send
+   follows it as a separate action row; the shared wrapper remains so drafts, feedback and settlement keep one owner. */
 .chat-quiz-comment-box {
     display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: flex-end;
+    flex-direction: column;
+    align-items: stretch;
     gap: var(--space-2);
-    padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-    border: 1px solid var(--field-border);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    transition: border-color 0.12s ease, box-shadow 0.12s ease;
-}
-.chat-quiz-comment-box:has(> .chat-quiz-comment:focus) {
-    border-color: var(--focus-accent-border);
-    box-shadow: 0 0 0 3px var(--focus-accent-ring);
+    padding: 0;
 }
 /* The words grow to one cap, then scroll (chat_input_sizing.js picks the engine's content sizing, else writes the
    measured height); two lines at rest. */
 .chat-quiz-comment {
-    flex: 1 1 16em;
+    flex: none;
+    width: 100%;
     min-width: 0;
     box-sizing: border-box;
     height: var(--chat-input-height, auto);
     min-height: calc(2em * var(--line-body) + 12px);  /* two lines of its own type: a finger's field reads at 16px */
     max-height: var(--message-field-max-height);
-    padding: 6px 0;
-    border: 0;
-    border-radius: 0;
+    padding: 6px var(--space-3);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
     outline: none;
-    background: transparent;
+    background: var(--surface-tray);
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--type-body);
     line-height: var(--line-body, 1.5);
     resize: none;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.chat-quiz-comment:focus {
+    border-color: var(--focus-accent-border);
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 .chat-quiz-comment[data-sizing="content"] { field-sizing: content; }
 .chat-quiz-comment[data-sizing="fit"] { overflow-y: hidden; }
@@ -10032,6 +10046,8 @@ body.keyboard-open .project-panel {
    lies flat. */
 .chat-quiz-send {
     flex: none;
+    align-self: flex-end;
+    margin-inline-end: var(--space-1);
     height: var(--composer-control-height);
     padding: 0 var(--space-4);
     border: 0;

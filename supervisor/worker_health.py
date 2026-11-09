@@ -268,8 +268,10 @@ def recover_confirmed_dead_worker(job: dict) -> None:
     if task_id and not task:  # no row of its own: a moved Presence turn's carrier died holding its park (#2566)
         from ouroboros.presence_carrier import settle_ended_turn
         settle_ended_turn(task_id)  # its Host waiter, already answered from the queue's custody, settles now
-    if task_id and isinstance(task, dict) and task.get("_presence_turn"):
-        try:  # the dead carrier was a Presence author: its intake fact dies with it
+    from ouroboros.conversation_lease import owner_conversation_key
+
+    if task_id and isinstance(task, dict) and (task.get("_presence_turn") or owner_conversation_key(task)):
+        try:  # the dead carrier was a Presence author or an owner turn's reader: its intake fact dies with it
             from ouroboros.conversation_lease import close_author_intake
 
             close_author_intake(root, task_id)

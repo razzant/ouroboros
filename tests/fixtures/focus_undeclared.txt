@@ -12,6 +12,6 @@ Place facts (context only):
 - notes with their authors: []
 - what woke you, with its author: [{"fact": "mention", "author": "connector"}]
 - the person (host facts): {"platform_actor_id": "person", "display_name": "", "owner_confirmed": false, "is_bot": false}
-- work already started here: Already started: task1
+- work started here: Already started: task1
 - allowance (last 24 h): {"status": "available", "remaining_usd": 2}
-- working folder (an address): not selected
+- working folder (address): not selected

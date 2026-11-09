@@ -832,7 +832,7 @@ calls and runtime behaviours:
 | `tool` | The skill may call `register_tool`. |
 | `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
 | `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
-| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; opening one needs its place, `presence` grant and a `/presence/turn` event. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
@@ -922,7 +922,9 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
+values are untouched.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
@@ -1036,15 +1038,17 @@ dropped; a nonempty list with no valid rows is unavailable, not known empty.
 | Source response | Meaning in Connect |
 | --- | --- |
 | `connect` absent | No instance chooser is offered; the connector's declared default scope remains available. |
-| Known nonempty list | Show valid instances and mark exact connected identities as “Connected · Open”. |
+| Known nonempty list | Show valid instances and mark exact connected identities “Connected”, chosen rather than connected again. |
 | `connect: []` | Known empty: “None offered yet”, with the declared connector settings door (Skills if none). |
-| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector with no live source asks to be turned on. |
+| Failed read, malformed response/list, or all rows invalid | Unavailable: keep the gap visible and offer “Try again”; do not invent an instance. A connector that is off asks to be turned on. |
 
-The host's explicit “Whole account” action remains available in all four states; it is independent of the
-instance list and posts only `connector`. Selecting an instance posts its string ids and label through
+Where shows the host's explicit “Whole account” action in all four states; it is independent of the instance
+list and posts only `connector`. Add skips Where only for a ready connector with neither a list nor a place yet,
+connecting its whole account at once. Selecting an instance posts its string ids and label through
 `POST /api/places`; the saved title is `<Service> · <label>`. A new identity starts Silent in one atomic write;
-repeat Connect preserves state, label, wakes and notes. Several identities can coexist without splitting or
-relabeling an existing broad place. Connectors remain listed with a place count and “Connect another”.
+a plain repeat Connect preserves state, label, wakes and notes, and one carrying an Add's words is refused
+(`place_exists`), writing nothing. Several identities can coexist without splitting or relabeling an existing
+broad place. Connectors remain listed with a place count and “Choose where”.
 
 A `provides: place` contribution may include `facts`: core names from `/identity.presence_wake_facts`,
 labelled core kinds `{id: "direct_message", label: "Mail addressed to you"}`, or connector-defined
@@ -1083,7 +1087,7 @@ A name or alias the owner wants to be called by is a connector signal: declare
 (one entry per line), match whole words case-insensitively in the connector, and report the fact on
 the event. Core stores the owner's choice as a wake item and matches membership only. The reference
 implementation is [email-presence 0.7.0](https://github.com/razzant/OuroborosHub/tree/main/skills/email-presence);
-[telegram-bot 0.6.3](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second (lane F1T, in flight).
+[telegram-bot](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second.
 
 A place connector reports observations; the host decides attention. While running and
 authenticated, report every supported event within the connected place's granted
@@ -1148,7 +1152,7 @@ Send identity and this actor fact only after the host advertises `presence_ident
 ### Places and focus transport ingress
 
 A reviewed connector declares `permissions: [presence]` and `provides: place`.
-The owner connects it in Consciousness > Places or through `configure_presence`.
+The owner adds it in Circles or through `configure_presence`.
 A place stores its state (Active, Silent or Paused), authored wake facts and notes,
 confirmed owner accounts, working-folder address and model choice. Connector updates
 never replace those choices. The old behavior skill's `presence:` block is migration
@@ -1210,8 +1214,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   provider marks the message as mentioning, with the name the connector resolved (null when it could not) and
   whether the id is the account the connector writes as. Without it the host reads
   `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
-  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
-  names the focus's own account when the event carries no credential identity.
+  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also names the
+  focus's own account when the event carries no credential identity.
 - Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, authors?, data:
   {messages: [...], complete?}}`, the conversation as the provider served it at capture. Optional `authors`
   is the connector's directory of the snapshot's authors, `[{"id": str, "name": str|null, "is_self": bool}]`,
@@ -1219,17 +1223,32 @@ Use the connector's ordinary content-hash-bound skill token for:
   mentioned ids through it when `message.mentions` is absent). The frame renders each
   message as author, a `[you]` mark, a `[this message]` mark on the waking message, its time and text;
   per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
-  `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
-  `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
-  `text` and an id (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is
-  already bounded, and the frame never cuts it.
-- Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
-  (a forward, or another person's text the event copies under the sender). The host never records such an event as
-  its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
-  (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on, and a Continue of that work
-  carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
-  Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
-  order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
+  `actor`/`author` mapping's `platform_actor_id`/`id`), a name (`user_profile`/`bot_profile`
+  `real_name`/`display_name`/`name`, `author_name`, `display_name`, `username`, or the nested mapping's
+  `display_name`/`username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the `text` and an id
+  (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is already bounded, and the
+  frame never cuts it.
+- Optional `event.message.attachments[]`, one record per declared file (name `file_name`/`name`/`filename`, type
+  `mime_type`/`content_type`/`mimetype`/`kind`, positive `file_size`/`size`): `status` `staged` (also when absent;
+  only these go in `staged_files`), `too_large`, `failed`, `unsupported` or another word, with a factual
+  `note`/`reason`/`stage_error` (else email's `attachment_stage_note`). Without `status`, `content_available: false`
+  reads as `failed` (`unsupported` for `stage_error: unsupported_mime_type`). Optional `event.message.non_text`:
+  `[{"kind": str, "description": str}]` (sticker, poll, location: neither words nor a file); past 4000 characters a
+  description is cut and counted, naming where it stays whole. The focus (in its own block) and history state these
+  as connector facts beside exact words, never quotable as speech. An event of only these facts is never empty.
+- Optional message facts: `reply_to_message` (`message_id`; author `from`/`sender_chat` with
+  `first_name`/`last_name`/`title`/`display_name`/`name`, `username`, `id`; `text`/`caption`; `forward_origin`;
+  `attachments[].file_name`), `reply_to_message_id`, `quote.text` (alone: author not recorded), `media_group_id`
+  with integer `media_group_position`, and `entities`/`caption_entities` `text_link` entries (UTF-16
+  `offset`/`length` into `event.text`, `url`), rendered without changing `event.text`.
+- Optional `event.message.forward_origin` (any non-empty value; a string as given, or a mapping naming `sender_user`,
+  `sender_user_name`, `sender_chat`/`chat`, `author_signature`, epoch `date`): another author's words (a forward, or
+  another person's text the event copies under the sender), never recorded as the sender's own;
+  `is_automatic_forward: true` marks a channel post opening its comment thread. A confirmed owner account's message
+  is their words by provenance (said where others can hear) at a turn's opening, mid-turn and when a focus hands it
+  on, whole and citable after a Continue; a forward of it is not, though its sender stays their confirmed account
+  (history, the Safety occasion). Whom words address and whether they ask for work is the mind's reading: an order
+  exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
@@ -2822,27 +2841,27 @@ Publish never downloads the scanner automatically. Typed failures return the
 completed stage, external effects, and a repair hint; Ouroboros decides whether
 to inspect, repair, re-review, retry, clean up, or stop.
 
-A successful publication also writes a durable local receipt to
-`data/state/skills/<name>/ouroboroshub.json` (`published` section: slug,
-version, content hash, repository, PR number/url, timestamp). The receipt is
-best-effort: a write failure is disclosed as `publication_recorded: false` in
-the tool result and never cancels the real PR. The skill's details show it as
-quiet submission history: the submitted version (not the current local one),
-the PR link and whether the local files now differ from the submitted copy. It
-is history, not a status: it never claims that the PR merged and never gates an
-action. The receipt survives uninstall (including the startup cleanup of
-uninstalled state) and reinstall; a republish overwrites it, and an explicit
-**Delete** of a local skill removes it with the rest of that skill's state.
+Successful publication best-effort writes a durable `published` receipt in
+`data/state/skills/<name>/ouroboroshub.json`: slug, submitted version, content
+hash, repository, PR number/URL and timestamp. Write failure is disclosed as
+`publication_recorded: false` without cancelling the real PR. Details show quiet
+submission history: that version (not the local one), the PR link and whether
+local files differ. It never claims merge or gates actions. Uninstall (including
+startup cleanup) and reinstall keep it; republishing replaces it; explicit
+**Delete** removes it with the skill's state.
 
-Forgetting the record in that history deliberately clears the local receipt.
-Nothing else needs it: the installed files, review and grants stay, the GitHub
-PR is not closed or changed, and installs and updates never wait for it. It
-clears the receipt shown; if another publication replaced it, refresh first.
+Forget clears only the displayed receipt; refresh if another publication replaced
+it. Installed files, review, grants and the GitHub PR stay unchanged; installs
+and updates never wait for this history.
 
 For an update of a catalog entry, the tool result and PR body name both the
-current catalog version and the proposed version. Versions are opaque strings:
-an older-looking or non-semantic version is allowed, while an identical version
-still needs to change before publishing an update.
+current catalog version and the proposed version; versions are opaque strings,
+so an older-looking or non-semantic one is allowed and only an identical one is
+refused. Before anything is written, the skill's files and entry at the
+destination are compared with the release its install record names for that
+folder: what the destination changed since, or would lose without such a
+release, is replaced only on Ouroboros's decision bound to that comparison,
+which the PR records.
 
 Publication succeeds only when the task records a validated pull-request
 receipt in the destination repository for this exact skill. A branch,

@@ -126,12 +126,13 @@ def test_a_malformed_anchor_is_refused_and_the_view_names_the_action(tmp_path):
     assert mark(ctx, "Check the exit code.", {"tool": "run_command", "text": "pytest"})["ok"]
     active = ChronicleStore(tmp_path).active_marks("1")
     assert active[-1]["anchor"] == {"tool": "run_command", "text": "pytest"}
-    assert "meets me at run_command with 'pytest'" in _memory_read(ctx, room_id="1")
+    assert "also shown after a task's first call matching run_command with 'pytest'" in _memory_read(ctx, room_id="1")
     shown = _marks_text([{"id": "m1", "scope": "room", "room": "Main", "text": "Check the exit code.", "by": "root",
                           "date": "2026-10-23", "target": "a note", "quote": "", "anchor": "run_command with 'pytest'"},
                          {"id": "m2", "scope": "global", "room": "Main", "text": "Plain.", "by": "root",
                           "date": "2026-10-23", "target": "a note", "quote": "", "anchor": ""}])
-    assert "meets me at run_command with 'pytest'" in shown and shown.count("meets me at") == 1
+    assert ("also shown after a task's first call matching run_command with 'pytest'" in shown
+            and shown.count("also shown after a task's first call matching") == 1 and "meets me at" not in shown)
 
 
 def _probe_registry(tmp_path, monkeypatch, ctx):

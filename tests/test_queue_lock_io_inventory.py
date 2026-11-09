@@ -25,6 +25,7 @@ import pytest
 
 from supervisor import queue, queue_publication
 from supervisor.loop_load import code_place
+from tests._main_followup import main as main
 from tests.test_conversation_lane_presence import lane as lane  # noqa: F401 -- fixture
 from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
 
@@ -274,6 +275,24 @@ def test_no_io_under_q_beyond_the_named_inventory(lane, tmp_path, monkeypatch, a
         sample, stack = _STATE["samples"].get(key, ("", ""))
         print(f"I/O under Q: {key} {sample}\n{stack}")  # the failure names the path and the stack too
     assert not drift, drift
+
+
+def test_a_main_follow_up_reaches_its_owner_turn_with_no_io_under_q(main, audited, store_seams):
+    """Main's follow-up through the real intake: Q spans the row judged and its fences only; the mailbox reads, the
+    mail lock's wait and the append run outside it, so the drive adds no site to the inventory."""
+    from tests._main_followup import _delivered, _say, _turns
+
+    _tick_armed()
+    _say(main.bridge, main.ctx, "Send it to our chat", "cm-audit-first")
+    (turn,) = _turns()
+    _STATE["seen"].clear()  # the first turn's admission is _drive_owner_turn's; this drive is the follow-up
+    _say(main.bridge, main.ctx, "This chat", "cm-audit-second")
+    assert [ack["target"] for ack in _delivered(main.bridge, "cm-audit-second")] == [turn["task"]["id"]]
+    unnamed = sorted(set(audited) - set(ALLOWED))
+    for key in unnamed:
+        sample, stack = _STATE["samples"].get(key, ("", ""))
+        print(f"I/O under Q: {key} {sample}\n{stack}")
+    assert not unnamed, unnamed
 
 
 def test_the_hook_sees_io_under_q_and_names_the_site(audited):

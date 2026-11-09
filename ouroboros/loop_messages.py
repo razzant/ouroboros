@@ -280,8 +280,10 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     if words := place_confirmed_words(focus_owner_now(ctx), presence.get("observed_text"), event.get("message")):
         # A place event from an account its connector account confirms now: my human's words, said where others can
         # hear, beside the frame as provenance (outside OWNER_SOURCES); an order exists only through a verified cite.
+        from ouroboros.presence_message_facts import event_reader  # this turn's record keeps the replied words whole
         _loop()._record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, **place_row_facts(
-            event.get("conversation_id"), event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
+            event.get("conversation_id"), event.get("message"), source=event_reader(getattr(ctx, "task_id", ""))),
+            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             stamped = run_origin({"metadata": metadata})["owner_ingress"]

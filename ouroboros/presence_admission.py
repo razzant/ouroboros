@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from ouroboros.places import Place, PlaceError, resolve_place
+from ouroboros.places import Place, PlaceError, place_records, resolve_place
 from ouroboros.presence_bindings import PresenceEndpoint
 
 
@@ -35,27 +35,30 @@ class PresenceAdmission:
     workspace_root: str = ""
     place: Place | None = None
     allowance: Mapping[str, Any] | None = None
+    circle: Mapping[str, Any] | None = None  # the circle words the place inherited at admission, with both origins
 
 
 def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",
                         global_max_rounds: int | None = None, repo_path: str | None = None,
                         provider: str = "", account_id: str = "", conversation_id: str = "",
                         thread_id: str = "") -> PresenceAdmission:
-    """Authentication remains the Host's job; this resolves scope, never owner identity."""
+    """Authentication remains the Host's job; this resolves scope, never owner identity. The place and the circle
+    words it inherits come from one read of the place store."""
     try:
+        records = place_records(drive_root)
         if binding_id:
-            from ouroboros.places import load_places
-            place = next((p for p in load_places(drive_root)
+            place = next((p for p in records.places.values()
                           if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
             if place is not None and place.connector != authenticated_transport_skill:
                 raise PresenceAdmissionError("presence_binding_wrong_transport", "binding_id")
         else:
             place = resolve_place(drive_root, connector=authenticated_transport_skill, provider=provider,
-                                  account_id=account_id, conversation_id=conversation_id, thread_id=thread_id)
+                                  account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
+                                  places=records.places.values())
     except PlaceError as exc:
         raise PresenceAdmissionError(exc.code, exc.field, str(exc)) from exc
     if place is None:
-        raise PresenceAdmissionError("place_not_connected", "place", "Connect this place in Consciousness > Places.")
+        raise PresenceAdmissionError("place_not_connected", "place", "Add this place in Circles.")
     if ((provider and place.provider != provider)
             or (place.account_id and account_id and place.account_id != account_id)
             or (place.conversation_id and conversation_id and place.conversation_id != conversation_id)
@@ -68,13 +71,25 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
                              transport_skill=place.connector, origin=origin, destination=destination,
                              instructions="\n\n".join(note.text for note in place.notes),
                              context_topics=place.context_topics, model_slot=place.model,
-                             workspace_root=place.working_folder, place=place)
+                             workspace_root=place.working_folder, place=place,
+                             circle=records.circle_context(place.place_id))
+
+
+def focus_state(drive_root: Path) -> str:
+    """``on``; ``off`` (the owner's switch known Off, or a pending Panic); ``unknown`` (a switch this read cannot
+    know). Intake admits only ``on``; a view claims Off only for ``off``."""
+    from ouroboros.consciousness import panic_blocks_wake
+    from supervisor.state import control_is, control_value, read_state
+    if panic_blocks_wake(drive_root):
+        return "off"
+    projection = read_state(drive_root).projection()
+    if control_is(projection, "bg_consciousness_enabled", True):
+        return "on"
+    return "off" if control_value(projection, "bg_consciousness_enabled")[0] else "unknown"
 
 
 def focus_enabled(drive_root: Path) -> bool:
-    from ouroboros.consciousness import panic_blocks_wake
-    from supervisor.state import control_is, read_state
-    return not panic_blocks_wake(drive_root) and control_is(read_state(drive_root).projection(), "bg_consciousness_enabled", True)
+    return focus_state(drive_root) == "on"
 
 
 def focus_allowance(drive_root: Path) -> dict:

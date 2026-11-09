@@ -595,6 +595,7 @@
  * @property {?number} chat_id
  * @property {'own'|'focus'} cause
  * @property {string} place_label
+ * @property {string=} place_id
  * @property {string} conversation
  * @property {?string} started_at
  * @property {?string=} first_reply_at
@@ -647,6 +648,12 @@
 /** @typedef {import('./place_contract_types.js').PlaceRoomsCoverage} PlaceRoomsCoverage */
 /** @typedef {import('./place_contract_types.js').PlaceRoomsResponse} PlaceRoomsResponse */
 /** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
+/** @typedef {import('./place_contract_types.js').PlaceCircleChoice} PlaceCircleChoice */
+/** @typedef {import('./place_contract_types.js').PlaceDescription} PlaceDescription */
+/** @typedef {import('./place_contract_types.js').CircleSummary} CircleSummary */
+/** @typedef {import('./place_contract_types.js').CircleCreateRequest} CircleCreateRequest */
+/** @typedef {import('./place_contract_types.js').CircleUpdateRequest} CircleUpdateRequest */
+/** @typedef {import('./place_contract_types.js').CircleDeleteRequest} CircleDeleteRequest */
 
 /**
  * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}`, `{mcp_server_id,

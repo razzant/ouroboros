@@ -227,6 +227,25 @@ def _wake_is_control(payload: Dict[str, Any]) -> bool:
     return False
 
 
+def _whole_wake(ctx: Any, payload: Dict[str, Any]) -> Any:
+    """The wake a receipt carries whole before its ACK: a spilled one's exact source (the same wake id), else
+    None for the no-resend exit. A summary would acknowledge questions and mail it never showed."""
+    delivery = payload.get("wake_delivery")
+    if not isinstance(delivery, dict) or delivery.get("complete") is not False:
+        return payload
+    wake_id, marker = payload.get("supervision_wake_id"), {k: payload[k] for k in ("replay_of",) if k in payload}
+    try:
+        from ouroboros.artifacts import read_actor_source_bytes, task_id_for_artifacts
+
+        whole = json.loads(read_actor_source_bytes(pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx),
+                                                   delivery.get("source")))
+    except Exception:
+        log.warning("Spilled wake source unreadable for the hold receipt", exc_info=True)
+        return None
+    return {**marker, **whole} if isinstance(whole, dict) and wake_id and whole.get("supervision_wake_id") == wake_id \
+        else None
+
+
 def _append_wake_receipt(
     messages: List[Dict[str, Any]], payload: Dict[str, Any], run_id: str,
     attempt_id: str,
@@ -341,6 +360,9 @@ def hold_step(
         # A refusal/fault is a daemon statement, not a leaf wake: no proof of a
         # live leaf, so no paid resume — take the honest no-resend terminal.
         return _exit_terminal("wait_" + str(payload.get("status")))
+    payload = _whole_wake(ctx, payload)
+    if payload is None:
+        return _exit_terminal("wake_source_unreadable")
     _append_wake_receipt(messages, payload, run_id, attempt_id)
     acked = False
     for _ in range(_ACK_ATTEMPTS):

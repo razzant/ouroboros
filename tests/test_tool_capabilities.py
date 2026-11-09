@@ -700,3 +700,22 @@ def test_enable_tools_answers_a_skill_name_with_its_namespace_tools():
     assert any(names[0] in line for line in lines) and any(names[1] in line for line in lines)
     assert td._named_namespace_guidance(Registry(), [namespace], discovery=True)[0].startswith(f"{namespace} names")
     assert td._named_namespace_guidance(Registry(), ["definitely_not_a_tool", "read"], discovery=True) == []
+
+
+def test_every_catalog_that_names_extract_pdf_text_names_read_archive():
+    """The two local file readers share every class; the one deliberate difference is the round-one core set,
+    which read_archive leaves for on-demand loading (read_file's binary refusal names it)."""
+    import ouroboros.tool_capabilities as caps
+    import ouroboros.consciousness_authority as authority
+    import ouroboros.safety as safety
+    import ouroboros.tools.registry_guards as guards
+
+    catalogs = {f"{module.__name__}.{name}": value
+                for module in (caps, authority, safety, guards) for name, value in vars(module).items()
+                if isinstance(value, (frozenset, set, tuple, list, dict)) and "extract_pdf_text" in value}
+    assert {"ouroboros.tool_capabilities.CORE_TOOL_NAMES", "ouroboros.tool_capabilities.ACTING_SUBAGENT_TOOL_NAMES",
+            "ouroboros.tool_capabilities.LOCAL_READONLY_SUBAGENT_TOOL_NAMES"} <= set(catalogs)
+    missing = [name for name, value in catalogs.items()
+               if name != "ouroboros.tool_capabilities.CORE_TOOL_NAMES" and "read_archive" not in value]
+    assert not missing, missing
+    assert "read_archive" not in caps.CORE_TOOL_NAMES

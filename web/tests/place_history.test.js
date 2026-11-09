@@ -4,8 +4,8 @@ import test from 'node:test';
 import { installCardDom, TextNode } from './helpers/card_dom.js';
 import { applyPayload, createTranslator, setMissTransport } from '../modules/i18n.js';
 import { normalizePlace, readPlaceRooms } from '../modules/consciousness_api.js';
-import { wakesForText } from '../modules/consciousness_words.js';
-import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeRoomsHtml, shownTime } from '../modules/place_history.js';
+import { wakeFactWord } from '../modules/consciousness_words.js';
+import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -58,6 +58,17 @@ function mount(f, options = {}, currentPlace = place) {
     const reader = mountPlaceHistory(host, currentPlace, room, { onBack: () => reader.close(), ...options });
     return reader;
 }
+
+test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
+    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
+    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
+    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
+    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
+    assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
+        'Silent now: it still hears and wakes here; what it would say or change here is held.');
+});
 
 test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(['user', 'assistant', 'system'].map((role) => historySpeaker({role, sender_label: 'Alice'})), ['Alice', 'Ouroboros', 'System']);
@@ -188,8 +199,9 @@ test('heard core facts describe one message while wake sentences keep their poli
     assert.deepEqual([...f.doc.body.querySelectorAll('[data-heard-fact]')].map((node) => node.textContent),
         ['addressed to it', 'group message', 'mentions it', 'reply to it', 'in its thread', 'new issue',
             'new pull request', 'review requested', 'assigned to it', 'from a bot', 'addressed to it']);
-    assert.equal(wakesForText(facts.map((fact) => ({ fact }))),
-        'wakes for direct messages, group messages, mentions, replies, replies in its threads, new issues, new pull requests, review requests addressed to me, assignments addressed to me, every message and messages addressed to it · also wakes on bot messages');
+    assert.deepEqual(facts.map((fact) => wakeFactWord(fact)), ['direct messages', 'group messages', 'mentions', 'replies',
+        'replies in its threads', 'new issues', 'new pull requests', 'review requests addressed to me', 'assignments addressed to me',
+        'every message', 'also wakes on bot messages', 'messages addressed to it'], 'the wake choices keep their policy words');
     reader.close();
 });
 
@@ -274,7 +286,7 @@ test('new reader words translate while the sending account, signal and held word
     const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
     assert.match(rows[0].textContent, /comme Settings/);
     assert.deepEqual([...rows[1].querySelectorAll('[data-heard-fact]')].map((node) => node.textContent), ['adressé à vous', 'd’un bot', 'Settings']);
-    assert.equal(wakesForText([{ fact: 'direct_message' }]), 'wakes for messages directs');
+    assert.equal(wakeFactWord('direct_message'), 'messages directs');
     assert.match(rows[2].textContent, /retenu, non vérifiéSettings/);
     assert.ok(rows.every((node) => !node.textContent.includes('Réglages')));
     reader.close();
@@ -356,28 +368,32 @@ test('Back disposal aborts pending read and ignores its late answer', async (t) 
     pending.resolve(page([row('late')])); await tick(); assert.equal(f.q('.place-convo'),null);
 });
 
-test('connector section lists zero/one/many without selecting or writing, and aborts on disposal', async (t) => {
+test('connector section counts its own places without listing them, and aborts on disposal', async (t) => {
     const f=fixture(t);
-    for(const count of [0,1,2]) {
+    for(const [count, words] of [[0,'No place yet'],[1,'1 place'],[2,'2 places']]) {
         const host=f.doc.createElement('section'); f.doc.body.append(host);
         const supplied=Array.from({length:count},(_,i)=>normalizePlace(rawPlace(String(i))));
         let signal;
         const dispose=mountConnectorPlaces(host,'telegram-user-session',{read:async (request)=>{signal=request.signal;return {places:[...supplied,normalizePlace({...rawPlace('foreign'),connector:'elsewhere'})]}}});
-        await tick(); assert.equal(host.querySelectorAll('[data-place-open]').length,count);
-        assert.equal(Boolean(host.querySelector('[data-place-connect]')),count===0);
-        assert.equal(f.q('[data-place-state]'),null); dispose(); assert.equal(signal.aborted,true); host.remove();
+        await tick();
+        assert.match(host.textContent, new RegExp(`${words} · Circles ›`), 'another connector\'s place is not counted');
+        assert.equal(host.querySelectorAll('[data-place-open]').length,0,'the places are listed once, on Circles');
+        assert.equal(host.querySelector('[data-place-connect]'),null);
+        dispose(); assert.equal(signal.aborted,true); host.remove();
     }
 });
 
-test('an empty connector section uses the shared Connect control, filtered to its own connector', async (t) => {
+test('the connector section\'s one door leads to Circles, leaving the sheet first', async (t) => {
     const f=fixture(t); const host=f.doc.createElement('section'); f.doc.body.append(host); let left=0;
+    // This window double has no dispatchEvent of its own: record what the door asks the shell for.
+    const asked=[]; f.doc.defaultView.dispatchEvent=(event)=>{ if (event.type==='ouro:open-circles') asked.push(event.detail); };
+    t.after(()=>{ delete f.doc.defaultView.dispatchEvent; });
     const dispose=mountConnectorPlaces(host,'telegram-user-session',{leave:()=>{left+=1;},read:async ()=>({places:[]})});
     await tick();
-    f.reply(()=>({places:[],connectors:[{connector:'telegram-user-session'},{connector:'elsewhere'}]}));
-    host.querySelector('[data-place-connect]').click(); await tick();
-    assert.equal(left,1,'the connector sheet leaves before Connect opens');
-    assert.deepEqual([...f.doc.body.querySelectorAll('[data-connect-act]')].map((button)=>button.dataset.connector),['telegram-user-session']);
-    assert.deepEqual(f.requests.map((request)=>request.url),['/api/places']);
+    host.querySelector('[data-circles-open]').click(); await tick();
+    assert.equal(left,1,'the connector sheet leaves before Circles opens');
+    assert.deepEqual(asked,[{}]);
+    assert.deepEqual(f.requests.map((request)=>request.url),[],'nothing else is read or written');
     dispose();
 });
 

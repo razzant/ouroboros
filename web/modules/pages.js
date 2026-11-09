@@ -13,6 +13,7 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export const PAGES = Object.freeze([
     Object.freeze({ id: 'chat', label: 'Main Chat', icon: 'chat', zone: 'head', hint: 'Main Ouroboros chat', init: 'initChat' }),
+    Object.freeze({ id: 'circles', label: 'Circles', icon: 'circles', zone: 'foot', init: 'initCircles' }),
     Object.freeze({ id: 'files', label: 'Files', icon: 'files', zone: 'foot', init: 'initFiles' }),
     Object.freeze({ id: 'skills', label: 'Skills', icon: 'skills', zone: 'foot', init: 'initSkills' }),
     Object.freeze({ id: 'widgets', label: 'Widgets', icon: 'widgets', zone: 'foot', init: 'initWidgets' }),

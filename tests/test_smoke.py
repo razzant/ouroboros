@@ -145,7 +145,7 @@ EXPECTED_TOOLS = [
     "skill_sources", "skill_search", "skill_install", "skill_update",
     "list_available_tools", "enable_tools", "call_mcp_tool",
     "analyze_screenshot", "vlm_query", "view_image",
-    "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
 ]
 
 

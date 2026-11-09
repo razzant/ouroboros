@@ -142,6 +142,32 @@ def test_a_direct_turns_forced_rail_keeps_its_owner_route_open(tmp_path, monkeyp
     assert usage.get("reason_code") == "round_limit" and seen == [True] and agent._accepting_owner_messages is True
 
 
+def test_a_direct_owner_turns_forced_rail_closes_its_durable_intake_and_keeps_its_owner_route(tmp_path, monkeypatch):
+    """Main's door reads an owner turn's durable fact (``owner:<chat>``): the forced rail is the loop's last read, so it
+    closes there before the rail's drain, as a final drain closes it; the local flag stays its route and Stop door."""
+    from tests.test_completion_hold_observation import runner, tool_call
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    turn = runner(tmp_path, monkeypatch, task_id="main-turn")
+    ctx = turn.registry._ctx
+    ctx.task_id, ctx.task_attempt, ctx.task_metadata = "main-turn", None, {}
+    agent = _reader(ctx, "main-turn", presence=False, accepting=True)
+    assert open_author_intake(tmp_path, "main-turn", "owner:1", attempt=1)
+    turn.registry.override_handler("chat_history", lambda *_a, **_kw: "Synthetic history")
+    seen = []
+
+    def forced_call():
+        seen.append((agent._accepting_owner_messages,
+                     author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1)))
+        return {"content": "Final."}
+
+    first = {"role": "assistant", "content": None, "tool_calls": [tool_call("chat_history", "read")]}
+    _text, usage, _trace = turn.run([first, forced_call])
+    assert usage.get("reason_code") == "round_limit" and seen == [(True, False)]
+    assert agent._accepting_owner_messages is True
+
+
 def _budget_rail(tmp_path, monkeypatch, *, exact_fits, second_fits, accepting=False):
     """The real budget rails with their prices scripted: ``land`` the soft landing that always ends the task,
     ``check`` the explicit profile's lookahead after a round, which may also admit ordinary work again."""

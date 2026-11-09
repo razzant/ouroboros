@@ -36,8 +36,7 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
   you want a finite per-attempt lifetime (the runtime ships `unlimited`); otherwise only
   Stop/cancel and the budget bind a headless CLB solve task. Silence past
   `OUROBOROS_TASK_IDLE_TIMEOUT_SEC` (measured from last real progress) brings attention,
-  never a stop (#1376): a dated notice to the task and at most one read-only diagnostic per
-  silence episode, charged to the same budget. A dead egress holds the task up to whichever
+  never a stop (#1376): a dated notice to the task and to an ancestor that waits on it. A dead egress holds the task up to whichever
   bound is actually set instead of failing it after the burst — and with none of them set it
   holds indefinitely. The wait is visible as durable `network_wait` events in the isolated
   server's `events.jsonl`. Note: waiting progress notes count as progress only with a real

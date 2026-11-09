@@ -358,6 +358,11 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # read_archive: a file that is no ZIP, a folder, an encrypted member or a compression the reader does not decode is
+    # named without reading anything, as the PDF reader's own UNAVAILABLE notices are; a damaged member fails the read.
+    "ARCHIVE_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_MEMBER_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_READ_FAILED": (True, "error"),
     # mcp_oauth: a remote MCP server that needs the owner's sign-in ran nothing; the substrate cannot serve the call yet.
     "MCP_AUTH_REQUIRED": (True, "unavailable"),
     # start_task / schedule_followup / manage_schedules: owner_words not found verbatim in my human's words that reached
@@ -368,6 +373,8 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OUTPUT_NOT_UTF8": (False, "ok"),
     # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
     "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED": (True, "blocked"),
+    # commit_reviewed refused to switch branches under a staged merge (a checkout would drop it); nothing changed.
+    "GIT_MERGE_IN_PROGRESS_BLOCKED": (True, "blocked"),
     # The new retained-review selection guard refuses a changed subject before dispatch or Git; no old answer exists.
     "REVIEW_SELECTION_CHANGED_BLOCKED": (True, "blocked"),
     # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
@@ -614,10 +621,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # Owner decision (PR #1636): an exact edit that leaves .py/.json unparsable is
     # applied and reported, never refused; the warning is a successful call.
     "SYNTAX_WARNING": (False, "ok"),
-    # #1376: a silence diagnostic's capability gate (registry_guards) is a new producer
-    # after the retired oracle; a refused tool never ran, as for its subagent peers.
-    "DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
-    "native:ACCESS_BLOCKED:DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
     # control_runtime `_send_user_message`: a relay answer that cannot be recorded as owed sends nothing and
     # keeps the relay open, published as native CAPABILITY_UNAVAILABLE. The bare warning names no suffix the
     # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.

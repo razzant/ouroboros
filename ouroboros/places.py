@@ -1,9 +1,15 @@
-"""Host-owned places, atomic revisioned choices and typed wake matching.
+"""Host-owned places, circles, atomic revisioned choices and typed wake matching.
 
 The store is installation-local. Its first locked write imports legacy bindings
 once; connectors never rewrite an existing place when their declarations change.
 Working folders are addresses, not capability fences. Missing state is empty;
 malformed state is a repair error and is never replaced with an empty store.
+
+Circles live in the same document beside the place rows (an ordered ``circles``
+list and ``place_choices`` by place id: its circle and its description), so one
+read resolves a place with the words it inherits and one lock writes both. A
+place row keeps its frozen keys: a body predating circles reads every place and
+ignores the circles (``PlaceRecords``).
 """
 from __future__ import annotations
 
@@ -38,6 +44,8 @@ WAKE_FACTS = (FACT_DIRECT_MESSAGE, FACT_GROUP_DM, FACT_MENTION, FACT_REPLY_TO_ME
 AUTHOR_CONNECTOR, AUTHOR_OWNER, AUTHOR_OUROBOROS, AUTHOR_MIGRATION = (
     "connector", "owner", "ouroboros", "migration")
 AUTHORS = (AUTHOR_CONNECTOR, AUTHOR_OWNER, AUTHOR_OUROBOROS, AUTHOR_MIGRATION)
+OWNER_VOICE = (AUTHOR_OWNER, AUTHOR_MIGRATION)  # words and acts that are my human's standing choices
+CIRCLE_NAME_MAX, DESCRIPTION_MAX = 80, 240
 SILENT_DISCLOSURE = ("Writes through this connector's declared tools and delivery queue are blocked. "
                      "Scripts, browser actions and unintegrated code may still write.")
 
@@ -62,8 +70,8 @@ def declared_wake_signals(connector: str) -> set[str]:
 
 
 class PlaceError(ValueError):
-    def __init__(self, code: str, field: str = "place", message: str = "") -> None:
-        self.code, self.field = code, field
+    def __init__(self, code: str, field: str = "place", message: str = "", *, place_id: str = "") -> None:
+        self.code, self.field, self.place_id = code, field, place_id  # place_id: the place a conflict names
         super().__init__(message or f"{code}: {field}")
 
 
@@ -194,7 +202,27 @@ def _document(value: Any) -> dict:
     for key, row in value["places"].items():
         if _decode(row, value.get("connections", {}).get(key)).place_id != key:
             raise PlaceError("places_invalid_state")
+    circles, choices = value.get("circles", []), value.get("place_choices", {})
+    if (not isinstance(circles, list) or not all(map(_valid_circle, circles))
+            or len({row["circle_id"] for row in circles}) != len(circles)
+            or not isinstance(choices, dict) or not all(map(_valid_choice, choices.values()))):
+        raise PlaceError("places_invalid_state")
     return value
+
+
+def _valid_circle(row: Any) -> bool:
+    return (isinstance(row, dict) and type(row.get("revision")) is int and row["revision"] >= 0
+            and all(isinstance(row.get(key), str) for key in ("circle_id", "name", "text", "text_author", "text_at"))
+            and bool(row["circle_id"].strip() and row["name"].strip()) and row["text_author"] in ("", *AUTHORS))
+
+
+def _valid_choice(row: Any) -> bool:
+    """A place's circle (who placed it, when) and description (who wrote it, when), for one connection."""
+    return (isinstance(row, dict) and type(row.get("connected_revision")) is int and row["connected_revision"] >= 0
+            and all(isinstance(row.get(key, ""), str) for key in (
+                "circle_id", "placed_by", "placed_at", "description", "description_author", "description_at"))
+            and (not row.get("circle_id") or row.get("placed_by") in AUTHORS)
+            and (not row.get("description") or row.get("description_author") in AUTHORS))
 
 
 def _read(drive_root: Any) -> dict:
@@ -255,11 +283,63 @@ def migrate_places(drive_root: Any) -> dict:
         raise PlaceError("places_migration_failed", str(path), f"Place migration needs repair: {exc}") from exc
 
 
-def load_places(drive_root: Any) -> list[Place]:
+@dataclass(frozen=True)
+class PlaceRecords:
+    """One read of the place store: its places by id, its ordered circles and each place's current choices.
+
+    A choice counts only for the connection it was made for (its ``connected_revision``): a place disconnected and
+    connected again under the same id starts outside every circle and without a description, whatever an older
+    body left in the document. Admission, FOCUS and its replay, Safety, destination facts, the own-clock map and a
+    non-inline root's current guidance all take circle words from one such read (``circle_context``)."""
+    revision: int
+    places: Mapping[str, Place]
+    circles: tuple[Mapping[str, Any], ...]
+    choices: Mapping[str, Mapping[str, Any]]
+
+    def circle(self, circle_id: str) -> Mapping[str, Any] | None:
+        return next((row for row in self.circles if circle_id and row["circle_id"] == circle_id), None)
+
+    def members(self, circle_id: str) -> list[Place]:
+        return [place for key, place in self.places.items() if self.choices.get(key, {}).get("circle_id") == circle_id]
+
+    def circle_context(self, place_id: str) -> dict[str, Any] | None:
+        """The circle whose words this place inherits, with both origins: who wrote the words and who placed the place
+        there. Its words are my human's standing letter here only when both are theirs; through a placement I made
+        their words still restrict, but consent to nothing new. None outside any circle."""
+        choice = self.choices.get(place_id) or {}
+        circle = self.circle(choice.get("circle_id", ""))
+        if circle is None:
+            return None
+        return {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author", "text_at", "revision")},
+                "placed_by": choice["placed_by"], "placed_at": choice.get("placed_at", ""),
+                "standing_delegation": bool(circle["text"]) and circle["text_author"] in OWNER_VOICE
+                and choice["placed_by"] in OWNER_VOICE}
+
+    def description(self, place_id: str) -> dict[str, str] | None:
+        """The place's short purpose line: what it is for, never a rule or a permission."""
+        choice = self.choices.get(place_id) or {}
+        return ({"text": choice["description"], "author": choice.get("description_author", ""),
+                 "at": choice.get("description_at", "")} if choice.get("description") else None)
+
+
+def _records(document: dict) -> PlaceRecords:
+    connections = document.get("connections", {})
+    rows = {key: _decode(value, connections.get(key)) for key, value in sorted(document["places"].items())}
+    choices = {key: row for key, row in document.get("place_choices", {}).items()
+               if key in rows and row["connected_revision"] == rows[key].connected_revision}
+    return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices)
+
+
+def place_records(drive_root: Any) -> PlaceRecords:
+    """The places, circles and choices from one read (the legacy import runs first, as ``load_places``)."""
     current = _read(drive_root)
     if not current.get("migration", {}).get("presence_bindings_v1"):
         current = migrate_places(drive_root)
-    return [_decode(value, current.get("connections", {}).get(key)) for key, value in sorted(current["places"].items())]
+    return _records(current)
+
+
+def load_places(drive_root: Any) -> list[Place]:
+    return list(place_records(drive_root).places.values())
 
 
 def migration_problems(drive_root: Any) -> list[dict]:
@@ -280,9 +360,12 @@ def get_place(drive_root: Any, place_id: str) -> Place:
 
 
 def resolve_place(drive_root: Any, *, connector: str, provider: str = "", account_id: str = "",
-                  conversation_id: str = "", binding_id: str = "", thread_id: str = "") -> Place | None:
+                  conversation_id: str = "", binding_id: str = "", thread_id: str = "",
+                  places: Iterable[Place] | None = None) -> Place | None:
+    """``places``: an already read set (``place_records``), else the store is read now."""
     candidates = []
-    for place in places_of_connector(drive_root, connector):
+    for place in (places_of_connector(drive_root, connector) if places is None
+                  else [place for place in places if place.connector == connector]):
         if binding_id and binding_id not in (place.place_id, *place.legacy_binding_ids):
             continue
         if provider and provider != place.provider:
@@ -479,12 +562,20 @@ def place_owner_accounts(drive_root: Any) -> OwnerAccounts:
     return OwnerAccounts(counted_owner_accounts(place_rows(drive_root).values()), sent_identities(drive_root))
 
 
+def forwarded_message(message: Any) -> bool:
+    """A connector's recorded forward carries another author's words, even when my human sent it: the account stays
+    theirs (``owner_author``), the words never become theirs (``owner_words.owner_row``, ``place_confirmed_words``,
+    ``dialogue_provenance.owner_speech``)."""
+    return bool(_fields({"message": message}, "message").get("forward_origin"))
+
+
 def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
     (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
     not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
-    so my human repeating my words is still my human). Provenance of the words, never whom they are for."""
+    so my human repeating my words is still my human). Provenance of the words, never whom they are for; who sent a
+    forward, never whose words it carries (``forwarded_message``)."""
     from ouroboros.own_sends import message_identity
 
     actor = actor if isinstance(actor, Mapping) else {}
@@ -547,68 +638,272 @@ def place_summary(place: Place) -> Mapping[str, Any]:
     return row
 
 
-def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None) -> Place | None:
-    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+def _expected(value: Any) -> int | None:
+    if value is not None and (type(value) is not int or value < 0):
         raise PlaceError("place_revision_invalid", "expected_revision", "place_revision_invalid: expected_revision must be a whole number.")
-    load_places(drive_root)  # migration precedes the first user edit, under the same file lock
+    return value
+
+
+def _transact(drive_root: Any, mutate: Any) -> None:
+    """One locked read-modify-write of the place document: ``mutate(document)`` returns the next document, or None
+    when nothing changes (nothing is written). The legacy import precedes the first edit, under the same lock file."""
+    load_places(drive_root)
+    update_json_locked(places_path(drive_root), lambda current: mutate(_document(current)),
+                       strict_existing_dict=True, reject_existing_empty_dict=True)
+
+
+def _with_choices(document: dict, choices: dict) -> dict:
+    document = {**document, "place_choices": choices}
+    if not choices:
+        document.pop("place_choices")
+    return document
+
+
+def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None,
+           choose: Any = None) -> Place | None:
+    """One place's change; ``choose(choice, document)`` changes its circle or description in the same transaction.
+    A changed choice is a change of the place: its revision moves (its connection's written revision with it), so a
+    sheet holding the older revision meets a conflict instead of overwriting."""
+    _expected(expected_revision)
     result = None
 
-    def mutate(current: dict) -> dict:
+    def mutate(current: dict) -> dict | None:
         nonlocal result
-        current = _document(current)
-        old = (_decode(current["places"][place_id], current.get("connections", {}).get(place_id))
+        connections = current.get("connections", {})
+        old = (_decode(current["places"][place_id], connections.get(place_id))
                if place_id in current["places"] else None)
         if expected_revision is not None and (old.revision if old else 0) != expected_revision:
             raise PlaceError("place_revision_conflict", "revision", f"Current revision: {old.revision if old else 0}")
         result = change(old)
-        if result == old:
-            return current
+        choices = dict(current.get("place_choices", {}))
+        stored = choices.get(place_id)
+        before = ({key: value for key, value in stored.items() if key != "connected_revision"}
+                  if old and stored and stored["connected_revision"] == old.connected_revision else {})
+        after = {} if result is None else choose(before, current) if choose else before
+        if result == old and after == before:
+            return None
+        revision = current["revision"] + 1
         rows = dict(current["places"])
         if result is None:
             rows.pop(place_id, None)
         else:
-            result = _validate(replace(result, revision=current["revision"] + 1,
-                                       connected_revision=old.connected_revision if old else current["revision"] + 1))
+            result = _validate(replace(result, revision=revision,
+                                       connected_revision=old.connected_revision if old else revision))
             rows[place_id] = place_summary(result)
-        connections = {key: value for key, value in current.get("connections", {}).items() if key in rows}
+        connections = {key: value for key, value in connections.items() if key in rows}
+        choices.pop(place_id, None)
         if result is not None:
             connections[place_id] = {"connected_revision": result.connected_revision, "written_revision": result.revision}
-        return {**current, "revision": current["revision"] + 1, "places": rows, "connections": connections}
+            if after:
+                choices[place_id] = {**after, "connected_revision": result.connected_revision}
+        return _with_choices({**current, "revision": revision, "places": rows, "connections": connections}, choices)
 
-    update_json_locked(places_path(drive_root), mutate, strict_existing_dict=True, reject_existing_empty_dict=True)
+    _transact(drive_root, mutate)
     return result
 
 
 def connect_place(drive_root: Any, *, connector: str, provider: str, label: str = "", account_id: str = "",
                   conversation_id: str = "", scope: str = "account", wakes: Iterable[str] = (),
-                  contribution_id: str = "", place_id: str = "", state: str = STATE_ACTIVE) -> Place:
-    # A repeated Connect is idempotent; a refreshed connector cannot replace choices.
+                  contribution_id: str = "", place_id: str = "", state: str = STATE_ACTIVE,
+                  first: Mapping[str, Any] | None = None, author: str = AUTHOR_OWNER) -> Place:
+    """A repeated Connect is idempotent; a refreshed connector cannot replace choices. ``first`` is what an Add says
+    about a new place (``note``, ``circle_id``, ``description``), written by ``author`` in the connecting transaction;
+    for a place connected already it is refused (``place_exists``), so a repeated Add never writes it twice."""
     identity = (connector, provider, account_id, conversation_id, contribution_id)
     place_id = place_id or uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(identity)).hex
     candidate = _validate(Place(place_id=place_id, connector=connector, provider=provider, label=label or provider,
                                account_id=account_id, conversation_id=conversation_id, scope=scope,
                                contribution_id=contribution_id, state=state,
                                wakes=tuple(WakeItem(fact, AUTHOR_CONNECTOR) for fact in dict.fromkeys(wakes))))
-    return _write(drive_root, place_id, lambda old: old or candidate)
+    first = {key: value for key, value in (first or {}).items() if value != ""}
+    if set(first) - {"note", "circle_id", "description"}:
+        raise PlaceError("place_connect_invalid", "first")
+    if first:
+        _author(author)
+    if "note" in first:
+        candidate = _change_place(candidate, "add_note", author, {"text": first["note"]})
+
+    def change(old: Place | None) -> Place:
+        if old is not None and first:
+            raise PlaceError("place_exists", "place", "place_exists: this place is connected already; change it on its "
+                             "sheet.", place_id=old.place_id)
+        return old or candidate
+
+    def choose(choice: dict, document: dict) -> dict:
+        for action, key in (("set_circle", "circle_id"), ("set_description", "description")):
+            if key in first:
+                choice = _change_choice(choice, action, author, {key: first[key]}, document)
+        return choice
+    return _write(drive_root, place_id, change, choose=choose)
+
+
+_CHOICE_ACTIONS = ("set_circle", "set_description")
+
+
+def _author(author: str) -> None:
+    if author not in {AUTHOR_OWNER, AUTHOR_OUROBOROS}:
+        raise PlaceError("place_author_invalid")
 
 
 def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
                expected_revision: int | None = None, **values: Any) -> Place | None:
-    """One writer shared by owner HTTP and the place verb; author is a host fact."""
-    if author not in {AUTHOR_OWNER, AUTHOR_OUROBOROS}:
-        raise PlaceError("place_author_invalid")
-    if action == "confirm_owner_account" and author != AUTHOR_OWNER:
+    """One writer shared by owner HTTP and the place verb; author is a host fact. ``update`` applies several changes
+    (``values["changes"]``, ``(action, values)`` pairs) in one transaction, the place's circle and description too."""
+    _author(author)
+    changes = values["changes"] if action == "update" else [(action, values)]
+    if author != AUTHOR_OWNER and any(name == "confirm_owner_account" for name, _args in changes):
         raise PlaceError("place_owner_confirmation_required", "owner_accounts",
-                         "Confirm this account from the owner's door or the Places sheet.")
+                         "Confirm this account from the owner's door or the place sheet.")
 
-    return _write(drive_root, place_id, lambda old: _change_place(old, action, author, values), expected_revision)
+    def change(old: Place | None) -> Place | None:
+        if old is None:
+            raise PlaceError("place_not_found", "place_id")
+        for name, args in changes:
+            if name not in _CHOICE_ACTIONS:
+                old = _change_place(old, name, author, args)
+        return old
+
+    def choose(choice: dict, document: dict) -> dict:
+        for name, args in changes:
+            if name in _CHOICE_ACTIONS:
+                choice = _change_choice(choice, name, author, args, document)
+        return choice
+    return _write(drive_root, place_id, change, expected_revision, choose)
+
+
+def _change_choice(choice: dict, action: str, author: str, values: Mapping[str, Any], document: Mapping[str, Any]) -> dict:
+    """A place's circle (``circle_id``, "" for none) or its description ("" clears it). The same circle or line saved
+    again keeps an owner's authorship: only my human's deliberate save makes an earlier one of mine theirs."""
+    key, by, at = (("circle_id", "placed_by", "placed_at") if action == "set_circle"
+                   else ("description", "description_author", "description_at"))
+    value = values.get(key, "")
+    if not isinstance(value, str):
+        raise PlaceError("place_invalid_string", key)
+    value = value.strip() if key == "circle_id" else " ".join(value.split())
+    if key == "circle_id" and value and not any(row["circle_id"] == value for row in document.get("circles", ())):
+        raise PlaceError("circle_not_found", "circle_id", "circle_not_found: no circle has this id; list the circles first.")
+    if key == "description" and len(value) > DESCRIPTION_MAX:
+        raise PlaceError("place_description_invalid", "description",
+                         f"place_description_invalid: a description is one short line of at most {DESCRIPTION_MAX} characters.")
+    if not value:
+        return {name: item for name, item in choice.items() if name not in (key, by, at)}
+    if choice.get(key) == value and choice.get(by) in (*OWNER_VOICE, author):
+        return choice
+    return {**choice, key: value, by: author, at: utc_now_iso()}
+
+
+def _circle_index(circles: list, circle_id: Any) -> int:
+    index = next((i for i, row in enumerate(circles) if circle_id and row["circle_id"] == circle_id), None)
+    if index is None:
+        raise PlaceError("circle_not_found", "circle_id", "circle_not_found: no circle has this id; list the circles first.")
+    return index
+
+
+def _circle_name(value: Any, circles: Iterable[Mapping[str, Any]], own_id: str = "") -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PlaceError("circle_name_invalid", "name", "circle_name_invalid: a circle needs a name.")
+    name = " ".join(value.split())
+    if len(name) > CIRCLE_NAME_MAX:
+        raise PlaceError("circle_name_invalid", "name", f"circle_name_invalid: a name is at most {CIRCLE_NAME_MAX} characters.")
+    if any(row["circle_id"] != own_id and row["name"].casefold() == name.casefold() for row in circles):
+        raise PlaceError("circle_name_taken", "name", "circle_name_taken: another circle has this name.")
+    return name
+
+
+def _circle_words(value: Any) -> str:
+    if not isinstance(value, str):
+        raise PlaceError("place_invalid_string", "text")
+    return value.strip()
+
+
+def create_circle(drive_root: Any, *, name: str, text: str = "", author: str) -> dict:
+    """A new circle at the end of the order; its words, when given, are ``author``'s."""
+    _author(author)
+    words, made = _circle_words(text), {}
+
+    def mutate(current: dict) -> dict:
+        circles, revision = list(current.get("circles", ())), current["revision"] + 1
+        circle_id = uuid.uuid4().hex[:12]
+        while any(row["circle_id"] == circle_id for row in circles):
+            circle_id = uuid.uuid4().hex[:12]
+        made.clear()
+        made.update(circle_id=circle_id, name=_circle_name(name, circles), text=words,
+                    text_author=author if words else "", text_at=utc_now_iso() if words else "", revision=revision)
+        return {**current, "revision": revision, "circles": [*circles, dict(made)]}
+
+    _transact(drive_root, mutate)
+    return made
+
+
+def edit_circle(drive_root: Any, circle_id: str, *, author: str, expected_revision: int | None = None,
+                name: str | None = None, text: str | None = None) -> dict:
+    """Rename a circle or change its words. A rename keeps who wrote the words; new words are ``author``'s, and the
+    same words saved again stay my human's unless my human saves them (then they become theirs)."""
+    _author(author)
+    _expected(expected_revision)
+    if name is None and text is None:
+        raise PlaceError("circle_update_invalid", "circle", "circle_update_invalid: give a new name or new words.")
+    words, saved = None if text is None else _circle_words(text), {}
+
+    def mutate(current: dict) -> dict | None:
+        circles = list(current.get("circles", ()))
+        index = _circle_index(circles, circle_id)
+        old = circles[index]
+        if expected_revision is not None and old["revision"] != expected_revision:
+            raise PlaceError("circle_revision_conflict", "revision", f"Current revision: {old['revision']}")
+        row = {**old, **({"name": _circle_name(name, circles, circle_id)} if name is not None else {})}
+        if words is not None and (words != old["text"] or (words and old["text_author"] not in (*OWNER_VOICE, author))):
+            row.update(text=words, text_author=author if words else "", text_at=utc_now_iso() if words else "")
+        saved.clear()
+        saved.update(old)
+        if row == old:
+            return None
+        circles[index] = {**row, "revision": current["revision"] + 1}
+        saved.update(circles[index])
+        return {**current, "revision": current["revision"] + 1, "circles": circles}
+
+    _transact(drive_root, mutate)
+    return saved
+
+
+def delete_circle(drive_root: Any, circle_id: str, *, expected_revision: int | None = None) -> dict:
+    """Remove a circle. Its places stay connected and keep their notes, descriptions and states; they leave the
+    circle in the same transaction (each one's revision moves). Returns the removed circle, its words included, and
+    the places it detached: there is no trash to restore from."""
+    _expected(expected_revision)
+    outcome: dict[str, Any] = {}
+
+    def mutate(current: dict) -> dict:
+        circles = list(current.get("circles", ()))
+        index = _circle_index(circles, circle_id)
+        if expected_revision is not None and circles[index]["revision"] != expected_revision:
+            raise PlaceError("circle_revision_conflict", "revision", f"Current revision: {circles[index]['revision']}")
+        removed, records, revision = circles.pop(index), _records(current), current["revision"] + 1
+        rows, connections = dict(current["places"]), dict(current.get("connections", {}))
+        choices, detached = dict(current.get("place_choices", {})), []
+        for key, choice in list(choices.items()):
+            if choice.get("circle_id") != circle_id:
+                continue
+            if key in records.choices:  # a member now, not a choice an older connection left
+                place = replace(records.places[key], revision=revision)
+                rows[key] = place_summary(place)
+                connections[key] = {"connected_revision": place.connected_revision, "written_revision": revision}
+                detached.append({"place_id": key, "label": place.label})
+            rest = {name: value for name, value in choice.items() if name not in ("circle_id", "placed_by", "placed_at")}
+            if set(rest) - {"connected_revision"}:
+                choices[key] = rest
+            else:
+                choices.pop(key)
+        outcome.clear()
+        outcome.update(circle=removed, detached=detached)
+        return _with_choices({**current, "revision": revision, "places": rows, "connections": connections,
+                              "circles": circles}, choices)
+
+    _transact(drive_root, mutate)
+    return outcome
 
 
 def _change_place(old: Place | None, action: str, author: str, values: dict) -> Place | None:
-    if action == "update":
-        for name, args in values["changes"]:
-            old = _change_place(old, name, author, args)
-        return old
     if action == "confirm_owner_account" and author != AUTHOR_OWNER:
         raise PlaceError("place_owner_confirmation_required", "owner_accounts")
     if old is None:

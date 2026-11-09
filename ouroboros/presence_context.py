@@ -48,8 +48,12 @@ def frame_presence_user_content(task: Mapping[str, Any], content: Any) -> Any:
         source = "The event includes text; the assembled input below also carries any host attachment context."
     else:
         source = "The event supplied no text. Any placeholder or attachment declaration below is host context."
+    from ouroboros.presence_message_facts import connector_facts, event_reader
+    reported = connector_facts(message, text=str(presence.get("observed_text") or ""), sender=str(
+        actor.get("display_name") or actor.get("username") or actor.get("platform_actor_id") or ""),
+        source=event_reader(task.get("id"), "message.non_text"))  # its own labelled block, before the words
     prefix = (framing + "\nSource facts: " + json.dumps(facts, ensure_ascii=False, sort_keys=True)
-              + "\n" + source + "\n\n")
+              + "\n" + source + "\n\n" + (f"{reported}\n\n" if reported else ""))
     if isinstance(content, str):
         return prefix + content
     return [{**content[0], "text": prefix + content[0]["text"]}, *content[1:]]
@@ -458,7 +462,7 @@ def _no_route_section(value: Mapping[str, Any], why: str) -> str:
 def build_presence_context_section(drive_root: Path, value: Any, task_id: str = "", *,
                                    status_root: Path | None = None, scheduled: bool = False,
                                    answers_conversation: bool = False, unsettled: str = "",
-                                   routeless: str = "") -> str:
+                                   routeless: str = "", inline: bool = False) -> str:
     """Render host-authored presence context, including declared full KB topics.
 
     ``status_root`` is the canonical task root the own-work catalogue reads (a forked
@@ -469,7 +473,9 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     ``answers_conversation`` (a non-inline, non-scheduled root whose final its reply
     carrier speaks, unless ``final_route`` reads it routeless) names that destination; an inline turn
     has its FOCUS frame instead. ``unsettled`` is why that route is still unknown; ``routeless`` is
-    why no connector reads this root, which then renders that fact instead.
+    why no connector reads this root, which then renders that fact instead. A schedule-born root and a
+    non-``inline`` root whose final the place reads also get the place's guidance as stored now
+    (``_guidance_now``); its source frame stays as recorded.
     """
 
     if not isinstance(value, Mapping):
@@ -479,10 +485,11 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
         value = _conversation_now(root, value, task_id)
     if value.get("place_id"):
         topics = focus_topics(drive_root, value)
+        guidance = _guidance_now(root, value) if not inline and (scheduled or answers_conversation) else ""
         if not scheduled:
             audience = (_final_audience_section(value, unsettled) if answers_conversation
                         else _no_route_section(value, routeless) if routeless else "")
-            return "\n\n".join(part for part in (audience, topics) if part)
+            return "\n\n".join(part for part in (audience, guidance, topics) if part)
         scheduled_parts = [_SCHEDULED_DELIVERY, _previous_turn_line(value["previous_turn"])
                            if isinstance(value.get("previous_turn"), Mapping)
                            else "No earlier turn of this conversation is recorded."]
@@ -490,7 +497,7 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
             own_work = _own_work_section(root, value, task_id)
         except Exception:
             own_work = "## Work started from this place (host-authored facts)\n\nUnavailable now; recent_tasks reads it."
-        own = [part for part in (_continuing_section(value), own_work, topics) if part]
+        own = [part for part in (_continuing_section(value), own_work, guidance, topics) if part]
         return "\n\n".join(["## A promise from a place conversation (host-authored facts)\n\n"
                               + "\n".join(scheduled_parts), *own])
     instructions = str(value.get("instructions") or "").strip()
@@ -590,6 +597,37 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     return "\n\n".join(parts)
 
 
+def _guidance_now(root: Path, value: Mapping[str, Any]) -> str:
+    """The place's notes and circle words as the store holds them now (a root outside the place's own turn reads
+    no FOCUS frame), labelled by store revisions, never a clock; an unreadable or removed place says so."""
+    from ouroboros.places import PlaceError, place_records
+
+    head, place_id = "## This place's guidance now (host-authored facts)\n\n", str(value.get("place_id") or "")
+    try:
+        records = place_records(root)
+    except (PlaceError, OSError, ValueError):
+        return head + "Unknown: the place records cannot be read now; configure_presence(action='inspect') reads them."
+    place, circle = records.places.get(place_id), records.circle_context(place_id)
+    if place is None:
+        return head + f"The place {place_id} is not connected now: it has no current notes or circle."
+    notes = [{"text": n.text, "author": n.author, **({"at": n.at} if n.at else {})} for n in place.notes]
+    return (head + f"{place.label or place_id} as stored at place revision {place.revision}"
+            + (f" and circle revision {circle['revision']}" if circle else "") + ", not as it stood at the source "
+            "event. Your human's notes here are their letter, and yours your record; notes with their authors: "
+            + json.dumps(notes, ensure_ascii=False) + circle_line(circle))
+
+
+def circle_line(circle: Any) -> str:
+    """A place's circle words as one more line after its notes, with both origins; nothing outside a circle, so a
+    frame recorded before circles renders as it did."""
+    if not isinstance(circle, Mapping) or not circle.get("text"):
+        return ""
+    facts = {key: circle.get(key) for key in ("name", "text", "text_author", "placed_by")}
+    return ("\n- its circle's words, shared by every place in it, with who wrote them and who placed this place there "
+            "(your human's words restrict this place, and consent here only when your human placed it): "
+            + json.dumps(facts, ensure_ascii=False))
+
+
 def _continuing_section(value: Mapping[str, Any]) -> str:
     continuing = value.get("open_turns") if isinstance(value.get("open_turns"), list) else []
     if not continuing:
@@ -642,7 +680,7 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
 
 
 PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
-                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line")
+                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 
 # The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
 # provider recorded about this event, never a reading of its text or a verdict about whom it is for.
@@ -910,16 +948,21 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
     voice = _voice_line(focus, event)
     snapshot = _thread_snapshot(focus, event)
+    who = actor.get("display_name") or actor.get("platform_actor_id") or "A person"
+    from ouroboros.presence_message_facts import connector_facts, event_reader  # the event record: the frame re-renders
+    reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=who,
+                               source=event_reader(task.get("id"), "message.non_text"))
     fields = {
         "voice_line": voice + "\n" if voice else "",
-        "who": actor.get("display_name") or actor.get("platform_actor_id") or "A person",
+        "who": who,
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
         "facts_line": _facts_line(focus, event),
+        "reported": f"{reported}\n\n" if reported else "",  # its own labelled block, outside their message
         "event": (content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)))
                  + (f"\n\n{snapshot}" if snapshot else ""),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),
-        "notes": json.dumps(place.get("notes") or [], ensure_ascii=False),
+        "notes": json.dumps(place.get("notes") or [], ensure_ascii=False) + circle_line(presence.get("circle")),
         "wake_item": json.dumps([w for w in place.get("wakes", []) if w["fact"] in matched], ensure_ascii=False),
         "actor_facts": json.dumps(actor, ensure_ascii=False) + (
             "; authenticated: no" + ("; your human's own address: yes (unverified)" if unverified else "")
@@ -963,7 +1006,7 @@ def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any, content: Any
     place = presence.get("place") if isinstance(presence.get("place"), Mapping) else {}
     optional = {"previous_turn": presence.get("previous_turn"), "open_turns": presence.get("open_turns"),
                 "work_here": metadata.get("focus_work_here"), "working_folder": place.get("working_folder"),
-                "notes_at_event": place.get("notes")}
+                "notes_at_event": place.get("notes"), "circle_at_event": presence.get("circle")}
     return {"message_text": presence["observed_text"], "event": dict(presence["event"]),
             "place_at_event": {"place_id": presence.get("place_id"),
                                "label": place.get("label") or place.get("provider") or place.get("place_id"),

@@ -6,9 +6,8 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { normalizeConnector, normalizePlace, normalizePlacesResponse, normalizePlaceStatus } from '../modules/consciousness_api.js';
-import { SILENT_CARD, WAKE_FACT_WORDS, placeStatusText, sentenceLabel, wakesForText } from '../modules/consciousness_words.js';
-import { dashboardPlaceRowHtml } from '../modules/consciousness_dashboard.js';
-import { placeChangeFor, placeSheetBodyHtml, placeSheetMetaText, openPlaceSheet } from '../modules/place_sheet.js';
+import { SILENT_CARD, WAKE_FACT_WORDS } from '../modules/consciousness_words.js';
+import { placeChangeFor, placeSheetBodyHtml, placeSheetMetaText, openPlaceSheet, recentRooms } from '../modules/place_sheet.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
@@ -19,10 +18,11 @@ const { places } = normalizePlacesResponse(FIXTURE.places);
 const [slack, community, mail] = places;
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
-test('the subtitle says only what the title does not: the state, never the label again or a raw id', () => {
-    assert.equal(placeSheetMetaText(slack), 'active');
-    assert.equal(placeSheetMetaText(community), 'silent');
-    assert.doesNotMatch(placeSheetMetaText(community), /Ouroboros community|telegram-bot|-100123|ouroboros_bot/);
+test('the subtitle says only what the title does not: the service and the state, never the label again or a raw id', () => {
+    assert.equal(placeSheetMetaText(slack, 'Acme'), 'Slack · active');
+    assert.equal(placeSheetMetaText(slack, 'Slack'), 'active', 'a title that is the service is not said twice');
+    assert.equal(placeSheetMetaText(community, 'Ouroboros community'), 'telegram · silent');
+    assert.doesNotMatch(placeSheetMetaText(community, 'Ouroboros community'), /Ouroboros community|telegram-bot|-100123|ouroboros_bot/);
 });
 
 test('the service is the matching connector declaration, independent of the editable place label', () => {
@@ -306,40 +306,24 @@ test('notes invite a letter without saving the placeholder and disclose each kno
     assert.doesNotMatch(host.textContent, /Silent and Paused are locks/);
 });
 
-test('declared core labels keep their checkbox spelling and lowercase only in wake sentences', () => {
+test('declared core labels keep their checkbox spelling; a core fact without one reads its core word', () => {
     const place = identityPlace({ facts: ['direct_message'], labels: { direct_message: 'Mail addressed to you' },
         wakes: [{ fact: 'direct_message', author: 'connector' }] });
     assert.match(placeSheetBodyHtml(place), /data-i18n-authored>Mail addressed to you</);
-    assert.equal(placeStatusText(place), 'active · wakes for mail addressed to you · 2 open turns');
     const fallback = { ...place, labels: null };
     assert.match(placeSheetBodyHtml(fallback), /<span>Direct messages<\/span>/);
-    assert.equal(placeStatusText(fallback), 'active · wakes for direct messages · 2 open turns');
     const declared = { ...fallback, facts: [{ id: 'direct_message', label: 'Mail addressed to you' }] };
-    assert.equal(placeStatusText(declared), placeStatusText(place));
+    assert.match(placeSheetBodyHtml(declared), /data-i18n-authored>Mail addressed to you</);
 });
 
-test('sentence labels lower only an initial capital in a lowercase word, preserving mixed case and acronyms', () => {
-    for (const [label, sentence] of [['Mail addressed to you', 'mail addressed to you'], ['GitHub', 'GitHub'],
-        ['GitHub mentions', 'GitHub mentions'], ['PR', 'PR'], ['PR reviews', 'PR reviews'],
-        ['Mail from GitHub', 'mail from GitHub'], ['Émail urgent', 'émail urgent'], ['mail', 'mail'],
-        ['1 PR', '1 PR'], ['A reply', 'A reply'], ['', '']]) {
-        assert.equal(sentenceLabel(label), sentence);
-        if (!label) continue;
-        const named = { direct_message: label, from_bot: label };
-        assert.equal(wakesForText([{ fact: 'direct_message' }], null, named), `wakes for ${sentence}`);
-        assert.equal(wakesForText([{ fact: 'from_bot' }], null, named), sentence);
-    }
-    assert.equal(wakesForText([{ fact: 'direct_message' }]), 'wakes for direct messages');
-});
-
-test('status labels override sheet labels while Dashboard rows retain manifest labels or core fallback', async (t) => {
+test('status labels override sheet labels and are never written onto the PlaceSummary', async (t) => {
     const { document, routes, calls } = statusSheetDom(t);
     for (const manifest of [{ direct_message: 'Declared mail' }, null]) {
         for (const labels of [{ direct_message: 'Mail addressed to you' }, undefined, { direct_message: 7 }]) {
             routes.set(statusUrl, jsonResponse({ text: 'Ready', tone: 'ok', labels }));
             const place = identityPlace({ facts: ['direct_message', 'mention', { id: 'signal.words', label: 'PR words' }],
                 labels: manifest, wakes: [{ fact: 'direct_message', author: 'connector' }] });
-            const before = dashboardPlaceRowHtml(place);
+            const before = JSON.stringify(place);
             const sheet = openPlaceSheet(place); await settled();
             const label = typeof labels?.direct_message === 'string' ? labels.direct_message : manifest?.direct_message;
             const wakes = document.body.querySelector('[data-place-section="wakes"]');
@@ -348,9 +332,7 @@ test('status labels override sheet labels while Dashboard rows retain manifest l
             assert.equal(caption.hasAttribute('data-i18n-authored'), Boolean(label));
             assert.match(wakes.textContent, /Mentions/);
             assert.match(wakes.textContent, /PR words/);
-            assert.equal(dashboardPlaceRowHtml(sheet.place), before, 'sheet status is never copied onto the PlaceSummary');
-            assert.match(before, manifest ? /wakes for declared mail/ : /wakes for direct messages/);
-            assert.doesNotMatch(before, /Mail addressed to you|mail addressed to you/);
+            assert.equal(JSON.stringify(sheet.place), before, 'sheet status is never copied onto the PlaceSummary');
             sheet.close();
         }
     }
@@ -542,6 +524,28 @@ test('Active · Silent · Paused in one control; the note says what the chosen s
     assert.match(placeSheetBodyHtml(mail), /Away from this place: no wakes, no actions\. Still connected; reported events are saved\./);
 });
 
+test('while consciousness is off the sheet says the place only hears: Active\'s note and Silent\'s wake note', () => {
+    // Owner 06.11: «Lives here: listens, wakes…» stayed on every sheet for the 28 hours Off left the places hearing.
+    const off = (place) => ({ ...place, onlyHears: true });
+    const active = placeSheetBodyHtml(off(slack));
+    assert.match(active, /<p class="place-state-note">Consciousness is off: it only hears here\.<\/p>/);
+    assert.doesNotMatch(active, /Lives here: listens/);
+    // «A checked kind calls it here at once» stays the rule; the exception under it says Off suspends it, as Paused does.
+    assert.match(active, /While consciousness is off, nothing here wakes it\./);
+    assert.doesNotMatch(placeSheetBodyHtml(slack), /While consciousness is off/);
+    const silent = placeSheetBodyHtml(off(community));
+    assert.match(silent, /While consciousness is off, nothing here wakes it\./);
+    assert.doesNotMatch(silent, /these still wake it to read and think/);
+    assert.match(silent, /class="place-silent-card"/, 'what Silent blocks is still said, once');
+    assert.doesNotMatch(silent, /class="place-state-note"/);
+    // With the switch on the stored choice says what it does; the host's fact is a strict boolean.
+    assert.match(placeSheetBodyHtml(slack), /Lives here: listens, wakes when its list says so, speaks and acts\./);
+    assert.match(placeSheetBodyHtml(community), /Silent: these still wake it to read and think/);
+    assert.doesNotMatch(placeSheetBodyHtml(community), /While consciousness is off/);
+    assert.deepEqual([true, 'true', undefined].map((only_hears) => normalizePlace({ place_id: 'x', state: 'active', only_hears }).onlyHears),
+        [true, false, false]);
+});
+
 test('Silent shows the host\'s card: the note and, verbatim, what it blocks and what it cannot', () => {
     const html = placeSheetBodyHtml(community);
     const card = html.match(/<p class="place-silent-card" role="note">([^<]*)<\/p>/)?.[1] || '';
@@ -695,7 +699,290 @@ test('the reader state keeps the authored place name out of the translation over
     await settled(); await settled();
     const meta = document.body.querySelector('[data-place-meta]');
     const authored = meta.querySelector('[data-i18n-authored]');
-    assert.ok(authored, 'the label sits in an authored span');
-    assert.equal(authored.textContent, slack.label);
-    assert.equal(meta.textContent, slack.label, 'the reader state shows the label alone, no state word');
+    assert.ok(authored, 'the place\'s name sits in an authored span');
+    // The place as its row names it (placeTitle, then the service), never the state word.
+    assert.equal(authored.textContent, 'Acme · Slack');
+    assert.equal(meta.textContent, 'Acme · Slack', 'the reader state shows the place alone, no state word');
+});
+
+// ---- the circle context: the first section ------------------------------------------------------------------------
+const CIRCLES = [
+    { id: 'team', name: 'Team', text: 'Help the team by the facts.\nKeep money out.', textAuthor: 'owner', textAt: '', revision: 3 },
+    { id: 'home', name: 'Home', text: 'Words Ouroboros wrote.', textAuthor: 'ouroboros', textAt: '', revision: 5 },
+];
+const inCircle = (circle, placedBy = 'owner', extra = {}) => ({ ...slack, circle: { id: circle, placedBy, placedAt: '' }, ...extra });
+
+test('the context section: the circle as a choice, its words with both origins, the place\'s own words beside them', () => {
+    const html = placeSheetBodyHtml(inCircle('team'), { circles: CIRCLES });
+    const first = html.slice(0, html.indexOf('data-place-section="conversations"'));
+    assert.match(first, /data-place-section="circle"/, 'the context leads the sheet, before its conversations');
+    assert.match(first, /<option value="team" selected data-i18n-authored>Team<\/option>/);
+    assert.match(first, /<option value="">Not in a circle<\/option>/);
+    assert.match(first, /<p class="place-circle-text" data-i18n-authored>Help the team by the facts\.\nKeep money out\.<\/p>/, 'the words whole in the DOM; CSS clamps them');
+    assert.match(strip(first), /written by you · placed here by you/);
+    assert.doesNotMatch(first, /keep-circle/, 'my human\'s own placement needs no keeping');
+    assert.match(first, /data-place-act="edit-circle">Edit in circle ›</);
+    // Ouroboros placed it: both origins named, and my human may make the placement theirs without a pending state.
+    const placed = placeSheetBodyHtml(inCircle('team', 'ouroboros'), { circles: CIRCLES });
+    assert.match(strip(placed), /written by you · placed here by Ouroboros · Keep it in Team/);
+    assert.deepEqual(placeChangeFor('keep-circle', inCircle('team', 'ouroboros')), { circle_id: 'team' });
+    const theirs = strip(placeSheetBodyHtml(inCircle('home'), { circles: CIRCLES }));
+    assert.match(theirs, /written by Ouroboros · placed here by you/);
+    // No circle: its own notes only; a reading of circles that is not back yet says so instead of a choice.
+    assert.match(strip(placeSheetBodyHtml(slack, { circles: CIRCLES })), /Only its own notes apply here/);
+    assert.match(placeSheetBodyHtml(slack, { circles: null }), /Reading circles…/);
+    assert.doesNotMatch(placeSheetBodyHtml(slack, { circles: null }), /data-place-circle/);
+});
+
+test('the place\'s own notes in brief keep each author\'s voice; the full Notes stay below', () => {
+    const notes = [{ id: 'a', text: 'Owner words', author: 'owner', at: '' }, { id: 'b', text: 'My own record', author: 'ouroboros', at: '' }];
+    const html = placeSheetBodyHtml({ ...slack, notes }, { circles: CIRCLES });
+    const brief = html.slice(0, html.indexOf('data-place-section="conversations"'));
+    assert.match(brief, /<div class="place-note place-note-preview is-owner"><p data-i18n-authored>Owner words<\/p><\/div>/);
+    assert.match(brief, /<div class="place-note place-note-preview"><p data-i18n-authored>My own record<\/p><div class="place-note-foot">/,
+        'Ouroboros\'s note is never painted in my human\'s voice');
+    assert.match(strip(brief), /2 notes of its own · All notes ›/);
+    assert.match(html, /data-place-section="notes"/);
+    assert.match(strip(placeSheetBodyHtml({ ...slack, notes: [] }, { circles: CIRCLES })), /No notes of its own yet\. Add a note ›/);
+});
+
+test('the description is its own optional line: empty until written, never a note\'s first line, saved and cleared alone', () => {
+    const notes = [{ id: 'a', text: 'First line of a note\nmore', author: 'owner', at: '' }];
+    const empty = placeSheetBodyHtml({ ...slack, notes, description: null }, { circles: CIRCLES });
+    assert.match(empty, /<input class="ui-control" data-place-draft="description" data-i18n-authored value=""/);
+    assert.match(strip(empty), /It says what the place is for and adds no rule\./);
+    const written = { ...slack, description: { text: 'Where the team asks', author: 'ouroboros', at: '' } };
+    const html = placeSheetBodyHtml(written, { circles: CIRCLES });
+    assert.match(html, /value="Where the team asks"/);
+    assert.match(strip(html), /adds no rule\. Written by Ouroboros\./, 'who wrote it starts its own sentence');
+    assert.doesNotMatch(strip(html), /\. written by/);
+    assert.deepEqual(placeChangeFor('save-description', written, { drafts: { description: '  A   new\nline ' } }), { description: 'A new line' });
+    assert.deepEqual(placeChangeFor('save-description', written, { drafts: { description: '' } }), { description: '' });
+    assert.equal(placeChangeFor('save-description', written, { drafts: { description: 'Where the team asks' } }), null);
+    assert.equal(placeChangeFor('save-description', { ...slack, description: null }, { drafts: {} }), null);
+    assert.deepEqual(placeChangeFor('circle', inCircle('team'), { value: 'home' }), { circle_id: 'home' });
+    assert.deepEqual(placeChangeFor('circle', inCircle('team'), { value: '' }), { circle_id: '' });
+    assert.equal(placeChangeFor('circle', inCircle('team'), { value: 'team' }), null);
+});
+
+test('conversations: one door to the newest, three recent rows, the rest on request', () => {
+    const room = (id, at) => ({ room_chat_id: id, address: `room ${id}`, unanswered_count: 0, label: `Room ${id}`, last_at: at, conversation_id: `c${id}`, thread_id: '' });
+    const rooms = [room(1, '2026-11-01T00:00:00Z'), room(2, '2026-11-03T00:00:00Z'), room(3, '2026-11-02T00:00:00Z'), room(4, '2026-11-04T00:00:00Z')];
+    assert.deepEqual(recentRooms(rooms).map((r) => r.room_chat_id), [4, 2, 3, 1]);
+    const coverage = { discovery: 'arrivals', importing: false, gaps: false };
+    const html = placeSheetBodyHtml(slack, { circles: CIRCLES, roomIndex: { rooms, coverage } });
+    const section = html.slice(html.indexOf('data-place-section="conversations"'), html.indexOf('data-place-section="readiness"'));
+    assert.match(section, /data-primary data-place-act="open-latest">Open conversation</);
+    assert.match(section, /data-place-act="all-rooms">All 4 ›</);
+    assert.equal((section.match(/data-place-room=/g) || []).length, 3);
+    const all = placeSheetBodyHtml(slack, { circles: CIRCLES, roomIndex: { rooms, coverage }, allRooms: true });
+    assert.equal((all.match(/data-place-room=/g) || []).length, 4);
+    assert.match(placeSheetBodyHtml(slack, { circles: CIRCLES, roomIndex: { rooms: [], coverage } }), /data-place-act="open-latest" data-disabled>/);
+});
+
+test('the live sheet: its title is the row\'s name, a circle choice and a kept placement write once with the revision', async (t) => {
+    const { document } = sheetDom(t);
+    const requests = [];
+    const place = inCircle('team', 'ouroboros', { label: 'Slack · Acme · Team' });
+    const sheet = openPlaceSheet(place, { circles: CIRCLES, readRooms: async () => ({ rooms: [], coverage: { discovery: 'arrivals', importing: false, gaps: false } }),
+        update: async (_id, change) => { requests.push(change); return { ...place, revision: place.revision + requests.length,
+            circle: change.circle_id ? { id: change.circle_id, placedBy: 'owner', placedAt: '' } : null,
+            description: change.description ? { text: change.description, author: 'owner', at: '' } : place.description }; } });
+    t.after(() => sheet.close());
+    await settled();
+    const label = document.body.querySelector('[data-place-label]');
+    assert.equal(label.textContent, 'Acme', 'the service and the circle\'s own name are not repeated in the title');
+    // The stub DOM reads text before elements, so the meta's parts are read apart (the real-browser pass sees order).
+    const meta = document.body.querySelector('[data-place-meta]');
+    assert.equal(meta.querySelector('[data-i18n-authored]').textContent, 'Slack');
+    assert.match(meta.textContent, /· active/);
+    assert.doesNotMatch(meta.textContent, /Acme|Team/);
+    const body = document.body.querySelector('[data-place-body]');
+    await click(body, '[data-place-act="keep-circle"]');
+    assert.deepEqual(requests.at(-1), { circle_id: 'team', expected_revision: 4 });
+    assert.match(body.textContent, /Your choice now\./);
+    const select = body.querySelector('[data-place-circle]');
+    select.value = 'home';
+    await body.fire('change', { target: select });
+    assert.deepEqual(requests.at(-1), { circle_id: 'home', expected_revision: 5 });
+    assert.match(body.textContent, /Now in Home\./);
+    await input(body, 'description', 'Where the team asks');
+    await click(body, '[data-place-act="save-description"]');
+    assert.deepEqual(requests.at(-1), { description: 'Where the team asks', expected_revision: 6 });
+    assert.match(body.textContent, /Description saved\./);
+    assert.equal(requests.length, 3, 'no write the owner did not ask for');
+});
+
+test('a sheet opened without circles reads them once from the places list; a failed read says so and offers no choice', async (t) => {
+    const { document } = sheetDom(t);
+    let reads = 0;
+    const sheet = openPlaceSheet(inCircle('team'), { readRooms: async () => ({ rooms: [], coverage: { discovery: 'arrivals', importing: false, gaps: false } }),
+        readList: async () => { reads += 1; return { places: [inCircle('team', 'owner', { revision: 9 })], circles: CIRCLES, connectors: [] }; } });
+    t.after(() => sheet.close());
+    await settled(); await settled();
+    const body = document.body.querySelector('[data-place-body]');
+    assert.equal(reads, 1);
+    assert.ok(body.querySelector('[data-place-circle]'));
+    assert.match(body.textContent, /Help the team by the facts\./);
+    assert.equal(sheet.place.revision, 9, 'the list\'s newer record replaces the opener\'s older one');
+    const failed = openPlaceSheet(slack, { readRooms: async () => ({ rooms: [], coverage: { discovery: 'arrivals', importing: false, gaps: false } }),
+        readList: async () => { throw new Error('offline'); } });
+    t.after(() => failed.close());
+    await settled(); await settled();
+    const bodies = document.body.querySelectorAll('[data-place-body]');
+    const second = bodies[bodies.length - 1];
+    assert.match(second.textContent, /Circles could not be read\./);
+    assert.equal(second.querySelector('[data-place-circle]'), null);
+    assert.doesNotMatch(second.textContent, /Reading circles/, 'a failed read is not still reading');
+    assert.equal(second.querySelector('[data-place-act="read-circles"]').textContent, 'Try again');
+});
+
+test('Try again reads the circles again; circles read before stay chosen beside a later failure', async (t) => {
+    const env = sheetDom(t);
+    let fail = true, reads = 0;
+    const readList = async () => {
+        reads += 1;
+        if (fail) throw new Error('offline');
+        return { places: [inCircle('team')], circles: CIRCLES, connectors: [] };
+    };
+    const sheet = openPlaceSheet(inCircle('team'), { readRooms: async () => ({ rooms: [], coverage: { discovery: 'arrivals', importing: false, gaps: false } }), readList });
+    t.after(() => sheet.close());
+    await settled(); await settled();
+    const body = env.document.body.querySelector('[data-place-body]');
+    fail = false;
+    await click(body, '[data-place-act="read-circles"]');
+    assert.equal(reads, 2);
+    assert.equal(env.document.activeElement, body.querySelector('[data-place-circle]'), 'the choice it brought takes the focus');
+    assert.doesNotMatch(body.textContent, /could not be read/);
+    // A circle changed elsewhere and that read fails: the choice stays, with the failure and Try again beside it.
+    fail = true;
+    env.window.dispatchEvent(new CustomEvent('ouro:places-changed', { detail: { circleId: 'home', removed: true } }));
+    await settled(); await settled();
+    assert.ok(body.querySelector('[data-place-circle]'));
+    assert.match(body.textContent, /Circles could not be read\./);
+    fail = false;
+    await click(body, '[data-place-act="read-circles"]');
+    assert.equal(body.querySelector('[data-place-act="read-circles"]'), null);
+    assert.equal(reads, 4);
+});
+
+// ---- replacing drafts: a description, folder or model draft is written on the revision it was typed against ----------
+// The server's side of a place write, as places._write does it: compare-and-set on the revision, and a refused write
+// answers the place as it stands. `edit` is another client's write, or the one the compare let through.
+function placeServer(raw = FIXTURE.places.places[0]) {
+    const server = { raw: structuredClone(raw), writes: [] };
+    server.edit = (change) => {
+        if ('description' in change) server.raw.description = change.description ? { text: change.description, author: 'owner', at: '' } : null;
+        for (const key of ['working_folder', 'model', 'state']) if (key in change) server.raw[key] = change[key];
+        if ('wakes' in change) server.raw.wakes = change.wakes.map((fact) => ({ fact, author: 'owner' }));
+        server.raw.revision += 1;
+        return normalizePlace(server.raw);
+    };
+    server.update = async (_id, { expected_revision: expected, ...change }) => {
+        server.writes.push({ ...change, expected_revision: expected });
+        if (expected !== server.raw.revision) {
+            throw Object.assign(new Error(`Current revision: ${server.raw.revision}`),
+                { status: 409, body: { code: 'place_revision_conflict', place: structuredClone(server.raw) } });
+        }
+        return server.edit(change);
+    };
+    return server;
+}
+const noRooms = async () => ({ rooms: [], coverage: { discovery: 'arrivals', importing: false, gaps: false } });
+const valueOf = (body, key) => body.querySelector(`[data-place-draft="${key}"]`).getAttribute('value');
+const deferredList = () => { let answer; const promise = new Promise((resolve) => { answer = resolve; }); return { read: () => promise, answer }; };
+
+for (const [key, action, wire, mine, theirs] of [
+    ['description', 'save-description', 'description', 'Mine: where the team asks', 'Theirs: the release desk'],
+    ['folder', 'save-folder', 'working_folder', '~/work/mine', '~/work/theirs'],
+    ['model', 'save-model', 'model', 'mine/model', 'theirs/model'],
+]) test(`a ${key} draft keeps the revision it was typed on across a newer places read; that Save meets the conflict, the next is the choice`, async (t) => {
+    const { document } = sheetDom(t);
+    const server = placeServer();
+    const list = deferredList();
+    // Opened without circles (a Dashboard door, Add): the sheet reads the places list, and that read is slow.
+    const sheet = openPlaceSheet(slack, { update: server.update, readRooms: noRooms, readList: list.read });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    const saved = () => (wire === 'description' ? server.raw.description?.text : server.raw[wire]);
+    await input(body, key, mine);  // typed on revision 4
+    server.edit({ [wire]: theirs });  // another client saves revision 5
+    list.answer({ places: [normalizePlace(server.raw)], circles: CIRCLES, connectors: [] });
+    await settled(); await settled();
+    assert.equal(sheet.place.revision, 5, 'the newer read is shown');
+    assert.equal(valueOf(body, key), mine, 'the draft stays over it');
+    await click(body, `[data-place-act="${action}"]`);
+    assert.deepEqual(server.writes, [{ [wire]: mine, expected_revision: 4 }], 'the draft\'s own revision, never the newer read\'s');
+    assert.equal(saved(), theirs, 'the other client\'s words stay');
+    assert.match(body.textContent, /Changed elsewhere; your text is kept\./);
+    assert.equal(valueOf(body, key), mine);
+    await click(body, `[data-place-act="${action}"]`);
+    assert.deepEqual(server.writes[1], { [wire]: mine, expected_revision: 5 }, 'the Save after the conflict is the deliberate one');
+    assert.equal(saved(), mine);
+    assert.doesNotMatch(body.textContent, /Changed elsewhere/);
+});
+
+test('a place another surface announces shows at once and leaves a draft on its own revision', async (t) => {
+    const env = sheetDom(t);
+    const server = placeServer();
+    const sheet = openPlaceSheet(slack, { circles: CIRCLES, update: server.update, readRooms: noRooms });
+    t.after(() => sheet.close());
+    const body = env.document.body.querySelector('[data-place-body]');
+    await input(body, 'folder', '~/work/mine');
+    env.window.dispatchEvent(new CustomEvent('ouro:places-changed', { detail: { place: server.edit({ working_folder: '~/work/theirs' }) } }));
+    assert.equal(sheet.place.revision, 5);
+    await click(body, '[data-place-act="save-folder"]');
+    assert.deepEqual(server.writes, [{ working_folder: '~/work/mine', expected_revision: 4 }]);
+    assert.equal(server.raw.working_folder, '~/work/theirs');
+    await click(body, '[data-place-act="save-folder"]');
+    assert.deepEqual(server.writes[1], { working_folder: '~/work/mine', expected_revision: 5 });
+});
+
+test('the sheet\'s own writes carry an open draft forward; a conflict re-bases only the draft whose Save met it', async (t) => {
+    const { document } = sheetDom(t);
+    const server = placeServer();
+    const sheet = openPlaceSheet(slack, { circles: CIRCLES, update: server.update, readRooms: noRooms });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    await input(body, 'description', 'Where the team asks');  // on revision 4
+    await click(body, '[data-fact="any_message"]');  // the owner's own press: 4 → 5
+    await input(body, 'folder', '~/work/acme-2');  // on revision 5
+    await click(body, '[data-effort-value="silent"]');  // 5 → 6
+    await click(body, '[data-place-act="save-description"]');
+    assert.deepEqual(server.writes.map((write) => write.expected_revision), [4, 5, 6], 'its own presses never conflict with its draft');
+    assert.doesNotMatch(body.textContent, /Changed elsewhere/);
+    // Another client writes (revision 8); the folder draft (carried to 7) meets the conflict on its own Save, and the
+    // model draft typed before it keeps its revision: its first Save meets the conflict too.
+    await input(body, 'model', 'mine/model');  // on revision 7
+    server.edit({ state: 'paused' });
+    await click(body, '[data-place-act="save-folder"]');
+    await click(body, '[data-place-act="save-model"]');
+    await click(body, '[data-place-act="save-folder"]');
+    await click(body, '[data-place-act="save-model"]');
+    assert.deepEqual(server.writes.slice(3).map((write) => [Object.keys(write)[0], write.expected_revision]),
+        [['working_folder', 7], ['model', 7], ['working_folder', 8], ['model', 9]]);
+    assert.equal(server.raw.working_folder, '~/work/acme-2');
+    assert.equal(server.raw.model, 'mine/model');
+    assert.equal(server.raw.state, 'paused', 'nothing the other client wrote was lost');
+});
+
+test('words typed while a description Save is out stay a draft on the revision that Save made', async (t) => {
+    const { document } = sheetDom(t);
+    const server = placeServer();
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const sheet = openPlaceSheet(slack, { circles: CIRCLES, readRooms: noRooms,
+        update: async (id, change) => { if (!server.writes.length) await held; return server.update(id, change); } });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    await input(body, 'description', 'First words');
+    const saving = click(body, '[data-place-act="save-description"]');
+    await input(body, 'description', 'First words, and more');
+    release(); await saving;
+    assert.equal(server.raw.description.text, 'First words');
+    assert.equal(valueOf(body, 'description'), 'First words, and more', 'the newer words stay');
+    assert.doesNotMatch(body.textContent, /Changed elsewhere/);
+    await click(body, '[data-place-act="save-description"]');
+    assert.deepEqual(server.writes.map((write) => write.expected_revision), [4, 5], 'on the revision the first Save made');
+    assert.equal(server.raw.description.text, 'First words, and more');
 });

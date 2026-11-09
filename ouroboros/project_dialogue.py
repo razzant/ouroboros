@@ -548,9 +548,9 @@ def append_chat_annotation(
 
 def routing_target_label(
     drive_root: Any, action: str, target: str, *, task: Any = None,
-    project_id: str = "",
+    project_id: str = "", fallback: str = "Task",
 ) -> str:
-    """Resolve one deterministic event-time label for an existing raw target."""
+    """Resolve one deterministic event-time label for an existing raw target (``fallback``: an unnamed task's)."""
     target = str(target or "").strip()
     if not target:
         return ""
@@ -562,11 +562,11 @@ def routing_target_label(
             project = get_reserved_project(drive_root, target) or {}
             return project_display_name(project.get("name"), target) or "Project"
         return task_presentation_snapshot(
-            drive_root, target, task=task, project_id=project_id,
+            drive_root, target, task=task, project_id=project_id, fallback=fallback,
         )["target_label"]
     except Exception:
         log.debug("Routing target label resolution failed for %s", target, exc_info=True)
-        return "Task"
+        return fallback
 
 
 # Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One factual PHRASE per typed reason (what the
@@ -685,23 +685,6 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
     return f"{prefix} ({reason_text})" if reason_text else prefix
 
 
-def routing_options_with_labels(drive_root: Any, options: Any) -> List[Dict[str, Any]]:
-    """Stamp human labels on manual task choices while retaining their raw ids."""
-    rows: List[Dict[str, Any]] = []
-    for raw in list(options or [])[:100]:
-        if not isinstance(raw, dict):
-            continue
-        row = dict(raw)
-        task_id = str(row.get("task_id") or "").strip()
-        if task_id and not str(row.get("label") or "").strip():
-            row["label"] = routing_target_label(
-                drive_root, str(row.get("action") or "steer_task"), task_id,
-                task=row, project_id=str(row.get("project_id") or ""),
-            )
-        rows.append(row)
-    return rows
-
-
 def routing_option_label(option: Any) -> str:
     """One human label per manual-routing option — the HOST SSOT (the durable
     routing_options history row and the Telegram skill both render through it;
@@ -807,6 +790,8 @@ TASK_CAUSE_PHRASES = {
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
+    "configured_actor_incomplete": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
+    "configured_actor_unknown": "This helper was set to run as a coding session; whether that run succeeded is unknown.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
     # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
     # (task_finalization.terminal_result_fields), a standing limitation of the
@@ -1595,6 +1580,6 @@ __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",
-    "routing_options_with_labels", "routing_target_label", "resolve_owner_message_source",
+    "routing_target_label", "resolve_owner_message_source",
     "source_refs_for_project",
 ]

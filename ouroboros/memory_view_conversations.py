@@ -17,7 +17,7 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
 
 A writer's terminal rows its page links below it (``memory_sealing.linked_rows``) are that page's, never open
 here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
-recorded speaker, or by none) is one line naming the earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
+recorded speaker, or by none, with the same connector facts) is one line naming the earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
 to my newest act there (my own words, a quiet finish, a note: ``memory_room_activity``); the floor
 (``memory_floor``) folds them in that order -- retold, considered, then the words nobody considered, oldest
 first within each (``F6w``); then a group to its line (``F6g``); my human's words last of all, other
@@ -130,7 +130,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         spoken = [(entry, cls) for entry, cls in classed if cls["lane"] == 1]
         key, place = conversation_of(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
         own = max((entry[2] for entry, cls in spoken if _outward(cls["author"])), default=-1)  # §3.4 (i)
-        ours = any(cls["author"]["kind"] == "ouroboros" or owner_speech(entry[1], cls["author"]) for entry, cls in spoken)
+        ours = any(_ours(entry[1], cls["author"]) for entry, cls in spoken)
         first = entries[0][2] if entries else -1
         for _address, meta, pos in reversed(sealed.get(room, ())):  # newest first: who of ours spoke before the pages
             if ours and pos < first or ours and first < 0:  # older than every open row: it considers none of them
@@ -138,7 +138,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             author = row_class(meta, pos=pos, **lineage)
             if author["lane"] == 1 and author["author"]["kind"] == "ouroboros":
                 ours, own = True, max(own, pos) if pos > first and _outward(author["author"]) else own
-            elif author["lane"] == 1 and owner_speech(meta, author["author"]):
+            elif author["lane"] == 1 and _ours(meta, author["author"]):
                 ours = True
         engaged = not place or ours or bool(notes.get(room)) or bool(running.get(room))
         fold = max(((pos, meta) for _a, meta, pos in held if meta.get("fold_read") is True and meta.get("wake_summary")),
@@ -237,19 +237,26 @@ def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
     """``row_sha256 -> the earlier copy's address`` of a room's later deliveries of words it already holds, its rows
     (sealed and open) in position order, the same non-empty words (``text_sha256``, whitespace aside): a row with no
     recorded speaker repeats the room's earliest copy, a recorded speaker's row only that speaker's own earliest copy
-    (never an unrecorded one). Edited words and wordless rows are none; no similarity, prefix or length."""
-    first: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (words, recorded speaker or "" for any) -> the earliest copy
+    (never an unrecorded one), and the same connector-facts digest from row_meta. Differing facts keep their own
+    row and reader; edited words and wordless rows are none. No similarity, prefix or length."""
+    first: Dict[Tuple[str, str, str], Dict[str, Any]] = {}  # (words, speaker or "" for any, facts) -> earliest copy
     found: Dict[str, Dict[str, Any]] = {}
     for address, meta, _pos in rows:
         digest = meta.get("text_sha256") if int(meta.get("text_chars") or 0) else ""
         if digest:
-            speaker = recorded_speaker(meta)
-            earlier = first.get((digest, speaker))
+            speaker, facts = recorded_speaker(meta), str(meta.get("message_facts_sha256") or "")
+            earlier = first.get((digest, speaker, facts))
             if earlier is not None and earlier["row_sha256"] != address["row_sha256"]:
                 found[address["row_sha256"]] = earlier
-            first.setdefault((digest, ""), address)
-            first.setdefault((digest, speaker), address)
+            first.setdefault((digest, "", facts), address)
+            first.setdefault((digest, speaker, facts), address)
     return found
+
+
+def _ours(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
+    """An act of mine or my human's in a room: my words, theirs (``owner_speech``) or a forward from their confirmed
+    account, which engages the room as theirs though its words stay another author's."""
+    return author.get("kind") == "ouroboros" or owner_speech(row, author) or author.get("owner_confirmed") is True
 
 
 def _outward(author: Mapping[str, Any]) -> bool:
