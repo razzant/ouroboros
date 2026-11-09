@@ -256,7 +256,7 @@ def test_the_saved_receipt_names_the_turn_by_its_own_name_or_by_none(main, named
 
 
 _CARRIER = r"""
-import json, sys
+import json, os, sys
 from contextlib import contextmanager
 from types import SimpleNamespace
 from ouroboros import conversation_lease, task_custody
@@ -266,7 +266,7 @@ from supervisor.worker_chat_lane import CarrierTurn
 root, task = sys.argv[1], json.load(open(sys.argv[2], encoding="utf-8"))
 say = lambda line: print(line, flush=True)
 turn = None
-say("ready")
+say(f"ready {os.getpid()}")  # the interpreter's own pid: on Windows a venv's python.exe launches it as a child
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -330,7 +330,7 @@ class _Carrier:
                                          stdout=subprocess.PIPE, stderr=errors, text=True)
         self.lines = stdqueue.Queue()
         _THREAD(target=lambda: [self.lines.put(line.strip()) for line in self.proc.stdout], daemon=True).start()
-        self.send("", "ready")
+        self.pid = int(self.send("", "ready"))  # the pid an intake fact it writes names, not the launcher's
 
     def send(self, command, expect=None):
         if command:
@@ -364,7 +364,7 @@ def test_the_carrier_takes_the_fact_and_its_locked_final_close_orders_a_racing_a
     try:
         assert carrier.send("take", "taken") == "owner:1"
         taken = _intake(main.root, turn)
-        assert taken["pid"] == carrier.proc.pid and taken["pid"] != os.getpid() and taken["accepting"] is True
+        assert taken["pid"] == carrier.pid and taken["pid"] != os.getpid() and taken["accepting"] is True
         _say(main.bridge, main.ctx, "The workshop group", "cm-early")
         assert _delivered(main.bridge, "cm-early") and [meta["task"]["id"] for meta in _turns()] == [turn]
 
