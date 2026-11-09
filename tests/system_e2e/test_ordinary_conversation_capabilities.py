@@ -1,11 +1,14 @@
 """S27: ordinary Main/Project tools and concurrency through real stdio MCP.
 
-One Main turn is held inside its model call while another completes MCP work.
-Both start after a Project exists. The Project then uses MCP and the built-in
-writer against its attached folder. Durable results, tool traces, wire schemas
-and physical files jointly prove capability; a stub's final answer alone cannot.
-The shared e2e_clone fixture runs committed HEAD, so an uncommitted candidate
-must first be materialized in an isolated clone by its operator.
+One Main turn is held inside its model call while a Project turn completes MCP
+work and the built-in writer against its attached folder; both start after the
+Project exists. The turn beside the held one is the Project room's because two
+owner messages in Main are one turn while it reads (#2996). Once the held turn
+has answered, Main's next message is a turn of its own and uses MCP too.
+Durable results, tool traces, wire schemas and physical files jointly prove
+capability; a stub's final answer alone cannot. The shared e2e_clone fixture
+runs committed HEAD, so an uncommitted candidate must first be materialized in
+an isolated clone by its operator.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import uuid
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
+from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
 from tests.system_e2e.harness import (
     LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text, conversation_turn_row,
     keyless_settings, message_text, require_lane, start_server, wait_durable_result, wait_until, ws_url,
@@ -67,15 +71,15 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
     read_tool, write_tool = "mcp_fixture__read_note", "mcp_fixture__write_note"
     steps = [
         {"tool": read_tool, "arguments": {"name": "input.txt"}},
-        {"tool": write_tool, "arguments": {"name": "main.txt", "text": "S27_MAIN_WRITE"}},
-        {"final": "S27_MAIN_COMPLETE"},
-        {"final": "S27_HELD_COMPLETE"},
-        {"tool": read_tool, "arguments": {"name": "input.txt"}},
         {"tool": write_tool, "arguments": {"name": "project.txt", "text": "S27_PROJECT_WRITE"}},
         {"tool": "write_file", "arguments": {
             "root": "active_workspace", "path": "room-result.txt", "content": "S27_ROOM_WRITE",
         }},
         {"final": "S27_PROJECT_COMPLETE"},
+        {"final": "S27_HELD_COMPLETE"},
+        {"tool": read_tool, "arguments": {"name": "input.txt"}},
+        {"tool": write_tool, "arguments": {"name": "main.txt", "text": "S27_MAIN_WRITE"}},
+        {"final": "S27_MAIN_COMPLETE"},
     ]
     gate = ModelGate(lambda body: bool(body.get("tools")) and "S27_HOLD" in body_text(body),
                      timeout=300)
@@ -125,24 +129,29 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                 # #2654: the native turn is the conversation lane's (a carrier process outside
                 # MAX_WORKERS, its RUNNING row never PENDING), not an in-process actor.
                 held_row = conversation_turn_row(oracle, held_id)
-                main_id = finish(send("Read input.txt with the fixture, write main.txt, then answer here."),
-                                 "S27_MAIN_COMPLETE")
-                assert (mcp_dir / "main.txt").read_text() == "S27_MAIN_WRITE"
-                assert not gate.release.is_set() and not gate.timed_out
-                assert oracle.task_result(held_id).get("status") == "running"
-                # The held turn's carrier stayed bound to it, blocked in its model call, while the
-                # other Main turn completed: that turn ran concurrently on ANOTHER carrier.
-                still = conversation_turn_row(oracle, held_id)
-                assert (still["worker_id"], still["carrier_pid"]) == (held_row["worker_id"], held_row["carrier_pid"]), (
-                    held_row, still)
-                gate.release.set()
-                assert finish(held_message, "S27_HELD_COMPLETE") == held_id
+                # Another Main message would join the held turn (#2996): the turn beside it is the Project room's.
                 project_id = finish(send("Read input.txt and write project.txt with the fixture; "
                                          "write room-result.txt in this Project and answer here.",
                                          in_project=True), "S27_PROJECT_COMPLETE")
+                assert (mcp_dir / "project.txt").read_text(encoding="utf-8") == "S27_PROJECT_WRITE"
+                assert (room / "room-result.txt").read_text(encoding="utf-8") == "S27_ROOM_WRITE"
+                assert not gate.release.is_set() and not gate.timed_out
+                assert oracle.task_result(held_id).get("status") == "running"
+                # The held turn's carrier stayed bound to it, blocked in its model call, while the
+                # Project turn completed on a worker carrier of its own, not on a thread of the server.
+                still = conversation_turn_row(oracle, held_id)
+                assert (still["worker_id"], still["carrier_pid"]) == (held_row["worker_id"], held_row["carrier_pid"]), (
+                    held_row, still)
+                carrier = oracle.task_result(project_id).get("execution_owner") or {}
+                assert (carrier.get("kind"), carrier.get("lane"), carrier.get("executor")) == (
+                    "direct", LANE_CONVERSATION, EXECUTOR_WORKER), carrier
+                gate.release.set()
+                assert finish(held_message, "S27_HELD_COMPLETE") == held_id
+                # The held turn's result is settled, so Main's next message is a turn of its own.
+                main_id = finish(send("Read input.txt with the fixture, write main.txt, then answer here."),
+                                 "S27_MAIN_COMPLETE")
 
-            assert (mcp_dir / "project.txt").read_text() == "S27_PROJECT_WRITE"
-            assert (room / "room-result.txt").read_text() == "S27_ROOM_WRITE"
+            assert (mcp_dir / "main.txt").read_text(encoding="utf-8") == "S27_MAIN_WRITE"
             assert not (e2e_clone / "room-result.txt").exists(), "room write targeted the system repo"
             assert oracle.task_result(project_id).get("_is_direct_chat") is True
             assert not [row for row in oracle._jsonl("logs/chat.jsonl")
