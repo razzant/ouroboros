@@ -476,7 +476,7 @@ def _owner_turn(main, text="First request"):
     "project_bound", "detached", "other_chat", "constrained_message",
 ])
 def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_owner_turn(main, monkeypatch, case):
-    """Every reader counts first, none is chosen among several, and absence of the fact is never preparation."""
+    """Only owner turns are candidates, none is chosen among several; absence of the fact is never preparation."""
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.conversation_lease import _intake_path, open_author_intake
     from ouroboros.owner_mailbox import drain_owner_entries
@@ -556,7 +556,9 @@ def test_a_main_message_is_its_own_turn_unless_its_one_reader_is_a_confirmed_own
         message = {"task_constraint": {"mode": "normal", "extra_allowlist": ["web_search"]}}
     before = {meta["task"]["id"] for meta in _turns()}
     _say(main.bridge, main.ctx, "One more thing", "cm-follow", **message)
-
+    if case in {"pooled_root_beside", "wake_beside"}:  # no other candidate beside the one owner turn: the words join it
+        assert [ack["target"] for ack in _delivered(main.bridge, "cm-follow")] == [turn] and not _turns("One more thing")
+        return
     assert not _delivered(main.bridge, "cm-follow")
     started = [meta for meta in _turns("One more thing") if meta["task"]["id"] not in before]
     assert len(started) == 1, (case, [meta["task"].get("text") for meta in _turns()])
@@ -726,7 +728,7 @@ def test_only_its_own_closed_fact_for_its_attempt_takes_a_finishing_owner_turn_o
         _admitted(_seed("Own clock", {"wake_cause": "own_clock", "initiator": "consciousness"}), reply_expected=False)
     _say(main.bridge, main.ctx, "And mention the deadline", "cm-third")
 
-    if fact == "closed":
+    if fact in {"closed", "closed_beside_wake"}:  # a wake beside the one reading owner turn is no candidate
         assert [ack["target"] for ack in _delivered(main.bridge, "cm-third")] == [second]
         assert not _turns("And mention the deadline")
     else:

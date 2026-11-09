@@ -176,24 +176,30 @@ def _route_main_followup(
     """Main's ordinary owner message reaches the one turn reading this conversation when it is my human's own.
 
     One author per conversation: a clarification typed while that turn still awaits its carrier or prepares must not
-    start a second author acting on the same request. Every reader of the chat counts first: a wake, a call or
-    background work beside the turn leaves the words their own turn, and none is chosen among several; an owner turn
-    whose own fact is closed (``_owner_turn_closed``) reads no more and is none. From its confirmed admission the
-    turn takes them only under its durable intake for the attempt judged
-    (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail lock, and
-    never once its result settled: no settled-result check alone orders words against a loop in another process.
-    A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
+    start a second author acting on the same request. The candidates are the rows that ARE my human's own turn of
+    this chat by the host's facts (``_owner_turn_key``: the conversation lane, the owner door's ingress, no Project
+    binding, not a wake, a call, Presence or detached work) and still read (``_owner_turn_closed``); exactly one
+    candidate takes the words, none or several leave them their own turn. A wake, a call or background work beside
+    the turn holds no ``owner:<chat>`` conversation and is no candidate: skipping it is a cut by the row's kind, never
+    a choice among readers. From its confirmed admission the turn takes them only under its durable intake for the
+    attempt judged (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail
+    lock, and never once its result settled: no settled-result check alone orders words against a loop in another
+    process. A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
     message's one root snapshot."""
     try:
         roots = roots if roots is not None else addressable_roots(ctx)
-        readers = [row for row in roots.rows(chat_id)
-                   if row.get("room_reader") and not _owner_turn_closed(ctx, row, chat_id)]
-        if roots.gap or len(readers) != 1:
+        if roots.gap:
             return ""
-        meta = getattr(ctx, "RUNNING", {}).get(str(readers[0]["task_id"]))
-        key = _owner_turn_key(ctx, readers[0], meta, chat_id)
-        return _deliver_to_reader(ctx, readers[0], message, client_message_id, task_metadata=task_metadata,
-                                  image_data=image_data, owner=(key, meta)) if key else ""
+        running = getattr(ctx, "RUNNING", {})
+        owner_turns = [(row, meta, key) for row in roots.rows(chat_id) if row.get("room_reader")
+                       for meta in (running.get(str(row["task_id"])),)
+                       for key in (_owner_turn_key(ctx, row, meta, chat_id),)
+                       if key and not _owner_turn_closed(ctx, row, chat_id)]
+        if len(owner_turns) != 1:
+            return ""
+        row, meta, key = owner_turns[0]
+        return _deliver_to_reader(ctx, row, message, client_message_id, task_metadata=task_metadata,
+                                  image_data=image_data, owner=(key, meta))
     except Exception:
         log.debug("Main follow-up routing failed; the message starts its own turn", exc_info=True)
     return ""

@@ -38,6 +38,17 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
+def _mind_note(evt: Dict[str, Any]) -> bool:
+    """An act whose words are the teller's own: no owner quote and a synthetic receipt id (``tell_task`` with a note
+    only, ``control_relay._tell_task``). Whatever turn speaks it, the note is not my human's words (D7: without a
+    verified source the words are the teller's), so its refusal is the teller's to narrate from its typed tool
+    result, as a task-issued act's is; the owner's chat shows no row and no ACK for it. An act that carries an owner
+    quote or wears an owner message id (a relayed message, the routing card's click) keeps its owner notice."""
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+
+    return not evt.get("quotes") and str(evt.get("client_message_id") or "").startswith(AGENT_RECEIPT_ID_PREFIX)
+
+
 def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool:
     """Whether an owner act's refusal publishes its System row (``_refusal_row``).
 
@@ -45,9 +56,10 @@ def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool
     was handed over (its durable row was refused, or no live ACK went out), so nothing else
     tells it, whatever message the act wears. Otherwise only for an unlabelled act (a
     synthetic receipt id) on a path that keeps the row the web shows, paired with the ACK.
-    A task that spoke for itself reads its typed refusal in its tool result and Logs row.
+    A task that spoke for itself reads its typed refusal in its tool result and Logs row; so does a turn whose
+    act carried no owner words (``_mind_note``).
     """
-    if _task_issued(evt):
+    if _task_issued(evt) or _mind_note(evt):
         return False
     return carrier == "system" or (
         paired and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip()))
@@ -186,7 +198,10 @@ def _steer_receipt(
     receipt = _emit_routing_receipt(
         ctx, evt, action="steer_task", target=target, target_label=target_label,
         status=status, reason=reason, detail=detail,
-        attachment_manifest=attachment_manifest, publish=not task_issued or bool(owner_message_id),
+        attachment_manifest=attachment_manifest,
+        # The owner hears of an act that carries their words or their click; a task's act and the mind's own note
+        # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone.
+        publish=(not task_issued and not _mind_note(evt)) or bool(owner_message_id),
     )
     for quote in evt.get("quotes") or []:
         source = quote.get("source") or {}

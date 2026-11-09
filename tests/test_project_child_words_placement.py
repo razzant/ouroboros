@@ -113,16 +113,15 @@ def _child_registry(room, monkeypatch, mode: str, profile: str = "acting_subagen
 
 
 def _steer_refused(room, target: str = "kid-1") -> int:
-    """An owner direct turn's later steer: its origin already routed, so the act carries
-    the turn's own synthetic receipt id and the refusal is a chat row."""
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+    """An owner act that names no receipt id: no ACK can carry its cause, so the refusal is a chat row in the
+    issuing room. A note of the mind (a synthetic receipt id, no quote) publishes none (``steering._mind_note``)."""
     from supervisor import steering
 
     before = room.revision()
     steering._handle_steer_task({
         "type": "steer_task", "routing_token": f"tok-{target}", "target_task_id": target,
         "message": "also check the README", "chat_id": room.chat_id,
-        "client_message_id": f"{AGENT_RECEIPT_ID_PREFIX}tok-{target}", "issuer": {"kind": "owner_turn"},
+        "client_message_id": "", "issuer": {"kind": "owner_turn"},
         "ts": "2026-10-11T12:07:00+00:00"}, room.host)
     return room.revision() - before
 
