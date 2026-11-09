@@ -175,9 +175,14 @@ def test_timeout_never_runs_body_and_retry_can_enter(monkeypatch, isolated_queue
     with mc.model_call_slot("model", route=ROUTE):
         monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
         bound = time.time() - 1 if deadline == "expired" else None
-        with pytest.raises(mc.ModelSlotTimeout):
+        with pytest.raises(mc.ModelSlotTimeout) as refused:
             with mc.model_call_slot("model", deadline_ts=bound, route=ROUTE):
                 pytest.fail("timeout bypassed capacity")
+        # The refusal names the install's own slot wait, the model and the measured wait (the raw
+        # llm_api_error row read "Provider capacity" for 140 waits of 05–08.11 that no provider saw).
+        text = str(refused.value)
+        assert text.startswith("Local model slot wait expired before dispatch: model model; no slot freed within "), text
+        assert text.endswith(" s; the request was not sent") and "Provider" not in text, text
         assert not _records(isolated_queue, "ticket")
         assert len(_records(isolated_queue, "slot")) == 1
     with mc.model_call_slot("model", route=ROUTE):
