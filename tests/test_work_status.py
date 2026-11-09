@@ -788,3 +788,32 @@ def test_a_silent_working_member_says_since_when_until_its_own_progress():
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])
     assert all(r["code"] != "no_progress" for r in ws.classify_member(row("q", "queued"), {**silent})["reasons"])
+
+
+def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_path, monkeypatch):
+    """The fact lives on the RUNNING row (``silence_attention.observe``), never on its task: the census carries it to
+    the work projection, so the line says since when while the episode is open and drops it at the source's progress."""
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from ouroboros.gateway.work_projection import works_snapshot
+    from ouroboros.task_results import write_task_result
+    from supervisor import silence_attention
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "quiet", "running", chat_id=7)
+    meta = {"task": {"id": "quiet", "type": "task", "chat_id": 7, "root_task_id": "quiet"}, "attempt": 1,
+            "started_at": 1794190000.0, "last_progress_at": 1794190200.0}
+    workers.RUNNING["quiet"] = meta
+
+    def reasons():
+        raw, owners = {}, []
+        _chat_activities_snapshot_safe(tmp_path, work_facts=raw, decision_owners=owners)
+        [work] = works_snapshot(tmp_path, owners, raw)["works"]
+        return [(reason["code"], reason.get("since")) for reason in work["because"]]
+
+    assert all(code != "no_progress" for code, _since in reasons())
+    silence_attention.observe(queue, "quiet", meta, 1794193800.0, 600.0)
+    assert reasons()[0] == ("no_progress", 1794190200.0)
+    meta["last_progress_at"] = 1794193900.0
+    silence_attention.recovered(queue, "quiet", meta, 1794193900.0)
+    assert all(code != "no_progress" for code, _since in reasons())

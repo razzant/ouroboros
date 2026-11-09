@@ -357,7 +357,7 @@ Orphan cancellation needs readable terminal owner-finish evidence or the owner's
 
 #### Live room Subagents mode
 
-`settings_integrity.live_subagents_mode()` reads the room at admission and each round (§7). Scheduler-stamped work (`schedule_writer_kind`), including Presence promises, reads Swarm as Auto and keeps Off; unscheduled autonomous work keeps its controls. Off hides catalogs and refuses new runs (`schedule_subagent`, `delegate_start`, `continue_from`, plan answers; `subagents_off_in_room`). Running helpers, Off→on, Settings and diagnostics: CLIENT_CONTRACT §9.
+`settings_integrity.live_subagents_mode()` reads the room at admission and each round (§7). Scheduler-stamped work (`schedule_writer_kind`), including Presence promises, reads Swarm as Auto and keeps Off; unscheduled autonomous work keeps its controls. Off hides catalogs and refuses new runs (`schedule_subagent`, `delegate_start`, `continue_from`, plan answers; `subagents_off_in_room`). Running helpers, Off→on and Settings: CLIENT_CONTRACT §9.
 
 `loop_messages` appends live mode facts; owner rows keep their Swarm label in echo/history. Retries/switches retain admission mode; failed reads leave labels absent. Receipts keep starts, `refused_starts`, reviews, models, cost and unfinished work. Only proven zero attempts/starts hides the line; gaps stay unknown (§3).
 

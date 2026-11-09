@@ -662,6 +662,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "owner_wait": dict(meta.get("owner_wait") or {}),
+                    # The live silence fact is the RUNNING row's, never its task's (silence_attention.observe).
+                    "silence_attention": dict(meta.get("silence_attention") or {}),
                     "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
                 for task_id, meta in queue_mod.RUNNING.items()]
