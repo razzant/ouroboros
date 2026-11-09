@@ -465,13 +465,16 @@ def owner_contact_refusal(ctx: ToolContext, chat_id: object) -> str:
     return ""
 
 
-def _main_notice_refusal(ctx: ToolContext, chat_id: object) -> str:
+def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool = False) -> str:
     """Why this caller may not address Main, or "" when it may.
 
     A retained Presence root uses source-bound private contact. Other callers
     need an owner-visible root room (a Project or an owner-started root).
+    ``asked_main`` marks the caller that chose ``destination="main"`` itself: only
+    that refusal names Main as the room the caller already runs in; the relay
+    return path shares the rule but not the sentence.
     """
-    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
     from ouroboros.dialogue_provenance import run_origin
 
     from ouroboros.presence_owner_contact import contact_origin
@@ -501,6 +504,12 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object) -> str:
     bound_chat = project_chat_for_task_tree(data_root, str(getattr(ctx, "task_id", "") or ""))
     if (visible_chat not in projects and bound_chat not in projects
             and not run_origin({"metadata": getattr(ctx, "task_metadata", None)})["owner_ingress"]):
+        if asked_main and visible_chat == WEB_UI_CHAT_ID:
+            # A wake or scheduled root already runs in Main: the host set its current room to the
+            # owner's main chat, so destination='current' reaches the owner there. Saying so grants no
+            # owner voice (the refusal stands); it only names the room the caller is in.
+            return ("this root already runs in Main, its current room, so destination='current' reaches "
+                    "your human there; 'main' is for a Project or owner-started root, and this one is neither")
         return "this root is neither bound to a registered Project nor started by the owner"
     return ""
 
@@ -534,11 +543,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
             f"destination={destination!r} is not a destination; use 'current' (this room) or 'main' (the owner's main chat)",
         ], effect="Nothing was sent."), tool_name="send_user_message")
     if target == "main":
-        refusal = _main_notice_refusal(ctx, chat_id)
+        refusal = _main_notice_refusal(ctx, chat_id, asked_main=True)
         if refusal:
+            remedy = "" if "destination='current'" in refusal else "; destination='current' still writes this work's own room"
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
-                f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent; "
-                "destination='current' still writes this work's own room.")))
+                f"⚠️ MAIN_NOTICE_BLOCKED: destination='main' refused: {refusal}. Nothing was sent{remedy}.")))
         from ouroboros.presence_owner_contact import ContactRequestConflict, ContactRequestInvalid, contact_origin, send_main_message
         try:
             origin = contact_origin(ctx)
