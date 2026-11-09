@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Literal, Mapping, Tuple
 
@@ -900,6 +901,30 @@ def recorded_finality(final: Any, authority: Any, *, host_facts: bool) -> str:
     else:
         standing = "final=unknown" if host_facts or known else ""
     return standing + (f"; authority={known}" if standing and known else "")
+
+
+def stamp_summary(stamp: Any) -> str:
+    """``host stamp: 932 tasks — completed 3 (final=true), failed 1 (final=true), not_recorded 928``: a page's or
+    part's host stamp as one line of counts by recorded status and finality standing (the ``final=…`` token
+    ``recorded_finality`` copies; the authority stays on each task's own line in the record's read), never a task id
+    and never the time it was computed, so a header stays identification whatever the stamp holds. A part's
+    ``part_stamp`` keeps only its still-open tasks in ``tasks`` and every task in ``counts``: the tasks it folded
+    as done are one clause. '' without a stamp."""
+    stamp = _mapping(stamp)
+    tasks = [entry for entry in stamp.get("tasks") or [] if isinstance(entry, Mapping)]
+    counted = sum(int(group.get("tasks") or 0) for group in stamp.get("counts") or [] if isinstance(group, Mapping))
+    total = max(counted, len(tasks))
+    if not total:
+        return ""
+    groups: Counter = Counter()
+    for entry in tasks:
+        standing = recorded_finality(entry.get("outcome_final"), entry.get("outcome_authority"),
+                                     host_facts=entry.get("source") == "host_task_facts").split(";")[0]
+        groups[(str(entry.get("status") or "unknown"), standing)] += 1
+    parts = [f"{status} {n}" + (f" ({standing})" if standing else "") for (status, standing), n in sorted(groups.items())]
+    if total > len(tasks):
+        parts.append(f"done {total - len(tasks)} (terminal, folded)")
+    return f"host stamp: {total} task{'' if total == 1 else 's'} — " + ", ".join(parts)
 
 
 def _host_facts_text(row: Mapping[str, Any]) -> str:

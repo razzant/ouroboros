@@ -166,9 +166,13 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     wake = room_text(root, {"id": "wake1", "chat_id": 1, "metadata": WAKE})
     assert "MAIN-DEFECT-main1" in wake
     assert "MAIN-DEFECT-bound" not in wake and "MAIN-DEFECT-pres1" not in wake
+    # Other rooms' late reviews are counted in the wake's waiting facts and listed by room and work on request; the
+    # wake draws no line for each of them.
+    assert marks["bound"] not in wake and marks["pres1"] not in wake and "Late review of task" not in wake
+    listing = _memory_read(_ctx(root, "wake1"), room_id="late_reviews")
+    assert listing.startswith("late reviews: 3 in 3 rooms")
     for task in ("bound", "pres1"):
-        lines = [line for line in wake.splitlines() if f"Late review of task {task}:" in line]
-        assert len(lines) == 1 and f'memory_read(node_id="{marks[task]}")' in lines[0]
+        assert f"result review of task {task}; memory_read(node_id='{marks[task]}')" in listing
         assert f"MAIN-DEFECT-{task}" in _memory_read(_ctx(root, "wake1"), node_id=marks[task])
     assert len(_late_marks(root)) == 3  # projection/read never releases any mark
     presence = room_text(root, {"id": "pt1", "chat_id": 555, "metadata": PRESENCE})
@@ -180,6 +184,27 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     helper_section = child.split(SECTION, 1)[1].split("\n## ", 1)[0]
     assert "the integrating mind releases it" in helper_section and "release_ids=" not in helper_section
     assert "until I release it with my reason" in main_c
+
+
+def test_a_view_captured_with_an_old_pointer_entry_draws_no_pointer_and_keeps_this_rooms_words():
+    """A view captured before other rooms' late reviews left it holds a pointer entry (no words, ``own_room`` False);
+    a held core is re-rendered after an update (``context_fit``), so such an entry draws nothing, while this room's
+    late review keeps its words and its release."""
+    import dataclasses
+
+    pointer = {"id": "late-review-old", "scope": "room", "room": "Alpha", "text": "", "by": "host",
+               "date": "2026-10-17", "target": "source x", "quote": "",
+               "late_review": {"task_id": "old1", "source": 'memory_read(node_id="late-review-old")', "sha256": "",
+                               "own_room": False}}
+    own = {**pointer, "id": "late-review-own", "room": "Main", "text": "OWN-WORDS",
+           "late_review": {"task_id": "own1", "source": "memory_read(source_ref={})", "sha256": "abcdef012345"}}
+    spec = dataclasses.replace(mv.ROLE_DEFAULTS["consciousness"], room_id="1", other_conversations=False)
+    for marks, shown in (((pointer,), False), ((pointer, own), True)):
+        text = mv.render_room(mv.MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={},
+                                                    marks=marks))
+        assert "late-review-old" not in text and "old1" not in text
+        assert (SECTION in text) is shown and ("OWN-WORDS" in text) is shown
+        assert ("release_ids=['late-review-own']" in text) is shown
 
 
 def test_showing_reading_sealing_and_a_fitted_window_never_release_it(tmp_path):
