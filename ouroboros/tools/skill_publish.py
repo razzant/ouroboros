@@ -818,10 +818,7 @@ def _submit_skill_to_hub(
     try:
         cyber = mode_has_unrestricted_agency(get_runtime_mode())
         if not confirm_public_submission and not cyber:
-            raise _PublishFailure(
-                "confirmation_required",
-                "Confirm this public submission, then retry.",
-            )
+            raise _PublishFailure("confirmation_required", "Confirm this public submission, then retry.")
         from ouroboros.skill_install_record import read_install_record
         from ouroboros.skill_source_install import run_in_lane
 

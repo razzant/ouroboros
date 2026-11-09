@@ -1254,7 +1254,7 @@ def reestablish_merge_head(target_sha: str) -> None:
     if not target_sha:
         return
     try:
-        (_g._git_dir() / "MERGE_HEAD").write_text(target_sha + "\n", encoding="utf-8")
+        (_g._git_dir() / "MERGE_HEAD").write_bytes((target_sha + "\n").encode("utf-8"))
     except Exception:
         _g.log.warning("reestablish_merge_head failed", exc_info=True)
 
