@@ -34,16 +34,28 @@ import os
 import pathlib
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from typing import Any
 
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+# Text records keep the JSON logs' clock (``utc_now_iso``): UTC with an explicit ``Z``, so one
+# moment reads the same in ``server.log`` and ``events.jsonl`` on every install (a local ``asctime``
+# without a zone put the text logs three hours off the JSON ones on a UTC+3 Mac).
+LOG_FORMAT = "%(asctime)s.%(msecs)03dZ [%(levelname)s] %(name)s: %(message)s"
+LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 SERVER_LOG_MAX_BYTES = 2 * 1024 * 1024
 SERVER_LOG_BACKUP_COUNT = 3
 OUTPUT_CHUNK_BYTES = 64 * 1024
 UNCAUGHT_LOGGER_NAME = "ouroboros.uncaught"
 
 _configured = False
+
+
+def utc_log_formatter() -> logging.Formatter:
+    """The one text-log formatter: UTC with its zone written, the JSON logs' clock."""
+    formatter = logging.Formatter(LOG_FORMAT, LOG_DATEFMT)
+    formatter.converter = time.gmtime
+    return formatter
 
 
 def configure_process_logging(*, drive_logs: pathlib.Path | None) -> None:
@@ -69,7 +81,7 @@ def configure_process_logging(*, drive_logs: pathlib.Path | None) -> None:
             backupCount=SERVER_LOG_BACKUP_COUNT, encoding="utf-8",
         ))
     handlers.append(logging.StreamHandler())
-    formatter = logging.Formatter(LOG_FORMAT)
+    formatter = utc_log_formatter()
     root = logging.getLogger()
     for handler in handlers:
         handler.setFormatter(formatter)
