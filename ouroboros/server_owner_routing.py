@@ -149,18 +149,17 @@ def _owner_turn_key(ctx: Any, row: Dict[str, Any], meta: Any, chat_id: int) -> s
     return key
 
 
-def _owner_turn_closed(ctx: Any, row: Dict[str, Any], chat_id: int) -> bool:
-    """Whether ROW is my human's own turn of this chat whose final drain already read last: its own fact for the
-    attempt RUNNING names is closed (``conversation_lease.author_intake_closed``). It finishes what it holds and
-    reads no more words. No fact, an unreadable or foreign one, or another attempt's proves nothing."""
+def _owner_turn_closed(row: Dict[str, Any], meta: Any, key: str) -> bool:
+    """Whether ROW, my human's own turn of this chat (``key``: its ``_owner_turn_key``, ``meta``: its RUNNING row),
+    has a final drain that already read last: its own fact for the attempt RUNNING names is closed
+    (``conversation_lease.author_intake_closed``). It finishes what it holds and reads no more words. No fact, an
+    unreadable or foreign one, or another attempt's proves nothing."""
     from ouroboros.conversation_lease import author_intake_closed
     from supervisor.queue import _task_drive_for_task
 
     tid = str(row["task_id"])
-    meta = getattr(ctx, "RUNNING", {}).get(tid)
-    key = _owner_turn_key(ctx, row, meta, chat_id)
-    return bool(key) and author_intake_closed(_task_drive_for_task(meta["task"], tid), tid, key,
-                                              attempt=int(meta.get("attempt") or 1))
+    return author_intake_closed(_task_drive_for_task(meta["task"], tid), tid, key,
+                                attempt=int(meta.get("attempt") or 1))
 
 
 def _route_main_followup(
@@ -194,7 +193,7 @@ def _route_main_followup(
         owner_turns = [(row, meta, key) for row in roots.rows(chat_id) if row.get("room_reader")
                        for meta in (running.get(str(row["task_id"])),)
                        for key in (_owner_turn_key(ctx, row, meta, chat_id),)
-                       if key and not _owner_turn_closed(ctx, row, chat_id)]
+                       if key and not _owner_turn_closed(row, meta, key)]
         if len(owner_turns) != 1:
             return ""
         row, meta, key = owner_turns[0]
