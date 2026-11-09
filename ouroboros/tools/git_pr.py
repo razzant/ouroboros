@@ -706,8 +706,8 @@ def get_tools() -> List[ToolEntry]:
                 "Stage a no-fast-forward merge of an integration branch into the body's working branch "
                 "WITHOUT committing (git merge --no-ff --no-commit). Sets MERGE_HEAD so "
                 "commit_reviewed creates a proper merge commit with both parents. Target is "
-                "branch_dev (the bound candidate branch during self-development; commit_reviewed checks it out before "
-                "committing — any other target would lose MERGE_HEAD). The "
+                "branch_dev (the bound candidate branch during self-development), the branch commit_reviewed commits "
+                "on: it keeps the staged merge there and refuses to switch branches while a merge is pending. The "
                 "integration-branch history (with original author commits) is permanently "
                 "linked. Finalize via commit_reviewed."
             ),
