@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros import headless, observability, source_retention
 from tests._packed_read_probe import count_packed_reads
+from tests._store_shared import remove_store_tree
 
 
 @pytest.fixture(params=[None, errno.EXDEV, errno.EPERM, errno.EACCES, errno.EOPNOTSUPP])
@@ -115,7 +116,7 @@ def test_a_retry_after_the_parent_packed_its_copies_reads_each_member_once(tmp_p
     assert headless.retry_child_task_refs(parent, child, task)["child_ref_promotion"]["status"] == "complete"
     # Each member once: a second read rewinds its xz stream; a missing read would be an unverified skip.
     assert reads == Counter(dict.fromkeys(members, 1)), sorted(reads.items())
-    shutil.rmtree(child)
+    remove_store_tree(child)  # the retries opened the child's own store; Windows removes no open file
     for call_id, (_call_type, payload) in payloads.items():
         restored = observability.read_call_payload(parent, task_id=task, call_id=call_id)[1]
         assert restored == json.loads(observability._json_bytes(observability.redact_projection(payload).value))
