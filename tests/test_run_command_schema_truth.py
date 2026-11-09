@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -33,7 +34,9 @@ from ouroboros.tools.shell import _SHELL_BUILTINS, _run_shell, get_tools
 from ouroboros.tools.shell_process import _active_subprocesses
 from tests._cases import case_folders
 
-_DESCRIPTION_CHARS_BEFORE = 481  # measured on ef33a0a956c2; T1 allowance ~80
+# measured on ef33a0a956c2 (481); re-measured after the process-ownership sentence of audit 08.11 item 12
+# (owner-approved), paid in part by dropping the string-array sentence the cmd parameter already states.
+_DESCRIPTION_CHARS_BEFORE = 718
 _ALLOWANCE = 80
 
 
@@ -184,6 +187,43 @@ def test_detached_background_child_lives_until_the_task_ends(tmp_path):
         ps.wait_for_cleanups()
         assert _gone(pid), "the task end ends it"
         assert pid in load_task_result(tmp_path, "t-detached")["process_scope"]["ended"]
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_description_states_what_a_process_stop_reaches():
+    """Audit 08.11 item 12: the schema carries the fact a mind needs before ending a process (a pid it
+    started names one process; a name or command-line pattern reaches other tasks', the owner's and this
+    installation's processes). It is text, not a guard: the parameter already states the argv shape, so
+    the duplicate sentence about it paid part of the words."""
+    description = _schema()["description"]
+    assert "A pid you started yourself (your own $!, start_service's result) is yours to stop" in description
+    assert "a name or command-line pattern (pkill -f, killall) also reaches other tasks', the owner's and this installation's processes" in description
+    assert "cmd MUST be a string array" not in description
+    assert "NEVER" in _schema()["parameters"]["properties"]["cmd"]["description"], "the argv shape stays stated once, at the parameter"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process tools")
+def test_stopping_processes_through_run_command_is_unchanged(tmp_path):
+    """The owner's question on item 12 («are flexible tools kept?»): nothing is filtered. A stop by exact
+    pid of a child this test started ends it through run_command, and a stop by name that matches nothing
+    comes back as the command's own exit code, not as a refusal."""
+    ctx = _ctx(tmp_path, "t-stop")
+    with _bound(ctx):
+        started = _run_shell(ctx, ["sh", "-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"], timeout_sec=5)
+    pid = int(next(line for line in started.splitlines() if line.strip().isdigit()).strip())
+    try:
+        assert ps.measure_birth(pid)
+        with _bound(ctx):
+            stopped = _run_shell(ctx, ["kill", str(pid)], timeout_sec=5)
+        assert "exit_code=0" in stopped and "BLOCKED" not in stopped, stopped
+        assert _gone(pid), "the exact-pid stop reached the child"
+        with _bound(ctx):
+            unmatched = _run_shell(ctx, ["pkill", "-f", "ouroboros-g02-no-such-process-7f3a9c"], timeout_sec=5)
+        assert unmatched.startswith("⚠️ SHELL_EXIT_ERROR") and "BLOCKED" not in unmatched, unmatched
     finally:
         try:
             os.kill(pid, 9)

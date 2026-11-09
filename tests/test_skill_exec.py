@@ -1029,6 +1029,47 @@ def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypa
 
     assert "SKILL_EXEC_GRANT_REQUIRED" in resp
     assert "inject_chat" in resp
+    assert "earlier version" not in resp  # never granted: nothing earlier to name
+
+
+def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, monkeypatch):
+    """Audit 08.11 item 1: after the payload changed, the execution refusal and the toggle refusal say the
+    owner's grant belongs to an earlier version of the files; the toggle keeps its one sentence and carries
+    the fact in ``detail``."""
+    from ouroboros.skill_loader import save_skill_grants
+
+    skills_root = tmp_path / "skills"
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: Permission grant test.\n"
+        "version: 0.1.0\n"
+        "type: script\n"
+        "runtime: python3\n"
+        "permissions: [inject_chat]\n"
+        "scripts:\n"
+        "  - name: hello.py\n"
+        "    description: Print hello.\n"
+        "---\n"
+        "# body\n"
+    )
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    save_skill_grants(ctx.drive_root, "alpha", [], content_hash="earlier-bytes", requested_keys=[],
+                      granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
+
+    ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+    assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
+    assert "inject_chat was granted to an earlier version of this skill's files (grant last updated 20" in ran
+    assert "hash" not in ran.lower()
+
+    save_enabled(ctx.drive_root, "alpha", False)
+    toggled = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+    assert toggled.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "grants"' in toggled, toggled
+    assert '"error": "Grant it the keys and permissions it asks for first."' in toggled
+    assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files (grant last updated 20' in toggled
 
 
 def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):

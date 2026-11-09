@@ -922,7 +922,8 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution refusal and the skill card then say the grant
+belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`), not that the keys are missing.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the

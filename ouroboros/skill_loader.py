@@ -786,6 +786,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             "unsupported_for_skill_type": False,
             "content_hash": "",
             "updated_at": "",
+            "earlier_grant": None,
         }
     requested = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     requested_permissions = requested_skill_permissions(
@@ -805,6 +806,18 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     )
     granted = [key for key in requested if key in persisted_grants]
     granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
+    # A grant saved for other bytes belongs to an earlier version of the skill's files. Readiness, the
+    # execution refusal and the card name that fact instead of reporting the keys as absent; the
+    # binding to bytes itself is unchanged.
+    earlier_grant = None
+    if grants.get("content_hash") and not grant_hash_ok:
+        earlier_keys = [key for key in requested if key in set(grants.get("granted_keys") or [])]
+        earlier_permissions = [
+            perm for perm in requested_permissions if perm in set(grants.get("granted_permissions") or [])
+        ]
+        if earlier_keys or earlier_permissions:
+            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions,
+                             "at": str(grants.get("updated_at") or "")}
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
     review_ready = skill.review.gate_for(skill.content_hash)["executable_review"]
@@ -824,6 +837,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         "unsupported_for_skill_type": unsupported,
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),
+        "earlier_grant": earlier_grant,
     }
 
 

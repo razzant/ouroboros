@@ -698,11 +698,13 @@ def get_tools() -> List[ToolEntry]:
             "name": "run_command",
             "description": (
                 "Run a bounded foreground command in an allowed cwd; returns stdout+stderr and resolved cwd. "
-                "cmd MUST be a string array, not one shell string. A builtin as cmd[0] (cd, export, ...) "
+                "A builtin as cmd[0] (cd, export, ...) "
                 "is refused: use cwd= or [\"sh\", \"-c\", \"cd x && a | b\"] (also pipes/chaining). "
                 "A background child (&, nohup) is no service: holding stdout/stderr it stalls the call until "
                 "timeout_sec; it ends with this task (local POSIX runs only; start_service keep_alive=true "
-                "outlives the task). "
+                "outlives the task). A pid you started yourself (your own $!, start_service's result) is yours "
+                "to stop; a name or command-line pattern (pkill -f, killall) also reaches other tasks', the "
+                "owner's and this installation's processes. "
                 "Prefer read_file, search_code/query_code, write_file/edit_text to cat/head/sed, grep/find, redirects."
             ),
             "parameters": {"type": "object", "properties": {
