@@ -1004,6 +1004,7 @@ D20 = "Presence"
 "supervisor/sleep_wake.py" = "D08"
 "supervisor/direct_roots.py" = "D08"  # the main loop's off-lock fragment, written beside the snapshot
 "supervisor/dispatch_choice.py" = "D08"  # the assignment pass: one gate predicate in cost order, stopping at free capacity
+"supervisor/pool_admission.py" = "D08"  # new project processes admitted by the machine's memory; the acting count
 "supervisor/consciousness_carriers.py" = "D08"
 "supervisor/queue_timeouts.py" = "D08"
 "supervisor/silence_attention.py" = "D08"

@@ -50,7 +50,7 @@ def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
     sent = worker(host, monkeypatch)
     # Exercise the actual residual-demand callback without creating native workers.
     monkeypatch.setattr("supervisor.worker_pool_lifecycle.reconcile_worker_capacity",
-                        lambda demand: forecasts.append(demand()))
+                        lambda demand, _reading=None: forecasts.append(demand()))
     if busy:  # a full pool: no pass, no read, no demand, the grant untouched; then the slot frees
         workers.WORKERS[0].busy_task_id = "another-task"
         workers.assign_tasks()
@@ -94,7 +94,7 @@ def test_child_dispatch_preserves_unknown_but_revokes_proven_stale_authority(
     real, calls = getattr(module, name), []
     forecasts = []
     monkeypatch.setattr("supervisor.worker_pool_lifecycle.reconcile_worker_capacity",
-                        lambda demand: forecasts.append(demand()))
+                        lambda demand, _reading=None: forecasts.append(demand()))
     def unreadable(*args, **kwargs):
         if args[1] == ROOT and DISPATCH_READS & {f.function for f in inspect.stack()}:
             calls.append(args[1])

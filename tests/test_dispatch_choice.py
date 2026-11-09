@@ -164,7 +164,7 @@ def test_the_dead_row_is_never_chosen_and_launches_nothing(assigning, monkeypatc
     monkeypatch.setattr(work_diagnostics, "control_reason", control_reason)
     monkeypatch.setattr(worker_assignment, "_claim_worker_launch", claim)
     monkeypatch.setattr(cancel_intents, "request_cancel", lambda *a, **kw: cancels.append(a[1]))
-    monkeypatch.setattr(workers, "MAX_WORKERS", 2)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(2))
     workers.RUNNING.clear()
     assigning.original.busy_task_id = None
     dead = task("silence-dead", admitted_dispatch=dispatch, delegation_role="subagent", root_task_id="owner",

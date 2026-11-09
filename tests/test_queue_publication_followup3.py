@@ -45,7 +45,7 @@ def _read(root, name):
 
 
 def _slot(wid, lane, busy=None):
-    return types.SimpleNamespace(wid=wid, lane=lane, busy_task_id=busy, active_capacity=True, resume_hold="",
+    return types.SimpleNamespace(wid=wid, lane=lane, busy_task_id=busy, active_capacity=True,
                                  reaping=False, readiness_exhausted=False, process_birth="b",
                                  ready_identity=(100 + wid, "b"), proc=types.SimpleNamespace(pid=100 + wid, is_alive=lambda: True))
 
@@ -145,7 +145,7 @@ def test_a_document_from_before_the_status_reads_its_failed_measurement_as_unkno
         == "unknown"
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     assert fact["free_worker_slots"] is None
-    assert all(fact[key] is None for key in ("worker_total", "active_worker_count", "reaping_count", "lane_carrier_total"))
+    assert all(fact[key] is None for key in ("worker_total", "acting_worker_count", "reaping_count", "lane_carrier_total", "memory_admission"))
 
 
 # ---- NIT: the census carries only the waits that still wait ---------------------------------------

@@ -1,4 +1,4 @@
-"""Required waiting lends capacity without replaying or detaching its task."""
+"""A required wait keeps its process and task; its return continues there, without a grant of capacity."""
 
 import datetime as dt
 import json
@@ -10,8 +10,11 @@ import pytest
 
 from ouroboros.artifacts import store_actor_source_bytes
 from ouroboros.task_results import load_task_result, write_task_result
-from supervisor import queue, worker_owner_wait, worker_pool_lifecycle, workers
+from ouroboros.host_memory import MemorySnapshot
+from supervisor import pool_admission, queue, worker_owner_wait, worker_pool_lifecycle, workers
 from tests.worker_pool_support import affirm_ready
+
+GIB = 2 ** 30
 
 
 class Process:
@@ -48,7 +51,9 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
     monkeypatch.setattr(queue, "_reap_queue", stdqueue.Queue())
     monkeypatch.setattr(workers, "WORKERS", slots)
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "1")  # the owner's cap on acting tasks
+    # A roomy machine (64 GiB, 48 available) and workers of half a GiB: memory admits; the cap decides.
+    monkeypatch.setattr(pool_admission, "physical_memory", lambda: MemorySnapshot(64 * GIB, 48 * GIB))
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda task: True)
     monkeypatch.setattr(workers, "load_state", lambda: {})
@@ -77,6 +82,7 @@ def pool(tmp_path, monkeypatch):
     root_task = {"id": "owner", "type": "task", "chat_id": 1, "_attempt": 3, "text": "work"}
     original = workers.Worker(0, Process(42), InputQueue(), busy_task_id="owner")
     affirm_ready(original)
+    original.rss = {"rss_bytes": GIB // 2, "rss_measure": "current"}  # its own size, from its task's heartbeat
     slots[0] = original
     # The project pool's own growth and retirement are read here; the conversation lane's
     # spare and its replenishment are ``tests/test_conversation_lane_pool.py``'s (4A).
@@ -97,21 +103,10 @@ def pool(tmp_path, monkeypatch):
 
 
 def maintain_capacity(demand: int = 0):
-    """``demand``: queued work the forecast reports; growth buys only that (4A), never a spare."""
-    worker_owner_wait.maintain_owner_wait_capacity()
-    worker_pool_lifecycle.reconcile_worker_capacity(lambda: demand)
-
-
-def quiesce_and_reap(worker):
-    command = worker.in_q.get_nowait()
-    assert command["type"] == "worker_quiescence"
-    worker_pool_lifecycle.handle_worker_quiescent({
-        "worker_id": worker.wid, "pid": worker.proc.pid,
-        "process_birth": worker.process_birth, "token": command["token"]}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()
-    assert worker.retiring and worker.active_capacity
-    worker_pool_lifecycle.reap_idle_worker(queue._reap_queue.get_nowait())
-    worker_owner_wait.maintain_owner_wait_capacity()
+    """``demand``: queued work the pass chose and no idle worker took; growth buys only that (4A), never a spare,
+    as the pass's reading of the (stubbed) machine admits it."""
+    worker_owner_wait.grant_warm_returns()
+    worker_pool_lifecycle.reconcile_worker_capacity(lambda: demand, pool_admission.read())
 
 
 def park(pool):
@@ -128,7 +123,7 @@ def test_park_is_durable_before_ack_and_preserves_running_ownership(pool):
     assert workers.RUNNING["owner"] is pool.meta
     assert workers.WORKERS[0] is pool.original and pool.original.busy_task_id == "owner"
     assert snap["running"][0]["owner_wait"] == saved["owner_wait"]
-    assert snap["active_worker_count"] == 0 and snap["parked_worker_count"] == 1
+    assert snap["acting_worker_count"] == 0 and snap["parked_worker_count"] == 1  # it waits, it does not act
     assert snap["running_count"] == 1 and not workers.PENDING
 
 
@@ -184,33 +179,42 @@ def test_a_park_whose_stack_moved_on_during_the_write_acknowledges_nothing(pool,
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
 
 
-def test_replacement_readiness_and_same_stack_resume(pool):
+def test_a_warm_return_continues_on_its_own_process_past_the_cap_and_stops_nobody(pool, monkeypatch):
+    """The one return rule (D8): with the owner's cap (1) taken by another acting task, the parked author's wake is
+    granted on its own worker at once: no idle process is held, silenced or retired for it, and the overshoot is
+    visible in the counts. Its row, attempt and clock are the same stack's; nothing is requeued."""
+    from supervisor.queue_publication import _pool_counts
+
     park(pool)
-    maintain_capacity(demand=1)
+    maintain_capacity(demand=1)  # the parked author acts no more: the cap lets one process start for other work
     replacement = workers.WORKERS[1]
     assert replacement.reaping and replacement.active_capacity
     assert pool.original is workers.WORKERS[0] and len(pool.created) == 1
     replacement.reaping = False
     affirm_ready(replacement)
     replacement.busy_task_id = "independent"
+    workers.RUNNING["independent"] = {"task": {"id": "independent", "type": "task"}, "worker_id": 1, "attempt": 1}
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
     maintain_capacity()
-    assert pool.original.in_q.empty() and not pool.original.active_capacity
-    replacement.busy_task_id = None
-    maintain_capacity()
-    assert replacement.proc.is_alive() and not pool.original.active_capacity
-    quiesce_and_reap(replacement)
-    assert set(workers.WORKERS) == {0} and not replacement.proc.is_alive()
     grant = pool.original.in_q.get_nowait()
     assert grant == {"type": "owner_wait", "task_id": "owner", "task_attempt": 3,
                      "wait_id": "wait", "phase": "resume_granted"}
     assert pool.original.active_capacity and workers.RUNNING["owner"] is pool.meta
     assert pool.meta["started_at"] == pool.wait["started_at"] and pool.meta["attempt"] == 3
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "resumed"
-    assert not workers.PENDING
+    assert replacement.in_q.empty() and not replacement.retiring and replacement.proc.is_alive()
+    counts = _pool_counts()
+    assert (counts["max_workers"], counts["acting_worker_count"]) == (1, 2), "the overshoot is visible"
+    assert not workers.PENDING and len(pool.created) == 1
     # Late duplicate transport cannot re-park an already consumed wait.
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.active_capacity and pool.original.in_q.empty()
+    # The other direction: the same wake without its authority (a hard Stop's intent) is not granted.
+    pool.meta["owner_wait"] = {**pool.meta["owner_wait"], "state": "waiting"}
+    pool.original.active_capacity, pool.meta["owner_wait_resume_requested"] = False, True
+    monkeypatch.setattr(worker_owner_wait, "_resume_authority_allowed", lambda *a: False)
+    maintain_capacity()
+    assert pool.original.in_q.empty() and not pool.original.active_capacity
 
 
 @pytest.mark.parametrize("field,value", [("pid", 43), ("task_attempt", 2), ("worker_id", 9)])
@@ -263,37 +267,19 @@ def test_a_grant_stands_on_its_store_commit_and_marks_the_queue(pool, monkeypatc
 
 
 def test_ordinary_pool_does_not_grow_to_configured_max(pool, monkeypatch):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 10)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "10")
     maintain_capacity()
     assert set(workers.WORKERS) == {0} and not pool.created
 
 
-def exhausted_replacement(pool):
+@pytest.mark.parametrize("failure", ["state", "command"])
+def test_a_failed_grant_rolls_the_return_back_whatever_the_pool_holds(pool, monkeypatch, failure):
+    """Beside an exhausted replacement (nothing is reclaimed from it any more), a grant whose store write or command
+    fails leaves the stack parked with its wait ``waiting``, in memory and in the store; the next tick asks again."""
     park(pool)
     maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
-    replacement.proc.alive = False
-    replacement.readiness_exhausted = True
-    return replacement
-
-
-def test_same_stack_reclaims_exhausted_replacement_without_new_spawn(pool):
-    replacement = exhausted_replacement(pool)
-    maintain_capacity()
-    assert workers.worker_pool_admission_state()["available"]
-    assert len(pool.created) == 1 and replacement.active_capacity
-    worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    maintain_capacity()
-    assert workers.WORKERS == {0: pool.original}
-    assert pool.original.active_capacity and len(pool.created) == 1
-    assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
-    assert workers.RUNNING["owner"] is pool.meta and pool.meta["attempt"] == 3
-    assert replacement.in_q.closed
-
-
-@pytest.mark.parametrize("failure", ["state", "command"])
-def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch, failure):
-    replacement = exhausted_replacement(pool)
+    replacement.proc.alive, replacement.readiness_exhausted = False, True
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
     if failure == "state":
         original = worker_owner_wait.set_owner_wait
@@ -315,6 +301,10 @@ def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch,
     assert len(pool.created) == 1 and workers.WORKERS[1] is replacement
     assert pool.original.in_q.empty() and pool.meta["owner_wait"]["state"] == "waiting"
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
+    if failure == "state":  # the other direction: the next tick's grant lands on the same worker
+        maintain_capacity()
+        assert pool.original.active_capacity and pool.original.in_q.get_nowait()["phase"] == "resume_granted"
+        assert workers.WORKERS[1] is replacement and len(pool.created) == 1
 
 
 def test_wait_lends_capacity_to_real_assignment(pool, monkeypatch):
@@ -349,12 +339,9 @@ def test_stop_policy_keeps_its_authority_at_resume(pool, monkeypatch, policy, gr
                         lambda *a, **k: {"owner": {"stop_policy": policy}})
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
     maintain_capacity()
-    if granted:
-        quiesce_and_reap(replacement)
     assert pool.original.active_capacity is granted
     assert pool.original.in_q.empty() is not granted
-    if not granted:
-        assert replacement.proc.is_alive()  # A hard Stop cannot churn idle replacements.
+    assert replacement.proc.is_alive() and not replacement.retiring  # no return retires an idle process
 
 
 def test_parked_crash_terminalizes_without_replaying_completed_effects(pool, monkeypatch):

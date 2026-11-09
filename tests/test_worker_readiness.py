@@ -138,12 +138,14 @@ def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_se
         lambda slots, cursor, *rest: handed.append((dict(slots), cursor, rest)),
     )
 
-    monkeypatch.setattr(workers, "MAX_WORKERS", cap)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(cap))
     launch = getattr(workers, start)
     launch() if count is None else launch(count)
 
     assert sorted(workers.WORKERS) == list(range(count or 1))
-    assert workers.MAX_WORKERS == cap
+    from ouroboros.runtime_limits import get_max_workers
+
+    assert get_max_workers() == cap  # the owner's cap is read live, never bound at the start
     assert all(slot.reaping for slot in workers.WORKERS.values()), "a fresh slot must not be assignable"
     assert _wait_for(lambda: bool(handed))
     slots, cursor, rest = handed[0]

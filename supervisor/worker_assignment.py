@@ -680,6 +680,7 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     from ouroboros.project_lease import candidate_is_leasable, lane_holders, running_project_ids
     from ouroboros.project_placement import refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
+    from supervisor.pool_admission import acting_children
     from supervisor.task_lifecycle import root_cancellation_fenced
     from supervisor.consciousness_carriers import autonomous_work_enabled
 
@@ -710,8 +711,8 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             w.busy_task_id == task_id for w in _pool().WORKERS.values()):
         # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
         return True
-    if str(candidate.get("delegation_role") or "") == "subagent":
-        if (_pool()._running_subagent_count(root_task_id, running) >= get_max_active_subagents_per_root()
+    if str(candidate.get("delegation_role") or "") == "subagent":  # the root's limit counts its acting children
+        if (acting_children(root_task_id, running) >= get_max_active_subagents_per_root()
                 and not _pool()._assignment_depth_reservation_admits(candidate, running)):
             return True
     if stat and not refresh_pending_placement(_pool().DRIVE_ROOT, candidate):  # a moved room's binding, before its lane
@@ -730,13 +731,14 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
 
 
 def assign_tasks() -> None:
-    """One tick's assignment: queue hygiene under Q, then ``dispatch_choice.run_pass`` over free capacity (nothing is
-    chosen or read when no worker is idle and no process may start), then growth to the demand that pass found."""
+    """One tick's assignment: warm returns, queue hygiene under Q, then ``dispatch_choice.run_pass`` over free capacity
+    (nothing is chosen or read when no worker is idle and no process may start; the machine is read only when chosen
+    work needs a new process), then growth to the demand that pass found, admitted by that pass's reading."""
     from ouroboros.store_hot_facts import statuses_ahead
     from supervisor import queue
     from supervisor.dispatch_choice import run_pass
     from supervisor.state import budget_remaining
-    from supervisor.worker_owner_wait import maintain_owner_wait_capacity
+    from supervisor.worker_owner_wait import grant_warm_returns
     from supervisor.conversation_lane import reconcile_under_project_fence
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity
 
@@ -746,7 +748,7 @@ def assign_tasks() -> None:
     if not _WORKER_LIFECYCLE_LOCK.acquire(blocking=False):
         return
     try:
-        maintain_owner_wait_capacity()
+        grant_warm_returns()
         if _pool()._WORKER_POOL_DISABLED_REASON:
             reconcile_under_project_fence()
     finally:
@@ -926,11 +928,11 @@ def assign_tasks() -> None:
                 _pool().send_with_budget(int(st["owner_chat_id"]), evo_block, role="system", system_type="evolution_notice")
             queue.persist_queue_snapshot(reason="evolution_blocked_light")
 
-    demand = run_pass(queue, remaining, unresolved_invalid_id_set)
-    if demand is None:
+    passed = run_pass(queue, remaining, unresolved_invalid_id_set)
+    if passed is None:
         return  # a malformed depth whose terminal could not be written stops this pass, growth included
     if _WORKER_LIFECYCLE_LOCK.acquire(blocking=False):
         try:
-            reconcile_worker_capacity(demand)
+            reconcile_worker_capacity(*passed)  # the demand, and the pass's reading of the machine
         finally:
             _WORKER_LIFECYCLE_LOCK.release()

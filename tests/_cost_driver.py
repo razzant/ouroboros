@@ -404,7 +404,7 @@ def _event_ctx(srv: Any) -> Any:
 
     return SimpleNamespace(
         DRIVE_ROOT=srv.DATA_DIR, REPO_DIR=srv.REPO_DIR, bridge=try_get_bridge(), WORKERS=workers.WORKERS,
-        PENDING=queue.PENDING, RUNNING=queue.RUNNING, MAX_WORKERS=2, send_with_budget=send_with_budget,
+        PENDING=queue.PENDING, RUNNING=queue.RUNNING, send_with_budget=send_with_budget,
         load_state=load_state, save_state=save_state, update_state=update_state,
         append_jsonl=append_jsonl, enqueue_task=queue.enqueue_task, persist_queue_snapshot=queue.persist_queue_snapshot,
         sort_pending=queue.sort_pending, consciousness=None, handle_chat_direct=handle_chat_direct,

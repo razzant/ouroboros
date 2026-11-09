@@ -199,9 +199,10 @@ def _count(document: dict, key: str) -> Optional[int]:
 
 
 def _pool_clause(root: Path) -> str:
-    """The published project worker pool (``queue_publication._pool_counts``): ceiling apart from the slots
-    that exist, dispatch-enabled capacity apart from slots holding a task (acting, or asleep on their process),
-    pending rows apart from those the launch refuses by their own facts, the conversation lane apart."""
+    """The published project worker pool (``queue_publication._pool_counts``): the owner's cap on acting tasks
+    apart from the processes that exist, slots holding a task (acting, or waiting on their process), pending rows
+    apart from those the launch refuses by their own facts, the conversation lane apart, then the supervisor's
+    last dated reading of the machine's memory (``_memory_clause``)."""
     try:
         from ouroboros.queue_observation import load_queue_document, pool_observation_status, queue_stamp
         document = load_queue_document(root)
@@ -223,9 +224,10 @@ def _pool_clause(root: Path) -> str:
     pending = _count(document, "pending_count")
     if pending is None and isinstance(document.get("pending"), list):
         pending = len(document["pending"])
-    parts = [said("ceiling", "max_workers"), said("total", "worker_total"),
-             said("dispatch-enabled", "active_worker_count"), said("with a task", "busy_worker_count"),
-             said("acting", "acting_worker_count"), said("asleep on their process", "parked_worker_count"),
+    cap = ("owner cap none (the machine's memory is the limit)" if "max_workers" in document
+           and document["max_workers"] is None else said("owner cap on acting tasks", "max_workers"))
+    parts = [cap, said("total", "worker_total"), said("with a task", "busy_worker_count"),
+             said("acting", "acting_worker_count"), said("waiting on their process", "parked_worker_count"),
              said("booting", "booting_count"), said("reaping (incl. booting)", "reaping_count"),
              said("assignable idle", "assignable_idle_workers")]
     parts.append(f"pending rows {pending}" if pending is not None else "pending rows not observed")
@@ -233,9 +235,28 @@ def _pool_clause(root: Path) -> str:
     if isinstance(refused, dict) and refused:
         parts.append(f"refused by their own facts {len(refused)}")
     carriers = _count(document, "lane_carrier_total")
-    lane = (f"conversation carriers {carriers}, outside the ceiling" if carriers is not None
+    lane = (f"conversation carriers {carriers}, outside the cap and memory admission" if carriers is not None
             else "conversation carriers not observed")
-    return f"project worker pool{when}: " + ", ".join(parts) + "; " + lane + "; " + _completions_clause(root)
+    return (f"project worker pool{when}: " + ", ".join(parts) + "; " + lane + "; "
+            + _memory_clause(document.get("memory_admission")) + "; " + _completions_clause(root))
+
+
+def _memory_clause(reading: Any) -> str:
+    """The supervisor's last reading of the machine for new project processes (``pool_admission.facts``)."""
+    if not isinstance(reading, dict) or not reading.get("read_at"):
+        return "memory admission: not read yet"
+
+    def size(key: str) -> str:
+        value = reading.get(key)
+        return f"{value / 2 ** 30:.1f} GiB" if isinstance(value, int) and not isinstance(value, bool) else "unknown"
+
+    typical = reading.get("typical_worker_bytes")
+    worker = (f"typical worker {typical // 2 ** 20} MiB ({reading.get('typical_basis')})"
+              if isinstance(typical, int) and not isinstance(typical, bool) else "typical worker size unknown")
+    return (f"memory admission read {reading['read_at']}: available {size('available_bytes')} of "
+            f"{size('total_bytes')}, reserve {size('reserve_bytes')}, kernel pressure {reading.get('pressure')}, "
+            f"{worker}, starting {reading.get('starting_processes')}, new processes admitted "
+            f"{reading.get('starts_admitted')} ({reading.get('reason')})")
 
 
 def _completions_clause(root: Path) -> str:

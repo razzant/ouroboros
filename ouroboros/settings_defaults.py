@@ -104,7 +104,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # unlike the worker lanes. (Renamed from the singular MODEL_FALLBACK.)
     "OUROBOROS_MODEL_FALLBACKS": OPENROUTER_DEFAULTS["fallback"],
     "OUROBOROS_SERVED_MODEL_REDOS": 2,  # redos of a round another model answered (`llm_substitution.py`)
-    "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,
+    "OUROBOROS_MAX_WORKERS": "", "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,  # "": no cap, memory admits (settings_scales)
     "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 3,
     # Mutative ("acting") subagents master toggle. Empty = follow runtime mode

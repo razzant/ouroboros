@@ -681,12 +681,10 @@ def _run_supervisor(settings: dict) -> None:
             handle_chat_direct, auto_resume_after_restart, EventBusLost, event_bus_exitcode,
         )
 
-        max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
-
         # Managed manifest branch defaults must drive worker commit/restart flows too.
         _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
         workers_init(
-            repo_dir=REPO_DIR, drive_root=DATA_DIR, max_workers=max_workers,
+            repo_dir=REPO_DIR, drive_root=DATA_DIR,
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
@@ -701,8 +699,7 @@ def _run_supervisor(settings: dict) -> None:
         kill_workers(preserve_pending=True)
         spawn_workers()
         from ouroboros.server_process import record_applied_restart_settings
-        record_applied_restart_settings({"OUROBOROS_MAX_WORKERS": max_workers,
-                                        "OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
+        record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
         persist_queue_snapshot(reason="startup")
         try:
             from ouroboros.delegate_recovery import pre_adopt_planned_handoffs
@@ -764,7 +761,6 @@ def _run_supervisor(settings: dict) -> None:
             DRIVE_ROOT=DATA_DIR, REPO_DIR=REPO_DIR,
             BRANCH_DEV=branch_dev, BRANCH_STABLE=branch_stable,
             bridge=bridge, WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
-            MAX_WORKERS=max_workers,
             send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
             update_state=update_state,
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,

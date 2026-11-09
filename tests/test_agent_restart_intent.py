@@ -81,7 +81,7 @@ def worker(runtime, monkeypatch):
     slot = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None,
         in_q=SimpleNamespace(put=lambda task: delivered.append(copy.deepcopy(task)))))
     monkeypatch.setattr(runtime.workers, "WORKERS", {0: slot})
-    monkeypatch.setattr(runtime.workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     return slot, delivered
 
 

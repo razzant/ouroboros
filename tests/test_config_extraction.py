@@ -47,6 +47,13 @@ _ADDED_OWNERS = {
     "GIT_READ_CAPTURE_TIMEOUT_SEC": runtime_limits,
     "IMMEDIATE_SETTINGS": settings_scales,
     "RESTART_REQUIRED_SETTINGS": settings_scales,
+    # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
+    "OWNER_CAP_KEY": settings_scales,
+    "OWNER_CAP_LEGACY": settings_scales,
+    "OWNER_CAP_FORMAT_KEY": settings_scales,
+    "owner_cap_value": settings_scales,
+    "owner_cap_document": settings_scales,
+    "document_optional_value": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
     "requested_effort": settings_scales,
     # The lane-era global review effort, frozen as the legacy skill-review fingerprint literal.

@@ -41,7 +41,7 @@ from ouroboros.settings_defaults import (
 )
 from ouroboros.settings_scales import (
     EFFORT_SCALE, EFFORT_RANGE_KEYS, EFFORT_FORMAT_KEY, normalize_effort_document, OPTIONAL_BOUND_LEGACY, UNLIMITED,  # noqa: F401
-    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value,  # noqa: F401
+    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value, OWNER_CAP_KEY, document_optional_value, owner_cap_document,  # noqa: F401
     REVIEW_POOL_DEFAULT_EFFORT,  # noqa: F401
     VALID_RUNTIME_MODES, VALID_SUBAGENTS_MODES, normalize_subagents_mode,  # noqa: F401
     VALID_SAFETY_MODES,  # noqa: F401
@@ -654,8 +654,8 @@ def _coerce_setting_value(key: str, value):
         return normalize_subagents_mode(value)
     if key == "OUROBOROS_CONTEXT_MODE":
         return normalize_context_mode(value)
-    if key in OPTIONAL_BOUND_LEGACY:  # document spelling: "unlimited" or a positive int; a typo is finite
-        return UNLIMITED if (bound := optional_bound_value(key, value)) is None else bound
+    if key in OPTIONAL_BOUND_LEGACY or key == OWNER_CAP_KEY:  # a positive int, else "unlimited" or blank; a typo is finite
+        return document_optional_value(key, value)
     # Trim so whitespace-only config is not treated as a configured skills repo.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
@@ -742,7 +742,7 @@ def normalize_settings_raw(raw: dict) -> dict:
     (``retired_key_sets_seen`` -> ``server_maintenance._startup_retired_settings_notice``)."""
     from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
 
-    loaded = normalize_consciousness_safety(coerce_settings_raw(raw))
+    loaded = normalize_consciousness_safety(coerce_settings_raw(owner_cap_document(raw)))  # the cap's legacy 10 reads blank
     # Prefer a CUSTOMIZED legacy retention value so a rename never orphans it; an
     # all-defaults file collapses to the unified default.
     if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:

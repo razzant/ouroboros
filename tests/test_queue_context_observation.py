@@ -116,7 +116,7 @@ def test_a_model_wait_is_not_worker_saturation(tmp_path):
     assert (fact["running_count"], fact["free_worker_slots"], fact["acting_worker_count"],
             fact["dispatch_refusals"]) == (1, 1, 1, {"silence-old": "cancelled"})
     line = engine_pool_line(tmp_path)
-    assert ("with a task 1, acting 1, asleep on their process 0, booting not observed, reaping (incl. booting) 1, "
+    assert ("with a task 1, acting 1, waiting on their process 0, booting not observed, reaping (incl. booting) 1, "
             "assignable idle 1, pending rows 0, refused by their own facts 1") in line
     assert "model" not in line.split("project worker pool", 1)[1].split(";", 1)[0]
 

@@ -28,8 +28,10 @@ schedule's table hold and the restart boundary, reads again, and revalidates mem
 
 ``run_pass``: ``worker_pool_lifecycle.admissible_starts`` says how many new processes the pass may start; with no idle
 worker and no start it chooses nothing and reads nothing. Otherwise one walk in queue order (``queue._queue_sort_key``:
-type priority, then ``_queue_seq``) stops at the rows it can use: one per idle worker and, while processes may start,
-as many as the booting slots and those starts can carry. A refusal is not kept as a hold: the next pass asks again,
+type priority, then ``_queue_seq``) stops at the rows it can use: one per idle worker (the owner's cap on acting tasks,
+when set, counts them) and, while processes may start, as many as the booting slots and those starts can carry. With
+no idle worker a start is one probe row until the walk chose work that needs a new process; only then is the machine
+read (``pool_admission``, once, outside Q), and a further walk collects what the starts it admitted may carry. A refusal is not kept as a hold: the next pass asks again,
 except a refusal by the row's own facts (a diagnostic whose source moved on, or bound to nothing), kept while the
 row's revision stands (``_revision``), published (``refusals``) and cancelled only when the row provably never
 reached a worker (``withdraw_revoked_diagnostic``), as the launch decided before. Both memories are bounded by the
@@ -52,7 +54,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-_ROUNDS = 2  # a second walk only when the first one's rows were refused after it (store gates, a refused claim)
+# The walk; a second only when its rows were refused after it (store gates, a refused claim); one more when the
+# pass's reading of the machine admitted more starts than the one probe row the walk was sized with.
+_ROUNDS = 3
 _COUNT_KEYS = ("passes", "rows_examined", "rows_screened", "store_reads", "chosen", "refused")
 _COUNTS = dict.fromkeys(_COUNT_KEYS, 0)
 _DRAINED = dict(_COUNTS)
@@ -371,10 +375,11 @@ def _root_resume(queue: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, excluded: set,
-             decided: set) -> Optional[tuple]:
+             decided: set, carried: Any = ()) -> Optional[tuple]:
     """Under Q: up to ``limit`` rows the memory gates (then their few stat reads) admit, in queue order, each seen by
-    the lanes and child limits of the rows before it, and every row it passes whose selection C2 must decide (not yet
-    this pass, ``decided``, and no admission kept); None when a malformed depth could not be terminalized."""
+    the lanes and child limits of the rows before it and of the rows an earlier walk of this pass chose for growth
+    (``carried``), and every row it passes whose selection C2 must decide (not yet this pass, ``decided``, and no
+    admission kept); None when a malformed depth could not be terminalized."""
     from ouroboros.project_lease import lane_holders, running_project_ids
 
     wa = _assignment()
@@ -382,7 +387,7 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
     undecided: List[Dict[str, Any]] = []
     plans: Dict[int, Dict[str, Any]] = {}
     with queue._queue_lock:
-        running, chosen = wa._started_projection(), set()
+        running, chosen = wa._started_projection() + [{"task": row} for row in carried], set()
         leased, holders = running_project_ids(running), lane_holders(running, _pool().PENDING)
         index, memo = None, {}
         for row in list(_pool().PENDING):
@@ -416,7 +421,7 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
 
 
 def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, Any]], screened: Dict[str, Any],
-            remaining: float, invalid_ids: set) -> List[Dict[str, Any]]:
+            remaining: float, invalid_ids: set, carried: Any = ()) -> List[Dict[str, Any]]:
     """Under Q: C2 for every undecided row, from step 2's read (an admission kept, a superseded selection repaired
     after the read-ahead is left); then the candidates still queued, still admitted by memory, unrefused by step 2
     and admitted by C2. An evolution without its campaign authority is cancelled, as the chooser cancelled it."""
@@ -427,7 +432,7 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
     live, admitted, stale, chosen = {id(item) for item in _pool().PENDING}, [], [], set()
     index = _index(queue) if undecided or any(_carrier(row) for row in rows) else ({}, {})
     memo: Dict[tuple, str] = {}
-    running = wa._started_projection()
+    running = wa._started_projection() + [{"task": row} for row in carried]
     with store_hot_facts.serving(screened["facts"], strict=True):
         for row in undecided:
             actor = screened["actors"].get(id(row))
@@ -481,30 +486,41 @@ def choose(queue: Any, remaining: float, invalid_ids: Any = (), *, limit: int = 
         return _decide(queue, rows, undecided, screened, remaining, set(invalid_ids))
 
 
-def _capacity(queue: Any) -> Tuple[list, int]:
-    """Under Q: the idle project workers and how many more rows growth may carry (booting slots and new starts)."""
-    from supervisor.worker_pool_lifecycle import admissible_starts, is_project_slot, project_slots, worker_ready
+def _capacity(queue: Any, reading: Any) -> Tuple[list, int, int]:
+    """Under Q: the idle project workers this pass may hand rows to (within the owner's cap on acting tasks, when one
+    is set), the booting slots, and how many rows growth may carry: booting slots and new starts, only while starts >
+    0. Before the pass reads the machine (``reading`` None) a start is one probe row, offered only when no worker is
+    idle, to learn whether chosen work needs a new process at all; after the reading ``admissible_starts`` says."""
+    from supervisor.pool_admission import PROBE
+    from supervisor.worker_pool_lifecycle import acting_room, admissible_starts, is_project_slot, project_slots, worker_ready
 
     idle = [w for w in _pool().WORKERS.values() if is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
-            and not getattr(w, "resume_hold", "") and getattr(w, "active_capacity", True)]
-    active = [w for w in project_slots() if getattr(w, "active_capacity", True)]
-    booting = sum(1 for w in active if w.busy_task_id is None and getattr(w, "booting", False)
+            and getattr(w, "active_capacity", True)]
+    room = acting_room()
+    idle = idle if room is None else idle[:room]
+    booting = sum(1 for w in project_slots() if w.busy_task_id is None and getattr(w, "booting", False)
                   and not getattr(w, "retiring", False) and not getattr(w, "readiness_exhausted", False))
-    resuming = sum(1 for w in project_slots()
-                   if not getattr(w, "active_capacity", True) and getattr(w, "resume_hold", ""))
-    starts = admissible_starts(active, resuming)
-    return idle, booting + starts if starts else 0
+    starts = admissible_starts(PROBE if reading is None and not idle else reading)
+    return idle, booting, booting + starts if starts else 0
 
 
-def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Callable[[], int]]:
+def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Tuple[Callable[[], int], Any]]:
     """One assignment pass over free capacity: reuse every idle worker, count what growth may carry. Returns the demand
-    ``reconcile_worker_capacity`` grows on (a callable it reads under Q), or None when the pass was blocked."""
+    ``reconcile_worker_capacity`` grows on (a callable it reads under Q) with the pass's reading of the machine (None
+    when it read none), or None when the pass was blocked.
+
+    The machine is read at most once a pass, outside Q, and only when the walk chose more work than the idle and
+    booting processes carry (the probe row): a pass whose work fits reads nothing. The reading then sizes growth, and
+    one more walk collects what further starts it admitted may carry."""
+    from supervisor import pool_admission
+
     wa = _assignment()
     invalid_ids = set(invalid_ids)
+    reading = None
     with queue._queue_lock:
-        idle, growth_room = _capacity(queue)
+        idle, booting, growth_room = _capacity(queue, reading)
         if not _pool().PENDING or not idle and not growth_room:
-            return lambda: 0  # nothing to reuse and nothing to start: no choice is made and nothing is read
+            return (lambda: 0), None  # nothing to reuse and nothing to start: no choice is made and nothing is read
         _forget(_pool().PENDING)
     _count(passes=1)
     wanted: List[Dict[str, Any]] = []
@@ -513,9 +529,10 @@ def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Callabl
     decided: set = set()
     for _round in range(_ROUNDS):
         with queue._queue_lock:
-            idle = _capacity(queue)[0]
+            idle = _capacity(queue, reading)[0]
         limit = len(idle) + max(0, growth_room - len(wanted))
-        collected = _collect(queue, remaining, invalid_ids, limit, excluded | {_tid(row) for row in wanted}, decided)
+        collected = _collect(queue, remaining, invalid_ids, limit, excluded | {_tid(row) for row in wanted}, decided,
+                             wanted)
         if collected is None:
             return None
         rows, undecided, plans = collected
@@ -523,11 +540,11 @@ def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Callabl
             break
         screened = _screen(queue, rows, undecided, plans)
         with queue._queue_lock:
-            admitted = _decide(queue, rows, undecided, screened, remaining, invalid_ids)
+            admitted = _decide(queue, rows, undecided, screened, remaining, invalid_ids, wanted)
             refused = [row for row in rows if not any(row is item for item in admitted)]
             excluded |= {_tid(row) for row in refused if screened["refused"].get(id(row)) != "deferred"}
             wanted += [row for row in refused if screened["refused"].get(id(row)) == "deferred"]
-            idle = _capacity(queue)[0]
+            idle = _capacity(queue, reading)[0]
             for row in admitted:
                 if not idle:
                     if len(wanted) < growth_room:
@@ -544,7 +561,13 @@ def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Callabl
                 if outcome is True:  # the inline path put it; bind it here under the same Q hold
                     wa._bind_running(queue, row, idle[0])
                 idle.pop(0)
-        if not refused or not idle and len(wanted) >= growth_room:
+        grew = False
+        if reading is None and not idle and len(wanted) > booting:  # chosen work needs a new process: read, once
+            reading = pool_admission.read()
+            with queue._queue_lock:
+                idle, booting, room = _capacity(queue, reading)
+            grew, growth_room = room > growth_room, room
+        if not grew and (not refused or not idle and len(wanted) >= growth_room):
             break
 
     def residual() -> int:
@@ -553,7 +576,7 @@ def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Callabl
         return sum(1 for row in wanted if id(row) in live and not row.get(wa._LAUNCH_CLAIM)
                    and _pool().repo_writer_task_allowed(row))
 
-    return residual
+    return residual, reading
 
 
 def resume_read(queue: Any, row: Dict[str, Any]) -> Optional[Tuple[str, Dict[Any, Any]]]:

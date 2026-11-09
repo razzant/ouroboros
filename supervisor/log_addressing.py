@@ -316,6 +316,10 @@ class TurnEventQueue:
         data = item.get("data") if kind == "log_event" else item
         if not isinstance(data, dict) or str(data.get("task_id") or "") != self._task_id:
             return item
+        if kind == "task_heartbeat":  # this worker's own size rides every task's beat, both lanes (memory admission)
+            from supervisor.conversation_lane import carrier_rss
+
+            data["_carrier_rss"] = carrier_rss()
         if self._on_frame is not None:
             try:
                 self._on_frame(kind, data)

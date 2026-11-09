@@ -1,10 +1,13 @@
-"""Lend dispatch capacity while the original worker retains an owner wait.
+"""An owner wait or warm sleep keeps its process; its return continues there (the one return rule).
 
-RUNNING and WORKERS keep the task's physical ownership. Only active capacity is
-transferred: a parked worker cannot dispatch model work until an idle active
-slot is retired and its original input queue receives the correlated grant.
-The ordinary supervisor assignment tick performs this maintenance; there is no
-second scheduler, queue, or durable wait store.
+RUNNING and WORKERS keep the task's physical ownership while it waits: the park marks
+the slot (``active_capacity`` False) and the waiting row does not act, so the owner's
+cap and the child limit do not count it (``pool_admission.waits_on_its_process``). A
+wake that asks to resume is granted on the same worker without a capacity condition
+(pool-capacity D8): nothing is held idle, silenced or retired for it, and the overshoot
+over the owner's cap shows in the pool's counts. The authority checks stay. The
+ordinary supervisor assignment tick performs this; there is no second scheduler,
+queue, or durable wait store.
 
 Q spans memory only here: a park and a grant are decided under Q, written to the
 task result outside it (``set_owner_wait``: the store is the restore authority
@@ -28,8 +31,7 @@ from ouroboros.owner_wait import set_owner_wait
 from ouroboros.store import acquisition_budget
 from supervisor.queue import _queue_lock
 from supervisor.worker_pool_lifecycle import (
-    _serialized_worker_lifecycle, is_project_slot, is_worker_slot, project_slots, request_worker_quiescence,
-    retire_or_replace_worker, retire_quiescent_worker, retire_worker, worker_ready,
+    _serialized_worker_lifecycle, is_worker_slot, retire_or_replace_worker, retire_quiescent_worker,
 )
 
 log = logging.getLogger(__name__)
@@ -273,47 +275,42 @@ def _owner_pause_wake_still_authorized(task_id: str, meta: dict) -> bool:
 _RESUME_CLAIM = "_resume_claim"
 
 
-def _grant_resume(
-    task_id: str, meta: dict, worker: Any, *, exhausted_replacement: Any = None,
-) -> bool:
+def _grant_resume(task_id: str, meta: dict, worker: Any) -> bool:
     """Reserve the warm Resume under Q and persist it on the admission lane.
 
-    Under Q only memory decides (the attempt, the worker, the replacement slot) and the claim is
-    taken; the lane reads the durable authorities, writes the wait ``resumed`` (a CAS on its id),
-    re-takes Q, revalidates memory only, marks the queue and hands the capacity back with the grant
-    command (``_resume_attempt``). A refusal or failure after the write rewrites ``waiting`` outside
-    Q and restores the clock facts. True only on the historical inline path (no generation) once
-    granted; on the lane this returns False and the caller's hold stands until the grant lands or lapses.
+    Under Q only memory decides (the attempt, the worker) and the claim is taken; the lane reads
+    the durable authorities, writes the wait ``resumed`` (a CAS on its id), re-takes Q, revalidates
+    memory only, marks the queue and hands the worker its grant (``_resume_attempt``). A refusal or
+    failure after the write rewrites ``waiting`` outside Q and restores the clock facts. True only on
+    the historical inline path (no generation) once granted; on the lane this returns False and the
+    claim keeps the next tick from granting twice until the grant lands or lapses.
     """
     from supervisor import workspace_preparation
 
     with _queue_lock:
         if meta.get(_RESUME_CLAIM) or not _resume_memory_allowed(task_id, meta, worker):
             return False
-        replacement = exhausted_replacement
-        if replacement is not None and not _replacement_current(replacement):
-            return False
         generation = workspace_preparation.current_generation()
         token = uuid.uuid4().hex
         meta[_RESUME_CLAIM] = token
     if generation is None:
         try:
-            return _resume_attempt(task_id, meta, worker, token, replacement)
+            return _resume_attempt(task_id, meta, worker, token)
         finally:
             _release_resume(task_id, meta, token)
     if generation.launches_closed() or not generation.submit(
-            functools.partial(_resume_job, task_id, meta, worker, token, replacement, generation),
+            functools.partial(_resume_job, task_id, meta, worker, token, generation),
             workspace_preparation.ADMISSION_LANE):
         _release_resume(task_id, meta, token)
     return False
 
 
-def _resume_job(task_id: str, meta: dict, worker: Any, token: str, replacement: Any, generation: Any) -> None:
+def _resume_job(task_id: str, meta: dict, worker: Any, token: str, generation: Any) -> None:
     """The reserving GENERATION's lane job: write the grant, then put it, unless that generation closed."""
     from supervisor import workspace_preparation
 
     try:
-        generation.wait_store(functools.partial(_resume_attempt, task_id, meta, worker, token, replacement, generation),
+        generation.wait_store(functools.partial(_resume_attempt, task_id, meta, worker, token, generation),
                               controls=lambda: ({"detail": "generation closed"}
                                                 if generation.launches_closed() else None))
     except workspace_preparation.PreparationStopped:
@@ -330,31 +327,18 @@ def _release_resume(task_id: str, meta: dict, token: str) -> None:
             meta.pop(_RESUME_CLAIM, None)
 
 
-def _replacement_current(replacement: Any) -> bool:
-    return (_pool().WORKERS.get(replacement.wid) is replacement
-            and getattr(replacement, "readiness_exhausted", False)
-            and getattr(replacement, "active_capacity", True)
-            and not replacement.proc.is_alive())
-
-
 def _resume_claim_held(task_id: str, meta: dict, worker: Any, token: str) -> bool:
     return (meta.get(_RESUME_CLAIM) == token and _resume_memory_allowed(task_id, meta, worker)
             and _pool().WORKERS.get(worker.wid) is worker)
 
 
-def _active_slots() -> int:
-    """Project slots holding active capacity: the only ones ``MAX_WORKERS`` bounds."""
-    return sum(1 for slot in project_slots() if getattr(slot, "active_capacity", True))
-
-
-def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replacement: Any,
-                    generation: Any = None) -> bool:
+def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, generation: Any = None) -> bool:
     """One grant attempt: authorities and the durable ``resumed`` wait outside Q, then the put under Q.
 
     On the lane a closed generation refuses before the durable write; a grant written while it was
-    open finishes its put, which without a replacement needs a free active slot: the reservation lent
-    nothing, so a slot taken meanwhile leaves the park standing. The second hold is memory only: the
-    queue is marked (the store's ``resumed`` row is the grant's restore authority), never published here.
+    open finishes its put on the same worker, whatever the pool holds (the one return rule). The
+    second hold is memory only: the queue is marked (the store's ``resumed`` row is the grant's
+    restore authority), never published here.
     """
     from ouroboros.owner_wait import OwnerWaitSuperseded
     from supervisor import queue
@@ -382,17 +366,10 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
     granted = False
     try:
         with _queue_lock:
-            if not _resume_claim_held(task_id, meta, worker, token) or (
-                    replacement is not None and not _replacement_current(replacement)):
-                log.info("Owner wait resume of %s refused after its durable grant: the stack, its worker "
-                         "or the replacement slot changed; the park stands", task_id)
+            if not _resume_claim_held(task_id, meta, worker, token):
+                log.info("Owner wait resume of %s refused after its durable grant: the stack or its worker "
+                         "changed; the park stands", task_id)
                 return False
-            if (generation is not None and replacement is None and is_project_slot(worker)
-                    and _active_slots() >= _pool().MAX_WORKERS):
-                log.info("Owner wait resume of %s waits: no active slot is free; the park stands", task_id)
-                return False
-            if replacement is not None:
-                replacement.active_capacity = False
             worker.active_capacity = True
             meta["owner_wait"] = resumed
             meta["task"].pop("_owner_wait_resume", None)
@@ -403,8 +380,6 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
                 _command(worker, task_id, resumed, "resume_granted")
             except Exception:
                 worker.active_capacity = False
-                if replacement is not None:
-                    replacement.active_capacity = True
                 if cold_handoff is not None:
                     meta["task"]["_owner_wait_resume"] = cold_handoff
                 meta["owner_wait"] = wait
@@ -435,90 +410,44 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
 
 
 @_serialized_worker_lifecycle
-def maintain_owner_wait_capacity() -> None:
-    """Resume original stacks first; assignment owns demand-sized replacement.
+def grant_warm_returns() -> None:
+    """Every authorized warm return continues on its own process (pool-capacity D8: the one return rule).
 
-    At full capacity an authorized warm Resume keeps ONE idle slot from fresh work
-    until it acknowledges and retires; other probes stay optional, and a slot
-    already retiring pays for one Resume. The parked author's slot carries the same
-    mark, and growth leaves capacity only for marked authors. Holds are recomputed
-    every tick, so they lapse with the authorization (Stop, Panic, a newer Pause,
-    the grant itself).
+    A parked stack whose wake asked to resume is granted on its worker with no capacity condition:
+    no idle process is held, silenced or retired for it, and the owner's cap does not stop it. The
+    authorities stay: memory under Q (the same attempt on a live worker still allowed to write), the
+    durable cancellation intent and owner Pause fence read off Q without waiting (a busy read grants
+    nothing this tick), and ``_RESUME_CLAIM`` against a double return. A sleeper's process left
+    without its task by a stop is retired through the quiescence probe, or forgotten when dead.
     """
-    holds: dict = {}
-    try:
-        _resume_original_stacks(holds)
-    finally:
-        with _queue_lock:
-            for slot in _pool().WORKERS.values():
-                slot.resume_hold = holds.get(slot.wid, "")
-
-
-def _resume_original_stacks(holds: dict) -> None:
     pool = _pool()
-    if pool.disable_exhausted_worker_pool():
-        return
     with _queue_lock:
         if (not pool.WORKERS or pool._WORKER_POOL_DISABLED_REASON
                 or all(getattr(w, "active_capacity", True) for w in pool.WORKERS.values())):
-            return
-        retired = [w for w in pool.WORKERS.values()
-                   if not getattr(w, "active_capacity", True) and w.busy_task_id is None]
-    for worker in retired:
+            return  # no slot is parked: nothing waits to return
+        left = [w for w in pool.WORKERS.values()
+                if not getattr(w, "active_capacity", True) and w.busy_task_id is None]
+    for worker in left:
         if not worker.proc.is_alive():
             try:
                 retire_or_replace_worker(worker.wid, worker)
             except Exception:
-                log.warning("Dead lent worker %s stays for the next tick", worker.wid, exc_info=True)
+                log.warning("Dead parked worker %s stays for the next tick", worker.wid, exc_info=True)
         else:
             retire_quiescent_worker(worker)
     with _queue_lock:
         waiting = [(tid, meta) for tid, meta in pool.RUNNING.items()
                    if meta.get("owner_wait_resume_requested")]
-        freeing = sum(1 for w in project_slots()
-                      if getattr(w, "active_capacity", True) and getattr(w, "retiring", False))
     for task_id, meta in waiting:
         with _queue_lock:
             worker = pool.WORKERS.get(meta.get("worker_id"))
-            if worker is None or getattr(worker, "active_capacity", True):
+            if (worker is None or getattr(worker, "active_capacity", True)
+                    or not _resume_memory_allowed(task_id, meta, worker)):
                 continue
-            if not _resume_memory_allowed(task_id, meta, worker):
-                continue
-        # The durable authorities are read off Q without waiting; a busy read authorizes nothing
-        # this tick (the hold is recomputed every tick).
         with acquisition_budget(0):
             if not _resume_authority_allowed(task_id, meta):
                 continue
-        with _queue_lock:
-            if not _resume_memory_allowed(task_id, meta, worker):
-                continue
-            holds[worker.wid] = task_id  # authorized this tick: owed its lent capacity back
-            active = [w for w in project_slots() if getattr(w, "active_capacity", True)]
-            # A grant still on the lane counts as the slot it will take (its worker is not active yet).
-            granting = sum(1 for other in pool.RUNNING.values() if other is not meta and other.get(_RESUME_CLAIM))
-            exhausted = next((w for w in active
-                              if getattr(w, "readiness_exhausted", False)
-                              and not w.proc.is_alive()), None)
-            idle = [w for w in active if w.busy_task_id is None and worker_ready(w)]
-            # A conversation carrier's park lent no project capacity: its Resume is never gated by MAX_WORKERS.
-            if is_project_slot(worker) and len(active) + granting >= pool.MAX_WORKERS and exhausted is None:
-                for slot in idle:
-                    request_worker_quiescence(slot)
-                quiet = next((slot for slot in idle if slot.quiescence_confirmed), None)
-                held = next((slot for slot in idle if slot.wid not in holds), None)
-                if freeing:
-                    freeing -= 1  # an earlier retirement already frees this Resume's slot
-                elif quiet is not None:
-                    retire_quiescent_worker(quiet)
-                elif held is not None:
-                    holds[held.wid] = task_id
-                continue  # grant after the reaper confirms death, on a later tick
-        if len(active) + granting < pool.MAX_WORKERS:
-            exhausted = None
         try:
-            if _grant_resume(task_id, meta, worker, exhausted_replacement=exhausted):
-                holds.pop(worker.wid, None)
-                if exhausted is not None:
-                    retire_worker(exhausted.wid, exhausted)
+            _grant_resume(task_id, meta, worker)
         except Exception:
             log.warning("Owner wait resume remains pending for %s", task_id, exc_info=True)
