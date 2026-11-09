@@ -2,22 +2,29 @@
 
 Selectors use dotted keys, [n] and [*]; wildcards preserve array nesting. JSONL
 filters select whole records before tail and projection. A bounded tail window
-discloses incomplete scanning. Store documents and multi-id bundles are canonical
-JSON reconstructions; single file/blob records retain their original bytes.
+discloses incomplete scanning; a rotated log's tail continues into its newest archive
+segments within the same input budget and names them (``source.rotation``). Store
+documents and multi-id bundles are canonical JSON reconstructions; single file/blob
+records retain their original bytes. A selected queue snapshot is measured after
+select: its shared values are expanded in memory, never canonicalized whole.
 
 Every result names its data plane: ``caller`` (the task's drive), ``child`` (an
 owned descendant's drive, selected through the caller's lineage), ``canonical``
 (the installation owner) or a native reviewer's pinned ``native_pin``, which never
-resolves to live data. The owner's default queue files, its money ledger and the
-owner fallback of a blob read need the same actor's existing resource read
-admission of each exact loose or pack file; tool availability is separate. Refusal grants nothing. Task documents, review
+resolves to live data; ``plane=canonical`` selects the installation's own logs (a
+fork's drive keeps its own). The owner's default queue files, its money ledger, those
+logs and the owner fallback of a blob read need the same actor's existing resource
+read admission of each exact file opened (loose, pack or log segment); tool
+availability is separate. Refusal grants nothing. Task documents, review
 records, skill state and retained runs are read from the owner's state without
 that check.
 """
 from __future__ import annotations
 
 from collections import deque
+import io
 import json
+import os
 from pathlib import Path
 import re
 
@@ -236,9 +243,12 @@ def _jsonl(path, where, tail, cap, subject):
     rows, consumed, partial = deque(maxlen=tail or None), 0, False
     whole = bytearray() if not where and not tail else None
     with path.open("rb") as stream:
-        if tail and path.stat().st_size > cap:
-            stream.seek(-cap, 2)
-            stream.readline(cap + 1)  # discard the possibly partial leading record
+        live = os.fstat(stream.fileno())
+        if tail and live.st_size > cap:
+            stream.seek(live.st_size - cap - 1)
+            # Probe the boundary byte; the scan window itself is still at most cap bytes.
+            if stream.read(1) != b"\n":
+                stream.readline(cap + 1)  # only a genuinely partial leading record
             partial = True
         while line := stream.readline(cap - consumed + 1):
             consumed += len(line)
@@ -256,7 +266,7 @@ def _jsonl(path, where, tail, cap, subject):
                 continue
             rows.append((line, value))
     raw = bytes(whole) if whole is not None else b"".join(row[0] for row in rows)
-    return raw, [row[1] for row in rows], partial, consumed
+    return raw, [row[1] for row in rows], partial, consumed, (live.st_dev, live.st_ino)
 
 
 def _matches(value, where):
@@ -267,6 +277,102 @@ def _matches(value, where):
     if where["op"] == "eq":
         return field == where["value"]
     return isinstance(field, (str, list, dict)) and where["value"] in field
+
+
+def _archive_start(path, live, listed, admit, gaps):
+    """Resolve the already-read generation without opening newer archive payloads."""
+    try:
+        current = path.stat()
+        if (current.st_dev, current.st_ino) == live:
+            return 0
+    except OSError:
+        pass  # Rotation can be between rename and creation of the next live file.
+    for position, member in enumerate(listed):
+        try:
+            stat = admit(member).stat()
+        except PermissionError:
+            gaps.add("refused_source")
+            break
+        except OSError:
+            gaps.add("unreadable_source")
+            break
+        if (stat.st_dev, stat.st_ino) == live:
+            return position + 1
+    gaps.add("live_generation_unresolved")
+    return None
+
+
+def _older_segments(path, live, where, need, budget, admit):
+    """The rotated side of a log its live read did not cover: ``(rows, consumed, clipped, facts)``.
+
+    ``rotate_jsonl_log_if_needed`` moves the live file to ``archive/<stem>_<stamp>.jsonl``. While
+    ``need`` matching rows are missing and ``budget`` bytes remain, the newest segments are read
+    through ``admit``; ``need=0`` (a tail=0 read) opens none. The window stays contiguous: a refused
+    or unreadable segment ends it rather than leaving a hole, an exhausted budget reads a segment's
+    newest bytes (``clipped``), and the live file itself, rotated during the read (``live`` is its
+    handle's device and inode), bounds which segments are older. After rotation only metadata is
+    read until that generation is found; unresolved identity returns the live rows with a gap.
+    A malformed row or a torn last line of a closed
+    segment is skipped and named in ``gaps``; the live file stays strict. ``facts`` is ``None`` for
+    a log that never rotated, else the files read, oldest first, the listed segments left unopened
+    (``None`` when the archive could not be listed) and the gaps.
+    """
+    from ouroboros.jsonl_tail import remembered_listing
+
+    gaps, chunks, read, consumed, clipped, position = set(), [], [], 0, False, 0
+    listed = remembered_listing(path)(path.parent.parent / "archive", path.stem, gaps)
+    position = _archive_start(path, live, listed, admit, gaps)  # check live AFTER the listing
+    if position is None:
+        return [], 0, True, {"segments": [f"{path.parent.name}/{path.name}"],
+                             "unopened": None, "gaps": sorted(gaps)}
+    if not listed and not gaps:
+        return [], 0, False, None
+    unlisted = bool(gaps)  # only the listing has met a gap so far
+    while position < len(listed) and need > 0 and consumed < budget:
+        try:
+            segment = admit(listed[position])
+        except PermissionError:
+            gaps.add("refused_source")
+            break
+        try:
+            with segment.open("rb") as stream:
+                stat = os.fstat(stream.fileno())
+                same, left = (stat.st_dev, stat.st_ino) == live, budget - consumed
+                partial_first = False
+                if not same and stat.st_size > left:
+                    stream.seek(stat.st_size - left - 1)
+                    partial_first = stream.read(1) != b"\n"  # boundary probe, outside the scan window
+                    clipped = True
+                data = b"" if same else stream.read(min(stat.st_size, left))
+        except OSError:
+            gaps.add("unreadable_source")
+            break
+        position += 1
+        if same:
+            continue
+        consumed += len(data)
+        if partial_first:
+            data = data[data.find(b"\n") + 1:] if b"\n" in data else b""
+        found = deque(maxlen=need)
+        for line in io.BytesIO(data):  # JSONL rows end at LF
+            if not line.strip():
+                continue
+            if not line.endswith(b"\n"):
+                gaps.add("torn_archive_line")
+                continue
+            try:
+                value = json.loads(line)
+            except (ValueError, RecursionError):
+                gaps.add("malformed_jsonl")
+                continue
+            if not where or _matches(value, where):
+                found.append((line, value))
+        chunks.append(found)
+        read.append(f"archive/{listed[position - 1].name}")
+        need -= len(found)
+    facts = {"segments": [*reversed(read), f"{path.parent.name}/{path.name}"],
+             "unopened": None if unlisted else len(listed) - position, "gaps": sorted(gaps)}
+    return [row for chunk in reversed(chunks) for row in chunk], consumed, clipped, facts
 
 
 def _knowledge_history(path, where, tail):
@@ -310,7 +416,11 @@ def _retained_run(canonical, identity, child):
     return read_actor_source_bytes(canonical, child, {key: source.get(key) for key in ("kind", "root", "path", "size", "sha256")})
 
 
-def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, canonical=None):
+def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, canonical=None, *,
+            admit=None, rotation=None, selected=False):
+    """One identity's ``(raw, value, rebuilt, clipped, consumed, owned)``. A log's ``rotation`` dict
+    receives its archive facts (``admit`` opens each segment); ``selected`` leaves a shared queue
+    snapshot uncanonicalized for its selection."""
     if kind == "task_result":
         if not _path(ctx, root, store.STORE_REL).is_file():
             raise FileNotFoundError("task store is unavailable in the selected data root")
@@ -347,7 +457,15 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
         raw, value, partial, consumed = _knowledge_history(path, where, tail)
         return raw, value, True, partial, consumed, False
     if op == "jsonl":
-        raw, value, partial, consumed = _jsonl(path, where, tail, cap, subject)
+        raw, value, partial, consumed, live = _jsonl(path, where, tail, cap, subject)
+        if rotation is not None and not partial and (not tail or len(value) < tail):
+            older, spent, clipped, facts = _older_segments(path, live, where, tail - len(value) if tail else 0,
+                                                           cap - consumed, admit)
+            if facts is not None:  # rows the request may lack lie beyond an unopened or clipped segment
+                rotation.update(facts)
+                raw, value = b"".join(row[0] for row in older) + raw, [row[1] for row in older] + value
+                consumed += spent
+                partial = clipped or ((not tail or len(value) < tail) and facts["unopened"] != 0)
         return raw, value, False, partial, consumed, False
     try:
         with path.open("rb") as stream:
@@ -371,21 +489,24 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
     from ouroboros.queue_observation import SHARED_KEY, expand_shared
 
     if kind == "queue_snapshot" and SHARED_KEY in value:  # replicated task values are published once; the agent reads whole rows
-        value = expand_shared(value)
+        value = expand_shared(value)  # a shared value stays one object however often its rows name it
+        if selected:  # the selection, not the whole expansion, is canonicalized and measured (max_bytes)
+            return raw, value, True, False, len(raw), False
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
     return raw, value, False, False, len(raw), False
 
 
 def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", ids=None,
-                child_task_id="", state_file="review_job", sha256="", blob_kind="json", select="",
+                child_task_id="", plane="", state_file="review_job", sha256="", blob_kind="json", select="",
                 filter=None, tail=100, max_rows=100, max_bytes=65536, snapshot=None,
                 timeout_sec=1, save_as="", format="json", view_head_chars=None, view_tail_chars=None) -> str:
     from ouroboros.artifacts import store_task_artifact_bytes
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.observability import read_blob_ref
 
-    result, plane = {}, ""
+    # ``plane`` names the plane a result was read from; ``requested_plane`` is the caller's selector.
+    result, requested_plane, plane, missing = {}, plane or "", "", ""
     try:
         if op not in {"sql", "json", "jsonl", "blob"}:
             raise ValueError(f"{_arg('op', op)}: use sql, json, jsonl or blob")
@@ -408,6 +529,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
         for selector in (select, filter["field"] if filter else ""):
             if selector and (not isinstance(selector, str) or len(selector) > 512 or not _SELECTOR.fullmatch(selector)):
                 raise ValueError("select/filter fields accept dotted keys, [n] and [*]")
+        if requested_plane not in ("", "canonical"):
+            raise ValueError(f"{_arg('plane', requested_plane)}: use canonical (the installation's log) or omit it")
         # Another operation's or kind's parameter is refused only when it asks for something;
         # its default value takes the omitted path.
         rows = {"jsonl": "tail", "sql": "max_rows"}.get(op)
@@ -418,7 +541,9 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 ("op=json or op=jsonl", op in {"json", "jsonl"}, (("kind", kind, bool(kind)), ("ids", ids, ids is not None))),
                 ("op=blob", op == "blob", (("sha256", sha256, bool(sha256)), ("blob_kind", blob_kind, blob_kind != "json"))),
                 ("op=jsonl", op == "jsonl", (("tail", tail, tail != 100),)),
-                ("kind=skill_state", kind == "skill_state", (("state_file", state_file, state_file != "review_job"),))):
+                ("kind=skill_state", kind == "skill_state", (("state_file", state_file, state_file != "review_job"),)),
+                ("a kind=*_log", isinstance(kind, str) and kind.endswith("_log"),
+                 (("plane", requested_plane, bool(requested_plane)),))):
             named = [(name, value) for name, value, used in given if used]
             if named and not applies:
                 hint = f"; {rows} bounds rows for op={op}" if rows and {"tail", "max_rows"} & {n for n, _ in named} else ""
@@ -428,6 +553,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             raise ValueError(f"{kind} is installation-wide; it has no child selector")
         if kind == "knowledge_history" and child_task_id:
             raise ValueError("knowledge_history is the installation's global knowledge; it has no child selector")
+        if requested_plane and child_task_id:
+            raise ValueError("plane=canonical reads the installation's log and child_task_id an owned child's; give one")
         native = (ctx.task_metadata or {}).get("native_data_root")
         canonical, owner = Path(native or canonical_data_root(ctx)).resolve(), "native_pin" if native else "canonical"
         caller = root = Path(ctx.drive_root).resolve()
@@ -508,24 +635,30 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 raise ValueError("ids must be unique")
             if kind in {"task_result", "review_ledger", "skill_state"}:
                 root, plane = canonical, owner
-            elif kind in {"queue_snapshot", "queue_dispatch"} and not child_task_id:
-                # The installation queue lives with its owner; child_task_id keeps child-local meaning.
+            elif (kind in {"queue_snapshot", "queue_dispatch"} and not child_task_id or requested_plane
+                  or kind in {"storage", "knowledge_history", "update_letter", "update_material"}):
+                # The installation queue lives with its owner; child_task_id keeps child-local meaning,
+                # and plane=canonical reads the installation's log instead of the caller drive's own.
                 root, plane = canonical, owner
                 _plane_path(ctx, plane, root, _FILES[kind], caller)
-            elif kind in {"storage", "knowledge_history", "update_letter", "update_material"}:
-                root, plane = canonical, owner
-                _plane_path(ctx, plane, root, _FILES[kind], caller)
+            elif kind.endswith("_log") and not child_task_id and caller != canonical:
+                missing = "; plane='canonical' reads the installation's log"  # a fork keeps its own logs
+            local = caller if plane == owner else root  # a file off this drive needs the actor's read admission
             values, remaining, retained = {}, sql.MAX_BYTES, 0
+            rotation = {} if kind.endswith("_log") else None
             for identity in identities:
                 raw, value, rebuilt, clipped, consumed, owned = _record(
                     ctx, root, kind, identity, _name(child_task_id or ctx.task_id) if kind == "run" else "",
-                    state_file, op, filter, tail, remaining, canonical)
+                    state_file, op, filter, tail, remaining, canonical, rotation=rotation, selected=bool(select),
+                    admit=lambda physical: _plane_path(ctx, plane, root, physical, local))
                 retained += owned
                 if consumed > remaining:  # history rows and a rebuilt task document are measured only here
-                    history = kind == "knowledge_history"
+                    history = kind == "knowledge_history"  # a selected queue snapshot is measured after select
                     raise _over_input(f"{kind} {identity}".strip() + (" without note bodies" if history else " as canonical JSON"),
-                                      consumed, remaining,
-                                      "keep fewer rows with tail or filter; select applies only after this check" if history else "")
+                                      consumed, remaining, {
+                                          "knowledge_history": "keep fewer rows with tail or filter; select applies only after this check",
+                                          "queue_snapshot": "select the part you need: a selection is expanded and measured alone",
+                                      }.get(kind, ""))
                 remaining -= consumed
                 if select:
                     value = _select(value, select)
@@ -539,6 +672,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 value, reconstructed = values, True
                 raw = _canonical(value)
             source.update(kind=kind, ids=identities, state_file=state_file if kind == "skill_state" else None)
+            if rotation:  # the log's rotated archive: segments read, oldest first, those left unopened, gaps
+                source["rotation"] = rotation
         if not result or result["status"] == "ok":
             if select:
                 if op in {"sql", "blob"}:
@@ -570,7 +705,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
     except (ValueError, TypeError, KeyError, IndexError, OSError, RuntimeError, RecursionError) as exc:
         code = "access_denied" if isinstance(exc, PermissionError) else "not_found" if isinstance(exc, FileNotFoundError) else "query_failed"
         result = dict(status="blocked" if code == "access_denied" else "unavailable" if code == "not_found" else "error",
-                      code=code, message=str(exc))
+                      code=code, message=str(exc) + (missing if code == "not_found" else ""))
     if plane and result["status"] != "ok":  # a refusal or gap names the plane it concerns, like a result
         result.setdefault("plane", plane)
     text = _canonical(result).decode("utf-8")
@@ -592,7 +727,8 @@ def get_tools():
         "format=text saves one selected string exactly. Complete tool output is retained before any delivery cut. "
         "kind=knowledge_history lists global knowledge writes (when, topic, mode, writer, focus, task, summary, sizes, "
         "change delta) without the note bodies, about 1 KB a row (raise max_bytes or lower tail); knowledge_read gives the current text. "
-        "Results name their data plane; the owner's default queue files, money ledger and blob fallback need the caller's existing read of each file."),
+        "Results name their data plane; the owner's default queue files, money ledger, blob fallback and plane=canonical "
+        "logs need the caller's existing read of each file."),
         "parameters": {"type": "object", "required": ["op"], "properties": {
             "op": {"enum": ["sql", "json", "jsonl", "blob"], "type": "string"},
             "db": {"enum": ["current", "money", "packs"], "type": "string", "default": "current",
@@ -602,22 +738,26 @@ def get_tools():
             "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32,
                     "description": "Task, run, review-record or skill names; one returns its value, several return an ID map."},
             "child_task_id": {"type": "string", "description": "Owned descendant's execution drive; default caller drive. Task documents/ledger/skills and the default queue files use the installation owner's state."},
+            "plane": {"type": "string", "enum": ["canonical"], "description": (
+                "*_log kinds only: the installation's log instead of this drive's, with its archive segments and "
+                "the caller's existing read of each file; omit for this drive's or child_task_id's log.")},
             "state_file": {"type": "string", "enum": list(_STATES), "default": "review_job", "description": "kind=skill_state only."},
             "sha256": {"type": "string", "description": "Blob SHA-256; the host locates loose or packed bytes, locally first, then the owner's when absent and readable."},
             "blob_kind": {"type": "string", "enum": ["json", "txt", "bin"], "default": "json", "description": "op=blob only."},
-            "select": {"type": "string", "description": "Dotted keys, [n], [*], e.g. primary_output.text or [*].tool. Applied per ID after filter/tail."},
+            "select": {"type": "string", "description": "Dotted keys, [n], [*], e.g. primary_output.text or [*].tool. Applied per ID after filter/tail, through a queue_snapshot's shared values."},
             "filter": {"type": "object", "required": ["field", "op", "value"], "additionalProperties": False,
                        "description": "op=jsonl only; keeps whole rows before tail.",
                        "properties": {"field": {"type": "string"}, "op": {"type": "string", "enum": ["eq", "contains"]}, "value": {}}},
             "tail": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100,
-                     "description": "JSONL: last matching rows; 0 reads from start. An 8 MiB scan window shared by ids (256 MiB for knowledge_history) reports scan_truncated."},
+                     "description": "JSONL: last matching rows; 0 reads from start. An 8 MiB scan window shared by ids (256 MiB for knowledge_history) reports scan_truncated. "
+                                    "A *_log tail continues into its newest archive segments; source.rotation names them, the unopened rest and gaps."},
             "max_rows": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100, "description": (
                 "op=sql only: rows returned before truncated=true. Another op accepts only the default 100, "
                 "as if omitted; op=jsonl bounds rows with tail.")},
             "max_bytes": {"type": "integer", "minimum": 256, "maximum": sql.MAX_BYTES, "default": 65536, "description": (
                 "Output budget after select/filter/tail (canonical JSON counts); op=sql stops fetching rows at it "
                 f"(truncated=true) before select. The fixed {sql.MAX_BYTES >> 20} MiB input budget, shared by ids, "
-                "is separate and precedes select.")},
+                "is separate and precedes select; a selected queue_snapshot spends only its file there.")},
             "snapshot": {"type": "boolean", "default": False, "description": "SQL: opt in to a checked disposable snapshot; default false for every db. Copy/check share the operation budget."},
             "timeout_sec": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "default": 1,
                             "description": "SQL operation seconds across acquisition/copy/check/query, not per phase. Executor startup/cleanup is separately bounded."},

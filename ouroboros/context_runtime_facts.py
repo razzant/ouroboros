@@ -486,7 +486,9 @@ _ROUTES_SHOWN = 4  # failing routes rendered in the line; the row keeps every ro
 _CAUSE_CHARS = 80  # of a top cause's message in the line; the row keeps the engine's whole first line
 _STORE_FILES = ("state/current.sqlite", "state/dialog.sqlite", "state/usage.sqlite")
 _JOURNAL_MODES: Dict[str, str] = {}  # per process: each store file's header, read once
-VITALS_READER = "query_data(kind='supervisor_log', op='jsonl')"  # the minimal working call: the kind requires op='jsonl'
+# The minimal working call: the kind requires op='jsonl', and these rows are the installation's journal,
+# which a forked drive does not keep (plane='canonical' reads it from any focus).
+VITALS_READER = "query_data(kind='supervisor_log', op='jsonl', plane='canonical')"
 VITALS_NOTE = f"No verdict here, the weighing is mine; clocks UTC; rows: {VITALS_READER}"
 WAL_GATE = ("WAL needs a SQLite with the WAL-reset fix (3.51.3+, or 3.50.7+ / 3.44.6+ within those series),"
             " enforced kernel locks and a local filesystem; an Update keeps this interpreter")

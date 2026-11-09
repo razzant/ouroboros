@@ -395,3 +395,77 @@ def test_native_reviewers_stay_on_their_pinned_plane(planes, monkeypatch):
         status, gone = _query(registry, op="json", kind="queue_snapshot")
         assert status == "unavailable" and gone["plane"] == "native_pin" and "data" not in gone
         assert str(canonical) not in gone["message"]  # decoded text, not JSON-escaped Windows paths
+
+
+def test_logs_read_the_installations_journal_only_when_asked_and_admitted(planes, monkeypatch):
+    """#1701: a fork's drive keeps its own logs, and the canonical server writes store_sites and the
+    supervisor's journal only there. plane=canonical reads the installation's log and its rotated
+    archive with the actor's existing read of each file; nothing falls back either way."""
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    canonical, pin = planes["canonical"], planes["pin"]
+    live = canonical / "logs/store_sites.jsonl"
+    live.parent.mkdir(exist_ok=True)
+    live.write_bytes(b'{"site":"older"}\n')
+    rotate_jsonl_log_if_needed(canonical, "store_sites.jsonl", "store_sites", max_bytes=0)
+    live.write_bytes(b'{"site":"newest"}\n')
+    archived = next((canonical / "archive").glob("store_sites_*.jsonl"))
+    contexts = _contexts(planes)
+    forked = _registry(contexts["forked_root"])
+    status, missing = _query(forked, op="jsonl", kind="store_sites_log")  # the default stays this drive's
+    assert status == "unavailable" and missing["plane"] == "caller" and "plane='canonical'" in missing["message"]
+    assert "newest" not in json.dumps(missing)
+    for name in ("forked_root", "helper", "acting"):
+        registry = _registry(contexts[name])
+        assert _read_admitted(registry, live) and _read_admitted(registry, archived)
+        status, result = _query(registry, op="jsonl", kind="store_sites_log", plane="canonical")
+        assert status == "ok" and result["data"] == [{"site": "older"}, {"site": "newest"}], (name, result)
+        assert result["source"]["plane"] == "canonical" and result["source"]["rotation"] == {
+            "segments": [f"archive/{archived.name}", "logs/store_sites.jsonl"], "unopened": 0, "gaps": []}
+    status, own = _query(_registry(contexts["root"]), op="jsonl", kind="store_sites_log", plane="canonical")
+    assert status == "ok" and own["source"]["plane"] == "canonical" and len(own["data"]) == 2
+    # A restriction on the live file refuses the read; one on an archived segment ends the window there.
+    ctx = _contexts(planes)["forked_root"]
+    for protected in (live, archived):
+        ctx.task_contract = {"resource_policy": {"protected_artifacts": [
+            {"paths": [str(protected)], "role": "black_box_reference"}]}}
+        restricted = _registry(ctx)
+        assert not _read_admitted(restricted, protected)
+        status, result = _query(restricted, op="jsonl", kind="store_sites_log", plane="canonical")
+        if protected == live:
+            assert status == "blocked" and result["plane"] == "canonical" and "data" not in result, result
+            assert "older" not in json.dumps(result) and "newest" not in json.dumps(result)
+        else:
+            assert status == "ok" and result["data"] == [{"site": "newest"}] and result["source"]["scan_truncated"]
+            assert result["source"]["rotation"] == {"segments": ["logs/store_sites.jsonl"], "unopened": 1,
+                                                    "gaps": ["refused_source"]}
+    # A native reviewer's installation is its pin, never live data.
+    (pin / "logs").mkdir(exist_ok=True)
+    (pin / "logs/store_sites.jsonl").write_bytes(b'{"site":"pin"}\n')
+    native = _registry(ToolContext(repo_dir=planes["repo"], drive_root=pin, task_id="native",
+                                  budget_drive_root=str(canonical), task_metadata={"native_data_root": str(pin)}))
+    status, pinned = _query(native, op="jsonl", kind="store_sites_log", plane="canonical")
+    assert status == "ok" and pinned["data"] == [{"site": "pin"}] and pinned["source"]["plane"] == "native_pin"
+
+
+def test_a_selected_shared_queue_through_the_registry_reads_past_its_whole_expansion(planes, monkeypatch):
+    """The installation queue as its publisher writes it (a repeated task value once, under $shared),
+    read by a fork through the real registry: a selection through a shared value is served where the
+    whole expansion's canonical JSON exceeds the fixed input budget its file fits."""
+    from ouroboros import query_data_sql
+    from ouroboros.shared_values import SHARED_KEY, token
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    digest = hashlib.sha256(b"shared").hexdigest()
+    document = {"worker_pool": {"total": 40}, SHARED_KEY: {digest: "v" * 400},
+                "running": [{"task": {"objective": token(digest)}} for _ in range(8)]}
+    (planes["canonical"] / "state/queue_snapshot.json").write_bytes(json.dumps(document).encode("utf-8"))
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", 2048)
+    forked = _registry(_contexts(planes)["forked_root"])
+    status, whole = _query(forked, op="json", kind="queue_snapshot", max_bytes=2048)
+    assert status == "error" and "select the part you need" in whole["message"] and whole["plane"] == "canonical"
+    status, objective = _query(forked, op="json", kind="queue_snapshot", select="running[7].task.objective", max_bytes=512)
+    assert status == "ok" and objective["data"] == "v" * 400 and objective["source"]["plane"] == "canonical"
+    status, pool = _query(forked, op="json", kind="queue_snapshot", select="worker_pool", max_bytes=256)
+    assert status == "ok" and pool["data"] == {"total": 40}
