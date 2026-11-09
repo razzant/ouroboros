@@ -3,9 +3,9 @@
 The timeout pass owns observations under Q. The existing admission lane persists
 and delivers them outside Q; the task document and ordinary queue own recovery.
 An episode is answered only by the source's own progress. No host role is minted
-for it (owner, 09.11.2026): without a waiting ancestor that reads its mail no mind
-is told, on any install; the fact stays on the task document, the published row and
-the work's own mail, read at its next step (ARCHITECTURE §5).
+for it (owner, 09.11.2026): the fact rides the task document and the published row,
+whose work line says since when; without a waiting ancestor that reads its mail no
+mind is told, on any install (ARCHITECTURE §5).
 """
 
 from __future__ import annotations

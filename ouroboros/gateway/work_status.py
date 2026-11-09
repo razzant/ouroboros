@@ -54,6 +54,7 @@ REASON_TEXT = {
     "helpers_running": ("1 helper still working", "{count} helpers still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
+    "no_progress": "No recorded progress",
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
@@ -334,6 +335,11 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             state["reasons"].append(reason(f"turn_{step}"))
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))
+        silence = raw.get("silence_attention")
+        if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
+            # The timeout pass dated a silence (owner 09.11, Q2 A): the work's line says since when, first, until its
+            # own progress ends the episode; a fact for whoever waits, never a stop or a mark.
+            state["reasons"].insert(0, reason("no_progress", since=silence["last_progress_at"]))
         return state
     state["confirmed"] = False
     return state

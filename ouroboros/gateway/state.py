@@ -538,7 +538,7 @@ def _raw_work_facts(row: dict) -> dict:
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
-                                        "_presence_turn") if row.get(key)}
+                                        "_presence_turn", "silence_attention") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
     return {**facts, **({"continuation": edges} if edges else {})}
 

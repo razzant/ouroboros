@@ -775,3 +775,16 @@ def test_the_works_turn_and_mains_attention_share_one_rule():
         waits, resume = owner_actions(item)
         owner_turns = [turn for turn in ws.classify_member(item)["turn"] if turn["kind"] == "action"]
         assert bool(owner_turns) is bool(waits or resume), item["activity_id"]
+
+
+def test_a_silent_working_member_says_since_when_until_its_own_progress():
+    """The dated silence fact (owner 09.11, Q2 A) leads a working member's reasons; it is gone once the work moved,
+    and a member that is not working never borrows it."""
+    silent = {"silence_attention": {"state": "pending_attention", "last_progress_at": 1794190200.0, "episode_id": "e"}}
+    state = ws.classify_member(row("t", "working"), {"running": True, **silent})
+    assert state["reasons"][0] == {"code": "no_progress", "text": "No recorded progress", "since": 1794190200.0}
+    assert state["activity"] == "working" and state["live"] is True
+    moved = {"silence_attention": {**silent["silence_attention"], "state": "progress_observed"}}
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("q", "queued"), {**silent})["reasons"])

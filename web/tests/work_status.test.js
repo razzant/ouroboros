@@ -826,3 +826,12 @@ test('a Continue whose own start was refused after its earlier work settled says
     assert.equal(workControls(held).resume, '', 'it tries again by itself: no Resume is offered');
     assert.ok(!/earlier attempt's work is confirmed finished/.test(workLine(held)), 'never the stale wait');
 });
+
+test('a silent work says since when in its line; without a date it keeps the host sentence', () => {
+    const at = Date.parse('2026-11-09T02:10:00Z') / 1000;
+    const dated = reasonText({ code: 'no_progress', text: 'No recorded progress', since: at });
+    assert.match(dated, /^No recorded progress since \S/);
+    assert.ok(!dated.includes('undefined'));
+    assert.equal(reasonText({ code: 'no_progress', text: 'No recorded progress' }), 'No recorded progress');
+    assert.equal(workLine({ activity: 'working', because: [{ code: 'no_progress', text: 'No recorded progress', since: at }] }), dated);
+});
