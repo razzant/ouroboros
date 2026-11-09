@@ -24,7 +24,7 @@ def test_wizard_test_and_discovery_share_one_endpoint_identity(direct_server_wit
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"endpoint-identity-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"endpoint-identity-{engine}", publish=True)
     report = {"candidate_identity": ui["candidate_identity"], "frames": {}}
     with _endpoint(["listed-model"]) as (url, calls), sync_playwright() as pw:
         saved_url = url.replace("127.0.0.1", "localhost")

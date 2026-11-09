@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -308,14 +309,27 @@ def _source_record(repo, destination, git) -> dict:
     return record
 
 
-def diagnostic_directory(fallback, name="diagnostics") -> Path:
-    """Producer-owned output, external when a test owner supplied a destination."""
+# Inside one producer folder of a test owner's destination: that producer declared the folder's output for
+# publication. `run_diagnostics` selects by this declaration alone and never publishes it as output.
+PUBLISHED_DIAGNOSTICS_MARKER = "OUROBOROS_TEST_DIAGNOSTICS_PUBLISHED.txt"
+
+
+def diagnostic_directory(fallback, name="diagnostics", *, publish=False) -> Path:
+    """Producer-owned output, external when a test owner supplied a destination.
+
+    There it stays with the owner's run, unless ``publish`` declares it diagnostics to publish (frames, DOM,
+    facts, startup logs): then this folder, and only this one, carries ``PUBLISHED_DIAGNOSTICS_MARKER``, which
+    ``run_diagnostics`` selects by. A drive, a checkout, raw JUnit or a proof keeps the default."""
     parent = os.environ.get(EVIDENCE_ENV)
     # A producer may call repeatedly for one test; keep its filenames stable
     # within that invocation, but separate workers/parametrizations/repeated runs.
     key = hashlib.sha256(os.fsencode(Path(fallback).resolve())).hexdigest()[:16]
     path = Path(parent) / name / key if parent else Path(fallback)
     path.mkdir(parents=True, exist_ok=True)
+    if parent and publish and not (path / PUBLISHED_DIAGNOSTICS_MARKER).is_file():
+        (path / PUBLISHED_DIAGNOSTICS_MARKER).write_text(
+            "published test diagnostics: the producer of this folder declared its output for publication\n",
+            encoding="utf-8")
     return path
 
 
@@ -335,19 +349,36 @@ def diagnostics_incomplete(reason, source=None) -> None:
         retain_tree(root, f"test diagnostics incomplete: {reason}")
 
 
+def _failure_outcome(error: BaseException) -> bool:
+    """An error, or pytest's own failure outside ``Exception`` (``pytest.fail``, which a signal-method
+    pytest-timeout raises), never its xfail or its ``Exit`` (``pytest.exit``, an ``Exception``). pytest is not
+    imported: a process that never loaded it cannot have raised either. Interruption, exit, cancellation, skip
+    and generator close are no failure."""
+    outcomes = sys.modules.get("_pytest.outcomes")
+    if outcomes is None:
+        return isinstance(error, Exception)
+    return (isinstance(error, (Exception, outcomes.Failed))
+            and not isinstance(error, (outcomes.XFailed, outcomes.Exit)))
+
+
 @contextmanager
 def keep_startup_log(root, name):
     """A real server that never became ready keeps why, past its case's scratch.
 
     Its own stdio (``root/name``: a failed manager child's traceback lands nowhere else) and its data
-    logs go to the run's evidence, for a launcher releases the case's tree on red too. The failure goes on.
+    logs go to the run's evidence as published diagnostics, for a launcher releases the case's tree on red
+    too. The failure goes on.
+    Any other ``BaseException`` leaves at once, with no I/O (``_failure_outcome``); a thread-method timeout
+    or a hard exit raises nothing here, so nothing is copied.
     """
     try:
         yield
-    except Exception:
+    except BaseException as error:
+        if not _failure_outcome(error):
+            raise
         root, logs = Path(root), Path(root) / "data" / "logs"
         try:
-            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup")
+            kept = diagnostic_directory(root / "startup-diagnostics", "server-startup", publish=True)
             for path in (root / name, *logs.glob("*.log"), *logs.glob("*.jsonl")):
                 if path.is_file():
                     target = kept / path.relative_to(root)
@@ -358,6 +389,129 @@ def keep_startup_log(root, name):
         except OSError as exc:
             diagnostics_incomplete(str(exc), root)
         raise
+
+
+# What `diagnostic_directory` names a producer's folder: its fallback path's SHA-256, 16 hex digits.
+_PRODUCER_FOLDER = re.compile(r"[0-9a-f]{16}")
+
+
+def _present(path) -> bool:
+    """Whether ``path`` exists, link or not. A denied answer raises: a gap, never an absence."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _published_folders(entry: Path, gaps: list) -> list[Path]:
+    """The folders of one entry at a run's top that hold published diagnostics, never through a link."""
+    if not stat.S_ISDIR(entry.lstat().st_mode) or _present(entry / EVIDENCE_RUN_MARKER):
+        return []
+    if entry.name == "ui":
+        return [entry]
+    folders = []  # each producer folder declares itself: a public one never opens its retained neighbours
+    for child in sorted(entry.iterdir()):
+        try:
+            if (_PRODUCER_FOLDER.fullmatch(child.name) and stat.S_ISDIR(child.lstat().st_mode)
+                    and _present(child / PUBLISHED_DIAGNOSTICS_MARKER)):
+                folders.append(child)
+        except OSError as error:
+            gaps.append((child, error))
+    return folders
+
+
+def run_diagnostics(run) -> tuple[list[Path], list[str], list[tuple[Path, OSError]]]:
+    """(files, names left at the top, gaps) of one evidence run, by the layout its owners write.
+
+    Its published diagnostics are ``ui/``, where scripts/safe_test.py and the commit gate point
+    ``OUROBOROS_UI_EVIDENCE_DIR`` by default, and each producer folder ``<family>/<key>/`` its producer
+    declared (``diagnostic_directory(..., publish=True)``: frames, facts, ``server-startup`` logs), without the
+    declaration. Everything else stays with the run: the owner's records (``owner.json``, ``result.json``,
+    ``source/``, the command's full streams), retained producer output, nested projections and any output
+    outside that contract. A folder marked as another run is that owner's record; links and special files
+    are never read. A path that cannot be listed or examined is a gap ``(path, error)``, and its siblings
+    are still read."""
+    run, roots, left, gaps = Path(run), [], [], []
+    for entry in sorted(run.iterdir()):
+        try:
+            folders = _published_folders(entry, gaps)
+        except OSError as error:
+            gaps.append((entry, error))
+            continue
+        roots += folders
+        if not folders:
+            left.append(entry.name)
+
+    def unlisted(error):  # os.walk's: a folder it could not list
+        gaps.append((Path(error.filename) if error.filename else top, error))
+
+    files = []
+    for top in roots:
+        for directory, dirs, names in os.walk(top, onerror=unlisted):  # links to folders are listed, never entered
+            if EVIDENCE_RUN_MARKER in names:
+                dirs[:] = []
+                continue
+            dirs.sort()
+            for path in (Path(directory) / name for name in sorted(names) if name != PUBLISHED_DIAGNOSTICS_MARKER):
+                try:
+                    if stat.S_ISREG(path.lstat().st_mode):
+                        files.append(path)
+                except OSError as error:
+                    gaps.append((path, error))
+    return files, left, gaps
+
+
+def export_diagnostics(raw, destination) -> dict:
+    """Copy every evidence run's diagnostics (``run_diagnostics``) beneath ``raw`` to the same relative
+    path beneath ``destination``, for publication apart from any proof. The source stays with its owner;
+    a folder or leaf that cannot be read or copied is a named gap, never a reason to stop copying the rest."""
+    raw, destination = Path(raw).resolve(), Path(destination)
+    facts = {"runs": [], "files": 0, "bytes": 0, "errors": []}
+
+    def gap(path, error):
+        facts["errors"].append(f"{Path(os.path.relpath(path, raw)).as_posix()}: {type(error).__name__}: {error}")
+
+    for directory, dirs, names in os.walk(raw, onerror=lambda error: gap(error.filename or raw, error)):
+        dirs.sort()
+        if EVIDENCE_RUN_MARKER not in names:
+            continue
+        dirs[:] = []  # a run's own tree is selected below, never searched for further runs
+        run = Path(directory)
+        relative = run.relative_to(raw)
+        try:
+            files, left, gaps = run_diagnostics(run)
+        except OSError as error:
+            gap(run, error)
+            continue
+        for path, error in gaps:
+            gap(path, error)
+        for path in files:
+            target = destination / relative / path.relative_to(run)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+                facts["bytes"] += target.stat().st_size
+                facts["files"] += 1
+            except OSError as error:
+                gap(path, error)
+        facts["runs"].append({"run": relative.as_posix(), "files": len(files), "left": left})
+    return facts
+
+
+def _export_main(argv) -> int:
+    """``python -m ouroboros.test_evidence export-diagnostics RAW DESTINATION``: 1 when a leaf is a gap."""
+    if len(argv) != 3 or argv[0] != "export-diagnostics":
+        print("usage: python -m ouroboros.test_evidence export-diagnostics RAW DESTINATION", file=sys.stderr)
+        return 2
+    facts = export_diagnostics(argv[1], argv[2])
+    for row in facts["runs"]:
+        print(f"CI_DIAGNOSTICS {row['run']}: {row['files']} file(s); left with the run: {', '.join(row['left'])}")
+    for error in facts["errors"]:
+        print(f"CI_DIAGNOSTICS_INCOMPLETE {error}")
+    print(f"CI_DIAGNOSTICS_EXPORTED {facts['files']} file(s), {facts['bytes']} bytes, "
+          f"from {len(facts['runs'])} run(s) into {argv[2]}", flush=True)
+    return 1 if facts["errors"] else 0
 
 
 def preview_file(path, limit=200_000) -> str:
@@ -530,3 +684,7 @@ def remove_scratch_tree(path) -> None:
         function(name)  # Sharing/ACL failures still propagate to the owner.
 
     shutil.rmtree(path, onerror=onerror)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_export_main(sys.argv[1:]))

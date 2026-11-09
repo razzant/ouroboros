@@ -402,7 +402,7 @@ def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server
             open_settings_tab("behavior")  # a full reload reads the saved document back
             expect(allowance).to_have_value("0")
             allowance.scroll_into_view_if_needed()
-            screenshot = diagnostic_directory(settings_path.parent, "settings-drafts") / f"settings-zero-saved-{engine}.png"
+            screenshot = diagnostic_directory(settings_path.parent, "settings-drafts", publish=True) / f"settings-zero-saved-{engine}.png"
             page.screenshot(path=str(screenshot), full_page=True)
             print(f"ZERO_SETTINGS_SCREENSHOT {screenshot}")
         finally:

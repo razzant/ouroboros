@@ -1215,7 +1215,7 @@ def run_chat_viewport_smoke(
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport") / f"live-card-viewport-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport", publish=True) / f"live-card-viewport-{browser_engine}.png"),
                     full_page=True,
                 )
 

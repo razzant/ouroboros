@@ -105,7 +105,7 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
     playwright = pytest.importorskip("playwright.sync_api")
-    output = diagnostic_directory(tmp_path, "update-description")
+    output = diagnostic_directory(tmp_path, "update-description", publish=True)
     large, small = FIXTURE["large"], FIXTURE["small"]
     current = {"status": _status(large, _letter(large, "none")), "preflight": _preflight(large)}
     calls = []
@@ -451,7 +451,7 @@ def test_the_writing_note_opens_main_s_card_before_its_first_message(door, engin
 
     state.update_state(lambda live: live.update(owner_chat_id=owner_chat))
     _offer(door.root)
-    output = diagnostic_directory(tmp_path, "update-description-door")
+    output = diagnostic_directory(tmp_path, "update-description-door", publish=True)
     case = {"key": _key(), "commits": 1, "version": "6.114.0", "qualification": None}
     history_reads = []
 
@@ -614,7 +614,7 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     still switch; a short text, read on entry or saved the same way, offers no button until a narrower window folds
     some of it."""
     ui, engine = letter_ui, letter_ui["engine"]
-    output = diagnostic_directory(tmp_path, "update-description-away")
+    output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
     large = FIXTURE["large"]
     short = "\n\n".join(FIXTURE["small"]["text"].split("\n\n")[:2])  # about five lines at the owner's width
     current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
