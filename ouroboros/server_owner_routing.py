@@ -368,7 +368,9 @@ def _deliver_to_reader(
                 # answer/result settled. Its solve loop no longer drains this
                 # mailbox; accepting an owner follow-up here would label it
                 # delivered, then terminal cleanup would erase it unread. One
-                # predicate with the quiz ingress (TZ-2 D15).
+                # predicate with the quiz ingress (TZ-2 D15). A pooled root writes no
+                # intake fact, so words after its final drain and before its stored
+                # result still land here, kept unread on that result (PERSISTENCE).
                 if mailbox_drain_ended(task_drive, tid):
                     return ""
                 # Phase A: a task whose cancellation is PENDING must not accept a
