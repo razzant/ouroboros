@@ -384,7 +384,6 @@ def test_only_a_census_of_unknown_outcomes_offers_going_on_and_every_door_carrie
         return {"ok": True}
     monkeypatch.setattr("supervisor.queue_transitions.resume_budget_paused_task", observed)
     monkeypatch.setattr("supervisor.continuation_admission.admit_continuation", observed)
-    monkeypatch.setattr("ouroboros.work_diagnostics.control_actor_reason", lambda *_a, **_k: "")
     seen.clear()
     for action in ("resume_task", "continue_task"):
         events_mind_controls._apply({"task_id": "t", "actor_task_id": "mind", "action_nonce": "n", "action": action,

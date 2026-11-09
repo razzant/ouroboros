@@ -110,6 +110,7 @@
  * @property {string} conversation_id
  * @property {string} label
  * @property {'active'|'silent'|'paused'} state
+ * @property {boolean=} only_hears Derived per read: true while consciousness is off (or Panic) and the place is not Paused.
  * @property {Array<Object<string,string>>} wakes
  * @property {Array<Object<string,string>>} notes
  * @property {Array<Object<string,string>>} owner_accounts

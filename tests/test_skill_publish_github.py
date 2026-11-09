@@ -76,7 +76,9 @@ def test_account_repository_and_exact_files_use_https(responses):
         ("GET", f"/repos/hub/project/contents/a%20file.md?ref={BASE_SHA}", {"content": "aGVsbG8="}),
         ("GET", f"/repos/hub/project/contents/missing?ref={BASE_SHA}", GitHubError("Not Found", http_status=404)),
         ("GET", f"/repos/hub/project/git/trees/{BASE_SHA}?recursive=1",
-         {"tree": [{"path": "skills/demo/a.md", "type": "blob"}, {"path": "skills/other/a.md", "type": "blob"}]}),
+         {"truncated": False, "tree": [{"path": "skills/demo/a.md", "type": "blob", "sha": "A" * 40},
+                                       {"path": "skills/demo/lib", "type": "tree", "sha": "c" * 40},
+                                       {"path": "skills/other/a.md", "type": "blob", "sha": "d" * 40}]}),
     )
     ctx = types.SimpleNamespace()
     assert github.github_login(ctx) == "alice"
@@ -84,8 +86,33 @@ def test_account_repository_and_exact_files_use_https(responses):
     assert github.fetch_branch_head(ctx, "hub", "project", "trunk") == (BASE_SHA, "trunk")
     assert github.fetch_upstream_file(ctx, "hub", "project", BASE_SHA, "a file.md") == b"hello"
     assert github.fetch_upstream_file(ctx, "hub", "project", BASE_SHA, "missing") is None
-    assert github.fetch_tree_paths(ctx, "hub", "project", BASE_SHA, "skills/demo") == ["a.md"]
+    assert github.fetch_tree_blobs(ctx, "hub", "project", BASE_SHA, "skills/demo") == {"a.md": "a" * 40}
     assert not pending and all(not row[2].get("body") for row in calls)
+
+
+def test_tree_and_blob_reads_never_mistake_a_partial_listing_or_a_gone_commit_for_absence(responses):
+    """A truncated listing would read missing paths as absent, so it is refused; a recorded commit the
+    repository no longer has is ``None`` only when the caller asked for that (its base), else an error."""
+    gone = GitHubError("No commit found for SHA", http_status=422)
+    _calls, pending = responses(
+        ("GET", f"/repos/hub/project/git/trees/{BASE_SHA}?recursive=1", {"truncated": True, "tree": []}),
+        ("GET", f"/repos/hub/project/git/trees/{COMMIT_SHA}?recursive=1", gone),
+        ("GET", f"/repos/hub/project/git/trees/{COMMIT_SHA}?recursive=1", gone),
+        ("GET", "/repos/hub/project/git/blobs/" + "e" * 40, {"encoding": "base64", "content": "aGVs\nbG8=\n"}),
+        ("GET", "/repos/hub/project/git/blobs/" + "f" * 40, {"encoding": "none", "content": ""}),
+    )
+    ctx = types.SimpleNamespace()
+    with pytest.raises(github.SkillPublishGitHubError) as partial:
+        github.fetch_tree_blobs(ctx, "hub", "project", BASE_SHA, "skills/demo")
+    assert (partial.value.reason_code, partial.value.status) == ("upstream_read_failed", "blocked")
+    assert github.fetch_tree_blobs(ctx, "hub", "project", COMMIT_SHA, "", missing_ok=True) is None
+    with pytest.raises(github.SkillPublishGitHubError) as missing:
+        github.fetch_tree_blobs(ctx, "hub", "project", COMMIT_SHA, "")
+    assert missing.value.http_status == 422
+    assert github.fetch_blob(ctx, "hub", "project", "e" * 40) == b"hello"
+    with pytest.raises(github.SkillPublishGitHubError):
+        github.fetch_blob(ctx, "hub", "project", "f" * 40)
+    assert not pending
 
 
 def test_a_branch_name_the_destination_holds_as_a_tag_is_refused_by_name(responses):

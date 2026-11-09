@@ -348,6 +348,7 @@ class RecentWake(_RecentWakeIdentity):
     chat_id: Optional[int]
     cause: Literal["own", "focus"]
     place_label: str
+    place_id: NotRequired[str]  # a focus wake's place, for its sheet
     conversation: str
     started_at: Optional[str]
     first_reply_at: NotRequired[Optional[str]]
@@ -465,6 +466,7 @@ class PlaceSummary(TypedDict):
     conversation_id: str
     label: str
     state: Literal["active", "silent", "paused"]
+    only_hears: NotRequired[bool]  # derived per read: true while consciousness is off (or Panic) and the place not Paused
     wakes: List[Dict[str, str]]
     notes: List[Dict[str, str]]
     owner_accounts: List[Dict[str, str]]

@@ -595,6 +595,7 @@
  * @property {?number} chat_id
  * @property {'own'|'focus'} cause
  * @property {string} place_label
+ * @property {string=} place_id
  * @property {string} conversation
  * @property {?string} started_at
  * @property {?string=} first_reply_at

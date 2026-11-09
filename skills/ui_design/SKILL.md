@@ -1,6 +1,6 @@
 ---
 name: ui_design
-version: 2.0.4
+version: 2.0.5
 type: instruction
 os: any
 permissions: []
@@ -60,7 +60,7 @@ A delegated session may not see this skill: give it this file's absolute path an
 ## 7. The owner's taste
 
 - Craft is general; taste is personal and changes. Before designing for a known owner, `knowledge_list(scope="global")`, then `knowledge_read(topic, scope="global")` for the topic holding their design reactions, if any.
-- After a reaction, `knowledge_write(scope="global")`: the date, what was shown, their words verbatim, where it applies and where not, told, observed or inferred. Revise in place; a correction is evidence about that moment, not a standing rule until they make it one.
+- After a reaction, `knowledge_write(scope="global")`: the date, what was shown, their words verbatim, where it applies and where not, told, observed or inferred. Revise in place; a reaction to what was shown stays with it, and how they want to see and choose holds until they revise it.
 - Delegates return observations; only the mind writes memory. A taste note never becomes product law or part of this skill.
 
 ## Done means

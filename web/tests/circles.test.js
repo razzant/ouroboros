@@ -47,6 +47,21 @@ test('a place row: its own name, the service, the state word, readiness only whe
     assert.doesNotMatch(placeRowHtml(alpha), /wakes for|spent|\$/, 'no wake list or spend on the row');
 });
 
+test('while consciousness is off a place that is not Paused says it only hears, muted, to the eye and to a screen reader', () => {
+    // Owner 06.11: Off silenced every place for 28 hours while each row went on reading «active» with the ok dot.
+    const [active, silent, paused] = normalizePlacesResponse({ ...RESPONSE, places: [raw('a', { only_hears: true }),
+        raw('s', { state: 'silent', only_hears: true }), raw('p', { state: 'paused' })] }).places;
+    const row = placeRowHtml(active, { title: 'a', source: 'Chat' });
+    assert.match(row, /<span class="ui-status" data-tone="muted">active · consciousness off<\/span>/);
+    assert.match(row, /aria-label="Open a \(Chat\): active · consciousness off; last event /);
+    assert.match(placeRowHtml(silent), /data-tone="muted">silent · consciousness off</);
+    assert.match(placeRowHtml(paused), /data-tone="muted">paused</);
+    assert.doesNotMatch(placeRowHtml(paused), /consciousness off/, 'a Paused place hears nothing new to say');
+    assert.equal(alpha.onlyHears, false, 'without the host\'s fact the row keeps its stored word and the ok dot');
+    assert.match(placeRowHtml(alpha), /data-tone="ok">active</);
+    assert.equal(normalizePlacesResponse({ ...RESPONSE, places: [raw('t', { only_hears: 'true' })] }).places[0].onlyHears, false);
+});
+
 test('a row whose name is its service says the service once, to the eye and to a screen reader', () => {
     const [whole] = normalizePlacesResponse({ ...RESPONSE, places: [raw('whole', { label: 'Chat' })] }).places;
     const row = placeRowHtml(whole, { title: 'Chat', source: 'Chat' });

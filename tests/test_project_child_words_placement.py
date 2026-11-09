@@ -114,7 +114,7 @@ def _child_registry(room, monkeypatch, mode: str, profile: str = "acting_subagen
 
 def _steer_refused(room, target: str = "kid-1") -> int:
     """An owner turn's relay of my human's words from a row without a client id: it rides the turn's synthetic
-    receipt id, so the refusal is a chat row beside its ACK. A note of the mind (no quote) publishes none."""
+    receipt id, whose ACK answers no chat row, so the refusal is its System row. A note of the mind publishes none."""
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
     from supervisor import steering
 

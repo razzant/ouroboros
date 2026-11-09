@@ -99,6 +99,8 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     assert "read on demand" in summarized
     bare = _write(ctx, "lessons/bare", "No summary here.")
     assert "it has no summary" in bare and "(no summary)" in bare
+    assert "shows its address and title, and its whole view marks it (no summary)" in bare
+    assert "only its title" not in bare and "outline" not in bare
     overview = _write(ctx, "overview", "What holds now.", summary="s")
     # The receipt names the integrating contexts that hold the overview whole and the helpers that read it
     # on demand (BIBLE P1, the subject of continuity).
@@ -108,6 +110,15 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     assert "not in the active knowledge index" in archived
     project = _write(_ctx(tmp_path, project_id="demo"), "lessons/local", "Project lesson.", summary="In demo.")
     assert "project:demo knowledge index, loaded in that project's contexts" in project
+    # Whom the summary reaches depends on the note's type: a person's summary stays in the outline a tight
+    # window, a helper and a session start with (knowledge.outline_keeps_summary); any other keeps its address and title.
+    assert "a tight window and a helper's or session's start show only its address and title" in summarized
+    assert "helpers do not load it" not in summarized
+    person = tools._knowledge_write(ctx, topic="people/ada", scope="global",
+                                    content="---\ntype: person\nsummary: Prefers short answers.\n---\nAda.\n")
+    assert "summary (22 chars) is shown in the global knowledge index" in person
+    assert "and the outline a tight window, a helper and a session start with" in person
+    assert "show only its address and title" not in person and "helpers do not load it" not in person
 
 
 def test_the_frozen_reflection_log_renders_nowhere(tmp_path):
