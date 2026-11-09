@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from typing import Callable, Any, Dict, List, Optional, Tuple
 
@@ -1045,7 +1046,7 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
 def _post_live_message(gateway: Any, rid: str, record: Dict[str, Any], left: Callable[[], float],
                        live_input: str = "") -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """``(verdict, body)`` of ONE live message POST, the keyword facts ``_message_result`` records and renders,
-    shared by a caller's ``delegate_message`` and the starter's placement (``place_rows_into_runs``): a budget
+    shared by a caller's ``delegate_message`` and the placement of my human's rows (``_place_into_run``): a budget
     spent before the POST sends nothing (the key stays unused, so the same-id retry is right), a typed refusal
     is classified (``_message_problem_outcome``), the engine's verdict rides 1:1, and an untyped failure is
     ``delivery_unknown`` (F7: never a raw traceback). ``body`` is the engine's answer when it gave one."""
@@ -1078,33 +1079,95 @@ def _post_live_message(gateway: Any, rid: str, record: Dict[str, Any], left: Cal
                     detail=f"{type(exc).__name__}: {exc}"), None
 
 
-_PLACEMENT_ENDED = frozenset({"delivered", "accepted", "rejected", "unsupported"})
-_PLACEMENT_REPLAYS = frozenset({"delivery_unknown", "prepared"})
 _PLACED_ATTACHMENTS = ("[Host fact: the attachments named above are retained by the host; the task that started "
                        "this session holds them and can be asked for them.]")
 
 
+def _placement_text(quote: Dict[str, Any], address: str, went: str) -> Tuple[str, Dict[str, Any]]:
+    """``(text, owner_words)`` of one row's frame: its words whole under the carried line (``_quote_body``), the
+    attachments' host fact when it carries files, and the frame's marker of the row (address, room, time)."""
+    from ouroboros.owner_relay import _quote_body, carried_quote_line
+
+    text = _quote_body(quote["owner_row"], carried_quote_line(quote, address=address, fact={"went_to": went}))
+    text += f"\n{_PLACED_ATTACHMENTS}" if quote.get("attachments") else ""
+    return text, {"address": address, "chat_id": quote["source"]["chat_id"], "ts": quote["source"]["ts"]}
+
+
+def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], str]], *,
+                    host: bool = False) -> List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]]:
+    """One session's placement of owed rows ``(address, quote, went)`` under the message deadline: one handshake and
+    one capability read, then each row framed as the starter's and chosen with any other placer's frames in one
+    transaction (``delegate_message_store.place_frame``: a row reaches a run once) and sent on the typed outcome
+    path (``_message_result``). A replay (prior ``prepared``/``delivery_unknown``) always reaches the engine, its
+    recorded bytes under its id; a new frame on a route with no live input, or an engine without the operation,
+    records ``unsupported`` with no POST. An engine that cannot be discovered or reached, or a read that fails,
+    frames nothing: the next pass places. ``(address, verdict, prior outcome, frame row)`` per frame sent."""
+    from ouroboros.delegate_message_store import PLACEMENT_REPLAYS, place_frame
+    from ouroboros.delegate_progress import poll_bound
+    from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
+
+    deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
+    sent: List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]] = []
+    try:  # a missing or unreadable daemon descriptor is the engine's absence this pass, never the task's end
+        gateway = ClaudexorGateway()
+    except ClaudexorUnavailable:
+        log.warning("owner words placement into run %s waits: engine not discovered", run.run_id, exc_info=True)
+        return sent
+    try:
+        try:
+            gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+        except ClaudexorUnavailable:
+            log.warning("owner words placement into run %s waits: engine handshake failed", run.run_id, exc_info=True)
+            return sent
+        reason, detail, live_input = _live_input_unsupported(
+            gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
+        if reason in ("capability_read_failed", "deadline_exhausted"):
+            log.warning("owner words placement into run %s waits: %s (%s)", run.run_id, reason, detail)
+            return sent
+        for address, quote, went in owed:
+            try:  # the frame is the write-ahead record: no frame, no POST
+                record, prior = place_frame(ctx, run, *_placement_text(quote, address, went), host=host)
+            except Exception:  # noqa: BLE001
+                log.warning("owner words frame for %s into run %s unwritten", address, run.run_id, exc_info=True)
+                continue
+            if record is None:  # another placer's frame ended the row for this run
+                continue
+            facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(record["text"]),
+                     "text_sha256": hashlib.sha256(record["text"].encode("utf-8", "replace")).hexdigest(),
+                     "frame": record["frame"]}
+            if reason and prior not in PLACEMENT_REPLAYS:  # a replay always reaches the engine: it may be delivered
+                verdict: Dict[str, Any] = dict(outcome="unsupported", reason=reason, host_code=SUBSTRATE_REFUSAL_CODE,
+                                               detail=detail, live_input=live_input)
+            else:
+                verdict, _body = _post_live_message(gateway, run.run_id, record, lambda: deadline - time.monotonic(),
+                                                    live_input)
+            _message_result(ctx, facts, **verdict)
+            sent.append((address, verdict, prior, record))
+    finally:
+        gateway.close()
+    return sent
+
+
+def _fact_line(address: str, run_id: str, outcome: str, reason: Any) -> str:
+    return f"[Host fact: my human's row {address} for session run {run_id}: {outcome}{f' ({reason})' if reason else ''}]"
+
+
 def place_rows_into_runs(ctx: ToolContext) -> List[str]:
-    """The starter's placement of my human's later rows into the sessions it has open, from its own round top
-    alone (``loop_round_limits._drain_incoming_messages`` with ``place_live_runs``): each run this task started
-    and still holds open (``open_runs`` by this focus, never a review-owned run) hears each row of the rows this
-    run carries down (``owner_relay._rows_to_carry``) whose identity stands in no START body of the run's line
-    and whose last placed frame has not ended it, as one ``task_message`` frame carrying ``owner_words`` (the same
-    wire kind as ``delegate_message``, one field more) through the same typed outcome path. Outcome rules:
-    ``delivered``, ``accepted`` and ``rejected`` end a row for that run; ``delivery_unknown`` (and a frame prepared
-    but never answered) replays its recorded bytes under the same message id; ``not_active`` or ``not_found`` on a
-    run the census still holds open is placed again under a new id; ``unsupported`` ends it, a route with no live
-    input (or an engine without the operation) recording that frame without a POST. One handshake and one
-    capability read per run, under the message deadline; an engine that cannot be discovered or reached, or a
-    read that fails, leaves the run for the next round (the starter's own round goes on: nothing here raises).
-    Returns the host fact lines for the starter's own context: one per row and run whose outcome changed."""
+    """The starter's catch-up of my human's rows in the sessions it has open, from its own round top alone
+    (``loop_round_limits._drain_incoming_messages`` with ``place_live_runs``), after the host's placement at receipt
+    (``place_at_receipt``): each run this task started and still holds open (``open_runs`` by this focus, never a
+    review-owned run) hears each row of the rows this run carries down (``owner_relay._rows_to_carry``) whose
+    identity stands in no START body of the run's line and whose last frame has not ended it (``_place_into_run``).
+    ``delivered``, ``accepted``, ``rejected`` and ``unsupported`` end a row for that run (``unsupported``: no live
+    input, so the row rides the next continuation); ``delivery_unknown`` and a frame never answered replay its bytes
+    under the same id; ``not_active`` or ``not_found`` on a run the census still holds open takes a new frame.
+    Nothing here raises. Returns the host fact lines for the starter's own context: one per row and run whose
+    outcome changed here, and one per frame the host placed that this context was not yet told of (``untold``)."""
     from ouroboros.delegate_continuation import line_start_bodies
     from ouroboros.delegate_custody import custody_root
     from ouroboros.delegate_custody_reconcile import open_runs
-    from ouroboros.delegate_message_store import placed_words, prepare
-    from ouroboros.delegate_progress import poll_bound
-    from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
-    from ouroboros.owner_relay import _quote_body, _rows_to_carry, carried_quote_line, stamped_refs
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, PLACEMENT_REPLAYS, mark_told, placed_words
+    from ouroboros.owner_relay import _rows_to_carry, stamped_refs
 
     lines: List[str] = []
     try:
@@ -1115,62 +1178,68 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
         for run in runs if rows else []:
             bodies = line_start_bodies(root, run.run_id)
             seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
-            last = {str(row["frame"]["owner_words"].get("address") or ""): row for row in placed_words(ctx, run.run_id)}
-            owed_by_run[run.run_id] = (run, [
-                (address, quote, went, last.get(address)) for identities, address, quote, went, _before in rows
-                if not identities & seen and str((last.get(address) or {}).get("outcome") or "") not in _PLACEMENT_ENDED])
+            frames = placed_words(ctx, run.run_id)
+            last = {str(row["frame"]["owner_words"].get("address") or ""): row for row in frames}
+            untold = [row for row in frames if row.get("untold") and row.get("outcome") not in PLACEMENT_REPLAYS]
+            owed_by_run[run.run_id] = (run, untold, [
+                (address, quote, went) for identities, address, quote, went, _before in rows
+                if not identities & seen and str((last.get(address) or {}).get("outcome") or "") not in PLACEMENT_ENDED])
     except Exception:  # noqa: BLE001 — a census that cannot be read places nothing this round; the loop goes on
         log.warning("owner words placement census unavailable this round", exc_info=True)
         return lines
-    for run, owed in owed_by_run.values():
-        if not owed:
-            continue
-        deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
-        try:  # a missing or unreadable daemon descriptor is the engine's absence this round, never the task's end
-            gateway = ClaudexorGateway()
-        except ClaudexorUnavailable:
-            log.warning("owner words placement into run %s waits: engine not discovered", run.run_id, exc_info=True)
-            continue
-        try:
-            gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
-        except ClaudexorUnavailable:
-            gateway.close()
-            log.warning("owner words placement into run %s waits: engine handshake failed", run.run_id, exc_info=True)
-            continue
-        try:
-            reason, detail, live_input = _live_input_unsupported(
-                gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
-            if reason in ("capability_read_failed", "deadline_exhausted"):
-                log.warning("owner words placement into run %s waits: %s (%s)", run.run_id, reason, detail)
-                continue
-            for address, quote, went, prior in owed:
-                replay = prior is not None and str(prior.get("outcome") or "") in _PLACEMENT_REPLAYS
-                if replay:  # the recorded bytes, never a re-derivation
-                    text, mid = prior["text"], prior["frame"]["message_id"]
-                    words, reply_to = prior["frame"]["owner_words"], prior["frame"].get("reply_to")
-                else:
-                    text = _quote_body(quote["owner_row"], carried_quote_line(quote, address=address, fact={"went_to": went}))
-                    text += f"\n{_PLACED_ATTACHMENTS}" if quote.get("attachments") else ""
-                    mid, reply_to = "", None
-                    words = {"address": address, "chat_id": quote["source"]["chat_id"], "ts": quote["source"]["ts"]}
-                try:
-                    record = prepare(ctx, run, "starter", text, mid, reply_to, owner_words=words)
-                except Exception:  # noqa: BLE001 — the frame is the write-ahead record: no frame, no POST
-                    log.warning("owner words frame for %s into run %s unwritten", address, run.run_id, exc_info=True)
-                    continue
-                facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(text),
-                         "text_sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest(),
-                         "frame": record["frame"]}
-                if reason and not replay:  # a replay always reaches the engine: its bytes may already be delivered
-                    verdict: Dict[str, Any] = dict(outcome="unsupported", reason=reason, host_code=SUBSTRATE_REFUSAL_CODE,
-                                                   detail=detail, live_input=live_input)
-                else:
-                    verdict, _body = _post_live_message(gateway, run.run_id, record, lambda: deadline - time.monotonic(), live_input)
-                _message_result(ctx, facts, **verdict)
-                if verdict["outcome"] != str((prior or {}).get("outcome") or ""):
-                    why = f" ({verdict['reason']})" if verdict.get("reason") else ""
-                    lines.append(f"[Host fact: my human's row {address} for session run {run.run_id}: "
-                                 f"{verdict['outcome']}{why}]")
-        finally:
-            gateway.close()
+    for run, untold, owed in owed_by_run.values():
+        sent = _place_into_run(ctx, run, owed) if owed else []
+        lines += [_fact_line(row["frame"]["owner_words"]["address"], run.run_id, row["outcome"], row.get("reason"))
+                  for row in untold] + [_fact_line(address, run.run_id, verdict["outcome"], verdict.get("reason"))
+                                        for address, verdict, prior, _row in sent if verdict["outcome"] != prior]
+        if told := [row["frame"]["message_id"] for row in [*untold, *(row for *_sent, row in sent)] if row.get("untold")]:
+            try:
+                mark_told(ctx, run.run_id, told)
+            except Exception:  # noqa: BLE001 — a fact not marked is told once more, never lost
+                log.warning("owner words facts of run %s not marked told", run.run_id, exc_info=True)
     return lines
+
+
+def place_at_receipt(root: Any, work_id: str, rows: List[Tuple[Any, ...]]) -> Optional[threading.Thread]:
+    """The host's placement of my human's rows a work just received (``owner_relay.carry_at_receipt``) into every
+    open session of its tree (``tree_open_runs``; never a review's run or a settled one), on a host thread started
+    now, outside every focus's turn and seat: each row no START body of the run's line holds, framed as the run's
+    starter's (``_place_into_run``). What the engine could not take this time waits for the next pass (the
+    starter's round top, or the next receipt). Returns the thread, or ``None`` when the tree holds no session open."""
+    from ouroboros.delegate_custody_reconcile import tree_open_runs
+
+    try:
+        runs = [run for run in tree_open_runs(root, work_id) if not run.review_owned]
+    except Exception:  # noqa: BLE001 — the starters' round tops place what this could not read
+        log.warning("owner words at receipt: open sessions of %s unreadable", work_id, exc_info=True)
+        return None
+    if not runs:
+        return None
+    thread = threading.Thread(target=_place_runs_at_receipt, args=(root, runs, rows), name="owner-words-placement",
+                              daemon=True)
+    thread.start()
+    return thread
+
+
+def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...]]) -> None:
+    from types import SimpleNamespace
+
+    from ouroboros.delegate_continuation import line_start_bodies
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, placed_words
+    from ouroboros.owner_relay import stamped_refs
+    from ouroboros.task_status import load_effective_task_result
+
+    for run in runs:
+        try:
+            meta = (load_effective_task_result(root, run.task_id) or {}).get("metadata")
+            ctx = SimpleNamespace(drive_root=root, task_id=run.task_id, task_metadata={  # its frames name its starter
+                **(meta if isinstance(meta, dict) else {}), "budget_drive_root": str(root)})
+            bodies = line_start_bodies(root, run.run_id)
+            seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
+            ended = {row["frame"]["owner_words"].get("address") for row in placed_words(ctx, run.run_id)
+                     if row.get("outcome") in PLACEMENT_ENDED}  # a later frame of a row is chosen again in its write
+            if owed := [(address, quote, went) for identities, address, quote, went, _before in rows
+                        if not identities & seen and address not in ended]:
+                _place_into_run(ctx, run, owed, host=True)
+        except Exception:  # noqa: BLE001 — a host thread: what it could not place waits for the next pass
+            log.warning("owner words placement into run %s failed at receipt", run.run_id, exc_info=True)

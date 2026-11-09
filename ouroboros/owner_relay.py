@@ -3,10 +3,12 @@
 Quote authority is possession of a host-retained ingress row, never the teller's
 lane. The mailbox is the durable delivery owner; ACK follows saved cognition.
 Return addresses are retained by the recipient independently of the teller.
-How a member comes to hold my human's rows lives here too: its birth set from its
-record and room (``task_words_text``, files staged by ``stage_birth_files``), and the
-identity read of a text already sent (``words_unseen_in`` over ``owner_words.words_stamp``
-lines), which carriage and placement use to render a row once.
+How a member comes to hold my human's rows lives here too: the host's carriage of a
+work's rows down its tree at receipt (``carry_at_receipt``) and each drain's catch-up
+(``carry_to_members``), its birth set from its record and room (``task_words_text``, files
+staged by ``stage_birth_files``), and the identity read of a text already sent
+(``words_unseen_in`` over ``owner_words.words_stamp`` lines), which carriage and placement
+use to render a row once.
 """
 from __future__ import annotations
 
@@ -699,7 +701,10 @@ def publish_relay_ack(root, target: str, relay: dict, bridge) -> None:
 
 
 def publish_relay(root, target: str, entry: dict, bridge, task=None) -> None:
-    """One target chat row, even after an append-before-receipt crash."""
+    """One target chat row, even after an append-before-receipt crash. The delivery is the quoted rows' receipt:
+    they ride on down the target's tree at once (``carry_relay_at_receipt``)."""
+    if entry.get("owner_rows") and not entry.get("host_carried"):
+        carry_relay_at_receipt(root, target, entry)
     from supervisor.message_ingress import _INGRESS_LOCK
     from supervisor.message_bus import log_chat
     from ouroboros import dialogue_store
@@ -818,9 +823,10 @@ def _carry_to_member(root, drive, task_id: str, member: dict, rows: list, teller
 
 
 def carry_to_members(ctx, *, delivered: bool) -> None:
-    """Reconcile my human's rows with every live member below this run at the end of a drain: the tree's members
-    for a root, the direct children for a helper; a member whose record and mailbox hold a row under none of its
-    references gets it once (``_carry_to_member``), teller the tree's root, so two drains write identical bytes.
+    """Reconcile my human's rows with every live member below this run at the end of a drain, the catch-up of the
+    host's carriage at receipt (``carry_at_receipt``): the tree's members for a root, the direct children for a
+    helper; a member whose record and mailbox hold a row under none of its references gets it once
+    (``_carry_to_member``), teller the tree's root, so two drains, and the host before them, write identical bytes.
     No delivery state: the only memory is a skip memo. A helper's quiet drain (nothing delivered, no helper
     scheduled since its last pass, no failed write, not the attempt's first) reads no member; a root's drain
     reads its census and skips the members' reads when the live set is unchanged and the drain was quiet. A
@@ -868,11 +874,76 @@ def carry_to_members(ctx, *, delivered: bool) -> None:
     memo.update(members=set(live), failed=failed)
 
 
+def carry_at_receipt(drive_root, work_id: str, quotes: list, *, went_to: str = "") -> Any:
+    """The host carries my human's rows a work just received down its tree at receipt (inv. 26), outside every
+    focus's turn and seat: each live member of the tree gets each row in its mail now (``_carry_to_member``, teller
+    the work: the bytes its drain's catch-up would write, a sleeping member woken as by any relay), and each open
+    session of the tree a frame (``delegate_interactions.place_at_receipt``). ``quotes``: each row's quote as the
+    work holds the row; ``went_to``: where a context row went. Returns the placement thread, or None. Never raises:
+    what fails here, the work's drain and its starters' round tops carry."""
+    from ouroboros.owner_words import _chat_ref
+    from ouroboros.task_status import FINAL_STATUSES, find_child_tasks
+    from supervisor.queue_timeouts import _task_drive_for_task
+
+    log = logging.getLogger(__name__)
+    rows = [({address, _chat_ref(quote["owner_row"]) if quote["owner_row"].get("client_message_id") else ""} - {""},
+             address, quote, went_to, "") for quote in quotes for address in [quote["source"]["address"]]]
+    try:
+        census = find_child_tasks(drive_root, root_task_id=work_id, exclude_task_id=work_id, materialize_artifacts=False)
+    except Exception:
+        log.warning("Carriage at receipt: the members of %s could not be read; its drain carries", work_id, exc_info=True)
+        census = []
+    for member in census:
+        tid = str(member.get("task_id") or "")
+        if tid and str(member.get("status") or "") not in FINAL_STATUSES:
+            try:
+                _carry_to_member(drive_root, _task_drive_for_task(member, tid, canonical=drive_root), tid, member, rows,
+                                 work_id)
+            except Exception:
+                log.warning("Carriage at receipt to %s of %s failed; the next drain writes it", tid, work_id, exc_info=True)
+    from ouroboros.delegate_interactions import place_at_receipt
+    return place_at_receipt(drive_root, work_id, rows) if rows else None
+
+
+def carry_row_at_receipt(drive_root, work_id: str, chat_id: int, client_message_id: str) -> Any:
+    """``carry_at_receipt`` of the accepted chat row the room delivered to ``work_id`` (``server_owner_routing``),
+    quoted as the work's drain will hold it (``retain_owner_message``: beside its source root)."""
+    from supervisor.message_ingress import accepted_chat_message
+
+    try:
+        row = accepted_chat_message(drive_root, int(chat_id), str(client_message_id or ""))
+        if not quotable_owner_row(row, drive_root):
+            return None
+        held = {**row, "_owner_source_root": str(Path(drive_root).resolve(strict=False))}
+        quote = owner_quote(drive_root, held, address=owner_row_address(row))
+    except Exception:
+        logging.getLogger(__name__).warning("Carriage at receipt: row %s of room %s unreadable", client_message_id,
+                                            chat_id, exc_info=True)
+        return None
+    return carry_at_receipt(drive_root, work_id, [quote])
+
+
+def carry_relay_at_receipt(root, target: str, entry: dict) -> Any:
+    """``carry_at_receipt`` of a relay's quoted rows still quotable now (a teller's ``tell_task``), each quoted as
+    the target's drain will hold it (``inject_relay``: beside the root it was read from)."""
+    quotes = []
+    try:
+        for row, _quote in _quotes_by_row(entry):
+            source_root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or root
+            if quotable_owner_row(row, source_root):
+                held = {**copy.deepcopy(row), "_owner_source_root": str(source_root)}
+                quotes.append(owner_quote(root, held, address=owner_row_address(row)))
+    except Exception:
+        logging.getLogger(__name__).warning("Carriage at receipt: relay rows to %s unreadable", target, exc_info=True)
+        return None
+    return carry_at_receipt(root, target, quotes) if quotes else None
+
+
 def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: list, went_to: str) -> None:
     """At a Project room's ingress, after the routing outcome: one carried context entry of the accepted chat row
     to every other live root of the room (``addressable_roots``), naming where the row went (the work it was
-    delivered to, else ``ROUTED_BY_HEAD``: a head of the room routed it); each root's drain carries it down its
-    tree. A write that fails stops no other root and never the message."""
+    delivered to, else ``ROUTED_BY_HEAD``: a head of the room routed it), and down each root's tree at once
+    (``carry_at_receipt``; its drain is the catch-up). A write that fails stops no other root and never the message."""
     from supervisor.message_ingress import accepted_chat_message
     from supervisor.queue_timeouts import _task_drive_for_task
 
@@ -896,3 +967,5 @@ def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: 
                         host_carried={"went_to": went_to or ROUTED_BY_HEAD})
         except Exception:
             log.warning("Carriage: room %s row %s not written to root %s", chat_id, address, tid, exc_info=True)
+            continue
+        carry_at_receipt(drive_root, tid, [quote], went_to=went_to or ROUTED_BY_HEAD)

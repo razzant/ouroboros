@@ -127,8 +127,8 @@ def _drain_incoming_messages(
     returned result's final save, or the published exact pause), so a crash in
     between delivers it again instead of losing it. Non-content controls are
     acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
-    close, a forced finalization or a live call): my human's rows this run carries
-    are placed into the sessions it holds open (``place_rows_into_runs``), each once.
+    close, a forced finalization or a live call): my human's rows the host's placement at receipt
+    left are placed into the sessions it holds open (``place_rows_into_runs``), each once.
     """
     controls: Dict[str, Any] = {}
 
@@ -364,11 +364,11 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
-    if owner_ctx is not None:  # my human's rows reach every live member below this run, by identity, each once
+    if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
-        if place_live_runs:  # and the sessions this run holds open, each row once per run
+        if place_live_runs:  # and the sessions this run holds open, each row once per run (and the host's facts)
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)

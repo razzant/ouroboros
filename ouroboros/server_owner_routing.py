@@ -754,6 +754,9 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
                                               task_metadata=task_metadata, image_data=image_data, roots=roots)
         unnamed_label = ""  # its turn named nothing yet: the receipt says saved, never a placeholder name
     if routed_to_task:
+        from ouroboros.owner_relay import carry_row_at_receipt
+
+        carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id)  # down its tree, now
         _record_routing_receipt(
             bridge,
             ctx,
