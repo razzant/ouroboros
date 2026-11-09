@@ -1013,6 +1013,7 @@ def _capture_context_core(
             answers_conversation=spoken and route != ROUTELESS,
             unsettled=why if route == UNKNOWN else "",
             routeless=why if spoken and route == ROUTELESS else "",
+            inline=inline,
         )
         if presence_section:
             dynamic_parts.append(presence_section)

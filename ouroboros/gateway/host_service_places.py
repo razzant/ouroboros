@@ -487,7 +487,7 @@ async def _api_presence_place(request: Request) -> JSONResponse:
             conversation_id=str(request.query_params.get("conversation_id") or ""),
             thread_id=str(request.query_params.get("thread_id") or "")))
         if place is None:
-            return _presence_error("Connect this place in Consciousness > Places.", 404, "place_not_connected", "blocked")
+            return _presence_error("Add this place in Circles.", 404, "place_not_connected", "blocked")
         return JSONResponse({"place_id": place.place_id, "label": place.label, "state": place.state})
     except host.HostServiceAuthError as exc:
         return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")

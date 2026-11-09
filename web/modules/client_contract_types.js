@@ -647,6 +647,12 @@
 /** @typedef {import('./place_contract_types.js').PlaceRoomsCoverage} PlaceRoomsCoverage */
 /** @typedef {import('./place_contract_types.js').PlaceRoomsResponse} PlaceRoomsResponse */
 /** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
+/** @typedef {import('./place_contract_types.js').PlaceCircleChoice} PlaceCircleChoice */
+/** @typedef {import('./place_contract_types.js').PlaceDescription} PlaceDescription */
+/** @typedef {import('./place_contract_types.js').CircleSummary} CircleSummary */
+/** @typedef {import('./place_contract_types.js').CircleCreateRequest} CircleCreateRequest */
+/** @typedef {import('./place_contract_types.js').CircleUpdateRequest} CircleUpdateRequest */
+/** @typedef {import('./place_contract_types.js').CircleDeleteRequest} CircleDeleteRequest */
 
 /**
  * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}`, `{mcp_server_id,

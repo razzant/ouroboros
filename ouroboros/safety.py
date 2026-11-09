@@ -612,9 +612,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
     from dataclasses import asdict, is_dataclass
     from ouroboros import owner_words
-    from ouroboros.place_guard import call_place_facts
-    from ouroboros.places import load_places
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.place_guard import call_place_facts, place_evidence
     from ouroboros.tool_effects import mcp_sends_as
     from ouroboros.safety_evidence import focus_event_source
 
@@ -629,16 +627,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     if referenced and referenced not in place_ids:  # a resolved row already names its place
         place["place_id"] = referenced
         place_ids.add(referenced)
-    notes = []  # each place's notes once, read now from the canonical store
-    if place_ids:
-        for record in load_places(canonical_data_root(ctx)):
-            if record.place_id not in place_ids:
-                continue
-            if record.place_id == place.get("place_id"):
-                place.update(place_label=record.label, place_state=record.state)
-            notes.extend({"place_id": record.place_id, "text": n.text, "author": n.author,
-                          **({"at": n.at} if n.at else {}),
-                          "standing_delegation": n.author in {"owner", "migration"}} for n in record.notes)
+    # Each place's notes and circle words once, read now from the canonical store (a circle call adds its circle).
+    notes = place_evidence(ctx, place, place_ids, tool_name, arguments)
     if tool_name == "place_reply":  # always a message; resolved rows already carry its route
         place["effect"] = "message"
         if not place.get("targets"):
@@ -1408,14 +1398,13 @@ def _reasons(verdicts):
 
 
 def _destination_lines(evidence):
-    """The flagged call's destinations as the bundle resolved them: each label with my human's notes there."""
+    """The flagged call's destinations as the bundle resolved them: each label with my human's notes and circle words."""
     from ouroboros.place_guard import destination_line
 
     place = evidence.get("place") or {}
     rows = {row["place_id"]: row for row in [*(place.get("places") or []), place] if row.get("place_id")}
-    return [destination_line(row.get("place_label") or pid, [note["text"] for note in evidence.get("notes") or ()
-                                                            if note["place_id"] == pid and note["standing_delegation"]])
-            for pid, row in rows.items()]
+    return [destination_line(row.get("place_label") or pid, [note for note in evidence.get("notes") or ()
+                                                            if note["place_id"] == pid]) for pid, row in rows.items()]
 
 
 def check_safety(
