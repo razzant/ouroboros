@@ -158,13 +158,20 @@ def test_state_carries_current_model_access_and_budget_resume_controls(gateway):
 @pytest.mark.parametrize("damage", ["StoreBusy", "StoreMigrating", "StoreLost"])
 def test_unavailable_current_question_index_is_incomplete_not_empty_truth(gateway, monkeypatch, damage):
     from ouroboros import store
+    from ouroboros.gateway.state_publication import Publisher
     _ask(gateway)
     assert _state(gateway)["current_questions_complete"] is True
     with store.open_store(gateway.root, write=False) as txn:
         revision = txn.revision()
     with monkeypatch.context() as patched:
         patched.setattr(obligations, "members", lambda *a: (_ for _ in ()).throw(getattr(store, damage)(damage)))
+        # The damage moves no revision the publication probes, so the app's held body of the first read may
+        # answer this one (#2848). A fresh publisher, as a new app has, produces it from the damaged index.
+        app_state = gateway.client.app.state
+        fresh = Publisher(app_state.state_publication.drive_root)
+        patched.setattr(app_state, "state_publication", fresh)
         payload = _state(gateway)
+        assert fresh.productions == 1
     assert payload["current_questions"] == []
     assert payload["current_questions_complete"] is False
     assert payload["current_questions_gaps"] == [{"reason": "question_index_unavailable"}]
