@@ -889,17 +889,30 @@ def _reset_custody_memo_between_tests():
 
 
 @pytest.fixture(autouse=True)
-def _unlatch_supervisor_event_bus_between_tests():
+def _unlatch_supervisor_event_bus_between_tests(monkeypatch):
     """A TestClient lifespan runs the server shutdown, whose ``workers.shutdown_event_q()``
     latches ``_EVENT_Q_SHUTDOWN`` for the rest of the xdist worker; the next test in that
     worker that publishes on the bus (``kill_workers_for_update``, a promote, a wake) then
     raises "supervisor event bus is shutting down" against a fixture it never saw. Several
     modules already unlatch it locally (test_promote_event_transport, test_inflight_indicator_seams);
-    this does it once for every test. A test that wants the latch sets it itself (monkeypatch)."""
+    this does it once for every test. A test that wants the latch sets it itself (monkeypatch).
+
+    The bus itself is created on its first use (a restart or a Stop publishing ``task_done``), so a
+    test whose production path published left a real bus attached, and a later test then met a
+    consumer it never set up (#2804). A real manager attached during the test is closed through its
+    owner, ``shutdown_event_q()``, before ``monkeypatch`` (requested for that order) hands back the
+    values a test replaced. A bus already attached when the test began is left alone, and a closed
+    one is never restored."""
+    from multiprocessing.managers import BaseManager
+
     from supervisor import workers
 
     workers._EVENT_Q_SHUTDOWN = False
+    found = workers._EVENT_Q_MANAGER
     yield
+    attached = workers._EVENT_Q_MANAGER
+    if attached is not found and isinstance(attached, BaseManager):
+        workers.shutdown_event_q()
 
 
 @pytest.fixture(autouse=True)
