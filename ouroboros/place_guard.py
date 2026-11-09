@@ -123,7 +123,7 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         if effect.effect == EFFECT_READ and not is_observe_origin(_metadata(ctx)):
             return ""
         return (_PREFIX + f"The place records need repair, so {name!r} cannot be attributed to a place: {exc}. "
-                "Writes through this connector wait until Consciousness › Places can read them again.")
+                "Writes through this connector wait until Circles can read them again.")
     if not effect.effect:
         return ""
     if is_observe_origin(_metadata(ctx)) and not (effect.declared and effect.effect == EFFECT_READ):
@@ -134,12 +134,12 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     for place in resolved:
         if place.state in (places.STATE_SILENT, places.STATE_PAUSED):
             return (_PREFIX + f"{place.label or place.place_id} is {place.state.title()}; {name!r} cannot write there. "
-                    "Change its state in Consciousness › Places or with configure_presence before writing there.")
+                    "Change its state in Circles or with configure_presence before writing there.")
     blocked = [place for place in siblings if place.state in (places.STATE_SILENT, places.STATE_PAUSED)]
     if not attributable and blocked:
         labels = ", ".join(place.label or place.place_id for place in blocked)
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
-                "Use a tool with declared, attributable targets or change the state in Consciousness › Places "
+                "Use a tool with declared, attributable targets or change the state in Circles "
                 "or with configure_presence.")
     return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_MESSAGE else ""
 
@@ -172,17 +172,50 @@ def verdict_speech_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, is_m
     return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_WRITE else ""
 
 
-def destination_line(label: str, notes: list[str]) -> str:
-    """One destination as the mind reads it beside an act or a refusal: its label and my human's notes for it."""
+def authored_notes(records: Any, place: Any) -> list[dict[str, Any]]:
+    """A place's guidance as the Safety bundle and destination lines carry it, from one ``places.place_records`` read:
+    its own notes, and its circle's words as one more entry with the circle's name and who placed the place there.
+    ``standing_delegation`` is my human's standing consent and restriction: their own note, or their circle words
+    through their own placement; through a placement I made their words still restrict, consenting to nothing, and
+    words I wrote stay context."""
+    entries = [{"place_id": place.place_id, "text": note.text, "author": note.author, **({"at": note.at} if note.at else {}),
+                "standing_delegation": note.author in places.OWNER_VOICE} for note in place.notes]
+    circle = records.circle_context(place.place_id)
+    if circle and circle["text"]:
+        entries.append({"place_id": place.place_id, "circle": circle["name"], "circle_id": circle["circle_id"],
+                        "text": circle["text"], "author": circle["text_author"],
+                        **({"at": circle["text_at"]} if circle["text_at"] else {}), "placed_by": circle["placed_by"],
+                        "standing_delegation": circle["standing_delegation"]})
+    return entries
+
+
+def destination_line(label: str, entries: list[Mapping[str, Any]]) -> str:
+    """One destination as the mind reads it beside an act or a refusal: its label, my human's notes for it and its
+    circle's words, labelled with who wrote them and who placed the place there (``authored_notes``)."""
     import json
 
-    return f"[DESTINATION] {label}: your human's notes for this place: " + (
-        "; ".join(json.dumps(text, ensure_ascii=False) for text in notes) or "none")
+    def who(author: str) -> str:
+        return "your human" if author in places.OWNER_VOICE else "you"
+
+    def standing(entry: Mapping[str, Any]) -> str:
+        # My human's words through a placement I made still restrict; their consent needs their own placement.
+        if entry["standing_delegation"]:
+            return ""
+        if entry["author"] in places.OWNER_VOICE:
+            return " (they still restrict here; consent needs your human's placement)"
+        return " (context, not your human's choice for this place)"
+    notes = [json.dumps(entry["text"], ensure_ascii=False) for entry in entries
+             if "circle" not in entry and entry["standing_delegation"]]
+    circles = [f"; its circle {json.dumps(entry['circle'], ensure_ascii=False)}'s words, by {who(entry['author'])}, "
+               f"placed there by {who(entry['placed_by'])}" + standing(entry)
+               + f": {json.dumps(entry['text'], ensure_ascii=False)}" for entry in entries if "circle" in entry]
+    return f"[DESTINATION] {label}: your human's notes for this place: " + ("; ".join(notes) or "none") + "".join(circles)
 
 
 def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result: Any) -> Any:
-    """A send into a place other than this turn's focus carries that place's label and my human's notes beside its
-    result, in every mode (my human's own work with Safety off included): the facts sit next to the act. ``result``
+    """A send into a place other than this turn's focus carries that place's label, my human's notes and its circle's
+    words beside its result, in every mode (my human's own work with Safety off included): the facts sit next to the
+    act, after it, never as guidance the act had before it ran. ``result``
     is a ``ToolResult``; the note trails its text as a host annotation, the producer's text kept apart. A blocked
     call carries its own facts (a place refusal names the place, a Safety refusal its destination)."""
     try:
@@ -190,14 +223,15 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
                 or effect_of(name, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
             return result
         _effect, _targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, None, False)
+        others = [place.place_id for place in resolved if place.place_id != (_metadata(ctx).get("focus") or {}).get("place_id")]
+        records = places.place_records(_drive_root(ctx)) if others else None
     except Exception:  # the call already ran: a missing note never turns its result into a failure
         import logging
         logging.getLogger(__name__).warning("destination facts for %s unavailable", name, exc_info=True)
         return result
-    focus = (_metadata(ctx).get("focus") or {}).get("place_id")
-    note = "\n".join(destination_line(place.label or place.place_id,
-                                      [entry.text for entry in place.notes if entry.author in {"owner", "migration"}])
-                     for place in resolved if place.place_id != focus)
+    # Each destination's notes and circle words from one read of the store, the label it has now.
+    note = "\n".join(destination_line(place.label or place.place_id, authored_notes(records, place))
+                     for place in (records.places.get(key) for key in others) if place is not None)
     if not note:
         return result
     from dataclasses import replace
@@ -248,6 +282,34 @@ def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
     pending = [{key: row[key] for key in ("tool", "at", "text") if key in row}
                for row in calls if row.get("text") is None or row["text"] not in delivered]
     return {"confirmed": confirmed, "calls_without_receipt": pending}
+
+
+def place_evidence(ctx: Any, place: dict[str, Any], place_ids: set[str], tool: str,
+                   args: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Each named place's guidance for the Safety bundle, read now from one snapshot (``authored_notes``); the bundle's
+    own place gets its current label and state. A ``configure_presence`` call naming a circle also carries that
+    circle's words and its places (``place["circle"]``): a circle change is judged with what it changes. Only
+    such a call reads the canonical store, so a check that names no place or circle needs no data root."""
+    from ouroboros.tool_access import canonical_data_root
+
+    circle_id = str(args.get("circle_id") or "") if tool == "configure_presence" else ""
+    if not place_ids and not circle_id:
+        return []
+    records, notes = places.place_records(canonical_data_root(ctx)), []
+    for record in records.places.values():
+        if record.place_id not in place_ids:
+            continue
+        if record.place_id == place.get("place_id"):
+            place.update(place_label=record.label, place_state=record.state)
+        notes.extend(authored_notes(records, record))
+    circle = records.circle(circle_id)
+    if circle is not None:
+        place["circle"] = {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author")},
+                           "places": [{"place_id": member.place_id, "place_label": member.label,
+                                       "place_state": member.state,
+                                       "placed_by": records.choices[member.place_id]["placed_by"]}
+                                      for member in records.members(circle_id)]}
+    return notes
 
 
 def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: Any = None,

@@ -971,6 +971,8 @@ def _build_task(
     if admission.place is not None:
         from ouroboros.places import place_summary
         presence_context.update(place_id=admission.place.place_id, place=place_summary(admission.place))
+        if admission.circle:  # absent outside a circle, so a frame recorded before circles still re-renders
+            presence_context["circle"] = dict(admission.circle)
         presence_context["event"]["facts"] = list(event.facts) if event.facts is not None else ["legacy_addressed"]
     previous_turn, open_turns = current_previous_turn(drive_root, event.conversation_key,
                                                      exclude_task_id=physical_task_id)

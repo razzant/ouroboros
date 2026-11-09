@@ -2,12 +2,63 @@
  *  Re-exported by client_contract_types.js; one PlaceSummary for every Places surface. */
 
 /**
- * Connect Silent; ids default to empty. An instance label is prefixed with the service.
+ * Connect Silent; ids default to empty. An instance label is prefixed with the service. An Add's note,
+ * description and circle_id land with a new place only; a connected one answers 409 place_exists.
  * @typedef {Object} PlaceConnectRequest
  * @property {string} connector
  * @property {string=} account_id
  * @property {string=} conversation_id
  * @property {string=} label
+ * @property {string=} note
+ * @property {string=} description
+ * @property {string=} circle_id
+ */
+
+/**
+ * The circle a place is in and who placed it there; the words and their author are the circle's.
+ * @typedef {Object} PlaceCircleChoice
+ * @property {string} circle_id
+ * @property {string} placed_by
+ * @property {string} placed_at
+ */
+
+/**
+ * A short purpose line under the place's name: never a rule or permission.
+ * @typedef {Object} PlaceDescription
+ * @property {string} text
+ * @property {string} author
+ * @property {string} at
+ */
+
+/**
+ * One circle, named once per list: its whole words and who wrote them.
+ * @typedef {Object} CircleSummary
+ * @property {string} circle_id
+ * @property {string} name
+ * @property {string} text
+ * @property {string} text_author
+ * @property {string} text_at
+ * @property {number} revision
+ */
+
+/**
+ * A new circle last in the order; its words are the owner's.
+ * @typedef {Object} CircleCreateRequest
+ * @property {string} name
+ * @property {string=} text
+ */
+
+/**
+ * Rename or reword; expected_revision compares the circle's revision before writing.
+ * @typedef {Object} CircleUpdateRequest
+ * @property {string=} name
+ * @property {string=} text
+ * @property {number=} expected_revision
+ */
+
+/**
+ * @typedef {Object} CircleDeleteRequest
+ * @property {number=} expected_revision
  */
 
 /**
@@ -87,6 +138,8 @@
  * @property {number|null} spent_24h_usd
  * @property {Array<Object>} account_candidates
  * @property {Array<Object<string,string>>} shared_owner_accounts Confirmed in another place of this bot or app; they count here.
+ * @property {PlaceCircleChoice|null} circle
+ * @property {PlaceDescription|null} description
  */
 
 /**
@@ -113,6 +166,8 @@
  * @property {string=} model
  * @property {PlaceOwnerAccountRequest=} confirm_owner_account
  * @property {string=} revoke_owner_account
+ * @property {string=} circle_id  // "" takes it out of its circle
+ * @property {string=} description  // "" clears it
  * @property {number=} expected_revision
  */
 

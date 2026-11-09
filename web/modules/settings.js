@@ -578,7 +578,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         ),
     });
     initHarnessAccounts();
-    const disposeOwnerSections = [bindSafetySettings(page), bindConsciousnessSettings(page, { state })];
+    const disposeOwnerSections = [bindSafetySettings(page), bindConsciousnessSettings(page)];
 
     function syncProcessingPreference(settings) {
         setSubagentsProcessingPreference(settings[PROCESSING_PREFERENCE_KEY]);

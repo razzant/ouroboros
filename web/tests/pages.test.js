@@ -9,10 +9,11 @@ import { statusMarkHtml } from '../modules/status_mark.js';
 // (tests/test_pages_registry_static.py).
 
 test('the registry: unique ids, today\'s order, one place in the head and the tools in the foot', () => {
-    assert.deepEqual(PAGES.map((p) => p.id), ['chat', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
-    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Files', 'Skills', 'Widgets', 'Dashboard', 'Settings']);
+    // Circles leads the tools: the one home of the places Ouroboros lives in (DESIGN "Circles").
+    assert.deepEqual(PAGES.map((p) => p.id), ['chat', 'circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
+    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Circles', 'Files', 'Skills', 'Widgets', 'Dashboard', 'Settings']);
     assert.deepEqual(pagesInZone('head').map((p) => p.id), ['chat']);
-    assert.deepEqual(pagesInZone('foot').map((p) => p.id), ['files', 'skills', 'widgets', 'dashboard', 'settings']);
+    assert.deepEqual(pagesInZone('foot').map((p) => p.id), ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     assert.deepEqual(ZONES, ['head', 'foot']);
     for (const page of PAGES) {
         assert.ok(PAGE_ICONS[page.icon], `${page.id} names an icon the registry holds`);
@@ -28,7 +29,7 @@ test('the registry: unique ids, today\'s order, one place in the head and the to
 test('rows render from the registry, in order, with the label verbatim and the icon once', () => {
     const rows = renderNavRows('foot');
     const ids = [...rows.matchAll(/data-nav-page="([a-z]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(ids, ['files', 'skills', 'widgets', 'dashboard', 'settings']);
+    assert.deepEqual(ids, ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     const main = renderNavRow(pageById('chat'));
     assert.match(main, /^<button class="nav-row nav-row-main" type="button" data-nav-page="chat" title="Main Ouroboros chat">/);
     // Main's row carries its room's one status mark after the label (app.js paints it, at rest it is hidden) and the

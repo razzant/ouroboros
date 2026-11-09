@@ -103,9 +103,10 @@ def test_bundle_authorship_scope_and_no_reasoning_dump(supervisor, monkeypatch):
     from ouroboros import places, place_guard
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"places": [{
         "place_id": "room", "place_label": "Friends", "place_state": "active"}], "targets": {"to": ["audience"]}})
-    monkeypatch.setattr(places, "load_places", lambda root: [places.Place("room", "connector", "chat", label="Friends",
-        notes=(places.NoteEntry("owner permission", "owner"), places.NoteEntry("old permission", "migration"),
-               places.NoteEntry("mind idea", "ouroboros")))])
+    room = places.Place("room", "connector", "chat", label="Friends",
+                        notes=(places.NoteEntry("owner permission", "owner"), places.NoteEntry("old permission", "migration"),
+                               places.NoteEntry("mind idea", "ouroboros")))
+    monkeypatch.setattr(places, "place_records", lambda root: places.PlaceRecords(0, {"room": room}, (), {}))
     h.values["OUROBOROS_SAFETY_OWNER_RULES"] = "owner standing rule"
     h.module.check_safety("remote_write", {"text": "payload"}, messages=[{"role": "assistant", "content": "private reasoning"},
         {"role": "tool", "content": "huge tool output"}], ctx=h.ctx)

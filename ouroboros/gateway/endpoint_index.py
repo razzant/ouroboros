@@ -53,6 +53,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/places",
     "POST /api/places/{place_id}",
     "DELETE /api/places/{place_id}",
+    "POST /api/circles",
+    "POST /api/circles/{circle_id}",
+    "DELETE /api/circles/{circle_id}",
     "POST /api/skills/{skill}/publish-preflight",
     "GET /api/model-catalog",
     "POST /api/tasks",
@@ -303,11 +306,14 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/skills/{skill}/attest-review": Shape(
         "200,409:SkillReviewResponse 400:ErrorResponse", "SkillRevisionRequest",
         note=f"the owner's review verdict; 409 when refused (ok false); {_IN_LANE}"),
-    "GET /api/places": Shape("200:json", note="Places and installed connector declarations; §12 Places"),
+    "GET /api/places": Shape("200:json", note="Places, CircleSummary circles once and installed connector declarations; §12 Places"),
     "GET /api/places/{place_id}/rooms": Shape("200:PlaceRoomsResponse 404,503:ErrorResponse", note="lazy indexed captured-room discovery; history uses /api/chat/history"),
-    "POST /api/places": Shape("200:json 400:json", "PlaceConnectRequest", note="connect from a declared connector"),
-    "POST /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceUpdateRequest", note="atomic owner-authored place choices"),
+    "POST /api/places": Shape("200:json 400,409:json", "PlaceConnectRequest", note="connect from a declared connector; an Add's words land with a new place, 409 place_exists names a connected one"),
+    "POST /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceUpdateRequest", note="atomic owner-authored place choices, its circle and description included"),
     "DELETE /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceDisconnectRequest", note="disconnect with optional revision; room history stays"),
+    "POST /api/circles": Shape("200:json 400:json", "CircleCreateRequest", note="a new circle last in the order; owner-authored words"),
+    "POST /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleUpdateRequest", note="rename or reword with optional revision"),
+    "DELETE /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleDeleteRequest", note="its places stay connected and leave it atomically; returns its words and the detached places"),
     "POST /api/skills/{skill}/publish-preflight": Shape(
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",
         note="read-only; every status carries the same shape; state hard_block is a refusal; destination "

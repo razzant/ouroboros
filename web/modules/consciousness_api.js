@@ -11,7 +11,8 @@ import { errorWords } from './ui_primitives.js';
 export const failureText = (error) => (error instanceof TypeError && error.response === undefined
     ? errorWords(error).text : error?.message || String(error));
 
-/** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
+/** Raised on window after a place or circle write the server confirmed: `{place}`, `{placeId, removed: true}`,
+ *  `{circle}` or `{circleId, removed: true, detached}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
 
 const text = (value) => (value === null || value === undefined ? '' : String(value));
@@ -99,7 +100,20 @@ export function normalizePlace(raw) {
         unanswered: count(place.unanswered),
         lastActivityAt: text(place.last_activity_at),
         spent24hUsd: amount(place.spent_24h_usd),
+        // Its circle and who placed it there (the words are the circle's, in the list's `circles`), and its short
+        // purpose line with who wrote it; absent stays null.
+        circle: object(place.circle) && text(place.circle.circle_id) ? { id: text(place.circle.circle_id),
+            placedBy: text(place.circle.placed_by), placedAt: text(place.circle.placed_at) } : null,
+        description: object(place.description) && text(place.description.text) ? { text: text(place.description.text),
+            author: text(place.description.author), at: text(place.description.at) } : null,
     };
+}
+
+/** One CircleSummary: its name, its whole words and who wrote them, its revision. */
+export function normalizeCircle(raw) {
+    const circle = object(raw) || {};
+    return { id: text(circle.circle_id), name: text(circle.name), text: text(circle.text),
+        textAuthor: text(circle.text_author), textAt: text(circle.text_at), revision: count(circle.revision) };
 }
 
 /** An installed connector with a valid place declaration (`GET /api/places` `connectors`). */
@@ -128,6 +142,8 @@ export function normalizePlacesResponse(raw) {
         places: list(data.places).map(normalizePlace).filter((place) => place.id).map((place) => ({ ...place,
             serviceLabel: connectors.find((connector) => connector.connector === place.connector)?.label || place.provider })),
         connectors,
+        // Each circle once, in the owner's order; null from a server without circles (not "no circle").
+        circles: Array.isArray(data.circles) ? data.circles.map(normalizeCircle).filter((circle) => circle.id) : null,
         // Old connections the places migration could not move (absent on a server without the migration).
         migrationProblems: list(data.migration_problems).map((problem) => ({
             bindingId: text(problem?.binding_id), code: text(problem?.code), detail: text(problem?.detail),
@@ -267,12 +283,17 @@ function placeAnswer(data) {
     return place;
 }
 
-/** Connect a place from an installed connector's declaration; no id is typed. */
-export async function connectPlace({ connector, accountId = '', conversationId = '', label = '' }) {
+/** Connect a place from an installed connector's declaration; no id is typed. An Add's `note`, `description` and
+ *  `circleId` land with a new place in the same write; a place connected already answers 409 `place_exists`. */
+export async function connectPlace({ connector, accountId = '', conversationId = '', label = '', note = '',
+    description = '', circleId = '' }) {
     const body = { connector };
     if (accountId) body.account_id = accountId;
     if (conversationId) body.conversation_id = conversationId;
     if (label) body.label = label;
+    if (note) body.note = note;
+    if (description) body.description = description;
+    if (circleId) body.circle_id = circleId;
     return placeAnswer(await jsonPost('/api/places', body));
 }
 
@@ -282,6 +303,42 @@ export async function connectPlace({ connector, accountId = '', conversationId =
  */
 export async function updatePlace(placeId, change) {
     return placeAnswer(await jsonPost(`/api/places/${encodeURIComponent(placeId)}`, change));
+}
+
+// ---- circle writes (owner-authored on the server; the places view re-reads after each) ----------------------------
+function circleAnswer(data, what) {
+    if (!data || data.ok !== true || !object(data.circle)) {
+        throw Object.assign(new Error(text(data?.error) || `${what} was not saved.`), { body: data });
+    }
+    return normalizeCircle(data.circle);
+}
+
+/** A new circle, last in the order: `{name, text}`. */
+export async function createCircle({ name, text: words = '' }) {
+    const circle = circleAnswer(await jsonPost('/api/circles', { name, text: words }), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Rename or reword one circle: `change` holds `name` and/or `text`; the revision guards a concurrent edit. */
+export async function updateCircle(circleId, change, expectedRevision) {
+    const body = { ...change, ...(expectedRevision === null || expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) };
+    const circle = circleAnswer(await jsonPost(`/api/circles/${encodeURIComponent(circleId)}`, body), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Delete one circle; its places stay connected. The answer holds the removed circle (its words) and the places it
+ *  detached: there is nothing to restore it from. */
+export async function deleteCircle(circleId, expectedRevision) {
+    const data = await fetchJson(`/api/circles/${encodeURIComponent(circleId)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_revision: expectedRevision }),
+    });
+    const circle = circleAnswer(data, 'The circle');
+    const detached = list(data.detached).map((row) => ({ placeId: text(row?.place_id), label: text(row?.label) }));
+    announce({ circleId, removed: true, detached });
+    return { circle, detached };
 }
 
 export async function disconnectPlace(placeId, expectedRevision) {
