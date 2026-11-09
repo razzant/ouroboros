@@ -952,7 +952,7 @@ def append_startup_receipt(
     else:
         guidance = _custody_guidance(receipt, ctx)
     delivered = _startup_view(
-        startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen)
+        startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen, ctx, messages)
     messages.append({
         "role": "user",
         "content": (
@@ -971,20 +971,20 @@ def append_startup_receipt(
     ctx._configured_startup_wake = ""
 
 
-def _startup_view(raw: str, receipt: Any, seen: Any) -> str:
+def _startup_view(raw: str, receipt: Any, seen: Any, ctx: Any = None, messages: Any = None) -> str:
     """The receipt as delivered: one wake copy, without mail the restored transcript holds."""
     recovery = receipt.get("recovery") if isinstance(receipt, dict) else None
     if isinstance(recovery, dict) and len(recovery.get("holders") or []) > 1:
         from ouroboros.delegate_supervision import unseen_wake_view
 
-        views = [{**item, "wake": unseen_wake_view(item["wake"], seen)} if isinstance(item.get("wake"), dict)
+        views = [{**item, "wake": unseen_wake_view(item["wake"], seen, ctx, messages)} if isinstance(item.get("wake"), dict)
                  else item for item in recovery["holders"]]
         return json.dumps({**receipt, "recovery": {**recovery, "holders": views}}, ensure_ascii=False, indent=2)
     if not isinstance(receipt, dict) or not isinstance(receipt.get("wake"), dict):
         return raw
     from ouroboros.delegate_supervision import unseen_wake_view
 
-    view = {**receipt, "wake": unseen_wake_view(receipt["wake"], seen)}
+    view = {**receipt, "wake": unseen_wake_view(receipt["wake"], seen, ctx, messages)}
     recovery = view.get("recovery")
     if isinstance(recovery, dict) and recovery.get("wake") == receipt["wake"]:
         view["recovery"] = {key: value for key, value in recovery.items() if key != "wake"}

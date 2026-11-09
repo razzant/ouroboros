@@ -356,12 +356,10 @@ def acknowledge_hold_delivery(ctx: Any, text: str, order: int | None = None) -> 
 def credit_hold_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any]) -> None:
     """A result that showed holds but reached the transcript shortened keeps its complete text as an exact
     source (``view['result_source_ref']``). Its holds count as shown once what was delivered of that one source
-    covers every character: the shortened view's own head and tail, then ``read_file`` windows that opened that
-    very file at its exact bytes (``read_view`` target and ``source_revision``), merged by the reading ledger
-    staged delegated outputs use (``delegate_output``). A cut window or a skipped middle credits only what was
-    shown; another file credits nothing, whatever its text claims. The holds are then read from the retained
-    source itself and recorded at the place its shortened view arrived (``order``, ``_record_holds``): a task a
-    later view or park notice showed keeps that newer record.
+    covers every character (``delegate_output.credit_exact_source``: the shortened view's own head and tail, then
+    ``read_file`` windows of that very file at its exact bytes; another file credits nothing, whatever its text
+    claims). The holds are then read from the retained source itself and recorded at the place its shortened view
+    arrived (``order``, ``_record_holds``): a task a later view or park notice showed keeps that newer record.
 
     ``row`` is the executed call and ``view`` its delivered view. A pending source leaves only once read whole:
     a later wait may select other tasks, so no later view stands in for it, and its few hundred bytes sit beside
@@ -369,50 +367,22 @@ def credit_hold_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any]) -> N
     that returned the same text keep two files, each completed only by what was delivered of it, at its own place.
     Pending sources and the records' places ride the continuation; the ledger is this process's, so a restarted
     worker proves its coverage again by reading."""
+    from ouroboros.delegate_output import credit_exact_source
+
     published = (row.get("result_meta") or {}).get("tool_result_meta") or {}
-    sources, read_view = dict(getattr(ctx, "_held_dependency_sources", None) or {}), published.get("read_view")
+    sources, key = dict(getattr(ctx, "_held_dependency_sources", None) or {}), None
     if published.get(HOLD_NOTICE):
-        ref, read_view = view.get("result_source_ref"), None
+        ref = view.get("result_source_ref")
         if not isinstance(ref, dict) or not ref.get("sha256"):
             return  # no exact source was kept: nothing can complete this view, so the next wait shows it again
-        key, ref = f"{ref.get('path')}|{ref['sha256']}", {**ref, "order": _next_order(ctx)}
-        ctx._held_dependency_sources = {**sources, key: ref}
-    elif not isinstance(read_view, dict) or not (named := [(key, ref) for key, ref in sources.items() if (
-            isinstance(ref, dict) and ref.get("sha256") and ref["sha256"] == read_view.get("source_revision"))]):
+        key = f"{ref.get('path')}|{ref['sha256']}"
+        sources[key] = {**ref, "order": _next_order(ctx)}
+        ctx._held_dependency_sources = sources
+    elif not isinstance(published.get("read_view"), dict):
         return
-    import hashlib
-
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
-    from ouroboros.delegate_output import _covered_whole, _delivered_source_ranges
-    from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
-
-    drive, owner, complete = pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx), False
-    try:
-        if read_view is not None:
-            store = task_artifact_dir_path(drive, owner)
-            target = pathlib.Path(str(read_view.get("target") or "")).resolve(strict=False)
-            key, ref = next(((key, ref) for key, ref in named if store.joinpath(
-                *pathlib.PurePosixPath(str(ref.get("path"))).parts).resolve(strict=False) == target), (None, None))
-            if ref is None:
-                return  # the same bytes under another name are not this source
-        content = reader_text(read_actor_source_bytes(drive, owner, ref).decode("utf-8"))
-        if read_view is not None:
-            ranges = _delivered_source_ranges(read_view, str(row.get("result") or ""), view, content)
-        else:  # the shortened view itself: its head and tail address this same text
-            shown = view.get("result_source_view") or {}
-            ranges = shown.get("shown_ranges") if (
-                shown.get("range_basis") == RESULT_VIEW_BASIS and shown.get("complete_chars") == len(content)
-                and shown.get("complete_sha256") == hashlib.sha256(content.encode("utf-8")).hexdigest()) else None
-            if not isinstance(ranges, list) or not all(
-                    isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span)
-                    and 0 <= span[0] <= span[1] <= len(content) for span in ranges):
-                return
-        for start, end in ranges or ():
-            complete = _covered_whole(f"held:{ctx.task_id}|{key}", start, end, len(content))
-    except Exception:  # crediting never breaks delivery: unread or unmatched, its holds stay unshown
-        log.warning("Held-dependency source of %s not credited; its holds stay unshown", ctx.task_id, exc_info=True)
-        return
-    if complete:
+    done = credit_exact_source(ctx, row, view, sources, "held", key)
+    if done:
+        key, ref, content = done
         acknowledge_hold_delivery(ctx, content, _place(ref.get("order")))
         ctx._held_dependency_sources = {other: value for other, value in (
             getattr(ctx, "_held_dependency_sources", None) or {}).items() if other != key}

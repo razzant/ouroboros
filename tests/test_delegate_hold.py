@@ -668,3 +668,81 @@ def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(
     details = [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
     assert "wait_refused" not in details and "wait_observation_pending" not in details
     assert [row["phase"] for row in _read_hold_events(tmp_path)] == ["entered", "resumed"]
+
+
+# --- #2992: a spilled wake the hold delivers ------------------------------------------------------------------
+
+_HOLD_TAIL = "OWNER-MAIL-TAIL-hold"
+
+
+def _spilling_hold(tmp_path, monkeypatch):
+    """The real supervising wait under the hold; its one read posts owner mail too long to inline, so the wake spills."""
+    import ouroboros.delegate_supervision as sup
+    from ouroboros.owner_mailbox import write_owner_message
+
+    def observe(_ctx, rid, *_a, **_k):
+        assert write_owner_message(tmp_path, "Owner instruction: " + "one exact long line; " * 1200 + _HOLD_TAIL,
+                                   "t-hold", msg_id="owner-mail")
+        return json.dumps({"status": "succeeded", "run_id": rid, "last_seq": 2})
+
+    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda ctx, run: sup.supervised_wait(ctx, run, wait_once=observe))
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path)
+    _start_leaf(tmp_path)
+    return registry
+
+
+def _hold_wake_facts(tmp_path, registry):
+    import ouroboros.delegate_supervision as sup
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    state = sup._load_state(registry._ctx, "run-leaf")
+    return (bool(state.get("pending_wake")),
+            [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "t-hold", set(), "1")])
+
+
+def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe):
+    """The hold appends its receipt and ACKs at once; a spilled wake's summary would acknowledge the owner mail
+    it cut. The receipt carries the wake's exact source instead, then the ACK covers what it showed."""
+    registry = _spilling_hold(tmp_path, monkeypatch)
+    seen = []
+
+    def check(messages, accumulated_usage):
+        seen.append(_without_context_facts(messages)[-1]["content"])
+        accumulated_usage.pop("_last_llm_error_kind", None)
+        return {"role": "assistant", "content": "integrated"}, 0.0
+
+    fake_call, calls = _unknown_then_check_call(check)
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert result == "integrated" and calls["n"] == 2
+    assert seen[0].startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]")
+    assert _HOLD_TAIL in seen[0] and '"wake_delivery"' not in seen[0], "the whole wake, not its summary"
+    assert _hold_wake_facts(tmp_path, registry) == (False, [])
+
+
+def test_an_unreadable_spilled_wake_source_takes_the_no_resend_exit_and_acknowledges_nothing(
+        tmp_path, monkeypatch, _quiet_probe):
+    """No fallback to the summary: the hold cannot show the whole wake, so it takes its honest no-resend terminal;
+    the wake and its mail stay unacknowledged for the next attempt."""
+    import ouroboros.artifacts as artifacts
+
+    registry = _spilling_hold(tmp_path, monkeypatch)
+    real = artifacts.read_actor_source_bytes
+
+    def unreadable(drive_root, task_id, ref, **kwargs):
+        if "delegate-wake-" in str((ref or {}).get("path") or ""):
+            raise OSError("controlled unreadable wake source")
+        return real(drive_root, task_id, ref, **kwargs)
+
+    monkeypatch.setattr(artifacts, "read_actor_source_bytes", unreadable)
+    fake_call, calls = _unknown_then_check_call(lambda *_a: pytest.fail("no paid round without the whole wake"))
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    _r, _u, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert calls["n"] == 1
+    assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
+    assert "wake_source_unreadable" in [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
+    assert _hold_wake_facts(tmp_path, registry) == (True, ["owner-mail"])

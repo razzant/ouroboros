@@ -9,6 +9,9 @@ only the reviewers, the tests runner and publication are stand-ins.
 
 #2680: an author continuation without paths lands the paths its referenced review covered, never
 every attributed candidate, and says before Git how the staged tree differs from the reviewed one.
+
+#2715: a staged merge keeps MERGE_HEAD, MERGE_MODE and MERGE_MSG through preparation, every unstaging
+exit and the author's continuation, so the commit lands with the reviewed ordered parents.
 """
 from __future__ import annotations
 
@@ -73,8 +76,8 @@ def _baseline(ctx) -> None:
                               [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
 
 
-def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=None):
-    """The production ``_repo_commit_push`` under an inert panel."""
+def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=None, door=None, **kwargs):
+    """The production ``_repo_commit_push`` (or the public ``door``) under an inert panel."""
     from ouroboros.review_dispatch import invoke_review_paid_stamp
 
     def reviewer(_ctx, message, **kw):
@@ -93,7 +96,7 @@ def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=N
     monkeypatch.setattr(git, "_run_review_preflight_tests", tests or (lambda *a, **kw: None))
     monkeypatch.setattr(git, "_post_commit_result", lambda *a, **kw: None)
     monkeypatch.setattr(git, "_auto_push", lambda *a, **kw: "")
-    return git._repo_commit_push(ctx, "candidate", paths=paths, skip_advisory_review=True)
+    return (door or git._repo_commit_push)(ctx, "candidate", paths=paths, skip_advisory_review=True, **kwargs)
 
 
 def test_attributed_commit_lands_staged_and_unstaged_deletions_and_renames(task, monkeypatch):
@@ -552,7 +555,7 @@ def _advisory_review(ctx, monkeypatch, paths, *, calls=None) -> dict:
     return json.loads(first.split("\n", 1)[1])["review_reference"]
 
 
-def _continue(ctx, monkeypatch, reference, **kwargs):
+def _continue(ctx, monkeypatch, reference, *, door=None, **kwargs):
     """The author's continuation from a FRESH context, as a later turn makes it: only durable records carry
     the review. Every progress note keeps the HEAD it was published at; no reviewer may be bought."""
     fresh = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root, task_id=ctx.task_id)
@@ -560,7 +563,7 @@ def _continue(ctx, monkeypatch, reference, **kwargs):
     notes = []
     fresh.emit_progress_fn = lambda text, *_a, **_kw: notes.append((str(text), _git(ctx.repo_dir, "rev-parse", "HEAD")))
     monkeypatch.setattr(git, "_run_parallel_review", lambda *_a, **_kw: pytest.fail("an author continuation buys no reviewer"))
-    result = git._repo_commit_push(fresh, "candidate", review_reference=reference, author_disposition={
+    result = (door or git._repo_commit_push)(fresh, "candidate", review_reference=reference, author_disposition={
         "disposition": "accepted", "rationale": "I read the returned review; this candidate is my decision."}, **kwargs)
     return fresh, result, [note for note in notes if "reviewed tree" in note[0].lower()]
 
@@ -993,3 +996,164 @@ def test_a_compacted_source_whose_record_names_no_counted_seat_continues_nothing
 
     assert "missing or no longer has its exact evidence" in result, result
     assert _git(repo, "rev-parse", "HEAD") == head and _git(repo, "ls-files", "-s") == index
+
+
+# --- #2715: a staged merge keeps its native state through every exit and lands with its parents --------------
+
+_MERGE_STATE = ("MERGE_HEAD", "MERGE_MODE", "MERGE_MSG")
+
+
+def _merge_state(repo: pathlib.Path) -> dict:
+    """What Git keeps for a merge in progress, byte for byte: it alone makes the next commit a merge."""
+    git_dir = pathlib.Path(_git(repo, "rev-parse", "--absolute-git-dir").strip())
+    return {name: (git_dir / name).read_bytes() if (git_dir / name).exists() else None for name in _MERGE_STATE}
+
+
+def _staged_merge(ctx, shape: str, *, before_merge=None) -> list:
+    """A contributor's commit merged ``--no-ff --no-commit`` onto the commit branch, as ``stage_pr_merge`` leaves
+    it; returns the ordered parents its commit must keep. ``ancestor`` leaves the commit branch at the fork point,
+    so only MERGE_MODE's ``no-ff`` keeps both parents; ``diverged`` moves the branch on first."""
+    repo = ctx.repo_dir
+    _git(repo, "checkout", "-q", "-b", "contribution")
+    (repo / "contrib").mkdir()
+    (repo / "contrib" / "feature.txt").write_text("contributed\n", encoding="utf-8")
+    _git(repo, "add", "contrib/feature.txt")
+    _git(repo, "-c", "user.name=Contributor", "-c", "user.email=contrib@example.invalid", "commit", "-qm", "contribution")
+    _git(repo, "checkout", "-q", ctx.branch_dev)
+    if shape == "diverged":
+        (repo / "b.txt").write_text("the commit branch moved on\n", encoding="utf-8")
+        _git(repo, "commit", "-qam", "the commit branch moves on")
+    if before_merge is not None:
+        before_merge()
+    parents = [_git(repo, "rev-parse", "HEAD").strip(), _git(repo, "rev-parse", "contribution").strip()]
+    _git(repo, "merge", "-q", "--no-ff", "--no-commit", "contribution")
+    assert _merge_state(repo)["MERGE_MODE"] == b"no-ff"
+    return parents
+
+
+def _assert_landed_merge(repo: pathlib.Path, parents: list, result: str) -> None:
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    assert "OK: committed" in result and commit not in parents, result
+    assert _git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:] == parents
+    assert _git(repo, "log", "-1", "--format=%an <%ae>", f"{commit}^2").strip() == "Contributor <contrib@example.invalid>"
+    assert _git(repo, "show", f"{commit}:contrib/feature.txt") == "contributed\n"
+    assert _merge_state(repo) == dict.fromkeys(_MERGE_STATE)  # the merge commit consumed it
+
+
+def _public_door():
+    return next(tool.handler for tool in git.get_tools() if tool.name == "commit_reviewed")
+
+
+@pytest.mark.parametrize(("selection", "cwd"), [("whole_tree", "."), ("whole_tree", "contrib"), ("selected", ".")])
+def test_unstaging_resets_the_staged_paths_and_keeps_a_staged_merge(task, selection, cwd):
+    """Both unstaging forms are path resets and keep MERGE_HEAD, MERGE_MODE and MERGE_MSG byte for byte; the
+    whole-tree form names ``:/``, so from a subdirectory it still resets the whole index. Files stay as they are."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.git_plumbing import WHOLE_INDEX
+
+    repo = task.repo_dir
+    _staged_merge(task, "diverged")
+    (repo / "a.txt").write_text("also staged\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    merging = _merge_state(repo)
+    assert _index(repo) == {"a.txt": "M", "contrib/feature.txt": "A"}
+    staged = WHOLE_INDEX if selection == "whole_tree" else ["a.txt", "contrib/feature.txt"]
+
+    git._unstage_candidate(SimpleNamespace(repo_dir=repo / cwd, _staged_selection=staged))
+
+    assert _index(repo) == {} and _merge_state(repo) == merging
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "also staged\n"
+    assert (repo / "contrib" / "feature.txt").read_text(encoding="utf-8") == "contributed\n"
+
+
+def test_a_pathless_reset_drops_a_staged_merge(task):
+    """The negative control of the test above, on this Git: the command the whole-tree unstage used to run."""
+    _staged_merge(task, "diverged")
+    _git(task.repo_dir, "reset", "-q", "HEAD")
+    assert _merge_state(task.repo_dir) == dict.fromkeys(_MERGE_STATE)
+
+
+def test_the_managed_repair_after_the_shared_unstage_keeps_its_target(task, monkeypatch):
+    """The managed resolver shares the whole-tree unstage and then re-asserts its target MERGE_HEAD: the target
+    stays, and MERGE_MODE and MERGE_MSG now survive beside it."""
+    from types import SimpleNamespace
+
+    import supervisor.git_ops as git_ops
+    from ouroboros.tools.git_plumbing import WHOLE_INDEX
+    from supervisor.update_merge import reestablish_merge_head
+
+    repo = task.repo_dir
+    _head, target = _staged_merge(task, "diverged")
+    merging = _merge_state(repo)
+    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+
+    git._unstage_candidate(SimpleNamespace(repo_dir=repo, _staged_selection=WHOLE_INDEX))
+    reestablish_merge_head(target)
+
+    assert _merge_state(repo) == merging and merging["MERGE_HEAD"] == f"{target}\n".encode()
+
+
+@pytest.mark.parametrize("shape", ["diverged", "ancestor"])
+def test_a_staged_merge_lands_with_both_parents_on_the_first_call(task, monkeypatch, shape):
+    """The reported path: a staged merge, then one passing public commit_reviewed. A preparation that drops the
+    merge before the fingerprint lets Git commit one parent, and the binding then agrees with it."""
+    parents = _staged_merge(task, shape)
+    _assert_landed_merge(task.repo_dir, parents, _commit(task, monkeypatch, door=_public_door()))
+
+
+@pytest.mark.parametrize("staging", ["whole_tree", "selected", "attributed"])
+@pytest.mark.parametrize("shape", ["diverged", "ancestor"])
+def test_a_staged_merge_survives_each_refusing_exit_and_lands_with_its_parents(task, monkeypatch, shape, staging):
+    """Through the public commit_reviewed handler, real Git throughout: a red tests preflight, a blocked review and
+    the free refusal of its identical retry each undo this call's staging and keep MERGE_HEAD, MERGE_MODE and
+    MERGE_MSG byte for byte; the rebutted retry lands one commit with the reviewed ordered parents and the
+    contributor's commit as its second parent. Omitted paths stage the whole tree without a baseline, or the task's
+    attributed paths with a baseline taken before the merge; named paths stage just those."""
+    repo, door = task.repo_dir, _public_door()
+    parents = _staged_merge(task, shape, before_merge=(lambda: _baseline(task)) if staging == "attributed" else None)
+    merging = _merge_state(repo)
+    paths = ["contrib/feature.txt"] if staging == "selected" else None
+
+    exits = [_commit(task, monkeypatch, paths, tests=lambda *_a, **_kw: "1 failed", door=door),
+             _commit(task, monkeypatch, paths, verdict="FAIL", door=door),
+             _commit(task, monkeypatch, paths, verdict="FAIL", door=door)]
+
+    for result, marker in zip(exits, ("1 failed", "Critical feedback", "IDENTICAL_DIFF_REFUSED")):
+        assert marker in result, result
+    assert _git(repo, "rev-parse", "HEAD").strip() == parents[0] and _index(repo) == {}
+    assert _merge_state(repo) == merging
+    landed = _commit(task, monkeypatch, paths, door=door, review_rebuttal="the inert critic's finding is answered")
+    _assert_landed_merge(repo, parents, landed)
+
+
+@pytest.mark.parametrize("staging", ["whole_tree", "selected"])
+@pytest.mark.parametrize("shape", ["diverged", "ancestor"])
+def test_an_advisory_handback_keeps_the_merge_for_the_authors_continuation(task, monkeypatch, shape, staging):
+    """Advisory returns the outcome before Git and unstages; the author's continuation, from a fresh context through
+    the same public handler, prepares the branch again, buys no reviewer and lands the reviewed parents."""
+    repo, door = task.repo_dir, _public_door()
+    parents = _staged_merge(task, shape)
+    merging = _merge_state(repo)
+    paths = ["contrib/feature.txt"] if staging == "selected" else None
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+
+    first = _commit(task, monkeypatch, paths, door=door)
+
+    assert first.startswith("Review outcome returned before commit"), first
+    assert _merge_state(repo) == merging and _git(repo, "rev-parse", "HEAD").strip() == parents[0]
+    reference = json.loads(next(line for line in first.splitlines() if line.startswith("{")))["review_reference"]
+    _fresh, landed, _notes = _continue(task, monkeypatch, reference, door=door, **({"paths": paths} if paths else {}))
+    _assert_landed_merge(repo, parents, landed)
+
+
+def test_an_ordinary_commit_on_the_current_branch_keeps_one_parent(task, monkeypatch):
+    """The positive control of the merge cases: without a merge the same public path lands one parent."""
+    repo = task.repo_dir
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "own.txt").write_text("ordinary change\n", encoding="utf-8")
+
+    result = _commit(task, monkeypatch, door=_public_door())
+
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    assert "OK: committed" in result and _git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:] == [head]

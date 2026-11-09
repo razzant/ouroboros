@@ -213,6 +213,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
         # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
         # read against the beacon cursors the actor was shown.
         "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
@@ -1163,6 +1164,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive; read coverage is process-local
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
