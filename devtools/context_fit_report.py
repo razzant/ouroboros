@@ -133,8 +133,8 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         ('whole', [g for g in snapshot.conversations if g['key'] not in lined and not any(
             w['id'] in gone.get('F6w', ()) for room in g['rooms'] for w in room['words'])]),
     ):
-        add('other conversations', '\n\n'.join(text for text, _chars in conversations.pieces(
-            groups, gone, lambda _key, make: (make(), 0))) if groups else '', form, len(groups))  # each subset's own head and foot
+        add('other conversations', '\n\n'.join(conversations.pieces(groups, gone, lambda _key, make: make()))
+            if groups else '', form, len(groups))  # each subset's own head and foot
     room = snapshot.room or {}
     notes = room.get('notes', [])
     short_notes = [note for note in notes if note['id'] in gone.get('F8', ())]

@@ -182,10 +182,9 @@ FIXED = {
 }
 
 
-def conversations_text(groups, gone, piece=None) -> str:
-    """``## Other conversations`` as its pieces join, for a test's reading; ``piece`` defaults to making each anew."""
+def conversations_text(groups, gone) -> str:
+    """``## Other conversations`` as its pieces join, for a test's reading."""
     from ouroboros import memory_view_conversations as conversations
 
     groups = list(groups)
-    return "\n\n".join(text for text, _chars in conversations.pieces(
-        groups, gone, piece or (lambda _key, make: (make(), 0)))) if groups else ""
+    return "\n\n".join(conversations.pieces(groups, gone, lambda _key, make: make())) if groups else ""

@@ -403,10 +403,10 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
 
 
 def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
-            piece: Callable[..., Tuple[str, int]]) -> List[Tuple[str, int]]:
-    """``## Other conversations`` at a floor level, each local form made once through ``piece`` (``snapshot.piece``):
-    the authority sentence first, then every group in its form; at the last rung (F6a) my human's words of the counted
-    groups stay, whole or by the address F7 folded them to. The pieces are joined by a blank line."""
+            piece: Callable[[Any, Callable[[], str]], Any]) -> List[Any]:
+    """``## Other conversations`` at a floor level, each local form through ``piece`` (its price from ``snapshot.piece``
+    or its text): the authority sentence first, then every group in its form; at the last rung (F6a) my human's words
+    of the counted groups stay, whole or by the address F7 folded them to. The pieces are joined by a blank line."""
     from ouroboros.memory_view import _rooms_line, _row_pointer
 
     words, owners, lined = set(gone.get("F6w", ())), set(gone.get("F7", ())), set(gone.get("F6g", ()))
