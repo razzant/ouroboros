@@ -842,6 +842,7 @@ class CarrierTurn:
             self.execution = entry.execution  # one execution per turn; the liveness read sees the body's phases
         self.execution.accepted_at = str((task.get("origin_message_ref") or {}).get("ts") or "")
         self.execution.census = dict(facts.get("census") or {})
+        self.execution.worker_id = worker_id
         admitted_at = float(facts.get("admitted_at") or 0.0)
         if admitted_at:
             # The owner's wait is measured from the admission's wall clock: the dispatch wait

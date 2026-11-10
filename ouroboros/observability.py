@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import contextvars
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import gzip
 import hashlib
 import logging
@@ -18,14 +18,13 @@ import os
 import pathlib
 import re
 import uuid
-from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.finalization_timing import (  # noqa: F401 — compatibility exports
     emit_finalization_timing, mark_last_answer, stamp_finalization_enqueue,
     task_timing, task_timing_scope, timed_phase, without_finalization_timing,
 )
-from ouroboros.secret_masking import SCHEMA_KINDS, SCHEMA_MAPS, SCHEMA_NOTES, SECRET_TOKEN_PATTERNS
+from ouroboros.redaction import RedactionResult, redact_projection
 from ouroboros.utils import (
     atomic_write_json,
     extract_trailing_json_object,
@@ -52,188 +51,6 @@ def child_ref_promotion_scope():
         yield
     finally:
         _PROMOTION_MEMO.reset(token)
-
-
-# A trailing quantity/identity qualifier names METADATA about a credential —
-# a count, budget, or label — never the secret value itself (``token_estimate``,
-# ``token_budget``, ``credential_profile_id``). Structural rule replacing the
-# per-name ``_NON_SECRET_KEY_NAMES`` allowlist (#447 G11: each new metadata
-# field used to need one more allowlist patch or be destroyed irreversibly).
-# Trailing-only on purpose: ``id_token`` (OIDC) stays a secret.
-_METADATA_QUALIFIER_SEGMENTS = frozenset({
-    "count", "counts", "estimate", "estimates", "total", "totals",
-    "budget", "budgets", "limit", "limits", "usage", "details",
-    "id", "ids", "index", "type", "kind", "len", "length", "size",
-    "num", "number",
-})
-_SECRET_KEY_EXACT = frozenset({
-    "authorization",
-    "auth_token",
-    "aws_access_key_id",
-    "aws_secret_access_key",
-    "aws_session_token",
-    "password",
-    "passwd",
-    "passphrase",
-    "token",
-    "secret",
-    "apikey",
-    "credential",
-    "credentials",
-    "private_key",
-    "private_key_pem",
-    "stripe_secret_key",
-    "secret_key",
-    "client_secret",
-    "api_key",
-})
-_SECRET_KEY_SUFFIXES = (
-    "_api_key",
-    "_token",
-    "_secret",
-    "_password",
-    "_passwd",
-    "_passphrase",
-    "_authorization",
-    "_access_token",
-    "_refresh_token",
-    "_credential",
-    "_credentials",
-    "_private_key",
-    "_private_key_pem",
-    "_secret_key",
-    "_secret_access_key",
-    "_client_secret",
-)
-# Some credential labels are emitted without separators (for example
-# ``authtoken`` or ``vendorapikey``).  Keep this list deliberately narrower
-# than a generic ``key`` suffix: ordinary forensic fields such as ``monkey``,
-# ``hockey``, and ``keynote`` must remain reconstructible.
-_SECRET_KEY_COMPOUND_SUFFIXES = (
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "passphrase",
-    "apikey",
-    "credential",
-    "credentials",
-    "authorization",
-    "privatekey",
-    "secretkey",
-    "accesskey",
-    "clientsecret",
-)
-# Whole-segment credential markers may carry a trailing version or environment
-# qualifier.  Match contiguous normalized segments, never raw substrings, so
-# names such as ``monkey``, ``hockey``, and ``keynote`` remain non-secret.
-_SECRET_KEY_SEGMENT_MARKERS: Tuple[Tuple[str, ...], ...] = (
-    ("api", "key"),
-    ("client", "secret"),
-)
-# Diagnostic token formats live in ``secret_masking``; file-tool reads do not
-# alter source bytes. This module keeps its historical private name.
-_TOKEN_PATTERNS = SECRET_TOKEN_PATTERNS
-_SECRET_QUERY_PARAM_RE = re.compile(
-    r"(?i)(?P<prefix>[?&])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
-    r"(?P<separator>=)(?P<value>[^&#\s]+)"
-)
-_SECRET_LITERAL_RE = re.compile(
-    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
-)
-_SECRET_LITERAL_KEY_RE = re.compile(r"""["']?(?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?$""")
-# Generic credential-dump catch: a ``name: <opaque-token>`` / ``name = <token>`` line
-# whose VALUE looks credential-like (>=32 chars, opaque charset, contains BOTH a
-# letter and a digit) even when the NAME carries no secret keyword. This catches
-# provider-named key dumps (e.g. ``openrouter: <token>``, ``cloud_ru: <token>``) that
-# the keyword-keyed literal rule above misses. Every hit is recorded in the manifest,
-# so any over-redaction is auditable rather than silent.
-_SECRET_GENERIC_KV_RE = re.compile(
-    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)"""
-    r"""(?P<value>(?=[A-Za-z0-9_\-.+/=]*[A-Za-z])(?=[A-Za-z0-9_\-.+/=]*[0-9])[A-Za-z0-9_\-.+/=]{32,})"""
-    r"""(?P<suffix>["']?)(?=[\s,}]|$)"""
-)
-# The generic name:value dump catch fires ONLY when the KEY itself signals a
-# credential — a provider name or a generic secret word. This is an ALLOWLIST, not a
-# denylist: it cannot eat opaque-but-cognitive values (commit SHAs, content hashes,
-# UUIDs, route fingerprints, model ids, base64/answer text) under structural keys,
-# preserving P1 reconstructibility. The literal keyword rule + dedicated token patterns
-# already cover keyword-keyed and well-known-shape secrets; this only ADDS provider-named
-# dumps (e.g. ``openrouter: <token>``) that carry no secret keyword. Every hit is logged
-# in the redaction manifest, so masking stays auditable rather than silent.
-_GENERIC_KV_SECRET_KEY_HINTS = (
-    "key", "token", "secret", "auth", "bearer", "cred", "password", "passwd",
-    "passphrase", "apikey", "access_token", "openrouter", "openai", "anthropic",
-    "cloudru", "cloud_ru", "gigachat", "groq", "deepseek", "together", "fireworks",
-    "mistral", "cohere", "perplexity", "replicate", "huggingface", "azure", "xai", "zai",
-)
-
-
-def _generic_kv_key_is_secretish(key_norm: str) -> bool:
-    return bool(key_norm) and any(hint in key_norm for hint in _GENERIC_KV_SECRET_KEY_HINTS)
-
-
-def _normalize_key_name(name: str) -> str:
-    text = str(name or "").strip()
-    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-
-
-def _is_secret_key_name(name: str) -> bool:
-    normalized = _normalize_key_name(name)
-    if not normalized:
-        return False
-    ordered_parts = tuple(normalized.split("_"))
-    if ordered_parts[-1] in _METADATA_QUALIFIER_SEGMENTS:
-        # Metadata ABOUT a credential, not the credential (the value-shape rules
-        # in _redact_text still catch a real secret parked under such a key).
-        return False
-    if normalized in _SECRET_KEY_EXACT or normalized.endswith(_SECRET_KEY_SUFFIXES):
-        return True
-    if normalized.endswith(_SECRET_KEY_COMPOUND_SUFFIXES):
-        return True
-    if any(
-        ordered_parts[start : start + len(marker)] == marker
-        for marker in _SECRET_KEY_SEGMENT_MARKERS
-        for start in range(len(ordered_parts) - len(marker) + 1)
-    ):
-        return True
-    parts = set(ordered_parts)
-    if "token" in parts or "password" in parts or "passwd" in parts or "passphrase" in parts:
-        return True
-    if "secret" in parts and parts & {"key", "token", "access", "credential", "credentials"}:
-        return True
-    if "private" in parts and "key" in parts:
-        return True
-    if "credential" in parts or "credentials" in parts:
-        return True
-    return False
-
-
-@dataclass
-class RedactionRecord:
-    """One redaction fact for a projection, never the original secret."""
-
-    path: str
-    rule: str
-
-
-@dataclass
-class RedactionResult:
-    """Redacted value plus a manifest of the redaction rules that fired."""
-
-    value: Any
-    records: List[RedactionRecord] = field(default_factory=list)
-
-    def manifest(self) -> Dict[str, Any]:
-        return {
-            "redacted": bool(self.records),
-            "count": len(self.records),
-            "rules": [
-                {"path": item.path, "rule": item.rule}
-                for item in self.records
-            ],
-        }
 
 
 def new_execution_id() -> str:
@@ -287,13 +104,14 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
-def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
-    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept."""
+def _publish_blob_file(path: pathlib.Path, raw: bytes) -> bool:
+    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept.
+    True when this call stored the bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
     if path.exists():
         _chmod_private(path)
-        return
+        return False
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
         with gzip.open(tmp, "wb", compresslevel=1) as fh:
@@ -301,6 +119,7 @@ def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
         _chmod_private(tmp)
         replace_atomic(tmp, path)
         _chmod_private(path)
+        return True
     except Exception:
         try:
             tmp.unlink()
@@ -311,6 +130,7 @@ def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
         # Concurrent reviewers can legitimately publish the same content-addressed blob. On
         # Windows the losing os.replace may raise while the winning blob is already durable.
         _chmod_private(path)
+        return False
 
 
 def _blob_ref(path: pathlib.Path, digest: str, kind: str, size: int) -> Dict[str, Any]:
@@ -330,6 +150,17 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
     """Persist a full private payload as a content-addressed gzip blob."""
     raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
     return write_blob_bytes(drive_root, raw, kind=kind)
+
+
+def write_part(drive_root: pathlib.Path, digest: str, raw: bytes) -> Dict[str, Any]:
+    """Store one shared element (``shared_values``) as the blob of its bytes, ``digest`` their sha256 as the tokenizer
+    computed it; bytes stored for the first time count as the window's ``new_parts`` (``context_timing.counted``).
+    Returns the part's ref as a manifest lists it."""
+    from ouroboros.context_timing import counted
+
+    if _publish_blob_file(_observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.json.gz", raw):
+        counted("new_parts", len(raw), key=digest)
+    return {"sha256": digest, "kind": "json", "encoding": "gzip", "size": len(raw)}
 
 
 def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -355,8 +186,7 @@ def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, D
         return _blob_ref(loose, digest, "json", size)
     for part_digest, raw in tokenized.parts.items():
         if part_digest not in parts:
-            ref = write_blob_bytes(drive_root, raw)
-            parts[part_digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
+            parts[part_digest] = write_part(drive_root, part_digest, raw)
     placement = loose.with_name(f"{digest}.json{SHARED_PLACEMENT_SUFFIX}")
     _publish_blob_file(placement, tokenized.skeleton)
     return {**_blob_ref(loose, digest, "json", size), "compressed_size": placement.stat().st_size}
@@ -366,18 +196,21 @@ def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, D
 #: by every call of the task. Their elements are stored once (``write_shared_blob``); every other
 #: record (tool calls, responses, reviews) is written whole.
 SHARED_ELEMENT_CALL_TYPES = frozenset({"llm_request", "physical_llm_candidate", "llm_claudexor_request"})
-_LISTED_PARTS: Dict[Tuple[str, str], set] = {}  # (drive root, task) -> parts a manifest of this process listed
-_LISTED_PARTS_TASKS = 16  # tasks whose listings this process remembers; forgetting one costs a fuller manifest
+#: (drive root, task) -> (the parts a manifest of this process listed, their redaction facts: ``redaction.part_fact``)
+_TASK_PARTS: Dict[Tuple[str, str], Tuple[set, dict]] = {}
+_TASK_PARTS_TASKS = 16  # tasks this process remembers; forgetting one costs a fuller manifest and its parts' scans again
 
 
-def _listed_parts(drive_root: pathlib.Path, task_id: str) -> set:
+def task_parts(drive_root: pathlib.Path, task_id: str) -> Tuple[set, dict]:
+    """What this process knows of a task's parts: the ones a manifest listed and their redaction facts, which the
+    request records and the working checkpoint share (a part either one met is not scanned again)."""
     key = (str(drive_root), str(task_id))
-    listed = _LISTED_PARTS.get(key)
-    if listed is None:
-        while len(_LISTED_PARTS) >= _LISTED_PARTS_TASKS:
-            del _LISTED_PARTS[next(iter(_LISTED_PARTS))]
-        listed = _LISTED_PARTS[key] = set()
-    return listed
+    known = _TASK_PARTS.get(key)
+    if known is None:
+        while len(_TASK_PARTS) >= _TASK_PARTS_TASKS:
+            del _TASK_PARTS[next(iter(_TASK_PARTS))]
+        known = _TASK_PARTS[key] = (set(), {})
+    return known
 
 
 def read_blob_ref(
@@ -1108,8 +941,10 @@ def write_call_manifest(
     call_id: str,
     manifest: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Write the small per-call manifest with refs into the private ledger."""
+    """Write the small per-call manifest with refs into the private ledger. In a measured window the wait for the
+    publication lock and the write under it are the sections ``<call type>.lock_wait`` and ``.manifest_write``."""
     from ouroboros import evidence_packs, store
+    from ouroboros.context_timing import timed
 
     path = call_manifest_path(drive_root, task_id, call_id or new_call_id("call"))
     safe_call = path.stem
@@ -1126,10 +961,16 @@ def write_call_manifest(
     }
     # The packer's deletion sections and other manifests hold this lock briefly; a model call
     # waits for them rather than failing its task (issue #1754).
-    with store.name_lock(pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME,
-                         timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC):
+    kind = str(payload.get("call_type") or "manifest")
+
+    def publish() -> None:
         evidence_packs.note_manifest_publication(drive_root, payload)
         atomic_write_json(path, payload, trailing_newline=True)
+
+    with ExitStack() as held:
+        timed(f"{kind}.lock_wait", held.enter_context, store.name_lock(
+            pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC))
+        timed(f"{kind}.manifest_write", publish)
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1153,119 +994,6 @@ def update_call_manifest_metadata(
     manifest = json.loads(path.read_text(encoding="utf-8"))
     return write_call_manifest(drive_root, task_id=task_id, call_id=call_id,
                                manifest={**manifest, **metadata})
-
-
-def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
-    out = text
-    for rule, pattern in _TOKEN_PATTERNS:
-        if rule == "url_credentials":
-            def _url_repl(match: re.Match[str]) -> str:
-                records.append(RedactionRecord(path=path, rule=rule))
-                return f"{match.group(1)}***REDACTED***:***REDACTED***@"
-
-            out = pattern.sub(_url_repl, out)
-            continue
-        def _repl(match: re.Match[str], _rule: str = rule) -> str:
-            records.append(RedactionRecord(path=path, rule=_rule))
-            return "***REDACTED***"
-
-        out = pattern.sub(_repl, out)
-
-    def _query_param_repl(match: re.Match[str]) -> str:
-        if not _is_secret_key_name(match.group("key")):
-            return match.group(0)
-        records.append(RedactionRecord(path=path, rule="secret_query_parameter"))
-        return (
-            f"{match.group('prefix')}{match.group('key')}"
-            f"{match.group('separator')}***REDACTED***"
-        )
-
-    out = _SECRET_QUERY_PARAM_RE.sub(_query_param_repl, out)
-
-    def _literal_repl(match: re.Match[str]) -> str:
-        prefix = match.group("prefix")
-        key_match = _SECRET_LITERAL_KEY_RE.search(prefix)
-        if key_match and not _is_secret_key_name(key_match.group("key")):
-            return match.group(0)
-        records.append(RedactionRecord(path=path, rule="secret_literal_assignment"))
-        return f"{prefix}***REDACTED***{match.group('suffix')}"
-
-    out = _SECRET_LITERAL_RE.sub(_literal_repl, out)
-
-    def _generic_kv_repl(match: re.Match[str]) -> str:
-        # Mask ONLY when the key itself signals a credential (provider name / secret
-        # word); a structural or cognitive key (sha/commit/uuid/model/answer/...) is
-        # left intact so the authoritative blob never loses forensic/answer data (P1).
-        _km = _SECRET_LITERAL_KEY_RE.search(match.group("prefix"))
-        _kn = _normalize_key_name(_km.group("key")) if _km else ""
-        if not _generic_kv_key_is_secretish(_kn):
-            return match.group(0)
-        records.append(RedactionRecord(path=path, rule="secret_generic_kv"))
-        return f"{match.group('prefix')}***REDACTED***{match.group('suffix')}"
-
-    out = _SECRET_GENERIC_KV_RE.sub(_generic_kv_repl, out)
-    return out
-
-
-def _secret_value_fingerprint(value: Any) -> str:
-    """Non-secret meta of a redacted value: type, length, sha256 first 8 hex.
-
-    The default authoritative blob is the redacted one, so bare destruction is
-    irreversible (#447 G11): the fingerprint keeps equality/rotation auditable
-    (same secret → same digest) without persisting a single raw byte.
-    """
-    raw = value if isinstance(value, str) else json.dumps(
-        value, ensure_ascii=False, sort_keys=True, default=str
-    )
-    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
-    return f"***REDACTED[{type(value).__name__}:len={len(raw)}:sha256_8={digest}]***"
-
-
-def _schema_names(item: Any) -> bool:
-    """A name map: every entry is a subschema - a boolean, ``{}``, or a dict saying what it accepts."""
-    return isinstance(item, dict) and all(isinstance(sub, bool) or isinstance(sub, dict) and (
-        not sub or (SCHEMA_KINDS | SCHEMA_MAPS) & set(sub)) for sub in item.values())
-
-
-def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret_literals: bool = False,
-                schema: bool = False) -> Any:
-    if secret_literals and not isinstance(value, (dict, list, tuple, bool)) and value not in (None, ""):
-        records.append(RedactionRecord(path=path, rule="secret_key_name"))
-        return _secret_value_fingerprint(value)
-    if isinstance(value, dict):
-        # A JSON Schema's name maps name parameters (``page_token``), not credentials: names and shapes
-        # stay readable (P1: tool schemas); under a credential-named one every value but its notes is masked.
-        kinds = value.get("type") if isinstance(value.get("type"), list) else [value.get("type")]
-        schema = schema or "object" in [str(kind).lower() for kind in kinds]
-        out: Dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            item_path = f"{path}.{key_text}" if path else key_text
-            if schema and key_text in SCHEMA_MAPS and _schema_names(item):
-                out[key_text] = {str(name): _redact_any(sub, records, f"{item_path}.{name}", schema=True,
-                                                        secret_literals=secret_literals or _is_secret_key_name(str(name)))
-                                 for name, sub in item.items()}
-            elif _is_secret_key_name(key_text):
-                if item not in (None, "", False):
-                    records.append(RedactionRecord(path=item_path, rule="secret_key_name"))
-                out[key_text] = (
-                    _secret_value_fingerprint(item) if item not in (None, "", False) else item
-                )
-            else:
-                out[key_text] = _redact_any(item, records, item_path,
-                                            secret_literals=secret_literals and key_text not in SCHEMA_NOTES)
-        return out
-    if isinstance(value, (list, tuple)):
-        return [_redact_any(item, records, f"{path}[{idx}]", secret_literals=secret_literals)
-                for idx, item in enumerate(value)]
-    if isinstance(value, str):
-        return _redact_text(value, records, path)
-    return value
-
-
-def redact_projection(value: Any) -> RedactionResult:
-    records: List[RedactionRecord] = []
-    return RedactionResult(_redact_any(value, records, "$"), records)
 
 
 def persist_call(
@@ -1301,8 +1029,12 @@ def persist_call(
     """
 
     from ouroboros.anthropic_native_custody import observability_custody_projection
+    from ouroboros.context_timing import timed
 
-    redacted = redact_projection(observability_custody_projection(payload))
+    shared = call_type in SHARED_ELEMENT_CALL_TYPES
+    listed, facts = task_parts(drive_root, task_id)
+    redacted = timed(f"{call_type}.redact", lambda: redact_projection(observability_custody_projection(payload),
+                                                                      facts=facts if shared else None))
     effective_keep_raw = keep_raw
     if effective_keep_raw is None:
         effective_keep_raw = (
@@ -1312,10 +1044,11 @@ def persist_call(
     # A request view stores each element once; a public view names only public parts, because its
     # parts are the bytes of the redacted value (an element redaction changes is a different part).
     parts: Dict[str, Dict[str, Any]] = {}
-    shared = call_type in SHARED_ELEMENT_CALL_TYPES
 
     def store(value: Any) -> Dict[str, Any]:
-        return write_shared_blob(drive_root, value, parts) if shared else write_blob(drive_root, value, kind="json")
+        if shared:
+            return timed(f"{call_type}.blobs", write_shared_blob, drive_root, value, parts)
+        return timed(f"{call_type}.blobs", write_blob, drive_root, value, kind="json")
 
     if effective_keep_raw:
         full_ref = store(payload)
@@ -1327,7 +1060,6 @@ def persist_call(
         full_ref = store(redacted.value)
         projection_ref = full_ref
         full_redacted = True
-    listed = _listed_parts(drive_root, task_id)
     new_parts = [ref for digest, ref in parts.items() if digest not in listed]
     manifest_ref = write_call_manifest(
         drive_root,
@@ -1574,7 +1306,7 @@ class SecretRedactingLogFilter(logging.Filter):
     """Mask secret-shaped values in every line of a stdlib logging handler.
     Root loggers propagate third-party INFO lines verbatim — httpx printed the
     full Telegram bot token inside its request-URL line every poll cycle.
-    Reuses this module's redaction SSOT (token patterns incl. bot tokens, URL
+    Reuses the projection redaction SSOT (``redaction``: token patterns incl. bot tokens, URL
     credentials, provider keys); any redaction failure keeps the original
     record rather than dropping the log line (v6.70.0)."""
     def filter(self, record: logging.LogRecord) -> bool:

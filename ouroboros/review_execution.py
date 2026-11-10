@@ -794,8 +794,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                     project_id=project_id, project_owned=bool(project_id) and not existing_project,
                     route=route.route_id, surface=surface, slot_id=slot_id,
                     **store_facts({"handshake_store_id": getattr(gateway, "store_identity", ""), "store_identity_unproven": True}),
-                    # #112: pending recovery replays the request row's lineage.
-                    root_task_id=root_task_id, parent_task_id=parent_task_id, review_source_delivery=delivery_facts,
+                    root_task_id=root_task_id, parent_task_id=parent_task_id, review_source_delivery=delivery_facts,  # #112: recovery replays the row's lineage
                     work_order_source_request=delivery_facts, prompt_cache_ttl=delivery_facts.get("prompt_cache_ttl"),
                     **usage_custody, **checking.get("custody", {}), **seat_engine)
             except BillingAuthorityUnavailable as exc:  # raised before any row or POST: unsent, unpaid, unrequested

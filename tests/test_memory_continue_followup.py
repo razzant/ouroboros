@@ -289,13 +289,15 @@ def test_physical_floor_keeps_account_and_pending_correction_without_claiming_in
                   + "The garden's independent measurement remains valid. Final exception Ω.")
     fix = _write(tmp_path, kind="correction", target_id=page, text=correction)["node_id"]
     snapshot, journal = _snapshot(tmp_path), _journal(tmp_path)
-    full, _, facts = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
+    fit = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
         window_tokens=1_000_000, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
+    full, facts = fit.story, fit.facts
     assert account_text in full and "Final exception Ω." in full
     assert f"later correction of its source {page} (not in this account)" in full
     assert facts["floor"]["pointer_records"] == []
-    short, room, facts = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
+    fit = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
         window_tokens=4096, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
+    short, room, facts = fit.story, fit.room, fit.facts
     assert account not in facts["floor"]["pointer_records"]
     assert account_text in short and "Final exception Ω." in short
     assert memory_floor.view_tokens(short) + memory_floor.view_tokens(room) > 4096 - 512  # its last view cannot fit

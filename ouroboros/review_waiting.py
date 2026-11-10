@@ -222,6 +222,14 @@ def outcome_states(record):
     return [f"{_outcome_token(identity)}#{status}" for identity, status in _closed_outcomes(record)]
 
 
+def shown_outcomes(record, rendered_rows=None):
+    """One bounded identity of the outcome states a response carried (``outcome_states``; ``rendered_rows`` when it
+    renders fewer than the record holds): the reference an author decides with quotes it, so a cost or custody revision
+    keeps a decision standing and any added or changed outcome does not. It proves delivery, never a read receipt."""
+    shown = record if rendered_rows is None else {**record, "rows": list(rendered_rows)}
+    return hashlib.sha256("\n".join(sorted(outcome_states(shown))).encode("utf-8")).hexdigest()[:32]
+
+
 def delivery_ready(ctx, state):
     """Facts exposed by this return, including the existing absolute time selector."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now

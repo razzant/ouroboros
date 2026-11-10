@@ -8,25 +8,13 @@ disable/reload can tear them down and purge modules cleanly.
 
 from __future__ import annotations
 
-import functools  # noqa: F401
 import importlib
 import importlib.util
-import inspect  # noqa: F401
-import hashlib  # noqa: F401
-import json  # noqa: F401
 import logging
 import os
 import pathlib
-import re  # noqa: F401
-import secrets  # noqa: F401
-import shutil  # noqa: F401 — facade compatibility
 import sys
 import threading
-import time  # noqa: F401
-import urllib.request  # noqa: F401
-import uuid  # noqa: F401
-from dataclasses import dataclass, field  # noqa: F401
-from types import ModuleType  # noqa: F401
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ouroboros.contracts.plugin_api import (
@@ -916,10 +904,13 @@ def reload_all(
     *,
     repo_path: str | None = None,
 ) -> Dict[str, Any]:
-    """Refresh all extension liveness and return ``skill: error_or_None``."""
+    """Refresh all extension liveness and return ``skill: error_or_None``; the measured window counts the
+    ``skills`` it discovered (hashes and catalog runs are counted where they happen)."""
+    from ouroboros.context_timing import counted
     from ouroboros.extension_health import fresh_code_stamp, record_health_for_runtime_state
 
     skills = discover_skills(drive_root, repo_path=repo_path)
+    counted("skills", len(skills))
     health_stamp = fresh_code_stamp()
     skill_names = {s.name for s in skills if s.manifest.is_extension()}
     with _lock:

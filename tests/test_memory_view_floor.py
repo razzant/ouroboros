@@ -55,8 +55,8 @@ def test_governing_unanswered_and_uncovered_owner_rows_have_distinct_protection(
     physical = mf.fit_memory_view(snapshot, frame(0, 0))
     assert dict(physical.addressed)["F7"] == tuple(r["address"] for r in rows[:2])
     assert rows[2]["line"] in mv.render_room(snapshot, physical)
-    _, text, _ = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=80_000,
-        known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
+    text = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=80_000,
+        known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000).room
     assert "Start room is smaller" in text
 
 
@@ -114,8 +114,9 @@ def test_a_project_roots_sealed_owner_rows_fold_only_under_physical_pressure_old
 ])
 def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_above_it(lane1, owners):
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=lane1))
-    _, text, facts = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
+    fit = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
         known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=104_464)
+    text, facts = fit.room, fit.facts
     floor = facts["floor"]
     assert (floor["allowance_tokens"], floor["physical_allowance_tokens"]) == (5_000, 30_000)
     assert ("Start room is smaller than requested" in text) is owners
@@ -359,8 +360,9 @@ def test_note_forms_are_attributed_to_the_owner_target():
     snap.room['notes'][0]['text'] = 'Held meaning. ' + 'detail ' * 1000
     level = mf.fit_memory_view(snap, {'margin': 0, 'budget': 0, 'physical': 500})
     assert dict(level.steps)['F8'] == 1 and level.by_budget > 0
-    _, room, facts = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
+    fit = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
         known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=66000)
+    room, facts = fit.room, fit.facts
     assert 'only physical pressure can narrow them' not in room
     assert facts['floor']['steps']['F8'] == 1 and facts['floor']['by_budget'] > 0
 

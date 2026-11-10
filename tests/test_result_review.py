@@ -1309,7 +1309,7 @@ def test_a_produced_symbolic_link_is_its_own_output_never_its_target(tmp_path, m
         assert (item["size"], item["sha256"]) == (len(os.fsencode(text)), hashlib.sha256(os.fsencode(text)).hexdigest())
     first = subject()
     assert "AN OWNER FILE" not in json.dumps(material) and "AN OWNER FILE" not in first.diff_text
-    assert f'symbolic link, its exact link text "{owner_file}"' in first.diff_text
+    assert f'symbolic link, its exact link text {links["a.txt"]["link"]}' in first.diff_text
     reviewing = [{"record_id": "review-of-a", "state": "pending", "subject": {"diff_sha": first.diff_sha}}]
     (folder / "a.txt").rename(folder / "b.txt")
     renamed = subject()
@@ -1418,10 +1418,16 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
     bytes already there, write nothing and type the call ``completed_no_effect``, so no reader counts it and Required
     buys nothing; a mixed batch lists only its changed member. The controls stay production: changed bytes, and a
     changed write in an ordinary folder whose capture failed."""
+    import pathlib
+
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.review_result import produced_material, required_material, result_review_at_delivery
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
+    # The exact bytes the calls below carry: the shared fixture's text-mode write is CRLF on Windows.
+    (ctx.workspace_root / "app.py").write_bytes(b"VALUE = 1\n")
+    (ctx.workspace_root / "lib.py").write_bytes(b"LIB = 'base'\n")
+    shared.git(ctx.workspace_root, "commit", "-qam", "exact fixture bytes", "--allow-empty")
     _baselined(ctx)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
@@ -1445,13 +1451,13 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
     assert changed["tool_result_meta"] == {"resolved_root": str(ctx.workspace_root.resolve()),
                                            "changed_paths": ["app.py"], "unchanged_paths": ["lib.py"]}
     assert not changed["is_error"]
-    assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in produced_material(ctx)["files"]] == [
+    assert [(item["kind"], pathlib.Path(item["path"]).name) for item in produced_material(ctx)["files"]] == [
         ("workspace change", "app.py")], "the batch's unchanged member is no produced material"
     assert required_material(ctx, trace, "VALUE is 2.") == "observed_production"
 
     plain = tmp_path / "plain"
     plain.mkdir()
-    (plain / "notes.txt").write_text("kept\n", encoding="utf-8")
+    (plain / "notes.txt").write_bytes(b"kept\n")
     folder = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.repo_dir, drive_root=ctx.drive_root,
                          workspace_root=plain, workspace_mode="external", task_id="task-plain")
     same = _loop_call(folder, "write_file", {"path": "notes.txt", "content": "kept\n"})
@@ -1468,18 +1474,24 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
     assert produced["observed"] and [item["kind"] for item in produced["files"]] == ["written file"]
     assert required_material(folder, folder._execution_trace, "Changed.") == "observed_production"
 
+    (plain / "crlf.txt").write_bytes(b"kept\r\n")  # one line ending apart from the payload: different bytes, on every OS
+    other = _loop_call(folder, "write_file", {"path": "crlf.txt", "content": "kept\n"})
+    assert "operation_outcome" not in other["tool_result_meta"] and (plain / "crlf.txt").read_bytes() == b"kept\n"
+
 
 @pytest.mark.parametrize("letter", ["a", "я"])
 def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_changes(tmp_path, monkeypatch, letter):
     """The typed receipt's limit measures serialized bytes. A cut unchanged-path list leaves the changed list whole,
     so nothing unchanged becomes produced; a cut changed-path list names its gap and never guesses the rest, which
     the folder's own attribution still lists."""
+    import pathlib
+
     from ouroboros.tools.review_result import produced_material, required_material
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
     names = [f"{i:02d}-{letter * 90}.txt" for i in range(50)]
     for name in names:
-        (ctx.workspace_root / name).write_text("kept\n", encoding="utf-8")
+        (ctx.workspace_root / name).write_bytes(b"kept\n")  # the payload's exact bytes on every OS
     shared.git(ctx.workspace_root, "add", ".")
     shared.git(ctx.workspace_root, "commit", "-qm", "fixture inputs")
     _baselined(ctx)
@@ -1490,7 +1502,7 @@ def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_chang
     assert meta["changed_paths"] == ["app.py"] and meta["unchanged_paths_omitted"] > 0
     assert "changed_paths_omitted" not in meta
     material = produced_material(ctx)
-    assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in material["files"]] == [
+    assert [(item["kind"], pathlib.Path(item["path"]).name) for item in material["files"]] == [
         ("workspace change", "app.py")]
     assert not [gap for gap in material["issues"] if "typed receipt" in gap], material["issues"]
     assert required_material(ctx, ctx._execution_trace, "Changed.") == "observed_production"
@@ -1501,7 +1513,7 @@ def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_chang
     assert cut["changed_paths_omitted"] > 0 and len(cut["changed_paths"]) + cut["changed_paths_omitted"] == len(names)
     material = produced_material(ctx)
     assert any("more path(s) than its typed receipt could name" in gap for gap in material["issues"]), material["issues"]
-    assert sorted(item["path"].rsplit("/", 1)[-1] for item in material["files"]) == sorted(["app.py", *names]), \
+    assert sorted(pathlib.Path(item["path"]).name for item in material["files"]) == sorted(["app.py", *names]), \
         "the folder's attribution lists every change; the receipt's cut invents none"
 
 

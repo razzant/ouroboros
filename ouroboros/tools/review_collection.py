@@ -9,6 +9,8 @@ import json
 import os
 import pathlib
 
+SHOWN_OUTCOMES = "shown_outcomes"  # the delivery a commit reference answers (``require_shown``), never its identity
+
 
 def reference_for(record, attempt=None):
     reference = {"record_id": record["record_id"], "task_id": record["task_id"],
@@ -54,7 +56,7 @@ def resolve_reference(ctx, reference, *, commit=False):
     if commit and attempt.repo_key != make_repo_key(pathlib.Path(ctx.repo_dir)):
         raise ValueError("the reference belongs to another repository")
     expected = reference_for(record, attempt)
-    if any(key not in expected or expected[key] != value for key, value in reference.items()):
+    if any(key not in expected or expected[key] != value for key, value in reference.items() if key != SHOWN_OUTCOMES):
         raise ValueError("review_reference identity differs from the recorded paid attempt")
     return root, attempt, record
 
@@ -376,9 +378,10 @@ def _read_only_why(ctx, attempt, record, staged):
 def _read_only_text(ctx, attempt, record, staged, result, lead):
     import json
 
-    from ouroboros.review_waiting import publish_delivery
+    from ouroboros.review_waiting import publish_delivery, shown_outcomes
 
-    payload = {**result, "review_reference": reference_for(record, attempt)}
+    payload = {**result, "review_reference": {**reference_for(record, attempt),
+                                              SHOWN_OUTCOMES: shown_outcomes(record, result.get("rows") or [])}}
     running = payload.get("state") != "settled"
     sent = ("only the continuation you chose was sent, in the original wave over its frozen subject"
             if payload.get("continuation") else "no new reviewer was sent")
@@ -760,7 +763,118 @@ class ContinuationWaits(ValueError):
     """A returned commit outcome whose reviewers are still running: the author's decision waits for them."""
 
 
-def continuation_refusal(exc: Exception) -> str:
+class ContinuationUnread(ValueError):
+    """The review record holds an outcome the decision's reference does not name (#2902)."""
+
+
+def _seat_outcome(seat):
+    """What a seat row shows, comparable between an attempt row and its ledger record (``review_ledger._apply_raw``)."""
+    from ouroboros.review_ledger import ANSWERED_STATUSES
+
+    outcome = seat.get("outcome") or {}
+    return (str(seat.get("operation_id") or ""), str(outcome.get("outcome_id") or seat.get("outcome_id") or ""),
+            str(outcome.get("status") or seat.get("status") or "") in ANSWERED_STATUSES)
+
+
+def shown_field(ctx, row):
+    """The reference field of a handback rendering attempt ``row``: its record's outcomes that the row itself shows, seat
+    by seat, under the same operation and outcome. A writer settles the record before the row, so a seat the row shows
+    running, or closed with an earlier outcome (an answer after a failure, a continued seat's successor), is not named.
+    Empty when the row is bound to no readable record."""
+    from ouroboros.review_ledger import ledger_root, load_record, seat_open
+    from ouroboros.review_state import _attempt_review_roster_rows
+    from ouroboros.review_waiting import shown_outcomes
+
+    try:
+        record = load_record(ledger_root(ctx), row.review_record_id) if row.review_record_id else None
+    except (OSError, ValueError):
+        record = None
+    if not record:
+        return {}
+    roster, seats = _attempt_review_roster_rows(row), [seat for seat in record.get("rows") or [] if isinstance(seat, dict)]
+
+    def slot(raw):
+        return str(raw.get("slot_id") or raw.get("slot") or "")
+
+    def carried(index, seat):  # joined as ``review_ledger.build_rows`` joins raw rows: by slot, else by position
+        raw = next((item for item in roster if slot(item) == str(seat.get("seat_id") or "")), None)
+        raw = roster[index] if raw is None and len(roster) == len(seats) and not slot(roster[index]) else raw
+        return raw is not None and not seat_open(raw) and (
+            not raw.get("late_result_pending") or raw.get("operation_state") == "custody_lost") and _seat_outcome(raw) == _seat_outcome(seat)
+    return {SHOWN_OUTCOMES: shown_outcomes(record, [seat for index, seat in enumerate(seats) if carried(index, seat)])}
+
+
+def require_shown(ctx, reference, source):
+    """``source`` when the decision's ``reference`` names every outcome its record holds now, else
+    ``ContinuationUnread``: a host-stored answer is no answer the author received (#2902), and the free collection
+    returns it under a new reference. An older reference proves no delivery, except of a record with nothing to read; a
+    review with no record cannot have gained an outcome. Cyber Pro's judgment stands, with the gap stated."""
+    from ouroboros.review_ledger import VERDICT_NOT_DISPATCHED, ledger_root, load_record
+    from ouroboros.review_waiting import outcome_states, shown_outcomes
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+
+    ctx._author_commit_unread = False
+    record_id = str(reference.get("review_record_id") or getattr(source, "review_record_id", "") or "")
+    record = load_record(ledger_root(ctx), record_id) if record_id else None
+    if record is None or reference.get(SHOWN_OUTCOMES) == shown_outcomes(record) or (
+            SHOWN_OUTCOMES not in reference and record.get("state") == "settled"
+            and (not outcome_states(record) or (record.get("verdict") or {}).get("aggregate") == VERDICT_NOT_DISPATCHED)):
+        return source
+    if review_enforcement_blocks("blocking"):
+        raise ContinuationUnread("its review record now holds an outcome this review_reference did not return")
+    ctx._author_commit_unread = True  # the landing check states it beside the decision's evidence
+    text = "Cyber Pro: the review record holds an outcome this review_reference did not return; this decision did not read it."
+    advisory = getattr(ctx, "_review_advisory", None)
+    if isinstance(advisory, list) and text not in advisory:
+        advisory.append(text)
+    return source
+
+
+def _state_unread_evidence(ctx, source):
+    """The Cyber Pro decision's evidence, on its row and record: what it holds was not all returned to this author."""
+    from ouroboros.review_doctrine import EVIDENCE_KIND
+    from ouroboros.review_ledger import ledger_root, note_author_decision
+
+    author = getattr(ctx, "_author_commit_record", None)
+    snapshot = author.get(EVIDENCE_KIND) if isinstance(author, dict) else None
+    if getattr(ctx, "_author_commit_unread", False) and isinstance(snapshot, dict) and not snapshot.get("unread_outcomes"):
+        snapshot["unread_outcomes"] = True
+        if source.review_record_id:
+            note_author_decision(ledger_root(ctx), source.review_record_id, author)
+
+
+def commit_landing_refusal(ctx, commit_message, started_at, managed_tx):
+    """The check at the last moment before ``git commit`` (tests done, no review-state lock held, Pause undisturbed): an
+    outcome settled since the decision was validated sends it back. Later arrivals are concurrent with the commit."""
+    import time
+
+    from ouroboros.tools import git as git_mod
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    source = getattr(ctx, "_author_commit_source", None)
+    if source is None:
+        return ""
+    try:
+        require_shown(ctx, ctx._author_commit_reference, source)
+        _state_unread_evidence(ctx, source)
+        return ""
+    except (OSError, ValueError) as exc:
+        text = continuation_refusal(exc, effect="No commit was created and the files are preserved.")
+    try:  # the refusal is recorded and returned even when its cleanup fails
+        if managed_tx:  # a managed merge keeps its whole index, retryable
+            from supervisor.update_merge import restore_assisted_resolution_after_commit_error
+            if restore_assisted_resolution_after_commit_error(managed_tx) is False:
+                text += " The managed update's resolution phase was not restored; recover it before retrying."
+        else:
+            git_mod._unstage_candidate(ctx)
+    except Exception as cleanup:  # noqa: BLE001 - named in the refusal, never silent
+        text += f" Restoring the index after this refusal failed ({type(cleanup).__name__}: {cleanup}); it may still hold the candidate."
+    git_mod._record_commit_attempt(ctx, commit_message, "blocked", block_reason="review_outcome_unread", block_details=text,
+                                   duration_sec=time.time() - started_at, phase="preflight")
+    return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=text))
+
+
+def continuation_refusal(exc: Exception, *, effect: str = "Nothing was staged or committed.") -> str:
     """A refused author continuation names the next call its cause leaves (06.11)."""
     from ouroboros.config import get_review_enforcement
     from ouroboros.tools.review_helpers import review_enforcement_blocks
@@ -771,10 +885,13 @@ def continuation_refusal(exc: Exception) -> str:
     elif isinstance(exc, ContinuationWaits):
         step = ("collect that outcome (its review_reference, no author_disposition) once its reviewers answer, "
                 "then decide.")
+    elif isinstance(exc, ContinuationUnread):
+        step = ("collect it at $0 (the same commit tool, this review_reference, no author_disposition), read it, then "
+                "decide with the review_reference that call returns.")
     else:
         step = ("decide with the review_reference an outcome you read returned (the last commit_reviewed call names "
                 "its own), or call without author_disposition to review the current bytes.")
-    return f"⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. Nothing was staged or committed. Next: {step}"
+    return f"⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. {effect} Next: {step}"
 
 
 def default_commit_continuation(ctx, kwargs) -> str:
@@ -811,12 +928,13 @@ def default_commit_continuation(ctx, kwargs) -> str:
     if blocking:
         return continuation_refusal(ValueError("author continuation requires Advisory enforcement"))
     latest = returned[-1]
-    reference = json.dumps({"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
-                            "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint})
+    named = {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
+             "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint,
+             **({"review_record_id": record_id} if (record_id := str(getattr(latest, "review_record_id", "") or "")) else {})}
     return ("⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: author_disposition names no review_reference, and a decision "
-            "answers an outcome it has read. Nothing was staged or committed. Next: once you have read the outcome of "
-            f"attempt {latest.attempt}, the latest returned for this copy, call again with this author_disposition "
-            f"and review_reference={reference}.")
+            "answers an outcome it has read. Nothing was staged or committed. Next: decide with the review_reference "
+            f"that outcome (attempt {latest.attempt}, the latest returned for this copy) returned; without it, collect "
+            f"that outcome at $0 with review_reference={json.dumps(named)} and no author_disposition.")
 
 
 def set_aside_wrong_step_fields(ctx, continuation, wake_on):

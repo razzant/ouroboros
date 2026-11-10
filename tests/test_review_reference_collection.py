@@ -153,7 +153,7 @@ def test_pending_commit_reference_collects_read_only_after_the_index_changed(aut
     payload = _payload(text)
     record_id = ref.get("review_record_id") or ref.get("record_id")
     assert payload["review_reference"]["review_record_id"] == record_id and payload["cost"]["usd"] == 0
-    assert all(payload["review_reference"][key] == value for key, value in ref.items() if key != "record_id")
+    assert all(payload["review_reference"][key] == value for key, value in ref.items() if key not in {"record_id", "shown_outcomes"})
     assert (_git(a.repo, "write-tree"), _commit_count(a)) == (changed_tree, 1), "files, index and HEAD untouched"
     assert set(a.reviewer.rounds) <= {"m1", "m2"} and len(a.reviewer.rounds) == len(set(a.reviewer.rounds))
     until(lambda: _payload(_reread(a, ref))["state"] == "settled")
@@ -655,8 +655,9 @@ def test_a_commit_row_a_busy_state_lock_left_open_is_reconciled_before_the_advis
         again = _payload(_reread(a, ref))
         assert again["state"] == "settled" and "attempt_row" not in again and again["cost"]["usd"] == 0, again
         assert (row().status, row().phase) == ("reviewed", "review_only") and not _attempt_has_active_review_custody(row())
+    read = payload["review_reference"]  # the decision answers what this collection returned (#2902)
     with _parent(a):
-        landed = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py"], review_reference=ref,
+        landed = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py"], review_reference=read,
                                         author_disposition=decision)
     assert _git(a.repo, "rev-parse", "HEAD") != head, landed
     assert _git(a.repo, "show", "HEAD:change.py") == "value = 3"
@@ -669,7 +670,7 @@ def test_a_commit_row_a_busy_state_lock_left_open_is_reconciled_before_the_advis
     assert all(item["raw_text"] for item in reconciled.triad_raw_results), "each seat's own answer, not the aggregate"
     assert load_record(a.data, ref["review_record_id"])["verdict"] == record["verdict"]
     [own] = [item for item in load_state(a.data).attempts if item.task_id == TASK and item.status == "succeeded"]
-    assert own.author_disposition["review_reference"] == ref and own.attempt != ref["attempt"]
+    assert own.author_disposition["review_reference"] == read and own.attempt != ref["attempt"]
 
 
 def test_a_busy_review_state_before_settlement_is_a_typed_recoverable_refusal(author, monkeypatch):  # noqa: F811

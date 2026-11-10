@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import queue
 import threading
 import time
@@ -70,6 +71,7 @@ def test_the_receipt_rides_the_first_dispatch_frame_and_the_consumer_records_it_
     # Order, not a tick: two reads of a coarse clock (Windows) can be equal.
     assert receipt["census"] == {"direct_turns_at_entry": 1} and receipt["dispatched_at"] >= receipt["entered_at"]
     assert (receipt["chat_id"], receipt["task_id"], receipt["execution_id"]) == (1, "owner", execution.execution_id)
+    assert (receipt["worker_id"], receipt["pid"]) == (None, os.getpid())  # no carrier named a slot: unknown, not 0
 
     ctx = SimpleNamespace(RUNNING={"a": {}}, PENDING=[1, 2], DRIVE_ROOT=tmp_path)
     events._handle_main_llm_call_state(sent, ctx)

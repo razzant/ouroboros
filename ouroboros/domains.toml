@@ -503,6 +503,7 @@ D20 = "Presence"
 "ouroboros/nanny_pacing.py" = "D07"
 "ouroboros/net_transport.py" = "D02"
 "ouroboros/observability.py" = "D16"
+"ouroboros/redaction.py" = "D16"  # secret redaction of stored projections: rules, walk, records
 "ouroboros/finalization_timing.py" = "D16"
 "ouroboros/process_logging.py" = "D16"
 "ouroboros/source_retention.py" = "D16"

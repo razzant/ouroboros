@@ -741,6 +741,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
             raise PhysicalAttemptPreparationFailed(
                 "physical candidate changed before dispatch", attempt_id=reservation.attempt_id,
             )
+        from ouroboros.llm_observability import host_step
         from ouroboros.observability import persist_physical_candidate
 
         scope = current_usage_scope()
@@ -761,6 +762,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 ),
             },
         )
+        host_step("physical_candidate")
         # One frozen send copy and one durable pre-send record. Disk read-back
         # comparison is the explicit historical audit's work, not dispatch IO.
         if predicate is not None:

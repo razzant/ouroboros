@@ -1099,7 +1099,10 @@ def _commit_request_refusals(ctx: ToolContext, *, root: str, preflight_reviewer:
 def _commit_reviewed_candidate(ctx, commit_message, started_at, managed_tx):
     """Admit the reviewed commit; join outside the launch lock so Pause stays prompt."""
     from ouroboros.owner_pause import OwnerPauseRefused, run_operation
+    from ouroboros.tools.review_collection import commit_landing_refusal
 
+    if refusal := commit_landing_refusal(ctx, commit_message, started_at, managed_tx):
+        return "", refusal
     try:
         run_operation(ctx, run_cmd, ["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         return run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip(), ""
