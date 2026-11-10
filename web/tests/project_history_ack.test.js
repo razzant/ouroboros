@@ -7,6 +7,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import * as readAhead from '../modules/read_ahead.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
+import { forgetProjectPreviews } from '../modules/chat_preview.js';
 
 // The span below is delimited by line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the delimiters expect.
@@ -295,6 +296,7 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
     };
     const context = vm.createContext({
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
+        forgetProjectPreviews,
         state: { projectSeenRevision: {} }, navState: { activeProjectId: 'p1' },
         projectInstances: new Map([['p1', inst]]), projectPaintRequests: new Map(), projectReveals: new Map(),
         projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] }, rooms: { forget() {} },

@@ -268,7 +268,7 @@ textarea.ui-control.consciousness-owner-words {
 /* On the desk the Connect list is as tall as its rows (a phone keeps the reader's full sheet). */
 /* A modal dialog keeps the engine's inset 0, so only fit-content (never auto) sizes it to its rows. */
 :root[data-layout="docked"] .document-reader.place-connect { height: fit-content; }
-:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5))); }
+:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5) - var(--inset-top))); }
 .place-sheet .document-reader-title { display: flex; align-items: center; gap: var(--space-3); white-space: normal; }
 .place-sheet-body { display: flex; flex-direction: column; gap: var(--space-5); container: placesheet / inline-size; }
 /* One column under the sheet's head: the sections start where its title starts. */

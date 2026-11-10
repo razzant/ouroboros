@@ -7,6 +7,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
+import { forgetProjectPreviews } from '../modules/chat_preview.js';
 
 const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
 
@@ -297,7 +298,7 @@ function snapshotHarness({ host, beyond = [], seen }) {
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
-        heldRows, beyond,
+        heldRows, beyond, forgetProjectPreviews,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: 90, mainSeenRevision: 90, mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: seen },

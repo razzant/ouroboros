@@ -15,6 +15,7 @@ import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, decorateContactSource, showTaskIncidentToast } from './chat_media.js';
 import { createCatchUp } from './room_retire.js';
+import { createChatPreview } from './chat_preview.js';
 import { attachmentCaption, attachmentViews, createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
@@ -167,7 +168,6 @@ import {
 const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
 const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 'completed_warn', 'failed',
     'cancelled', 'rejected', 'interrupted']);  // a helper's narration is `progress`
-const CHAT_STORAGE_KEY = 'ouro_chat';
 // Details and Reviews use the shared control glyph; ::after remains the touch hit area.
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
@@ -315,14 +315,11 @@ export function createChatInstance({
     let replaySelection = null;
     function noteBubbleKeys(node) { replayKeys?.note(node); }
 
-    const persistedHistory = [];
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
     const pendingUserBubbles = new Map();
+    // A source read has painted the room (the saved preview never counts).
     let historyLoaded = false;
-    // A source read has painted the room. The sessionStorage preview a failed first
-    // read leaves is not one: the first source read after it still opens the room.
-    let sourceHydrated = false;
     let historySyncPromise = null;
     let lastHistorySyncSucceeded = false;
     // STICKY single-flight hydration promise: unlike historySyncPromise it survives success, so hydration triggers
@@ -602,12 +599,6 @@ export function createChatInstance({
         if (destroyed || leaving) return;
         const request = await stateSnapshots.gate(true);
         if (request) await readStateSnapshot(stateSnapshots, request);
-    }
-
-    function persistVisibleHistory() {
-        try {
-            sessionStorage.setItem(storeKey(CHAT_STORAGE_KEY), JSON.stringify(persistedHistory.slice(-200)));
-        } catch {}
     }
 
     const ACTUAL_BOTTOM_TOLERANCE_PX = 6;
@@ -2157,26 +2148,8 @@ export function createChatInstance({
                 noteBubbleKeys(prior);
                 rememberMessageKey(messageKey);
                 chatDecision.renderRoutingDecision(prior, opts.chatAnnotation);
-                const changed = syncSavedProjectContext(prior, opts.originProjected);
-                for (const row of persistedHistory) if (opts.originId && row.originId === opts.originId
-                    || clientMessageId && row.clientMessageId === clientMessageId) row.originProjected = false;
-                return changed;
+                return syncSavedProjectContext(prior, opts.originProjected);
             }
-        }
-
-        if (!isProgress && !ephemeral && !_historyAppending) {
-            persistedHistory.push({
-                text, role, ts, markdown: !!markdown, ...meta, narration: opts.narration,
-                originProjected: !!opts.originProjected, terminalTime: opts.terminalTime || null,
-                completionNotice: opts.completionNotice || null,
-                skillReview: opts.skillReview || null, evidenceRef: opts.evidenceRef || null,
-                presenceContact: opts.presenceContact || null,
-                attachments: attachments.length ? attachments : null,
-                textPlaceholder: opts.textPlaceholder === true,
-            });
-            // Match the persisted-history cap.
-            if (persistedHistory.length > 200) persistedHistory.splice(0, persistedHistory.length - 200);
-            if (!_historyReplayActive) persistVisibleHistory();
         }
 
         const bubble = document.createElement('div');
@@ -2331,6 +2304,7 @@ export function createChatInstance({
         liveCardBound.beginReplay();
         try {
             withStableViewport(() => {
+                preview.retire();
                 replayKeys = createReplayKeys();
                 noteBubbleKeys(messagesDiv);
                 replaySelection = keepSelection(document);
@@ -2543,7 +2517,6 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                persistVisibleHistory();
                 return true;
             });
         } finally {
@@ -2618,9 +2591,9 @@ export function createChatInstance({
                 composer.seedInputHistory(messages);
 
                 const wasFirstLoad = !historyLoaded;
-                // Recovery from a failed first read still opens at the newest message.
-                const opensAfterPreview = !sourceHydrated && followingAtStart && reading.generation === generationAtStart;
-                historyLoaded = sourceHydrated = true;
+                // The first source read opens at the newest message unless the reader moved.
+                const opensAfterPreview = wasFirstLoad && followingAtStart && reading.generation === generationAtStart;
+                historyLoaded = true;
                 lastHistorySyncSucceeded = true;
                 messagesDiv.dataset.historyHydrated = 'true';
                 emptyWelcome?.historyRead(data.window?.complete === true);
@@ -2643,6 +2616,7 @@ export function createChatInstance({
             } catch (err) {
                 if (destroyed || startedVisit !== visit) { initialHydrationPromise = null; return false; }
                 lastHistorySyncSucceeded = false;
+                preview.failed(err);
                 emptyWelcome?.historyRead(false);
                 initialHydrationPromise = null;
                 // Migration keeps a calm note and retries through the existing 700 ms scheduler.
@@ -2694,25 +2668,17 @@ export function createChatInstance({
     });
 
     (async () => {
+        // The owners below exist first: no read stands between an opening and the saved text.
+        await null;
+        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
         if (destroyed) return;
-        // A message this tab kept across a reload that the first read (or its preview) did not show saved is in doubt.
-        const reconcileUnsaved = () => !destroyed && unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content,
-            'user', false, ts || null, false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
-        if (await awaitInitialHydration()) return reconcileUnsaved();
-        try {
-            const saved = JSON.parse(sessionStorage.getItem(storeKey(CHAT_STORAGE_KEY)) || '[]');
-            // Replay the persisted addMessage options through the same normalizer.
-            for (const { text, role, markdown, ts, ...restored } of saved) {
-                addMessage(text, role, !!markdown, ts || null, false, restored);
-            }
-        } catch {}
-        historyLoaded = true;
-        // The next successful source read reconciles this offline preview.
-        if (!lastHistorySyncSucceeded) liveCardBound.arm();
-        reconcileUnsaved();
+        await awaitInitialHydration();
+        // A message this tab kept across a reload that the first read did not show saved is in doubt.
+        if (!destroyed) unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
+            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
     })();
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
@@ -2826,6 +2792,7 @@ export function createChatInstance({
         // The room's measured layout variables, each written only when it changes (true then).
         const layout = { setProperty: (name, value) => page.style.getPropertyValue(name) !== value
             && (page.style.setProperty(name, value), true) };
+        let chromeMoved = false;
         const mutate = () => {
             let changed = false;
             if (pageHeader && messagesDiv) {
@@ -2838,10 +2805,18 @@ export function createChatInstance({
             if (inputArea && messagesDiv) {
                 const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);
                 changed = layout.setProperty('--chat-input-reserve', `${reserve}px`) || changed;
+                // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
+                const box = el => el.getBoundingClientRect();
+                if (pageHeader && document.body.classList.contains('keyboard-open')
+                        && !inputArea.querySelector('[data-motion]')) {
+                    chromeMoved = layout.setProperty('--chat-keyboard-chrome', `${Math.round(box(messagesDiv).top
+                        - box(pageHeader).top + box(inputArea).height - box(input).height)}px`);
+                }
             }
-            return changed;
+            return changed || chromeMoved;
         };
         const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
+        if (chromeMoved) composer?.resize();  // a grown cap sends no resize
         // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
         if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
         updateScrollButton();
@@ -2912,13 +2887,21 @@ export function createChatInstance({
     let recentHasOrigins = false;
     let recentHistoryIds = new Set();
     let recentRequest = 0, recentApplied = 0;
+    // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
         const recentVersion = cursor == null ? ++recentRequest : 0;
-        return { ...await apiClient.chatHistory({ chatId, cursor, ...options }), recentVersion };
+        try {
+            return { ...await apiClient.chatHistory({ chatId, cursor, ...options }), recentVersion };
+        } catch (error) {
+            if (!destroyed && !leaving && !options.signal?.aborted) preview.refused(error);
+            throw error;
+        }
     }
+    // Both newest reads (the room's own, ↓'s `latest` page) are admitted here once: the saved preview follows.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
+        preview.save(messages, data);
         // The newest admitted window (↓ too) owns the failure note.
         historyControls.endRecent(data.reason_code ? new Error('Some saved history could not be loaded.') : null);
         recentCoverage = data.coverage ?? null;
@@ -3038,17 +3021,22 @@ export function createChatInstance({
             pageHistoryIds.delete(descriptor.id);
             withStableViewport(() => releaseHistoryIds(ids));
         },
-        // Rows stored since the newest read join its window.
+        // Rows stored since the newest read join its window (and the saved preview).
         applyArrivals: (messages, { window, fromReconnect }) => {
+            preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             applyHistoryMessages(messages, { fromReconnect });
             readReceipt.arrived(window);
         },
         readNewest: syncHistory, newestInFlight: () => historySyncPromise,
-        canArrive: () => sourceHydrated && lastHistorySyncSucceeded && !liveCardBound.isArmed(),
+        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !liveCardBound.isArmed(),
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
     });
+    // The saved text shown until the first canonical read (chat_preview.js); `self` carries room_retire.js's kept selection.
+    let self = null;
+    const preview = createChatPreview({ feed: messagesDiv, room: [chatId, projectId], label: senderLabel,
+        mutate: withStableViewport, kept: () => self?.keptRanges });
 
     function syncLoadOlderControl(snapshot = historyPager.getState()) {
         if (destroyed || leaving) return;
@@ -3112,7 +3100,11 @@ export function createChatInstance({
             if (historyIslandAtEdge(messagesDiv, ids, historyNodes)) void loadHistoryAtEdge('newer');
         }
     }
-    const disposeReadingGestures = reading.bindGestures(navigateHistoryAtEdge);
+    // Only the owner's own move toward older messages puts a phone keyboard away.
+    const disposeReadingGestures = reading.bindGestures(direction => {
+        if (direction < 0 && document.activeElement === input && document.body.classList.contains('keyboard-open')) input.blur();
+        navigateHistoryAtEdge(direction);
+    });
     // Compact tables share rich-answer keyboard/overflow affordances; destroy releases them.
     bindMarkdownTables(messagesDiv);
     function retryHistoricalUpserts() {
@@ -3538,7 +3530,7 @@ export function createChatInstance({
     header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
         refreshState: refreshHeaderControlState });
 
-    return {
+    return self = {
         page,
         chatId,
         projectId,
@@ -3623,6 +3615,7 @@ export function createChatInstance({
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();
+            preview.destroy();
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);
             reviewHydrator.clear();
             // The buffered collections go last; a page replay never clears the subagent lineage, only this does.
@@ -3630,7 +3623,7 @@ export function createChatInstance({
                 subagentTerminalChildren, cancelableTaskIds, missingManagedTaskIds, managedTaskDetailReads, pendingUserBubbles,
                 localEchoJournal, seenMessageKeys, pageHistoryIds, historicalTerminals, pendingHistoryEvictions,
                 pendingHistoryUpserts, pendingLiveEvictions]) held.clear();
-            messageKeyOrder.length = persistedHistory.length = 0;
+            messageKeyOrder.length = 0;
             recentCoverage = null;
             try { destroyChatMarkdown(page); page.remove(); } catch {}
         },
