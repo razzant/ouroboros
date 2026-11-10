@@ -93,8 +93,8 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 `tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
 `tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
-- **Measure growth:** history, object count, nesting, cold caches and contention, using
-  existing spans and real-reader spies when responsiveness suffers. Telemetry adds no
+- **Measure growth:** history, object count, nesting, cold caches and contention, by
+  receipts (`work`, L7) and real-reader spies. Telemetry adds no
   steady-state writes/history reads. Remove repetition or reuse a validated view before
   adding a projection/cache. Unknown is never empty; no universal time limit, benchmark or approval gate.
 - **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
@@ -105,7 +105,7 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 - **Reuse precedents:** a writer seam whose transaction also writes the facts readers
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
-  one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3); one
+  one-step indexed selects (`store_capture.py`); one
   census per tree (`tree_census.writer_facts`); reuse by source identity, never time, against a
   fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`); rows kept by stamp, verdicts
   per reader (`delegate_custody_current.held_runs`, `task_store.owing_documents`); one batch of
@@ -166,7 +166,7 @@ ARCHITECTURE §10 "Continuity data-flow map" owns sources, projections and reten
 
 | Store / surface | Complete source → interactive projection | Growth and retention proof |
 |---|---|---|
-| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads cost the page, never another room's history; import coverage is disclosed; pages and parts compress the horizon, never delete it; size appears in the storage count |
+| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads and host work cost the page, never another room's history (a capture's whole-tail read is the named debt, L7d); import coverage is disclosed; pages and parts compress the horizon, never delete it; size appears in the storage count |
 | Plan/review evidence | ARCHITECTURE §10.1, "Plan/review authority" | Source and retention rules live in that row |
 | Skill-review root tasks | The review ledger's hot index (`state/review_ledger/index.jsonl`; a `surface="skill"` row names its skill) → `skill_readiness._skill_names_from_review_history`, bounded; a legacy `review_history.jsonl` is only read | Append-only; archived segments are disclosed as truncation; size under App state |
 | Task/project execution | ARCHITECTURE §10.1, "Execution evidence" | Promotion and retention rules live in that row |
