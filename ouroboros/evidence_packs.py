@@ -499,6 +499,23 @@ def _locate(root: pathlib.Path, **identity: str) -> Optional[Tuple[pathlib.Path,
     return next(iter(_placements(root, **identity)), None)
 
 
+def read_position(root: Any, *, sha256: str = "", kind: str = "", task_id: str = "",
+                  rel_path: str = "") -> Optional[tuple]:
+    """Where a read of this blob or task source at ``root`` would decode, for ordering reads of one forward-only
+    stream: ``(pack, offset)``, ``()`` when loose bytes answer first, ``None`` when ``root`` holds neither."""
+    root = pathlib.Path(root)
+    if rel_path:
+        loose, identity = _handle_path(root, task_id, rel_path), {"task_id": task_id, "rel_path": rel_path}
+        if pathlib.PurePosixPath(rel_path).parts[:2] != CHECKPOINTS_REL.parts:
+            return () if loose.exists() else None  # only checkpoint handles are ever packed
+    else:
+        loose, identity = root / "observability" / "blobs" / f"{sha256}.{kind}.gz", {"sha256": sha256, "kind": kind}
+    if loose.is_file() or (not rel_path and kind == "json" and shared_placement_path(root, sha256).is_file()):
+        return ()
+    located = _locate(root, **identity)
+    return None if located is None else (str(located[0]), int(located[1]["offset"]))
+
+
 
 def blob_ref_fields(ref: Any) -> Tuple[str, str, int]:
     """``(sha256, kind, size)`` of a gzip CAS blob ref (size -1 when the ref carries none), or ``ValueError``."""
@@ -537,35 +554,51 @@ def read_loose_gzip(path: pathlib.Path, max_bytes: Optional[int] = None) -> byte
 
 
 class _PartCache:
-    """The parts one pack write already read, newest kept, bounded by ``PART_CACHE_BYTES``."""
+    """The parts one scope already read, newest kept, bounded by ``PART_CACHE_BYTES``; ``packed_only`` keeps only
+    parts whose root holds no loose copy, the ones a read decodes from a pack."""
 
-    def __init__(self, limit: int) -> None:
-        self.limit, self.size, self.parts = limit, 0, collections.OrderedDict()
+    def __init__(self, limit: int, packed_only: bool = False) -> None:
+        self.limit, self.size, self.parts, self.packed_only = limit, 0, collections.OrderedDict(), packed_only
 
-    def get(self, digest: str) -> Optional[bytes]:
-        raw = self.parts.get(digest)
+    def get(self, key: tuple) -> Optional[bytes]:
+        raw = self.parts.get(key)
         if raw is not None:
-            self.parts.move_to_end(digest)
+            self.parts.move_to_end(key)
         return raw
 
-    def put(self, digest: str, raw: bytes) -> None:
+    def put(self, key: tuple, raw: bytes) -> None:
         if len(raw) > self.limit:
             return
-        self.parts[digest] = raw
+        self.parts[key] = raw
         self.size += len(raw)
         while self.size > self.limit:
             _, old = self.parts.popitem(last=False)
             self.size -= len(old)
 
+    def offer(self, root: Any, sha256: str, raw: bytes) -> None:
+        if not (self.packed_only and (pathlib.Path(root) / "observability" / "blobs" / f"{sha256}.json.gz").is_file()):
+            self.put((os.path.realpath(root), sha256), raw)
+
 
 @contextlib.contextmanager
-def part_cache_scope() -> Iterator[None]:
-    """One read per unique part while reassembling the views of one pack (``write_pack``)."""
-    token = _PART_CACHE.set(_PartCache(PART_CACHE_BYTES))
+def part_cache_scope(*, packed_only: bool = False) -> Iterator[None]:
+    """One read per unique part of a root while reassembling views (``write_pack``, one walk); nesting joins."""
+    if _PART_CACHE.get() is not None:
+        yield
+        return
+    token = _PART_CACHE.set(_PartCache(PART_CACHE_BYTES, packed_only))
     try:
         yield
     finally:
         _PART_CACHE.reset(token)
+
+
+def remember_part(root: Any, sha256: str, raw: bytes) -> None:
+    """Offer bytes verified at ``root`` to the current scope: a view reassembled there later need not decode them.
+    Keyed by root, so one root's bytes never answer a check of another's."""
+    cache = _PART_CACHE.get()
+    if cache is not None:
+        cache.offer(root, sha256, raw)
 
 
 def shared_placement_path(root: Any, sha256: str) -> pathlib.Path:
@@ -584,15 +617,15 @@ def _shared_whole(root: pathlib.Path, sha256: str, size: int, max_bytes: Optiona
     if admit is not None:
         admit(placement)
     skeleton = read_loose_gzip(placement, max_bytes)
-    cache = _PART_CACHE.get()
+    cache, place = _PART_CACHE.get(), os.path.realpath(root)
 
     def part(digest: str) -> bytes:
-        raw = cache.get(digest) if cache is not None else None
+        raw = cache.get((place, digest)) if cache is not None else None
         if raw is None:
             raw = blob_bytes(root, {"sha256": digest, "kind": "json", "encoding": "gzip"},
                              expected_kind="json", max_bytes=max_bytes, admit=admit)
             if cache is not None:
-                cache.put(digest, raw)
+                cache.offer(root, digest, raw)
         return raw
 
     raw = splice(skeleton, part, context=f"view {sha256[:12]}")

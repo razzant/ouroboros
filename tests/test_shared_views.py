@@ -359,9 +359,9 @@ def test_a_view_named_outside_a_manifest_brings_its_parts_and_the_child_can_go(t
 
 
 def test_a_child_view_beside_a_packed_task_proves_each_shared_part_once_then_checks_each_new_whole(root, monkeypatch):
-    """The parts a child's views share with an already packed task are each proven once by their own node; every
-    NEW skeleton is then checked as the whole it splices to, reading each part it names once (a token repeated
-    in ``send_messages`` included), never again only to learn the parent already holds it."""
+    """The parts a child's views share with an already packed task are each decoded once, by their own node: every
+    NEW skeleton is then checked as the whole it splices to from the walk's bounded part cache (a token repeated in
+    ``send_messages`` included), never decoding a part again only to learn the parent already holds it."""
     from ouroboros import headless
     from tests._packed_read_probe import count_packed_reads
 
@@ -377,7 +377,7 @@ def test_a_child_view_beside_a_packed_task_proves_each_shared_part_once_then_che
     reads = count_packed_reads(monkeypatch)
     _rewritten, state = obs.promote_child_task_refs(root, child, task, {})
     assert (state["status"], state["pending_refs"]) == ("complete", []), state
-    assert reads and set(reads.values()) == {1 + len(views)}, reads
+    assert reads and set(reads.values()) == {1}, reads
     shutil.rmtree(child)
     for index, view in enumerate(views):
         _manifest, restored, _ = obs.read_call_payload(root, task_id=task, call_id=f"llm_{index}_request")
