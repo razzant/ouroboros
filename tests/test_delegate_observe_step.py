@@ -51,10 +51,12 @@ class Engine:
     routes = ROUTES
 
     repaired = True  # the route accepts the problem acknowledgement (the contract probe's answer)
+    blocking_opt_in = False  # the route also answers the ``includeBlocking`` opt-in (claudexor #628)
 
     def __init__(self, *, streams=(), wakes=(), details=(), catalog=None, probe_answer=None):
         self.streams, self.wakes, self.details = list(streams), list(wakes), list(details)
         self.stream_opens, self.requests, self.detail_reads, self.probes = [], [], [], []
+        self.opt_in_probes = []
         self.catalog, self.probe_answer = catalog, probe_answer
 
     def operations(self, *, timeout_sec=None):
@@ -69,15 +71,18 @@ class Engine:
             raise answer
         return contextlib.nullcontext(answer if isinstance(answer, _Stream) else _Stream(answer))
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
-            self.probes.append(wait_ms)
+            (self.opt_in_probes if include_blocking else self.probes).append(wait_ms)
             if isinstance(self.probe_answer, BaseException):
                 raise self.probe_answer
+            if include_blocking and not self.blocking_opt_in:  # a strict input that predates the opt-in
+                raise ClaudexorUnavailable("invalid_request", "Unrecognized key(s): 'includeBlocking'", status_code=400)
             if not self.repaired:
                 raise ClaudexorUnavailable("invalid_request", "targets[0].seen: expected string", status_code=400)
             return _wake("timeout", [{"status": None, "pending": None, "token": None, "problem": "not_found"}])
-        self.requests.append({"targets": targets, "wait_ms": wait_ms})
+        self.requests.append({"targets": targets, "wait_ms": wait_ms,
+                              **({"include_blocking": True} if include_blocking else {})})
         answer = self.wakes.pop(0)
         if isinstance(answer, BaseException):
             raise answer
@@ -285,3 +290,49 @@ def test_refusal_without_new_events_publishes_availability_for_the_already_shown
     assert delegate_activity.shown_cursor(ctx, ctx.task_id, "run-s", 1) == 1
     delegate_progress.emit_retained(ctx, "run-s")
     assert len(ctx.frames) == 2, "the delivered metadata does not repeat"
+
+
+# -- questions that hold nothing (claudexor #628) -----------------------------------------------
+
+def _async_detail(*deliveries, seq=3):
+    rows = [{"interactionId": f"i-{index}", "delivery": delivery,
+             "questions": [{"id": "q", "question": "?", "options": [], "multi_select": False}]}
+            for index, delivery in enumerate(deliveries)]
+    summary = {"state": "running", "waitingOnUser": True,
+               "asyncQuestionsOnly": all(delivery == "async" for delivery in deliveries)}
+    return {"summary": summary, "lastSeq": seq, "pendingInteractions": rows}
+
+
+def _marked(blocking, token=TOKEN_B):
+    return {**_summary(pending=True, token=token), "blocking": blocking}
+
+
+def test_a_fetched_async_question_leaves_the_working_run_quiet_without_a_detail_read(ctx):
+    asked = _async_detail("async")
+    gateway = Engine(streams=["", "", ""], details=[asked, asked], wakes=[
+        _wake("attention", [_marked(False)], [0]),
+        _wake("timeout", [_marked(False)]),
+        _wake("attention", [_marked(False, token=TOKEN_A)], [0]),
+    ])
+    gateway.blocking_opt_in = True
+    first = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0)
+    assert first.detail is asked and gateway.detail_reads == ["run-s"], "a new question is fetched before its ACK"
+    quiet = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert gateway.requests[1] == {"targets": [{"runId": "run-s", "seen": TOKEN_B}], "wait_ms": 0, "include_blocking": True}
+    assert quiet.detail is None and gateway.detail_reads == ["run-s"], "no three-second detail read for it"
+    payload = json.loads(quiet.payload)
+    assert payload["status"] == "no_progress" and payload["waiting_on_user"] is True
+    assert payload["async_questions_only"] is True and payload["answered"] is True
+    changed = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert changed.detail is asked and gateway.detail_reads == ["run-s"] * 2, "a changed token is fetched again"
+
+
+@pytest.mark.parametrize("row", [_marked(True), _summary(pending=True, token=TOKEN_B)], ids=["holding", "unknown"])
+def test_a_holding_or_unknown_question_is_never_a_quiet_beat(ctx, row):
+    held = _async_detail("async", "blocking")
+    gateway = Engine(streams=["", ""], details=[held, held],
+                     wakes=[_wake("attention", [row], [0]), _wake("timeout", [row])])
+    gateway.blocking_opt_in = True
+    delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0)
+    again = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert again.detail is held and gateway.detail_reads == ["run-s"] * 2, "the old detail beat, as before"

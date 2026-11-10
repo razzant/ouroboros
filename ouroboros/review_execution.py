@@ -1085,15 +1085,18 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
     run no panel owns ends on its owner's control (a panel's run outlives its author, #1006)."""
     from ouroboros.delegate_registration_policy import review_owned_source
     from ouroboros.gateways.claudexor import pending_interactions as _cx_pending
+    from ouroboros.gateways.claudexor_observation import question_attention
     deadline = time.monotonic() + max(0.0, float(seconds))
     owner = None if deadline < float("inf") or review_owned_source(getattr(entry, "source", "")) else current_model_wait()
     detail, unobserved = _observe_session(gateway, run_id, max(0.0, deadline - time.monotonic()), None)
     seen: Optional[str] = None
     while not custody.is_terminal(detail):
         pending = _cx_pending(detail)
-        first = pending[0] if pending else {}
-        if (pending or bool(custody.summary_of(detail).get("waitingOnUser"))) \
-                and _interaction_outlives_slot(first.get("timeout_at"), deadline):
+        # Only a question that holds the reviewer ends its slot (claudexor #628), judged on the whole set: an async
+        # one is attention and may stay unanswered; the deadline and text are the holding row's own.
+        first = next((row for row in pending if row.get("delivery") != "async"), {})
+        held = (pending or custody.summary_of(detail).get("waitingOnUser")) and not question_attention(detail, pending)[1]
+        if held and _interaction_outlives_slot(first.get("timeout_at"), deadline):
             question = next((q for q in (str(x.get("question") or "").strip()
                                          for x in first.get("questions") or []) if q), "")
             outcome, state, carried = _slot_cancel_outcome(
