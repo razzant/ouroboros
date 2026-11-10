@@ -15,6 +15,18 @@ asks) sends one UTF-8 JSON line per TCP connection and gets one line back:
 - ``{"url", "method", "post_data", "resource_type"?, "body_present"?, "token"}`` →
   ``{"block": browser_policy.browser_request_block_reason(...)}`` for every routed
   request, the agent's or the human's in the shared tab.
+- ``{"action": "file_intake", "files": [{"path": P, "root": R?}, ...], "token": T}`` →
+  ``{"block": "", "files": [{"path", "name", "size", "sha256"}, ...]}`` or a reason:
+  local files chosen for a page's file input. Each entry is admitted by
+  ``core_file_tools.read_admission``, ``read_file``'s whole admission (profile, Presence
+  ceiling, runtime-data and protected paths) of its symlink-resolved target, with ``read_file``'s
+  root inference (an absolute path selects the root holding it, else ``active_workspace``);
+  each must open no-follow as a regular file. At most ``FILE_INTAKE_FILES`` files and
+  ``FILE_INTAKE_BYTES`` together are read, a growing file only to that bound; their exact
+  bytes are retained in the session task's artifact store (``store_actor_source_bytes``)
+  and answered by absolute ``path``, original basename ``name`` (the selected spelling's),
+  ``size`` and ``sha256``, never inline. Any refusal, or the session closing meanwhile,
+  answers no file at all; bytes already retained stay, unanswered, under their digest name.
 
 Every decision reads the session's bound ToolContext with the actor facts
 ``tools/browser.py`` passes for its own route (restricted profile, effective mode);
@@ -39,8 +51,11 @@ import contextvars
 import hmac
 import json
 import logging
+import os
+import pathlib
 import secrets
 import socket
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +73,9 @@ TOKEN_ENV = "OUROBOROS_BROWSER_GUARD_TOKEN"
 GUARD_ENV_NAMES = frozenset({ADDRESS_ENV, TOKEN_ENV})  # host-owned: a saved server config may not set them
 _CLOSED = "BROWSER_SESSION_CLOSED: the task's MCP session is closing"
 _FULL = "BROWSER_POLICY_UNAVAILABLE: too many browser-policy questions are already waiting"
+_INTAKE = "BROWSER_FILE_INTAKE_BLOCKED"
+FILE_INTAKE_FILES = 16  # files one file_intake question may select
+FILE_INTAKE_BYTES = 20 * 1024 * 1024  # their bytes together, held in memory until every one is retained
 
 
 class BrowserGuard:
@@ -164,6 +182,10 @@ class BrowserGuard:
         elif arming:
             self.armed = True
             return {"armed": True}
+        elif facts.get("action") == "file_intake":
+            reason, files = self._file_intake(facts.get("files"))
+            if not reason and not self._closing.is_set():  # every file retained while the session lived
+                return {"block": "", "files": files}
         elif "action" in facts:
             reason = (self._script_reason(facts.get("url")) if facts.get("action") == "evaluate"
                       else "BROWSER_POLICY_UNAVAILABLE: unknown guard action")
@@ -213,6 +235,81 @@ class BrowserGuard:
         except Exception:
             log.warning("MCP browser guard could not read a request's target identity", exc_info=True)
             return "BROWSER_POLICY_UNAVAILABLE: runtime service identity could not be read"
+
+    def _file_intake(self, files: Any) -> tuple:
+        """``(block, retained)``: every selected file read within the bounds, then all retained, or none answered."""
+        from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
+        from ouroboros.task_results import validate_task_id
+        from ouroboros.tool_access import canonical_data_root
+
+        if not isinstance(files, list) or not 0 < len(files) <= FILE_INTAKE_FILES or any(
+                not isinstance(entry, dict) or set(entry) - {"path", "root"} or not isinstance(entry.get("path"), str)
+                or not entry["path"].strip() or "\x00" in entry["path"] or not isinstance(entry.get("root", ""), str)
+                for entry in files):
+            return f"{_INTAKE}: files is 1 to {FILE_INTAKE_FILES} {{path, root?}} objects with a nonempty path", None
+        try:
+            task_id, store = validate_task_id(getattr(self._ctx, "task_id", None)), canonical_data_root(self._ctx)
+        except Exception:
+            return f"{_INTAKE}: no task owns this browser session to retain the files", None
+        selected, left = [], FILE_INTAKE_BYTES
+        for number, entry in enumerate(files, 1):
+            if self._closing.is_set():
+                return _CLOSED, None
+            refusal, name, data = self._intake_read(entry, left)
+            if refusal:
+                return f"{_INTAKE}: file {number} of {len(files)} {refusal}", None
+            selected.append((name, data))
+            left -= len(data)
+        retained = []
+        try:
+            for name, data in selected:
+                if self._closing.is_set():
+                    return _CLOSED, None
+                ref = store_actor_source_bytes(store, task_id, category="tool_results", source_id="browser_upload",
+                                               data=data, extension=pathlib.PurePath(name).suffix[1:])
+                retained.append({"path": str(task_artifact_dir_path(store, task_id) / ref["path"]), "name": name,
+                                 "size": ref["size"], "sha256": ref["sha256"]})
+        except Exception as exc:
+            log.warning("MCP browser guard could not retain selected upload files", exc_info=True)
+            return f"{_INTAKE}: the selected files could not be retained ({type(exc).__name__})", None
+        return "", retained
+
+    def _intake_read(self, entry: Dict[str, str], left: int) -> tuple:
+        """``(refusal, name, bytes)`` of one entry, admitted as ``read_file`` admits it, at most ``left`` bytes."""
+        from ouroboros.confined_files import FILE_FLAGS
+        from ouroboros.tools.core_file_tools import read_admission
+        from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+        path = entry["path"]
+        try:
+            root = entry.get("root") or _root_containing_absolute_path(self._ctx, "read_file", path) or "active_workspace"
+            _root, binding, refusal = read_admission(self._ctx, root, path)
+        except Exception as exc:
+            log.warning("MCP browser guard could not admit a selected upload file", exc_info=True)
+            return f"could not be admitted ({type(exc).__name__})", "", b""
+        if refusal is not None:  # read_file's own words: a ToolResult's text, or a protected path's final text
+            return f"is refused: {str(getattr(refusal, 'text', refusal)).removeprefix('⚠️ ')}", "", b""
+        target = binding.target_path
+        name = pathlib.PurePath(path).name
+        name = name if name not in ("", ".", "..") else target.name
+        try:
+            if target.is_dir():
+                return "is a folder; select each file in it", "", b""
+            # The target is resolved; a link swapped in as the final component fails, a FIFO never blocks.
+            with os.fdopen(os.open(target, FILE_FLAGS | getattr(os, "O_BINARY", 0)), "rb") as handle:
+                observed = os.fstat(handle.fileno())
+                if not stat.S_ISREG(observed.st_mode):
+                    return "is not a regular file", "", b""
+                if observed.st_size > left:
+                    return f"exceeds the {FILE_INTAKE_BYTES} bytes the selection may hold together", "", b""
+                data = handle.read(left + 1)  # a file growing while read still stops at the bound
+        except FileNotFoundError:
+            return "does not exist", "", b""
+        except OSError as exc:
+            return f"cannot be read ({type(exc).__name__}: {exc.strerror or 'unreadable'})", "", b""
+        if len(data) > left:
+            return f"exceeds the {FILE_INTAKE_BYTES} bytes the selection may hold together", "", b""
+        return "", name, data
 
 
 def _send(connection: socket.socket, answer: Dict[str, Any], timeout: float) -> None:

@@ -40,6 +40,65 @@ def _reply(ctx, text):
     ctx._delivery_candidate = SimpleNamespace(full_text=text)
 
 
+def _export_split_drive_blob(ctx, payload):
+    """Use the MCP projection that registers an embedded resource on the canonical drive."""
+    import base64
+
+    mcp_types = pytest.importorskip("mcp.types")
+    from ouroboros.mcp_result_images import project_returned
+    from ouroboros.tools.tool_result import ToolResult
+
+    raw = mcp_types.CallToolResult(content=[mcp_types.EmbeddedResource(
+        type="resource", resource=mcp_types.BlobResourceContents(
+            uri="file:///unread-export.zip", mimeType="application/zip",
+            blob=base64.b64encode(payload).decode("ascii")))])
+    cfg = SimpleNamespace(id="fixture", auth_token="", url="", secret_values=(), transport="stdio")
+    result = project_returned(ToolResult(status="ok", code="OK", text=""), raw, ctx, cfg, "export")
+    assert result is not None and result.status == "ok" and "task artifact " in result.text
+    return result
+
+
+def test_split_drive_mcp_blob_enters_required_result_and_changes_subject(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.tools import review_result as rr
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    canonical = ctx.drive_root
+    ctx.drive_root = tmp_path / "child-drive"
+    ctx.budget_drive_root = canonical
+    ctx.task_attempt = 1
+    answer = "The export is ready."
+
+    _export_split_drive_blob(ctx, b"PK\x03\x04first export")
+    first = rr.produced_material(ctx)
+    assert len(first["files"]) == 1 and first["issues"] == []
+    assert Path(first["files"][0]["path"]).is_relative_to(canonical)
+    assert first["files"][0]["sha256"] == hashlib.sha256(b"PK\x03\x04first export").hexdigest()
+    original = rr.result_subject(ctx, SimpleNamespace(answer=answer), governance_root=ctx.repo_dir)
+
+    _export_split_drive_blob(ctx, b"PK\x03\x04second export")
+    second = rr.produced_material(ctx)
+    assert len(second["files"]) == 2 and second["issues"] == []
+    changed = rr.result_subject(ctx, SimpleNamespace(answer=answer), governance_root=ctx.repo_dir)
+    assert changed.diff_sha != original.diff_sha and changed.tree_sha != original.tree_sha
+
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    shown, trace = [], {"tool_calls": []}
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True
+    assert len(sends) == 3 and trace["review_runs"][0]["authority"] == "host_root"
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is False
+    assert len(sends) == 3
+
+    store_task_artifact_bytes(ctx.drive_root, ctx.task_id, "ordinary.txt", b"child export")
+    files = rr.produced_material(ctx)["files"]
+    assert len(files) == 3 and any(Path(row["path"]).parent.name == ctx.task_id
+                                   and Path(row["path"]).name == "ordinary.txt" for row in files)
+
+
 def test_every_seat_answers_the_one_result_question_and_the_same_subject_is_reused_free(tmp_path, monkeypatch):
     ctx, _project = _foreign_project(tmp_path, monkeypatch)
     _reply(ctx, "The report is ready: report.md lists the three findings.")

@@ -7,8 +7,10 @@ be read, for its Playwright consumer and this bridge alike.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import pathlib
 import socket
 import threading
 import time
@@ -17,7 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import browser_policy, config, mcp_browser_guard, mcp_task_session
+from ouroboros import artifacts, browser_policy, config, mcp_browser_guard, mcp_task_session
+from ouroboros.artifacts import task_artifact_dir_path
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.server_process import record_service_binding
 from ouroboros.tools import browser
@@ -210,7 +213,10 @@ def test_bridge_reaches_the_policy_owner_through_the_real_server_process(tmp_pat
         {"url": "http://169.254.169.254/latest/meta-data", "method": "GET", "post_data": None},
         {"action": "evaluate", "url": f"http://127.0.0.1:{other}/"},
         {"action": "evaluate", "url": "http://169.254.169.254/"},
+        {"action": "file_intake", "files": [{"path": "upload.bin"}]},
     ]
+    upload = b"\x00real session\xff\r\n"
+    (pathlib.Path(registry._ctx.workspace_root) / "upload.bin").write_bytes(upload)
     with owner(registry):
         result = call(registry, "guard", {"questions": questions})
         guard = session_of(registry).guard
@@ -222,7 +228,12 @@ def test_bridge_reaches_the_policy_owner_through_the_real_server_process(tmp_pat
     assert [answer["block"] for answer in answers[2:]] == [
         "", owner_block, owner_block, owner_block, "", "",
         "BROWSER_METADATA_BLOCKED: link-local/cloud metadata target", "",
-        "BROWSER_METADATA_BLOCKED: link-local/cloud metadata target"]
+        "BROWSER_METADATA_BLOCKED: link-local/cloud metadata target", ""]
+    [retained] = answers[-1]["files"]  # the session's own task keeps the bytes; the server gets their path
+    assert pathlib.Path(retained["path"]).read_bytes() == upload
+    assert pathlib.Path(retained["path"]).is_relative_to(task_artifact_dir_path(registry._ctx.drive_root, "root"))
+    assert {**retained, "path": ""} == {"path": "", "name": "upload.bin", "size": len(upload),
+                                        "sha256": hashlib.sha256(upload).hexdigest()}
     discovery, session = rows(log, "start")
     assert discovery["guard"] == "" and discovery["token"] is False  # listing never gets the guard
     assert session["guard"] == address and address.startswith("127.0.0.1:") and session["token"] is True
@@ -405,3 +416,197 @@ def test_retiring_the_guard_answers_its_queued_questions_and_runs_none_of_them(t
     assert _reply(first, 5)["block"].startswith("BROWSER_SESSION_CLOSED")  # it ended while that ran
     guard._pool.shutdown(wait=True)
     assert decided == ["http://127.0.0.1:9/1"]  # no queued question reached the policy
+
+
+# -- file_intake: local files chosen for a page's file input, retained exactly for the session's task --------------
+
+def _intake_world(tmp_path):
+    """A top-level task context whose active workspace (its repository) holds ``upload/``."""
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    (repo / "upload").mkdir(parents=True)
+    data.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=data)
+    ctx.task_id = "t-upload"
+    return ctx, repo / "upload"
+
+
+def _intake(guard, *files):
+    return _ask(guard, {"action": "file_intake", "files": list(files)})
+
+
+def _retained(ctx):
+    home = task_artifact_dir_path(ctx.drive_root, ctx.task_id) / "source_handles" / "tool_results"
+    return sorted(path.name for path in home.iterdir()) if home.exists() else []
+
+
+def test_file_intake_retains_the_exact_bytes_and_names_of_every_selected_file(tmp_path):
+    ctx, folder = _intake_world(tmp_path)
+    names = ["отчёт 📄.bin", "été.TXT", "plain"]  # Cyrillic and emoji; a decomposed (NFD) spelling
+    contents = [bytes(range(256)) * 3 + b"\r\n\x00\r", "é text\r\n".encode(), b""]
+    for name, data in zip(names, contents):
+        (folder / name).write_bytes(data)
+    (folder / "chosen.pdf").symlink_to(folder / names[0])
+    with _guard(ctx) as guard:
+        answer = _intake(guard, {"path": f"upload/{names[0]}"},
+                         {"path": str(folder / names[1])},  # absolute: read_file's root inference
+                         {"root": "active_workspace", "path": "upload/plain"}, {"path": "upload/chosen.pdf"})
+    assert answer["block"] == "" and set(answer) == {"block", "files"}, answer
+    rows = answer["files"]
+    assert [row["name"] for row in rows] == [*names, "chosen.pdf"]  # the selected spelling, byte for byte
+    store = task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+    for row, data in zip(rows, [*contents, contents[0]]):
+        path = pathlib.Path(row["path"])
+        assert path.is_absolute() and path.is_relative_to(store / "source_handles" / "tool_results"), row
+        assert path.read_bytes() == data
+        assert (row["size"], row["sha256"]) == (len(data), hashlib.sha256(data).hexdigest())
+    assert rows[3]["sha256"] == rows[0]["sha256"]  # the link's resolved target, under the link's own name
+    assert [pathlib.PurePath(row["path"]).suffix for row in rows] == [".bin", ".TXT", ".bin", ".pdf"]
+
+
+def test_file_intake_answers_no_file_when_any_selected_file_is_refused(tmp_path):
+    from ouroboros.tools.core_file_tools import read_admission
+    from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+    from tests.test_delegate_input_files import _presence
+
+    ctx, folder = _intake_world(tmp_path)
+    (folder / "ok.bin").write_bytes(b"ok")
+    (folder / "inner").mkdir()
+    (folder / "oracle.bin").write_bytes(b"black box")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"not in any root")
+    (folder / "escape.bin").symlink_to(outside)  # admission judges the link's resolved target
+    ctx.task_contract = {"resource_policy": {"protected_artifacts": [{
+        "id": "oracle", "role": "black_box_reference", "paths": [str(folder / "oracle.bin")]}]}}
+    ok = {"path": "upload/ok.bin"}
+    refused = [{"path": str(outside)}, {"path": "../outside.bin"}, {"path": "upload/escape.bin"},
+               {"root": "bogus", "path": "upload/ok.bin"}, {"root": "skill_payload", "path": "x.bin"},
+               {"path": "upload/oracle.bin"}]
+    unreadable = folder / "locked.bin"
+    unreadable.write_bytes(b"locked")
+    unreadable.chmod(0)
+    misses = {"does not exist": {"path": "upload/absent.bin"}, "is a folder": {"path": "upload/inner"}}
+    if not os.access(unreadable, os.R_OK):  # a superuser reads it anyway
+        misses["cannot be read (PermissionError"] = {"path": "upload/locked.bin"}
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(folder / "pipe")
+        misses["is not a regular file"] = {"path": "upload/pipe"}  # opened without waiting for a writer
+    try:
+        with _guard(ctx) as guard:
+            for entry in refused:  # read_file's own refusal, in its own words, with read_file's root inference
+                root = (entry.get("root") or _root_containing_absolute_path(ctx, "read_file", entry["path"])
+                        or "active_workspace")
+                words = read_admission(ctx, root, entry["path"])[2]
+                answer = _intake(guard, ok, entry)
+                assert answer == {"block": "BROWSER_FILE_INTAKE_BLOCKED: file 2 of 2 is refused: "
+                                           + str(getattr(words, "text", words)).removeprefix("⚠️ ")}, (entry, answer)
+            for words, entry in misses.items():
+                answer = _intake(guard, ok, entry)
+                assert set(answer) == {"block"} and words in answer["block"], (entry, answer)
+                assert answer["block"].startswith("BROWSER_FILE_INTAKE_BLOCKED: file 2 of 2 "), answer
+            _presence(ctx, ("system_repo", "unrelated"))  # a Presence ceiling granting nothing here
+            answer = _intake(guard, ok)
+            assert "PRESENCE_RESOURCE_BLOCKED" in answer["block"] and "files" not in answer, answer
+            shapes = (None, [], "upload/ok.bin", [ok] * 17, [{"path": ""}], [{"path": "a\x00b"}], [{"path": 3}],
+                      [{**ok, "extra": 1}], [{**ok, "root": 3}], [ok, "upload/ok.bin"])
+            for files in shapes:
+                answer = _ask(guard, {"action": "file_intake", "files": files})
+                assert answer == {"block": "BROWSER_FILE_INTAKE_BLOCKED: files is 1 to 16 {path, root?} objects "
+                                           "with a nonempty path"}, (files, answer)
+    finally:
+        unreadable.chmod(0o600)
+    assert _retained(ctx) == []  # every refusal came before any retention
+    taskless = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    with _guard(taskless) as guard:
+        assert "no task owns this browser session" in _intake(guard, ok)["block"]
+
+
+def test_file_intake_reads_no_more_than_its_declared_bounds(tmp_path, monkeypatch):
+    ctx, folder = _intake_world(tmp_path)
+    monkeypatch.setattr(mcp_browser_guard, "FILE_INTAKE_BYTES", 10)
+    monkeypatch.setattr(mcp_browser_guard, "FILE_INTAKE_FILES", 2)
+    for name, size in (("six", 6), ("five", 5), ("ten", 10), ("eleven", 11), ("grows", 1 << 20)):
+        (folder / name).write_bytes(b"x" * size)
+    selected = {(folder / name).stat().st_ino: name for name in ("ten", "grows")}
+    grower, real, real_open, reads = (folder / "grows").stat().st_ino, os.fstat, os.fdopen, []
+
+    def stale(fd):  # the file grew after its size was read: st_size still says it is empty
+        observed = real(fd)
+        return os.stat_result((*observed[:6], 0, *observed[7:10])) if observed.st_ino == grower else observed
+
+    class Counted:  # every read of a selected file: the size asked for and the bytes it gave
+        def __init__(self, handle, name):
+            self._handle, self._name = handle, name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def __getattr__(self, attr):
+            return getattr(self._handle, attr)
+
+        def read(self, size=-1):
+            data = self._handle.read(size)
+            reads.append((self._name, size, len(data)))
+            return data
+
+    def counted(fd, *args, **kwargs):
+        name = selected.get(real(fd).st_ino)
+        handle = real_open(fd, *args, **kwargs)
+        return Counted(handle, name) if name else handle
+    monkeypatch.setattr(os, "fstat", stale)
+    monkeypatch.setattr(os, "fdopen", counted)
+    with _guard(ctx) as guard:
+        assert _intake(guard, {"path": "upload/ten"})["files"][0]["size"] == 10  # exactly the bound
+        over = "exceeds the 10 bytes the selection may hold together"
+        assert _intake(guard, {"path": "upload/eleven"})["block"].endswith("file 1 of 1 " + over)
+        assert _intake(guard, {"path": "upload/six"}, {"path": "upload/five"})["block"].endswith("file 2 of 2 " + over)
+        assert _intake(guard, {"path": "upload/grows"})["block"].endswith("file 1 of 1 " + over)  # the read stops
+        assert "files is 1 to 2 " in _intake(guard, *[{"path": "upload/six"}] * 3)["block"]
+    # One read each, asked for one byte past the bound: a mebibyte file reported empty gave 11 bytes, no more.
+    assert reads == [("ten", 11, 10), ("grows", 11, 11)], reads
+    assert len(_retained(ctx)) == 1
+
+
+def test_file_intake_answers_no_file_once_its_session_closes_or_without_its_token(tmp_path, monkeypatch):
+    from ouroboros.tools import core_file_tools
+
+    ctx, folder = _intake_world(tmp_path)
+    (folder / "a.bin").write_bytes(b"a")
+    (folder / "b.bin").write_bytes(b"b")
+    both, closed = [{"path": "upload/a.bin"}, {"path": "upload/b.bin"}], {"block": mcp_browser_guard._CLOSED}
+    real_store, real_admission, stored = artifacts.store_actor_source_bytes, core_file_tools.read_admission, []
+
+    def closing_after(guard, count, real, *, fail=False):
+        def step(*args, **kwargs):
+            if fail and len(stored) == count:
+                raise OSError("disk full")
+            result = real(*args, **kwargs)
+            stored.append(result)
+            if not fail and len(stored) == count:
+                guard.closing()
+            return result
+        return step
+    with _guard(ctx) as guard:
+        wrong = _ask(guard, {"action": "file_intake", "files": both, "token": "0" * 64})
+        assert set(wrong) == {"block"} and "guard token" in wrong["block"]
+        guard.closing()
+        assert _intake(guard, *both) == closed
+    assert _retained(ctx) == []
+    for count, real, target, kept in ((1, real_admission, core_file_tools, 0),  # closed while admitting
+                                      (1, real_store, artifacts, 1),  # closed between two retentions
+                                      (2, real_store, artifacts, 2)):  # closed as the last file was retained
+        stored.clear()
+        with _guard(ctx) as guard:
+            name = "read_admission" if target is core_file_tools else "store_actor_source_bytes"
+            monkeypatch.setattr(target, name, closing_after(guard, count, real))
+            assert _intake(guard, *both) == closed
+        monkeypatch.setattr(target, name, real)
+        assert len(_retained(ctx)) == kept, (name, count)
+    stored.clear()
+    with _guard(ctx) as guard:  # a failed retention answers no file either; what was retained stays unanswered
+        monkeypatch.setattr(artifacts, "store_actor_source_bytes", closing_after(guard, 1, real_store, fail=True))
+        failed = _intake(guard, {"path": "upload/b.bin"}, {"path": "upload/a.bin"})
+    assert failed == {"block": "BROWSER_FILE_INTAKE_BLOCKED: the selected files could not be retained (OSError)"}
+    assert "disk full" not in failed["block"]
