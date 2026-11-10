@@ -468,7 +468,7 @@ export const skillSourcesApi = {
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
     catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
-    search: ({ q = '', source = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}) })}`, { cache: 'no-store', ...init }),
+    search: ({ q = '', source = '', sort = '', cursor = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}), ...(sort ? { sort } : {}), ...(cursor ? { cursor } : {}) })}`, { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**

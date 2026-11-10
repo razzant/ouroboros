@@ -105,6 +105,56 @@ def test_source_host_failures_publish_tool_error(ctx, monkeypatch, failure):
     assert (result.status, result.code) == ("error", "TOOL_ERROR")
 
 
+def _with_clawhub(hub, monkeypatch, search):
+    from ouroboros.marketplace import clawhub
+
+    rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
+    monkeypatch.setattr(clawhub, "search", search)
+    return clawhub
+
+
+def test_skill_search_lists_a_named_registrys_popular_page(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    asked = []
+
+    def search(query, **kwargs):
+        asked.append((query, kwargs.get("sort")))
+        name = "weather-kit" if query else "popular-one"
+        return {"results": [clawhub._summary_from_record({"name": name, "summary": "Most downloaded."})]}
+
+    clawhub = _with_clawhub(hub, monkeypatch, search)
+    found = json.loads(_call("skill_search", context, source="clawhub"))
+    assert asked == [("", "popular")]
+    assert [item["id"] for item in found["items"]] == ["clawhub/popular-one"]
+    assert "most downloaded" in found["listing"] and found["count"] == 1
+    # Other calls keep their behaviour: no registry for an empty All sources, its text search for words.
+    asked.clear()
+    assert "listing" not in json.loads(_call("skill_search", context))
+    assert asked == []
+    words = json.loads(_call("skill_search", context, source="clawhub", query="weather"))
+    assert "listing" not in words
+    assert asked == [("weather", None)], "a text search asks the registry without a listing order"
+    assert "clawhub/weather-kit" in [item["id"] for item in words["items"]]
+    assert not [note for note in words["notes"] if note.startswith("ClawHub")]
+
+
+def test_skill_search_says_when_a_named_registry_cannot_be_listed(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    asked = []
+
+    def search(*_a, **_k):
+        asked.append(1)
+        raise RuntimeError("HTTP 503")
+
+    _with_clawhub(hub, monkeypatch, search)
+    failed = json.loads(_call("skill_search", context, source="clawhub"))
+    assert failed["items"] == [] and "listing" not in failed and "ClawHub: HTTP 503" in failed["notes"]
+    asked.clear()
+    by_category = json.loads(_call("skill_search", context, source="clawhub", category="writing"))
+    assert asked == [] and any("no categories" in note for note in by_category["notes"])
+
+
 @pytest.mark.parametrize("tool", ["skill_sources", "skill_install", "skill_update"])
 def test_successful_calls_publish_ok(ctx, tool):
     context, _drive, _reviews, _hub = ctx

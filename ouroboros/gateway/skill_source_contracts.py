@@ -185,10 +185,12 @@ class SkillCatalogResponse(TypedDict, total=False):
 
 class SkillCatalogSearchResponse(TypedDict, total=False):
     """``GET /api/skill-catalog/search``: matching items, registry (ClawHub) hits appended; a registry
-    that could not answer sets ``registry_error`` and keeps the local matches."""
+    that could not answer sets ``registry_error`` and keeps the local matches. A registry named by ``source``
+    with no ``q`` answers one page of its own order, ``next_cursor`` naming the next page while there is one."""
 
     items: Required[List[SkillCatalogItem]]
     registry_error: str
+    next_cursor: str
 
 
 class SkillCatalogItemDetailResponse(TypedDict, total=False):

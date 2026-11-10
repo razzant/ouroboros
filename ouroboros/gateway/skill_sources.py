@@ -246,11 +246,19 @@ async def api_skill_catalog(request: Request) -> JSONResponse:
         return json_exception(exc, context="skill catalog read failed")
 
 
-def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source: str) -> Dict[str, Any]:
-    from ouroboros.skill_source_catalog import catalog_view, registry_items
+def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source: str, *, sort: str = "",
+            cursor: str = "") -> Dict[str, Any]:
+    from ouroboros.skill_source_catalog import catalog_view, registry_browse, registry_items
     from ouroboros.skill_sources import load_sources
 
     rows = load_sources()
+    named_registry = next((row for row in rows if row["kind"] == "registry" and row["id"] == source), None)
+    if named_registry is not None and not query.strip():  # a registry has no local list: its own page is the answer
+        try:
+            page = registry_browse(named_registry, sort=sort, cursor=cursor)
+        except Exception as exc:
+            return {"items": [], "registry_error": f"{named_registry['name']}: {exc}"[:300]}
+        return {"items": page["items"], **({"next_cursor": page["next_cursor"]} if page["next_cursor"] else {})}
     view = catalog_view(drive_root, rows=rows, refresh=True, repo_dir=repo_dir)
     words = [word for word in query.lower().split() if word]
     items = [item for item in view["items"] if (not source or item["source_id"] == source) and all(
@@ -268,9 +276,11 @@ def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source
 async def api_skill_catalog_search(request: Request) -> JSONResponse:
     query = str(request.query_params.get("q") or "")
     source = str(request.query_params.get("source") or "")
+    sort = str(request.query_params.get("sort") or "")
+    cursor = str(request.query_params.get("cursor") or "")
     try:
         return JSONResponse(await asyncio.to_thread(_search, request_drive_root(request), request_repo_dir(request),
-                                                    query, source))
+                                                    query, source, sort=sort, cursor=cursor))
     except Exception as exc:
         return json_exception(exc, context="skill catalog search failed")
 

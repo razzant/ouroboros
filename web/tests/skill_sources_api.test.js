@@ -101,6 +101,7 @@ test('each call sends exactly what the host takes', async () => {
         await skillSourcesApi.catalog();
         await skillSourcesApi.catalog({ refresh: true });
         await skillSourcesApi.search({ q: 'weather', source: 'clawhub' });
+        await skillSourcesApi.search({ source: 'clawhub', sort: 'updated', cursor: 'next page' });
         await skillSourcesApi.item('ouroboros-community', 'scholion');
         await skillSourcesApi.install('ouroboros/weather');
         await skillSourcesApi.install('clawhub/steipete/weather', { replace: true });
@@ -118,6 +119,7 @@ test('each call sends exactly what the host takes', async () => {
             { url: '/api/skill-catalog', method: 'GET', body: undefined },
             { url: '/api/skill-catalog?refresh=1', method: 'GET', body: undefined },
             { url: '/api/skill-catalog/search?q=weather&source=clawhub', method: 'GET', body: undefined },
+            { url: '/api/skill-catalog/search?q=&source=clawhub&sort=updated&cursor=next+page', method: 'GET', body: undefined },
             { url: '/api/skill-catalog/item/ouroboros-community/scholion', method: 'GET', body: undefined },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'ouroboros/weather', turn_on_when_ready: true } },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'clawhub/steipete/weather', turn_on_when_ready: true, replace: true } },
