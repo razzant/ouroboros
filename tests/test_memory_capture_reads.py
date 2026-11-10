@@ -61,7 +61,7 @@ def test_a_view_enters_the_chronicle_index_for_its_activation_and_its_one_captur
     entered = _counted(monkeypatch, ChronicleStore, "_index")
     view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
     assert view.active and sum(len(group["rooms"]) for group in view.conversations) == 23 and view.room["facts"]["pages"] == 1
-    assert entered == ["_reading", "capture"]  # the activation receipt, then one read for every reader of the view
+    assert entered == ["_reading", "_read_snapshot"]  # the activation receipt, then one read for every reader of the view
 
 
 def test_rows_by_address_answers_as_resolve_row_and_a_wrong_hint_still_finds_its_row(tmp_path):

@@ -55,6 +55,7 @@ from ouroboros.mark_anchors import describe as describe_anchor
 from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
                                          told_here, told_map)
 from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
+from ouroboros.context_timing import counted, timed_section
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -285,8 +286,25 @@ class MemoryViewSnapshot:
     def active(self) -> bool:
         return self.store_status.get("state") == "active"
 
+    def piece(self, key: Any, make: Callable[[], str]) -> int:
+        """The characters one local form of this view adds to a request's JSON, made once for this snapshot; a whole
+        text's price is their sum (``room_chars``). Only the count stays, as the floor prices far more forms than it
+        delivers, and delivery draws its text once (``render_story``, ``render_room``). A non-field attribute, like the
+        floor's element table: ``snapshot_json``, equality and ``dataclasses.replace`` never see it, and it lives as
+        long as the snapshot object."""
+        pieces = self.__dict__.setdefault("_pieces", {})
+        if key not in pieces:
+            counted("view_pieces", key=(id(self), key))
+            pieces[key] = json_chars(make())
+        return pieces[key]
+
 
 _TUPLES = ("story", "conversations", "marks", "fallback_refusals")
+
+
+def json_chars(text: str) -> int:
+    """What a text adds to a request's JSON: its escaped characters, quotes excluded."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
@@ -449,6 +467,7 @@ _STORIES: "OrderedDict[str, Tuple[int, List[memory_inventory.LegacyUnit], _Story
 _STORIES_KEPT = 4
 
 
+@timed_section("memory_view.story")
 def capture_story(store: ChronicleStore, root: pathlib.Path, label: Callable[..., str],
                    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
     """``(story entries, story status, helper refusals)``; folded or not is ``memory_inventory``'s verdict.
@@ -510,11 +529,10 @@ def _capture_story(store: ChronicleStore, sources: _StorySources, units: List[me
     story = [{**entry, "told_by": told[entry["id"]]} if entry["id"] in told else entry for entry in story]
     progress = memory_inventory.legacy_progress(units)
     open_units = [unit for unit in units if not unit.folded]
-    accounts = store.accounts()
     status = {"folded": progress["folded"], "total": progress["periods"], **memory_inventory.story_counts(store),
               "open_records": len(open_units), "open_rows": sum(unit.rows for unit in open_units),
               "open_chars": sum(unit.retelling_chars for unit in open_units), "helper_route": "",
-              "accounts": len(accounts),  # in the common view: whole there, not told by a later account
+              "accounts": len(store.records(kinds=("account",))),  # in the common view: whole there, not told by a later account
               "accounts_shown": sum(1 for entry in pages if entry["kind"] == "account" and not entry.get("told_by"))}
     if status["folded"] < status["total"]:
         status["helper_route"] = sources.helper_route()
@@ -972,11 +990,10 @@ def _page_label(entry: Mapping[str, Any]) -> str:
     return _page_pointer(entry) + attribution + "\n" + _indented(sentence)
 
 
-def _told_lines(account_id: str, told: List[Dict[str, Any]]) -> List[str]:
-    """One count and period over the selected records, nested selections included; exact IDs stay in the reader."""
-    children: Dict[str, List[Dict[str, Any]]] = {}
-    for item in told:
-        children.setdefault(item["told_by"], []).append(item)
+def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -> List[str]:
+    """One count and period over the selected records, nested selections included; exact IDs stay in the reader.
+
+    ``children``: the told records by their teller, indexed once per render (``render_story``)."""
     records, pending = [], [account_id]
     while pending:
         for item in children.get(pending.pop(), ()):
@@ -1119,6 +1136,9 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
     return lines
 
 
+STORY_STEPS = ("F3", "F5l", "F5", "F5a")  # the only steps ``render_story``'s text reads
+
+
 def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> str:
     """Block B's tail, ``## My story``: the settled retellings, then the pages not yet folded, then the status.
 
@@ -1128,16 +1148,44 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     chronicle, the room labels, the helper route and ``level`` (the physical floor's; the
     empty level renders the full view): F3 turns a room's retold records into one line; F5l keeps
     page first sentences, then F5 addresses pages and parts by covered-period age, independently
-    of display order. Selected accounts stay whole.
+    of display order. Selected accounts stay whole. Only those steps (``STORY_STEPS``) reach the text.
     """
+    key = _story_key(level)
+    counted("view_renders", key=("story", id(snapshot), key))
+    return _story_text(snapshot, dict(key))
+
+
+def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
+    return tuple(item for item in level.addressed if item[0] in STORY_STEPS)
+
+
+def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
+    """``json_chars(render_story(snapshot, level))``, read from the snapshot's pieces: what pricing a level costs."""
+    key = _story_key(level)
+    return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))
+
+
+def whole_story_at(snapshot: MemoryViewSnapshot, level: FloorLevel) -> bool:
+    """Whether this level's story is the whole story's text. Prices decide unless a level naming story steps prices the
+    same as the whole, and only then are the two texts drawn (two renders of the build's work)."""
+    key, same = _story_key(level), story_chars(snapshot, level) == story_chars(snapshot)
+    if not same or not key:
+        return same
+    counted("view_renders", 2)
+    return _story_text(snapshot, dict(key)) == _story_text(snapshot, {})
+
+
+def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
     spec = snapshot.spec
     if not spec.story:
         return ""
     if not snapshot.active:
         return (f"## My story — unavailable now ({snapshot.store_status.get('reason')})\n\n"
                 f"The old memory files are untouched: read_file(root='runtime_data', path='{LEGACY_FILE}').")
-    gone = dict(level.addressed)
-    told = [entry for entry in snapshot.story if entry.get("told_by")]
+    told: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in snapshot.story:
+        if entry.get("told_by"):
+            told.setdefault(entry["told_by"], []).append(entry)
     pointers = [entry for entry in snapshot.story if entry.get("kind") == "legacy" and not entry.get("told_by")]
     accounts = [entry for entry in snapshot.story if entry.get("kind") == "account" and not entry.get("told_by")]
     pages = [entry for entry in snapshot.story if entry.get("kind") not in ("legacy", "account") and not entry.get("told_by")]
@@ -1299,32 +1347,52 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     ``floor_note`` (``### Physical floor``) closes the block. Before the import has completed
     the room is one line naming the reason and a reader that works without the chronicle.
     """
+    counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
+    texts = _room_parts(snapshot, dict(level.addressed), lambda _key, make: make())
+    return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
+
+
+def room_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> int:
+    """``json_chars(render_room(snapshot, level, floor_note=...))`` from the snapshot's pieces and the blank lines joining them."""
+    chars = [count for count in _room_parts(snapshot, dict(level.addressed), snapshot.piece) if count]
+    if floor_note and snapshot.active:
+        chars.append(json_chars(floor_note))
+    return sum(chars) + 4 * max(0, len(chars) - 1)  # JSON spells a newline in two characters
+
+
+_ROOM_STEPS = ("F1", "F2", "F4", "F7", "F7p", "F7a", "F8", "F8a")  # the steps ``_room_text`` reads
+
+
+def _room_parts(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]],
+                piece: Callable[[Any, Callable[[], str]], Any]) -> List[Any]:
+    """The block's parts before the floor note, in order and joined by a blank line, each through ``piece``: its
+    price (``snapshot.piece``) or its text."""
     from ouroboros import memory_view_conversations as conversations
 
-    parts = [snapshot.owner_words]
+    parts = [piece(("owner_words",), lambda: snapshot.owner_words)]
     spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if not snapshot.active:
         if room:
-            parts.append(f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
-                         f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
-                         f"room, newest first; this room is chat_id {room['room_id']}.")
-        return "\n\n".join(part for part in parts if part)
-    gone = dict(level.addressed)
+            parts.append(piece(("inactive_room",), lambda: (
+                f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
+                f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
+                f"room, newest first; this room is chat_id {room['room_id']}.")))
+        return parts
     # A snapshot persisted before other rooms' late reviews left this view (a pointer entry: ``own_room`` False, no
     # words) is re-rendered after an update (``context_fit``); such an entry draws nothing.
     late = [mark for mark in snapshot.marks if mark.get("late_review") and mark["late_review"].get("own_room") is not False]
     ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
     if late:
-        parts.append(_late_reviews_text(late, snapshot.spec.role))
+        parts.append(piece(("late_reviews",), lambda: _late_reviews_text(late, snapshot.spec.role)))
     if ordinary:
-        parts.append(_marks_text(ordinary))
+        parts.append(piece(("marks",), lambda: _marks_text(ordinary)))
     if room:
-        parts.append(_room_text(room, gone))
-    if snapshot.spec.other_conversations:
-        parts.append(conversations.render(snapshot.conversations, gone))
-    parts.append(floor_note)
-    return "\n\n".join(part for part in parts if part)
+        parts.append(piece(("room", tuple((step, gone.get(step, ())) for step in _ROOM_STEPS)),
+                           lambda: _room_text(room, gone)))
+    if snapshot.spec.other_conversations and snapshot.conversations:
+        parts.extend(conversations.pieces(list(snapshot.conversations), gone, piece))
+    return parts
 
 
 # --- the role line ----------------------------------------------------------------------------------

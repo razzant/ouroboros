@@ -33,6 +33,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ouroboros import chat_chain, memory_inventory
+from ouroboros.context_timing import timed_section
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
                                            warm_lineage)
@@ -94,6 +95,7 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
             "pos": first[2], "last_pos": last[2], "chars": sum(int(e[1].get("text_chars") or 0) for e, _c in group)}
 
 
+@timed_section("memory_view.conversations")
 def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room: Mapping[str, List[Entry]],
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
             sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:
@@ -400,31 +402,39 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     return "\n".join(lines)
 
 
-def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> str:
-    """``## Other conversations`` at a floor level: the authority sentence first, then every group in its form; at the
-    last rung (F6a) my human's words of the counted groups stay, whole or by the address F7 folded them to."""
+def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
+            piece: Callable[[Any, Callable[[], str]], Any]) -> List[Any]:
+    """``## Other conversations`` at a floor level, each local form through ``piece`` (its price from ``snapshot.piece``
+    or its text): the authority sentence first, then every group in its form; at the last rung (F6a) my human's words
+    of the counted groups stay, whole or by the address F7 folded them to. The pieces are joined by a blank line."""
     from ouroboros.memory_view import _rooms_line, _row_pointer
 
-    groups = list(groups)
-    if not groups:
-        return ""
     words, owners, lined = set(gone.get("F6w", ())), set(gone.get("F7", ())), set(gone.get("F6g", ()))
     counted = [group for group in groups if group["key"] in lined] if gone.get("F6a") else []
-    lines = ["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]
+    parts = [piece(("conversations", "head"), lambda: "\n".join(["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]))]
     if counted:
-        rooms = [room for group in counted for room in group["rooms"]]
-        lines += ["", f"{len(counted)} conversations by count (the window's last rung): " + _rooms_line(rooms)]
-        lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"] for group in counted
-                  for room in group["rooms"] for word in room["words"] if _whole_owner(word)]
-    keys = {group["key"] for group in counted}
+        counted_owners = [word for group in counted for room in group["rooms"] for word in room["words"] if _whole_owner(word)]
+        parts.append(piece(("conversations", "counted", tuple(group["key"] for group in counted),
+                            frozenset(word["id"] for word in counted_owners if word["id"] in owners)),
+                           lambda: "\n".join([f"{len(counted)} conversations by count (the window's last rung): " + _rooms_line(
+                               [room for group in counted for room in group["rooms"]]),
+                               *(_row_pointer(word, "words") if word["id"] in owners else word["line"] for word in counted_owners)])))
+    shown = {group["key"] for group in counted}
     for group in groups:
-        if group["key"] in keys:
+        if group["key"] in shown:
             continue
-        lines += ["", render_group(group, words, owners, group["key"] in lined)]
-    kinds = Counter("engaged" if room["engaged"] else "silent" for group in groups for room in group["rooms"])
-    lines += ["", f"{len(groups)} other conversations, {kinds['engaged']} rooms where my human or I spoke, "
-                  f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room."]
-    return "\n".join(lines)
+        as_line, spoken = group["key"] in lined, [word["id"] for room in group["rooms"] for word in room["words"]]
+        parts.append(piece(("conversations", "group", group["key"], as_line,
+                            frozenset() if as_line else frozenset(word for word in spoken if word in words),
+                            frozenset(word for word in spoken if word in owners)),
+                           lambda group=group, as_line=as_line: render_group(group, words, owners, as_line)))
+
+    def foot() -> str:
+        kinds = Counter("engaged" if room["engaged"] else "silent" for group in groups for room in group["rooms"])
+        return (f"{len(groups)} other conversations, {kinds['engaged']} rooms where my human or I spoke, "
+                f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room.")
+    parts.append(piece(("conversations", "foot"), foot))
+    return parts
 
 
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:

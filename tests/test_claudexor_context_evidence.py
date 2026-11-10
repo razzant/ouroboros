@@ -107,10 +107,33 @@ def test_auto_does_not_reuse_last_discovered_accounts_capacity(tmp_path, catalog
     assert len(catalog["calls"]) == 2
 
 
+def test_an_auto_start_reads_the_catalog_once_and_rewrites_nothing_it_already_holds(tmp_path, catalog):
+    """Every Auto start reads the engine's catalog live, exactly once: that read answers the window and the output
+    limit even when the output record is past its ten minutes, the same statement read again is not written again,
+    and another advertisement is what the very next start plans by."""
+    from ouroboros import context_timing
+
+    def start(**kwargs):
+        with context_timing.measured_sections():
+            return _probe(tmp_path, **kwargs), context_timing.section_spans()["work"]
+
+    hours_ago = (ce.utc_now() - __import__("datetime").timedelta(hours=2)).isoformat()
+    catalog["value"]["observedAt"] = hours_ago  # no maximum and an output record already past its ten minutes
+    first, work = start()
+    assert (first.window_tokens, first.credential_profile_id, len(catalog["calls"])) == (872_000, "account-a", 1)
+    assert work == {"catalog_calls": 1, "evidence_writes": 2}  # the probe and the output limit; no second read
+    again, work = start()
+    assert (again.to_json(), len(catalog["calls"]), work) == (first.to_json(), 2, {"catalog_calls": 1})
+    catalog["value"] = _catalog("account-b", "identity-b", 500_000)
+    changed, work = start()
+    assert (changed.window_tokens, changed.credential_profile_id, len(catalog["calls"])) == (500_000, "account-b", 3)
+    assert work["catalog_calls"] == 1 and "catalog_calls_again" not in work
+
+
 def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repeated(tmp_path, monkeypatch):
     """A probe reads the engine's catalog once. When that read fails (now, or its ten-minute record), the output limit
-    names that failed read instead of waiting on a second read of the same daemon; a read that succeeded without
-    an account's window still reads the output limit."""
+    names that failed read instead of waiting on a second read of the same daemon; a read that answered without an
+    account's window answers the output limit too, so a nameless answer is read once per probe."""
     from ouroboros.llm import LLMClient
 
     reads = []
@@ -127,7 +150,7 @@ def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repe
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog",
                         staticmethod(lambda *_a, **_kw: reads.append("answered") or copy.deepcopy(nameless)))
     (tmp_path / "fresh").mkdir()
-    assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered", "answered"]
+    assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered"]
 
 
 def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(tmp_path, catalog, monkeypatch):

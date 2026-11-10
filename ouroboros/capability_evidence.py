@@ -332,14 +332,22 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
     """One ``_store_transaction`` writing one evidence entry of namespace ``kind``.
 
     It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
-    stale snapshot over another's record; the network read runs OUTSIDE it. Returns whether
-    the entry was saved and never raises: a write that fails or finds the store busy leaves
-    the previous file as it was, including an older record of this key."""
+    stale snapshot over another's record; the network read runs OUTSIDE it. An entry the store
+    already holds as it is is not written again. Returns whether the entry is stored and never
+    raises: a write that fails or finds the store busy leaves the previous file as it was,
+    including an older record of this key. The measured window counts a write (``evidence_writes``)."""
+    from ouroboros.context_timing import counted
+
+    if (_read(drive_root).get(kind) or {}).get(fp) == value:
+        return True
     try:
         with _store_transaction(drive_root):
             data = _load(drive_root)
+            if data.get(kind, {}).get(fp) == value:
+                return True
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
+            counted("evidence_writes", key=(kind, fp))
             return _save(drive_root, data)
     except Exception:
         log.debug("capability evidence store failed (%s)", kind, exc_info=True)
@@ -802,12 +810,14 @@ def _claudexor_metadata_evidence(model: str, base_url: str, headers: Any,
     an account fingerprint cannot reuse a prior account's cached capacity. The same
     read's output maximum is returned beside it and stored unless ``record`` is off.
     """
+    from ouroboros.context_timing import counted
     from ouroboros.llm import LLMClient
     from ouroboros.provider_models import parse_claudexor_model
 
     source, native_model = parse_claudexor_model(model)
     options = dict(options or {})
     requested_profile = str(options.get("credential_profile_id") or "")
+    counted("catalog_calls", key=(source, requested_profile, native_model))
     catalog = LLMClient.claudexor_model_catalog(source, requested_profile or None,
                                               requested_model=native_model)
     profile = str(catalog.get("credentialProfileId") or "")
@@ -1093,16 +1103,15 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
-    One catalog read serves both: a read that failed (live, or its ten-minute record) is not repeated for the
-    output limit, which names that failed read; a read that succeeded without a window still reads it.
-    After a failed read a fetching probe of an unpinned Auto route plans by the pool's smallest fresh statement
-    (``_pool_bound``); a reader that may not fetch keeps it unknown.
+    One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, or
+    its ten-minute record) is named by it, so neither is repeated. After a failed read a fetching probe of an unpinned
+    Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
     """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
     evidence = _probe_window(drive_root, **route)
-    read_failed = evidence.status == STATUS_FAILED
+    read_failed, read = evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
@@ -1121,7 +1130,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=read))
     return evidence
 
 

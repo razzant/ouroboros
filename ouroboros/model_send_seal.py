@@ -83,7 +83,7 @@ def build_model_send_seal(
     """The ``model_send_seal`` block for one physical-candidate manifest.
 
     ``projected`` is the physical custody projection persist already computed;
-    ``redaction`` is the :class:`observability.RedactionResult` of the CAS write
+    ``redaction`` is the :class:`redaction.RedactionResult` of the CAS write
     (built by ``persist_call`` — the seal discloses the exact redaction
     instances that fired, it never re-runs them). ``custody_projected`` lets the
     caller pass the ``projected != candidate`` fact it already computed for its

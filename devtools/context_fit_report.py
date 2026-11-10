@@ -96,7 +96,7 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
                 fit = physical_fit(plan, plan.messages_for(selected), sent, root=root)
         input_tokens = fit['measurement']['estimated_input_tokens']
     else:
-        facts = memory[-1][2] if memory else {}
+        facts = memory[-1].facts if memory else {}
         level = mf.kept_level(snapshot, facts) if memory else mv.FloorLevel(tuple(
             (step, tuple(ident for s, ident, *_ in mf.floor_elements(snapshot) if s == step)) for step in mf.LADDER))
         addressed = frames[-1][1]
@@ -133,7 +133,8 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         ('whole', [g for g in snapshot.conversations if g['key'] not in lined and not any(
             w['id'] in gone.get('F6w', ()) for room in g['rooms'] for w in room['words'])]),
     ):
-        add('other conversations', conversations.render(groups, gone) if groups else '', form, len(groups))
+        add('other conversations', '\n\n'.join(conversations.pieces(groups, gone, lambda _key, make: make()))
+            if groups else '', form, len(groups))  # each subset's own head and foot
     room = snapshot.room or {}
     notes = room.get('notes', [])
     short_notes = [note for note in notes if note['id'] in gone.get('F8', ())]
