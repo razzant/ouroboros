@@ -27,14 +27,20 @@ def _row(nodeid, outcome="passed", phase="call"):
     return {"nodeid": nodeid, "phase": phase, "outcome": outcome, "is_subtest": False}
 
 
-def _results(directory, reports, *, exit_code=None, collection=()):
+def _results(directory, reports, *, exit_code=None, collection=(), selected=None, skips=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     failed = any(row["outcome"] == "failed" for row in reports) or collection
-    (directory / "results.json").write_text(json.dumps({
+    result = {
         "format": 1, "session_exit_code": (1 if failed else 0) if exit_code is None else exit_code,
-        "reports": reports, "collection_failures": [{"nodeid": path, "outcome": "failed"} for path in collection],
-    }), encoding="utf-8")
+        "reports": reports,
+        "collection_failures": [{"nodeid": path, "outcome": "failed"} for path in collection],
+    }
+    if selected is not None:  # what tests/ci_evidence.py's session left to run after every filter
+        result["selected_nodeids"] = list(selected)
+    if skips is not None:  # the collectors that skipped at collection; a producer older than the field names none
+        result["collection_skips"] = list(skips)
+    (directory / "results.json").write_text(json.dumps(result), encoding="utf-8")
 
 
 def _selection(evidence, *, parallel="success", serial="success", node="success", inventory=None):
@@ -165,6 +171,84 @@ def test_outcomes_name_each_id_and_a_module_stands_for_its_tests(tmp_path):
         "tests/t.py::test_ok": "passed", "tests/t.py::test_red": "failed", "tests/t.py::test_skip": "skipped",
         "tests/u.py::test_late": "failed", "tests/t.py::test_gone": "unknown", "tests/w.py::test_any": "failed",
         "tests/v.py": "passed", "tests/u.py": "failed", "tests/w.py": "failed"}
+
+
+def test_a_class_or_function_id_stands_for_its_tests_and_parametrizations(tmp_path):
+    _results(tmp_path, [_row("tests/t.py::test_p[1]"), _row("tests/t.py::test_p[2]"), _row("tests/t.py::test_pp", "failed"),
+                        _row("tests/t.py::TestK::test_a"), _row("tests/t.py::test_q[1]"), _row("tests/t.py::test_q[2]", "failed")])
+    ids = ["tests/t.py::test_p", "tests/t.py::TestK", "tests/t.py::test_q", "tests/t.py::test_p[1]",
+           "tests/t.py::TestK::test_b"]
+    assert pmc.outcomes(pmc.read_session(tmp_path), ids) == dict(zip(ids, [
+        "passed", "passed", "failed", "passed", "unknown"]))  # test_pp is not one of test_p's parametrizations
+
+
+def test_an_aggregate_id_passes_only_when_each_test_its_session_selected_ran_whole(tmp_path):
+    module, one, two = "tests/t.py", "tests/t.py::test_one", "tests/t.py::test_two"
+    ids = [module, one, two, "tests/t.py::test_none"]
+    # A budget that ended the session before test_two leaves the module unknown, never passed on test_one alone.
+    _results(tmp_path, _whole(one), selected=[one, two], exit_code=1)
+    assert pmc.outcomes(pmc.read_session(tmp_path), ids) == dict(zip(ids, ["unknown", "passed", "unknown", "unknown"]))
+    _results(tmp_path, [*_whole(one), *_whole(two)], selected=[one, two])
+    assert pmc.outcomes(pmc.read_session(tmp_path), ids) == dict(zip(ids, ["passed", "passed", "passed", "unknown"]))
+    # test_two exists, but the session's markers left it out (the lane's exclusions, the size check's selection): it
+    # runs in no session that judges the module, while test_two itself stays unknown, neither passed nor absent.
+    _results(tmp_path, _whole(one), selected=[one])
+    assert pmc.outcomes(pmc.read_session(tmp_path), ids) == dict(zip(ids, ["passed", "passed", "unknown", "unknown"]))
+    _results(tmp_path / "size", _whole("tests/test_smoke.py::test_sized"), selected=["tests/test_smoke.py::test_sized"])
+    assert pmc.size_status(pmc.read_session(tmp_path / "size"), ["size tests/test_smoke.py"]) == {
+        "size tests/test_smoke.py": "passed"}
+    # A class that did not collect fails the module and its own ids; the module's other tests keep their verdict.
+    _results(tmp_path, [*_whole(one), *_whole(two)], selected=[one, two], collection=["tests/t.py::TestK"])
+    assert pmc.outcomes(pmc.read_session(tmp_path), [module, "tests/t.py::TestK::test_k", one]) == {
+        module: "failed", "tests/t.py::TestK::test_k": "failed", one: "passed"}
+    # A class that skipped at collection held tests that never ran: no red and no pass of its module or itself, with a
+    # selection or without one (an xdist controller's export). Beneath it nothing is known; its siblings keep theirs.
+    klass, inner = "tests/t.py::TestK", "tests/t.py::TestK::test_k"
+    for selection in ([one, two], None):
+        _results(tmp_path, [*_whole(one), *_whole(two)], selected=selection, skips=[klass])
+        assert pmc.candidates(pmc.read_session(tmp_path)) == {}
+        assert pmc.outcomes(pmc.read_session(tmp_path), [module, klass, inner, one, two]) == dict(zip(
+            [module, klass, inner, one, two], ["skipped", "skipped", "unknown", "passed", "passed"]))
+    # A failure beside it still fails the module, and a skip in one module touches no other.
+    _results(tmp_path, [*_whole(one), _row(two, "failed")], selected=[one, two], skips=[klass, "tests/u.py::TestX"])
+    assert pmc.outcomes(pmc.read_session(tmp_path), [module]) == {module: "failed"}
+    _results(tmp_path, _whole(one), selected=[one], skips=["tests/u.py::TestX"])
+    assert pmc.outcomes(pmc.read_session(tmp_path), [module]) == {module: "passed"}
+    # A whole module that skipped at collection: exit 5, nothing selected, its ids no pass and none of them absent.
+    _results(tmp_path, [], selected=[], skips=[module], exit_code=5)
+    assert pmc.outcomes(pmc.read_session(tmp_path), [module, one]) == {module: "skipped", one: "unknown"}
+    # Without a selection (an older producer) an aggregate counts only on an export that ended (exit 0 or 1).
+    _results(tmp_path, _whole(one), exit_code=2)
+    assert pmc.outcomes(pmc.read_session(tmp_path), [module, one]) == {module: "unknown", one: "passed"}
+
+
+def _xfail(nodeid, phase="call", reason="known breach", **facts):
+    """A report row of pytest's XFAIL as tests/ci_evidence.py keeps it: "skipped", with the marker's reason."""
+    return {**_row(nodeid, "skipped", phase), "wasxfail": reason, **facts}
+
+
+def _whole(nodeid, call=None):
+    """The setup, call and teardown a pass reports of a test that ran whole."""
+    return [_row(nodeid, phase="setup"), call or _row(nodeid), _row(nodeid, phase="teardown")]
+
+
+def test_an_expected_failure_that_ran_is_neither_a_pass_nor_a_skip(tmp_path):
+    def ran(nodeid, call):
+        return [_row(nodeid, phase="setup"), call, _row(nodeid, phase="teardown")]
+    _results(tmp_path, [*ran("tests/t.py::test_breach", _xfail("tests/t.py::test_breach")),
+                        _xfail("tests/t.py::test_notrun", "setup", "[NOTRUN] kept"), _row("tests/t.py::test_notrun", phase="teardown"),
+                        _row("tests/t.py::test_late", phase="setup"), _xfail("tests/t.py::test_late"),
+                        _xfail("tests/t.py::test_late", "teardown"),
+                        *ran("tests/t.py::test_opted", _xfail("tests/t.py::test_opted", error_type="XFailed")),
+                        *ran("tests/t.py::test_legacy", _row("tests/t.py::test_legacy", "skipped")),
+                        *ran("tests/u.py::test_ok", _row("tests/u.py::test_ok")),
+                        *ran("tests/u.py::test_breach", _xfail("tests/u.py::test_breach")),
+                        _row("tests/t.py::test_torn", phase="setup"), _xfail("tests/t.py::test_torn")])
+    ids = ["tests/t.py::test_breach", "tests/t.py::test_notrun", "tests/t.py::test_late", "tests/t.py::test_opted",
+           "tests/t.py::test_legacy", "tests/u.py", "tests/t.py", "tests/t.py::test_torn"]
+    # Only the call that ran whole and failed as its marker expects; an older row without the field proves nothing.
+    assert pmc.outcomes(pmc.read_session(tmp_path), ids) == dict(zip(ids, [
+        "xfailed", "skipped", "skipped", "skipped", "skipped", "xfailed", "skipped", "skipped"]))
 
 
 def test_container_args_never_name_a_node_the_tree_lacks():
@@ -352,6 +436,10 @@ def test_a_size_check_that_skipped_or_did_not_finish_measured_nothing(tmp_path):
     _results(tmp_path / "skip", [_row("tests/test_smoke.py::test_a"), _row("tests/test_b.py::test_books", "skipped", "setup")])
     found, problems = pmc.size_findings(pmc.read_session(tmp_path / "skip"))
     assert found == {} and problems == ["the size check skipped `tests/test_b.py::test_books`, so it measured nothing there"]
+    # A module id of the size check is an aggregate like any other: a skip at collection within it is no pass.
+    _results(tmp_path / "uncollected", _whole("tests/test_b.py::test_a"), skips=["tests/test_b.py::TestK"])
+    assert pmc.size_status(pmc.read_session(tmp_path / "uncollected"), ["size tests/test_b.py"]) == {
+        "size tests/test_b.py": "skipped"}
     _results(tmp_path / "green", [_row("tests/test_smoke.py::test_a")])
     assert pmc.size_findings(pmc.read_session(tmp_path / "green")) == ({}, [])
     unfinished = ["the size check could not run or finish, so it went unchecked"]
@@ -520,6 +608,64 @@ def test_cost_outcome_reaches_the_real_summary_command(tmp_path, monkeypatch, ca
     assert "Cost contract: not selected on Windows" in capsys.readouterr().out
 
 
+BREACH = "tests/test_cost_contract.py::test_room_history_is_flat[k30-R_late]"
+
+
+@pytest.mark.parametrize("case,expected_red,said", [
+    ("executed", False, "Known breach `" + BREACH + "`, measured as its xfail marker expects; it does not make this "
+                        "leg red: reads one more tools segment (k=1 -> k=30)."),
+    ("not_run", True, f"Cost check `{BREACH}` is an xfail that never ran its test."),
+    ("setup_error", True, f"Cost check `{BREACH}` is an xfail that never ran its test."),
+    ("teardown", True, f"Cost check `{BREACH}` failed in teardown, which its xfail marker absorbed."),
+    ("opted_out", True, f"Cost check `{BREACH}` ended in pytest.xfail() instead of measuring."),
+    ("missing_teardown", True, f"Cost check `{BREACH}` is an xfail without its setup or teardown on record"),
+    ("missing_setup", True, f"Cost check `{BREACH}` is an xfail without its setup or teardown on record"),
+    ("legacy", True, "by evidence older than the xfail record: whether it ran is unknown."),
+    ("skip", True, f"Cost check `{BREACH}` was skipped."),
+    ("strict_xpass", True, f"Cost check `{BREACH}`: failed in call."),
+    ("unreported", True, "Cost contract not fully verified"),
+    ("red_session", True, "Cost contract not fully verified"),
+])
+def test_only_a_known_breach_that_ran_leaves_the_cost_contract_verified(tmp_path, monkeypatch, capsys,
+                                                                        case, expected_red, said):
+    """#2972: a gap row's strict xfail that ran is measured, listed with its reason, and not red by itself."""
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "complete": True, "failed": [], "flaky": [], "problems": [], "not_run": {}}), encoding="utf-8")
+    passing = "tests/test_cost_contract.py::test_room_history_is_flat[k30-R_active]"
+    breach = {
+        "executed": [_row(BREACH, phase="setup"), _xfail(BREACH), _row(BREACH, phase="teardown")],
+        "not_run": [_xfail(BREACH, "setup", "[NOTRUN] reads one more tools segment"), _row(BREACH, phase="teardown")],
+        "setup_error": [_xfail(BREACH, "setup", error_type="RuntimeError"), _row(BREACH, phase="teardown")],
+        "teardown": [_row(BREACH, phase="setup"), _xfail(BREACH), _xfail(BREACH, "teardown")],
+        "opted_out": [_row(BREACH, phase="setup"), _xfail(BREACH, error_type="XFailed"), _row(BREACH, phase="teardown")],
+        "missing_teardown": [_row(BREACH, phase="setup"), _xfail(BREACH)],
+        "missing_setup": [_xfail(BREACH), _row(BREACH, phase="teardown")],
+        "legacy": [_row(BREACH, phase="setup"), _row(BREACH, "skipped"), _row(BREACH, phase="teardown")],
+        "skip": [{**_row(BREACH, "skipped", "setup"), "wasxfail": None}, _row(BREACH, phase="teardown")],
+        "strict_xpass": [_row(BREACH, phase="setup"), _row(BREACH, "failed"), _row(BREACH, phase="teardown")],
+    }.get(case, [_row(BREACH, phase="setup"), _xfail(BREACH), _row(BREACH, phase="teardown")])
+    for row in breach:
+        if row.get("wasxfail") == "known breach":
+            row["wasxfail"] = "reads one more tools segment (k=1 -> k=30)."
+    directory = tmp_path / "cost-contract"
+    directory.mkdir()
+    (directory / "results.json").write_text(json.dumps({
+        "format": 1, "session_exit_code": int(case in ("strict_xpass", "red_session")),
+        "tests_collected": 3 if case == "unreported" else 2,
+        "reports": [_row(passing, phase="setup"), _row(passing), _row(passing, phase="teardown"), *breach],
+        "collection_failures": []}), encoding="utf-8")
+    monkeypatch.setenv("COST_CONTRACT_OUTCOME", "success")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    code = pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "linux"])
+    text = capsys.readouterr().out
+    assert code == int(expected_red) and ("— RED" in text) is expected_red and said in text
+    assert ("Cost contract not fully verified" in text) is expected_red
+    notice = f"::notice title=Known cost-contract breach on Linux::{BREACH} (an expected failure, measured)"
+    assert (notice in text) is (case in ("executed", "unreported", "red_session"))
+    if case == "executed":
+        assert "1 passed, 0 failed/unfinished, 0 skipped, 1 known breach(es) measured." in text
+
+
 @pytest.mark.parametrize("stage", ["classify", "attribute", "route"])
 @pytest.mark.parametrize("outcome", ["failure", "skipped", "", "success"])
 def test_workflow_stage_outcome_reaches_summary_without_a_new_retry(tmp_path, monkeypatch, capsys, stage, outcome):
@@ -541,6 +687,111 @@ def test_a_missing_report_does_not_establish_removal_and_a_skip_does_not_establi
         _results(directory, [_row("tests/t.py::test_ok"), _row("tests/t.py::test_skip", "skipped", "setup")])
     found = pmc.check_ids(ids, tmp_path, read_source={"tests/t.py": "def test_deselected(): pass\n"}.get, run=run)
     assert found == dict(zip(ids, ["skipped", "unknown", "absent"]))
+
+
+def test_a_recheck_runs_only_the_listed_tests_and_absence_needs_their_modules_complete_collection(tmp_path):
+    ids = ["tests/t.py::test_ok", "tests/t.py::test_param", "tests/t.py::test_renamed", "tests/t.py::test_deselected",
+           "tests/u.py::test_x", "tests/v.py::TestK::test_y", "tests/gone.py::test_z"]
+    sources, seen = {path: "" for path in ("tests/t.py", "tests/u.py", "tests/v.py")}, {}
+
+    def run(args, directory):
+        seen["args"], seen["listed"] = args, Path(args[-2].split("=", 1)[1]).read_text(encoding="utf-8").split()
+        _results(directory, [*_whole("tests/t.py::test_ok"), *_whole("tests/t.py::test_param[1]"),
+                             *_whole("tests/t.py::test_param[2]")], collection=["tests/u.py", "tests/v.py::TestK"],
+                 selected=["tests/t.py::test_ok", "tests/t.py::test_param[1]", "tests/t.py::test_param[2]"])
+        data = json.loads((Path(directory) / "results.json").read_text(encoding="utf-8"))
+        data["listed"] = {"unmatched": ["tests/t.py::test_renamed", "tests/u.py::test_x", "tests/v.py::TestK::test_y"]}
+        (Path(directory) / "results.json").write_text(json.dumps(data), encoding="utf-8")
+
+    found = pmc.recheck_ids(ids, tmp_path / "recheck", read_source=sources.get, run=run)
+    assert seen["args"][:-2] == ["tests/t.py", "tests/u.py", "tests/v.py"] and seen["args"][-2].startswith("--ci-listed=")
+    assert seen["args"][-1] == f"--session-timeout={pmc.RECHECK_SECONDS}"
+    assert seen["listed"] == ids[:-1]  # a module the head lacks is not collected: its ids are absent
+    # Gone only where the module collected cleanly; a module or class that did not collect fails what it holds, and the
+    # test a marker left out (test_deselected: it exists, so it was never unmatched) stays unknown.
+    assert found == dict(zip(ids, ["passed", "passed", "absent", "unknown", "failed", "failed", "absent"]))
+
+    def killed(args, directory):  # no final export: its journal names what ran, never what is gone
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        (Path(directory) / "events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in [
+            {"event": "start", "nodeid": ids[0]}, {"event": "report", **_row(ids[0])}, {"event": "finish", "nodeid": ids[0]},
+            {"event": "start", "nodeid": "tests/t.py::test_param[1]"},
+            {"event": "report", **_row("tests/t.py::test_param[1]")}]), encoding="utf-8")
+    assert pmc.recheck_ids(ids[:3], tmp_path / "killed", read_source=sources.get, run=killed) == dict(zip(
+        ids[:3], ["passed", "failed", "unknown"]))  # test_param[1] was still running when the session ended
+
+
+def test_the_head_picks_the_module_a_recheck_starts_from_so_a_slow_red_front_holds_back_no_fixed_tail(tmp_path):
+    """#2834: a recheck runs its modules in argument order until its budget ends, so the module that comes first is
+    the one reached. The head's CRC-32 rotates the sorted modules: one head keeps one order, and successive heads bring
+    every module to the front. The listed ids are the same whatever the order, and a test without a report stays unknown."""
+    import zlib
+
+    modules = [f"tests/test_{name}.py" for name in "abcde"]
+    ids = [f"{module}::test_x" for module in reversed(modules)]
+    heads, seen = [f"{index:x}" * 40 for index in range(16)], []
+
+    def run(args, directory):
+        assert Path(args[-2].split("=", 1)[1]).read_text(encoding="utf-8").splitlines() == ids
+        seen.append(args[:-2])
+        _results(directory, [])
+
+    for head in heads:
+        for again in range(2):
+            assert pmc.recheck_ids(ids, tmp_path / f"{head[0]}{again}", head=head, run=run,
+                                   read_source=dict.fromkeys(modules, "").get) == dict.fromkeys(ids, "unknown")
+    for head, first, again in zip(heads, seen[::2], seen[1::2]):
+        start = zlib.crc32(head.encode()) % len(modules)
+        assert first == again == modules[start:] + modules[:start]
+    assert {order[0] for order in seen} == set(modules)
+
+
+def test_windows_shaped_ids_and_paths_reach_the_session_whole(tmp_path, monkeypatch):
+    """The Windows leg: a parameter keeps its drive letter, backslashes and `::` in the nodeid, the evidence path has a
+    drive letter and a space, and text mode writes CRLF. Each id is one listed line, each argument one argsfile line
+    that pytest's @file reader (argparse: `splitlines`) returns whole, and the results map back to the exact ids."""
+    import argparse
+    import zlib
+
+    ids = ["tests/sub/test_w.py::test_path[C:\\\\work\\\\a b.txt]", "tests/sub/test_w.py::TestK::test_m[x::y]",
+           "tests/test_v.py::test_v"]
+    seen, directory = {}, tmp_path / "D:" / "a b" / "recheck"
+
+    def run(args, directory):
+        seen["args"] = args
+        _results(directory, [*_whole(ids[0]), *_whole(ids[1])])
+
+    found = pmc.recheck_ids(ids, directory, head="h", run=run,
+                            read_source=dict.fromkeys(["tests/sub/test_w.py", "tests/test_v.py"], "").get)
+    assert found == dict(zip(ids, ["passed", "passed", "unknown"]))
+    modules, start = ["tests/sub/test_w.py", "tests/test_v.py"], zlib.crc32(b"h") % 2
+    assert seen["args"][:2] == modules[start:] + modules[:start]
+    assert seen["args"][2] == f"--ci-listed={directory / 'listed.txt'}"
+    text = (directory / "listed.txt").read_text(encoding="utf-8")
+    assert text.replace("\n", "\r\n").splitlines() == text.splitlines() == ids  # what Windows text mode writes
+
+    commands = []
+    monkeypatch.setattr(pmc.subprocess, "call", lambda command, **kwargs: commands.append(command) or 0)
+    windows = ["tests/test_v.py", "--ci-listed=D:\\a\\_temp\\post-merge\\recheck\\listed.txt", "--session-timeout=225"]
+    assert pmc.run_pytest(windows, tmp_path / "a b", cwd=tmp_path) == 0
+    assert commands[0][3:5] == ["--ci-evidence-dir", str(tmp_path / "a b")]
+    argsfile = Path(commands[0][2].removeprefix("@"))
+    argsfile.write_bytes(argsfile.read_bytes().replace(b"\n", b"\r\n"))
+    parser = argparse.ArgumentParser(fromfile_prefix_chars="@", allow_abbrev=False)
+    parser.add_argument("paths", nargs="*")
+    known, options = parser.parse_known_args([commands[0][2]])
+    assert [*known.paths, *options] == windows
+
+
+def test_the_recheck_budget_leaves_a_whole_test_bound_inside_the_route_steps_limit():
+    """Two copies of the route step's limit and of the per-test bound must not drift apart (#2834)."""
+    import re
+
+    text = (pmc.REPO_ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8")
+    step = text.split("- name: Hand each red to its author", 1)[1].split("- name:", 1)[0]
+    assert int(re.search(r"timeout-minutes: (\d+)", step).group(1)) * 60 == pmc.ROUTE_STEP_SECONDS
+    assert f"--timeout={pmc.TEST_SECONDS}" in pmc.SESSION_FLAGS and "python scripts/post_merge_check.py route" in step
+    assert 0 < pmc.RECHECK_SECONDS and pmc.RECHECK_SECONDS + pmc.TEST_SECONDS + 75 == pmc.ROUTE_STEP_SECONDS
 
 
 def test_source_read_failure_is_not_module_removal(tmp_path, monkeypatch):
@@ -567,6 +818,76 @@ def test_the_runner_final_inventory_failure_is_not_a_green_selected_run(tmp_path
     assert not result["failed"] and "inventory/floor" in result["problems"][0]
     (tmp_path / "classification.json").write_text(json.dumps(result), encoding="utf-8")
     assert pmc.render_summary(tmp_path)[1]
+
+
+def _identified(directory, reports, *, sha=HEAD, run_id="77", platform="Linux", collection=()):
+    """A selected pass's export as tests/ci_evidence.py writes it: its reports with the run and system it names."""
+    _results(directory, reports, collection=collection)
+    data = json.loads((Path(directory) / "results.json").read_text(encoding="utf-8"))
+    data.update(github={"sha": sha, "run_id": run_id, "run_attempt": "1"}, environment={"platform": platform})
+    (Path(directory) / "results.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_only_tests_this_run_passed_whole_at_its_head_on_its_system_spare_a_recheck(tmp_path):
+    ids = ["tests/t.py::test_a", "tests/t.py::test_flaky", "tests/t.py::test_skip", "tests/s.py::test_serial",
+           "tests/t.py::test_breach", "tests/t.py::test_not_selected", "tests/t.py::test_torn", "tests/u.py",
+           "tests/u.py::test_whole", "tests/b.py::test_b", "tests/t.py::test_param"]
+    _selection(tmp_path)
+    _identified(tmp_path / "parallel", [*_whole(ids[0]), _row(ids[1], "failed"), _row(ids[2], "skipped", "setup"),
+                                        *_whole(ids[4], _xfail(ids[4])), _row(ids[6], phase="setup"), _row(ids[6]),
+                                        *_whole(ids[8]), *_whole("tests/t.py::test_param[1]")], collection=["tests/b.py"])
+    _identified(tmp_path / "serial", [*_whole(ids[3]), *_whole(ids[9])])
+    # A failure (even one its retry passed), skip, xfail, a test without its teardown, a module or function id and a
+    # test of a module that did not collect in another pass are rechecked.
+    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {
+        ids[0]: "passed", ids[3]: "passed", ids[8]: "passed"}
+    for other in ({"sha": "e" * 40}, {"run_id": "78"}, {"platform": "Windows"}):
+        _identified(tmp_path / "parallel", _whole(ids[0]), **other)
+        _identified(tmp_path / "serial", _whole(ids[3]), **other)
+        assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {}, other
+    for label in ("parallel", "serial"):  # a pass killed before its export names no commit, run or system
+        (tmp_path / label / "results.json").unlink()
+        (tmp_path / label / "events.jsonl").write_text(json.dumps(
+            {"event": "report", "nodeid": ids[0], "phase": "call", "outcome": "passed"}) + "\n", encoding="utf-8")
+    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {}
+
+
+def test_route_records_its_hand_over_before_the_recheck_and_reuses_this_runs_passes(tmp_path, monkeypatch, capsys):
+    _selection(tmp_path)
+    _identified(tmp_path / "parallel", _whole("tests/t.py::test_here"))
+    seen = {}
+
+    def fake_route(github, **kwargs):
+        kwargs["checkpoint"]({"handed": "before the recheck"})
+        seen["saved"] = json.loads((tmp_path / "routing.json").read_text(encoding="utf-8"))
+        seen["same_run"] = kwargs["same_run"](["tests/t.py::test_here", "tests/t.py::test_other"])
+        return {"comments": [], "created": [], "updated": [], "narrowed": [{"issue": 5, "ids": ["x"]}], "closed": [],
+                "warnings": []}
+
+    monkeypatch.setattr(pmc, "route", fake_route)
+    monkeypatch.setenv("GITHUB_RUN_ID", "77")
+    assert pmc.main(["route", "--evidence-dir", str(tmp_path), "--run-url", "u", "--head", HEAD]) == 0
+    assert seen == {"saved": {"handed": "before the recheck"}, "same_run": {"tests/t.py::test_here": "passed"}}
+    assert json.loads((tmp_path / "routing.json").read_text(encoding="utf-8"))["narrowed"] == [{"issue": 5, "ids": ["x"]}]
+    assert "narrowed [5]" in capsys.readouterr().out
+
+
+def test_the_summary_names_narrowed_issues_and_a_recheck_that_did_not_finish(tmp_path):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "failed": [], "flaky": [], "problems": [], "selection": {}}), encoding="utf-8")
+    routing = {"comments": [], "created": [], "updated": [], "closed": [], "warnings": [],
+               "narrowed": [{"issue": 2464, "ids": ["tests/t.py::a", "tests/t.py::b"]}], "complete": True}
+    (tmp_path / "routing.json").write_text(json.dumps(routing), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path, system="windows")
+    assert not red and "updated: none; narrowed: #2464 (2 passing again); closed as green: none." in text
+    assert "did not finish" not in text and "got no result" not in text
+    (tmp_path / "routing.json").write_text(json.dumps({**routing, "rechecked": {"a": "passed", "b": "unknown"}}),
+                                           encoding="utf-8")
+    assert "- 1 tracked test(s) got no result in the recheck (it starts none after 225 s" in pmc.render_summary(
+        tmp_path, system="windows")[0]
+    (tmp_path / "routing.json").write_text(json.dumps({**routing, "narrowed": [], "complete": False}), encoding="utf-8")
+    text, _ = pmc.render_summary(tmp_path, system="windows")
+    assert "the recheck of the open issues did not finish" in text and "narrowed: #" not in text
 
 
 def test_skipped_base_probe_is_not_a_good_revision(tmp_path, monkeypatch):

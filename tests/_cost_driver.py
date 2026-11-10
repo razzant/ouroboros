@@ -76,7 +76,9 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import json
+import math
 import os
 import pathlib
 import sys
@@ -98,6 +100,41 @@ HOLD_TIMEOUT_SEC = 1800.0
 STATEMENT_SAMPLE = 80
 # B10: what a turn's request must carry (a row the step before it wrote), by tag.
 NEEDLES: Dict[str, List[str]] = {}
+# The clocks a measured process meets beside the work it counts: production bounds that the drive's own duration or the
+# stand's age crosses, so they split identical work by elapsed time, never by history (counting is not timing). Each is
+# held, before the server is imported, where the stand's intended state holds at every size: an install just restarted,
+# its supervisor alive. A spec's ``clocks`` replaces any of them in its own unit: the instrument's controls drive the
+# production values and see the work move.
+CLOCKS: Dict[str, float] = {
+    # ``utils``, ``skill_identity`` and ``skill_discovery_reuse`` (a copy made at import) ``_RACY_NS``, 2 s: a file read
+    # within a clock tick of its write is read again, and each restore of the stand leaves its rewritten files that
+    # young (#2961: B2's 16 reads of the project bindings, a stat each or an open each). A file's identity (inode, size,
+    # nanosecond times) still names every write the process meets.
+    "racy_ns": 0,
+    # ``task_status._SNAPSHOT_OWNERSHIP_FRESH_SEC``, 10 s: the held supervisor never refreshes its queue stamp, so a
+    # pass that outlasts it takes every queued task for live (B7: three evidence tasks wait, 336 VM steps and 16
+    # statements each).
+    "queue_alive_fresh_sec": math.inf,
+    # ``restore_pending_from_snapshot``'s ``max_age_sec``, 900 s: the boot restores the stand's queue only while the
+    # fixture's stamp is younger, so a stand restored 15 minutes after its build boots another way (B2, B3, B5, the
+    # cancel sweep's first pass).
+    "restore_max_age_sec": math.inf,
+}
+
+
+def hold_clocks(replaced: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Set ``CLOCKS`` (with ``replaced`` over them) where the product reads them; returns what was held, as the result
+    records it: JSON has no infinity, so an unbounded clock is written ``"inf"``, which a spec may hand back."""
+    from ouroboros import skill_discovery_reuse, skill_identity, task_status, utils
+    from supervisor import queue
+
+    clocks = {name: float(value) if isinstance(value, str) else value  # a recorded "inf" handed back
+              for name, value in {**CLOCKS, **(replaced or {})}.items()}
+    utils._RACY_NS = skill_identity._RACY_NS = skill_discovery_reuse._RACY_NS = int(clocks["racy_ns"])
+    task_status._SNAPSHOT_OWNERSHIP_FRESH_SEC = clocks["queue_alive_fresh_sec"]
+    restore = getattr(queue.restore_pending_from_snapshot, "func", queue.restore_pending_from_snapshot)
+    queue.restore_pending_from_snapshot = functools.partial(restore, max_age_sec=clocks["restore_max_age_sec"])
+    return {name: value if math.isfinite(value) else str(value) for name, value in clocks.items()}
 
 
 class _FirstRequest(BaseException):
@@ -567,13 +604,8 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
                    facts: Dict[str, Any]) -> None:
     """B10: the history (untagged) and the steady state a long-lived install keeps over it, then each turn up to
     its first model request; at k=1 also breadth, rows and archived history."""
-    from ouroboros import skill_identity, utils
     from tests import _turn_shapes as shapes
 
-    # A file read within a clock tick of its write is read again (``utils._RACY_NS``): bounded by time, not by the
-    # history, it would make two turns' counts depend on the milliseconds between them. B10 runs without that
-    # window; a file's identity (inode, size, nanosecond times) still names every write the turns meet here.
-    utils._RACY_NS = skill_identity._RACY_NS = 0
     no_carrier_can_start()
     ctx, k = _event_ctx(srv), int(facts.get("k") or 1)
 
@@ -931,9 +963,6 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
 
 def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
                       facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
-    from ouroboros import utils
-
-    utils._RACY_NS = 0  # a file within a clock tick of its write proves nothing and ends a probe early: bounded by time, not by history
     _chat_frame(meter, client, result, "B4", "cost-contract-1")
     _request(meter, client, result, "B3", "GET", "/api/state")
     _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
@@ -960,6 +989,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
     meter.__enter__()
     stubs: Dict[str, Any] = {}
     try:
+        result["clocks"] = hold_clocks(spec.get("clocks"))  # before the server's first read
         from starlette.testclient import TestClient
 
         import server as srv

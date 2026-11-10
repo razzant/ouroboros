@@ -111,6 +111,20 @@ def _gap(table: Dict[Any, str], name: Hashable) -> tuple:
     return (pytest.mark.xfail(strict=True, raises=AssertionError, reason=table[name]),) if name in table else ()
 
 
+class KnownBreach(AssertionError):
+    """A room gap's breach as measured: only the counters its cause grows, by no more than its row records."""
+
+
+# A room read's known breach: its cause, and the k=1 -> k=30 growth of each counter it grows on this fixture's
+# drives (one causal pair, measured by the exact meter: 2f8ebe37's report). A precondition, an answer that differs,
+# any other counter, or more growth fails as a plain AssertionError; no growth at all is a strict XPASS.
+ROOM_GAPS: Dict[str, Tuple[str, Dict[str, int]]] = {"R_late": (
+    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
+    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
+    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB).",
+    {"dir_entries:archive": 203, "json_chars": 39044, "json_loads": 150, "read_bytes:archive": 39190})}
+
+
 # ---- measurement -------------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
@@ -202,7 +216,9 @@ def assert_publication_flat(measured: Dict[Any, Any], tag: str) -> None:
     assert_flat(measured, tag)
 
 
-def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
+def assert_flat(measured: Dict[Any, Any], tag: str, gap: Dict[str, int] | None = None) -> None:
+    """`tag` does not grow from k=1 to the large root; with a room `gap`, it grows exactly as that gap
+    records (KnownBreach), scaled to the large root's history as the gap's k=30 growth is."""
     large = measured["large"]
     answers = [{key: value for key, value in (measured[k].get("responses", {}).get(tag) or {}).items()
                 if key in ("status", "echo")} for k in (K_SMALL, large)]
@@ -214,8 +230,14 @@ def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
     growing = sorted(((source, amount - little.get("callers", {}).get(source, 0))
                       for source, amount in big.get("callers", {}).items()
                       if amount > little.get("callers", {}).get(source, 0)), key=lambda item: -item[1])[:8]
+    if gap is not None:
+        excused = {key: value for key, value in breaches.items()
+                   if key in gap and value[1] - value[0] <= gap[key] * (large - K_SMALL) / 29}
+        breaches = {key: value for key, value in breaches.items() if key not in excused}
     assert not breaches, (f"{tag} grows with unrelated history (k={K_SMALL} -> k={large}): {breaches}; "
                           f"history touched at k={large}: {touched}; growing readers: {growing}")
+    if gap is not None and excused:
+        raise KnownBreach(f"{tag} grows as its gap records (k={K_SMALL} -> k={large}): {excused}")
 
 
 # ---- B1-B5 and the room ------------------------------------------------------------------------
@@ -280,15 +302,36 @@ def test_b5_stop_of_a_tree_is_flat(measured):
     assert_flat(measured, "B5")
 
 
-@pytest.mark.parametrize("tag", ["R_active", pytest.param("R_late", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
-    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
-    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB)."))),
-    "R_activew"])
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=(pytest.mark.xfail(
+    strict=True, raises=KnownBreach, reason=ROOM_GAPS[tag][0]),) if tag in ROOM_GAPS else ())
+    for tag in ("R_active", "R_late", "R_activew")])
 def test_room_history_is_flat(measured, tag):
     for k in (K_SMALL, measured["large"]):  # a page, never the import window's refusal
         assert measured[k]["import"]["state"] == "done" and measured[k]["responses"][tag]["status"] == 200, k
-    assert_flat(measured, tag)
+    assert_flat(measured, tag, ROOM_GAPS[tag][1] if tag in ROOM_GAPS else None)
+
+
+def test_a_room_gap_excuses_only_its_own_counters_within_their_recorded_growth():
+    """The refusals of `assert_flat` with a gap, on synthetic counts: only exactly the recorded breach is known."""
+    gap = ROOM_GAPS["R_late"][1]
+
+    def measured(grown, answer=200, large=30):
+        root = {key: 1000 for key in (*gap, "json_loads", "stat:root")}
+        return {"large": large, K_SMALL: {"R_late": {"counts": root}, "responses": {"R_late": {"status": 200}}},
+                large: {"R_late": {"counts": {**root, **{key: root[key] + amount for key, amount in grown.items()}}},
+                        "responses": {"R_late": {"status": answer}}}}
+    with pytest.raises(KnownBreach):
+        assert_flat(measured(gap), "R_late", gap)
+    with pytest.raises(KnownBreach):  # a smaller history grows proportionally less
+        assert_flat(measured({key: amount * 14 // 29 for key, amount in gap.items()}, large=15), "R_late", gap)
+    for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1}):
+        with pytest.raises(AssertionError, match="grows with unrelated history") as caught:
+            assert_flat(measured(grown), "R_late", gap)
+        assert not isinstance(caught.value, KnownBreach), grown
+    with pytest.raises(AssertionError, match="answered differently") as caught:
+        assert_flat(measured(gap, answer=500), "R_late", gap)
+    assert not isinstance(caught.value, KnownBreach)
+    assert assert_flat(measured({}), "R_late", gap) is None  # cause gone: the strict xfail XPASSes and fails
 
 
 # ---- B9: the memory's addressed reads ------------------------------------------------------------
