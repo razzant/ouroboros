@@ -212,6 +212,7 @@ def validate_evidence_snapshot(value: Any, *, subject_hash: str = "") -> Optiona
         "subject_hash": subject,
         "observed_at": observed,
         "seats": seats,
+        **({"unread_outcomes": True} if value.get("unread_outcomes") else {}),
     }
 
 
@@ -609,7 +610,8 @@ def doctrine_result_lines(decision: Any) -> List[str]:
         )
     snapshot = decision.get(EVIDENCE_KIND)
     if isinstance(snapshot, dict) and snapshot.get("feedback_at_decision"):
-        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}")
+        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}"
+                     + ("; the record held outcomes this decision did not read" if snapshot.get("unread_outcomes") else ""))
     lines.append("landing: this commit, recorded separately from the evidence at decision.")
     return lines
 

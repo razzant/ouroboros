@@ -378,13 +378,13 @@ def test_a_recorded_continue_successor_collects_its_predecessors_bound_run_attac
     assert text.startswith("Review outcome collected read-only") and "recorded Continue" in text, text
     payload = _payload(text)
     assert payload["state"] == "settled" and payload["cost"]["usd"] == 0, payload
-    assert all(payload["review_reference"][key] == value for key, value in reference.items())
+    assert all(payload["review_reference"][key] == value for key, value in reference.items() if key != "shown_outcomes")
     decision = {"disposition": "accepted", "rationale": "I read the predecessor's collected review; landing it."}
-    with _successor_scope(a, actor):
-        landed = a.git._commit_reviewed(ctx, "", review_reference=reference, author_disposition=decision)
+    with _successor_scope(a, actor):  # the reference left behind answered less than this collection returned (#2902)
+        landed = a.git._commit_reviewed(ctx, "", review_reference=payload["review_reference"], author_disposition=decision)
     assert _commit_count(a) == 2 and sent() == before and [r.run_gets for r in readers] == [[run_id]], landed
     own = [item for item in load_state(a.data).attempts if item.task_id == actor and item.status == "succeeded"]
-    assert len(own) == 1 and own[0].author_disposition["review_reference"] == reference
+    assert len(own) == 1 and own[0].author_disposition["review_reference"] == payload["review_reference"]
     assert not predecessor().author_disposition, "the predecessor's row records no decision it never made"
 
 

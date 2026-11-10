@@ -417,3 +417,428 @@ def test_a_technical_failure_at_the_ceiling_is_decided_by_the_current_author_wit
     assert own.author_disposition["review_reference"] == reference
     assert own.author_disposition["reviewer_signal"] == aggregate and own.author_disposition["enforcement"] == "advisory"
     assert sum(row.paid for row in rows if row.task_id in {"inline-task", "successor-task"}) == 1, "no new paid wave"
+
+
+LATE_CRITICAL = json.dumps([{"item": "late bug", "severity": "critical", "verdict": "FAIL", "reason": "found after the handback"}])
+DECISION = {"disposition": "accepted", "rationale": "I read the returned outcome and accept the current bytes."}
+
+
+def _returned_partial(ctx, monkeypatch, *, cap="3"):
+    """A paid wave returned while its critic still runs and its coupling seat has answered: the returned reference, the
+    reviewer's sends. Real Git and the real handback; only the reviewers' transport is supplied."""
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", cap)
+    ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
+    git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
+    (ctx.repo_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    git.run_cmd(["git", "add", "VERSION"], cwd=ctx.repo_dir)
+    git.run_cmd(["git", "commit", "-m", "fixture version"], cwd=ctx.repo_dir)
+    write_task_result(ctx.drive_root, ctx.task_id, "running")
+    capture_mutation_baseline(ctx.drive_root, ctx.task_id, [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
+    (ctx.repo_dir / "change.py").write_text("value = 2\n", encoding="utf-8")
+    reviews = []
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: "")
+
+    def reviewer(_ctx, message, **kw):
+        from ouroboros.review_dispatch import invoke_review_paid_stamp
+        invoke_review_paid_stamp(ctx._review_paid_stamp)
+        reviews.append(kw["review_binding_fingerprint"])
+        ctx._last_review_critical_findings = []
+        ctx._last_triad_raw_results = [
+            {"slot_id": "critic", "status": "error", "error": "unavailable", "operation_id": "paid-original",
+             "operation_state": "in_flight", "late_result_pending": True},
+            {"slot_id": "coupling", "status": "responded", "parts": ["coupling"], "raw_text": "[]", "operation_id": "paid-coupling",
+             "operation_state": "settled", "answers": {"coupling": {"status": "responded", "verdict": "PASS", "findings": [],
+                                                                    "critical": 0, "coverage": "full"}}}]
+        return "review unavailable", CouplingOutcome(verdict="PASS", status="responded"), "infra_failure", []
+    monkeypatch.setattr(git, "_run_parallel_review", reviewer)
+    first = git._repo_commit_push(ctx, "Fix amount", skip_advisory_review=True)
+    assert first.startswith("Review outcome returned before commit"), first
+    return json.loads(first.split("\n", 1)[1])["review_reference"], reviews
+
+
+def _settle_late(ctx, reference, *, raw_text=LATE_CRITICAL, status="responded"):
+    """The late answer through the real writers a left wave settles with: the ledger record first, then its attempt row."""
+    from ouroboros import review_pause
+    from ouroboros.review_ledger import ledger_root
+
+    left = {"surface": "commit", "task_id": reference["task_id"], "record_id": reference["review_record_id"],
+            "retry_key": "", "attempt": reference["attempt"], "drive_root": str(ctx.drive_root), "canonical_root": str(ledger_root(ctx))}
+    seat = {"surface": "multi_model_review", "slot_id": "critic", "parts": ["change"], "model": "late-model", "status": status,
+            "operation_id": "paid-original", "operation_state": "settled", "late_result_pending": False, "raw_text": raw_text}
+    settled = review_pause._settle_left_record(left, [seat], final=False)
+    assert settled is not None
+    review_pause._settle_left_attempt(left, _named_row(ctx, reference), [seat], settled)
+    return settled
+
+
+def _head(ctx):
+    return git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
+
+
+def _staged(ctx):
+    return git.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=ctx.repo_dir).strip()
+
+
+def _read_back(ctx, reference, reviews, *, expect="critical"):
+    """The free collection the refusal names: the index no longer holds the reviewed bytes, so the outcome reads back."""
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+    count = len(reviews)
+    collected = git._repo_commit_push(ctx, "", review_reference=reference)
+    assert len(reviews) == count, "collection buys no reviewer"
+    assert "committed" not in collected.split("\n", 1)[0] or "nothing was staged" in collected, collected
+    assert expect in collected, collected
+    return json.loads(collected[collected.index("\n{"):])["review_reference"]
+
+
+def test_feedback_settled_after_the_reference_returned_needs_a_fresh_decision_and_no_new_review(candidate, monkeypatch):  # noqa: F811
+    """#2902: a decision answers the outcome that reached its author. A reviewer's later FAIL, settled by the real
+    writers, refuses that decision before anything is staged; the free collection returns it, and a new decision on the
+    new reference lands the current bytes. Nothing is bought and the FAIL is never read as PASS."""
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    settled = _settle_late(ctx, reference)
+    assert settled["verdict"]["critical_findings"], settled["verdict"]
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and "review_reference" in refused, refused
+    assert "author_disposition" in refused and "$0" in refused, refused
+    assert _head(ctx) == head and not _staged(ctx), "refused before staging or Git"
+    assert not load_record(ledger_root(ctx), reference["review_record_id"]).get("author_decision")
+    fresh = _read_back(ctx, reference, reviews)
+    assert fresh != reference and fresh["review_record_id"] == reference["review_record_id"]
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=fresh, author_disposition=DECISION)
+    assert _head(ctx) != head, landed
+    assert git.run_cmd(["git", "show", "HEAD:change.py"], cwd=ctx.repo_dir).strip() == "value = 3"
+    assert len(reviews) == 1 and ctx._commit_review_status == "author_continued"
+    record = load_record(ledger_root(ctx), reference["review_record_id"])
+    assert record["verdict"]["aggregate"] == settled["verdict"]["aggregate"] != "PASS"
+    assert record["author_decision"]["review_reference"] == fresh
+
+
+def test_feedback_settled_after_validation_is_caught_at_the_commit_boundary(candidate, monkeypatch):  # noqa: F811
+    """The race: the decision validates, staging and the tests run, and only then the late FAIL settles. The check before
+    Git refuses it with the bytes preserved, unstaged and uncommitted; collecting and deciding again lands at no cost."""
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    head = _head(ctx)
+    tests_ran = []
+
+    def late_during_tests(*_a, **_kw):
+        tests_ran.append(_settle_late(ctx, reference))
+    monkeypatch.setattr(git, "_run_review_preflight_tests", late_during_tests)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert tests_ran, refused
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head, refused
+    assert not _staged(ctx) and (ctx.repo_dir / "change.py").read_text(encoding="utf-8") == "value = 2\n"
+    row = load_state(ctx.drive_root).attempts[-1]
+    assert row.status == "blocked" and row.block_reason == "review_outcome_unread"
+    assert "landing" not in (load_record(ledger_root(ctx), reference["review_record_id"]).get("author_decision") or {})
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: None)
+    fresh = _read_back(ctx, reference, reviews)
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=fresh, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1, landed
+
+
+def test_a_decision_stays_usable_while_no_outcome_was_added(candidate, monkeypatch):  # noqa: F811
+    """Accounting and custody revisions of the record are no new feedback. The returned outcome here is partial: one seat
+    answered while another runs. Deciding on received feedback beside a running seat is the existing contract
+    (``resolve_commit_review_reference``: ``review_outcome_received``; ``test_explicit_continuation...[pending]``), which
+    this repair neither widens nor treats as terminal; a wave with no received feedback still waits."""
+    from ouroboros.review_ledger import ledger_root, revise_record
+    from ouroboros.review_waiting import save_wait
+
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+
+    def account(record):
+        record["rows"] = [{**row, "usd": 0.25, "tokens_in": 7} for row in record["rows"]]
+        record["cost"] = {"usd": 0.5, "unknown": False}
+        return record
+    revised = revise_record(ledger_root(ctx), reference["review_record_id"], account)
+    saved = save_wait(ctx, reference["review_record_id"], {"seen_outcomes": ["a"], "seen_outcome_states": ["a#responded"]})
+    assert saved["revision"] > revised["revision"] > 1
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1, landed
+    assert load_state(ctx.drive_root).attempts[-1].author_disposition["review_reference"] == reference
+
+
+def test_collecting_an_unchanged_outcome_returns_the_same_identity(candidate, monkeypatch):  # noqa: F811
+    """Same-state replay: reading a settled review twice names one identity, and its reference still collects (the
+    exact-identity check of a collection is not disturbed by the delivery identity it carries)."""
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    _settle_late(ctx, reference)
+    first = _read_back(ctx, reference, reviews)
+    second = _read_back(ctx, first, reviews)
+    assert first == second
+
+
+def test_a_reference_without_a_delivery_identity_recovers_at_no_cost(candidate, monkeypatch):  # noqa: F811
+    """A reference minted before deliveries were identified proves nothing about what its author read: it is neither
+    trusted nor dead. Its outcome reads back free, and the decision proceeds on the reference that read returns."""
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    legacy = {key: value for key, value in reference.items() if key != "shown_outcomes"}
+    assert legacy != reference
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=legacy, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head and not _staged(ctx), refused
+    fresh = _read_back(ctx, legacy, reviews, expect="coupling")
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=fresh, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1, landed
+
+
+def test_a_legacy_not_dispatched_reference_has_nothing_unread(candidate, monkeypatch):  # noqa: F811
+    """A record that dispatched nothing can have no late outcome and offers nothing to collect, so an older reference to
+    it keeps the Advisory decision the owner chose on 9 November."""
+    ctx = candidate
+    reviews, _paid = _ceiling_author(ctx, monkeypatch)
+    (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+    ceiling = git._repo_commit_push(ctx, "Fix amount", skip_advisory_review=True)
+    reference = json.loads(ceiling.split("\n", 1)[1])["review_reference"]
+    reference.pop("shown_outcomes", None)
+    head = _head(ctx)
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1, landed
+
+
+def test_a_continue_successor_collects_late_feedback_and_decides_itself(candidate, monkeypatch):  # noqa: F811
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    _settle_late(ctx, reference)
+    _continue_to(ctx, "successor-task")
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head, refused
+    fresh = _read_back(ctx, reference, reviews)
+    assert fresh["task_id"] == reference["task_id"] != ctx.task_id, "the original reference stays canonical"
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=fresh, author_disposition=DECISION)
+    assert _head(ctx) != head, landed
+    decision = load_record(ledger_root(ctx), reference["review_record_id"])["author_decision"]
+    assert decision["decided_by_task"] == "successor-task" and decision["review_reference"] == fresh
+
+
+def test_a_late_technical_failure_is_new_feedback_and_stays_decidable(candidate, monkeypatch):  # noqa: F811
+    """A seat that closes without a verdict is still an outcome the author has not read. Once read, Advisory's explicit
+    decision (owner 9 Nov) proceeds with no verdict and no PASS."""
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    settled = _settle_late(ctx, reference, raw_text="", status="error")
+    assert settled["verdict"]["aggregate"] != "PASS"
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head, refused
+    fresh = _read_back(ctx, reference, reviews, expect="rows")
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=fresh, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1 and ctx._commit_review_status == "author_continued", landed
+
+
+def test_blocking_refuses_before_reading_any_delivery_identity(candidate, monkeypatch):  # noqa: F811
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    _settle_late(ctx, reference)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    head = _head(ctx)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "requires Advisory" in refused and _head(ctx) == head, refused
+
+
+@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+def test_cyber_pro_keeps_its_judgment_and_states_the_unread_outcome(candidate, monkeypatch, runtime_mode):  # noqa: F811
+    """No internal veto for Cyber Pro: the decision lands, the result and row say it did not read the later outcome."""
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    _settle_late(ctx, reference)
+    head = _head(ctx)
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert _head(ctx) != head and len(reviews) == 1, landed
+    assert "did not read it" in landed, landed
+    final = load_state(ctx.drive_root).attempts[-1]
+    assert any("did not read it" in str(item) for item in final.advisory_findings)
+    assert final.author_disposition["evidence_at_decision"]["unread_outcomes"] is True, final.author_disposition
+    from ouroboros.review_ledger import ledger_root, load_record
+    assert load_record(ledger_root(ctx), reference["review_record_id"])["author_decision"]["evidence_at_decision"]["unread_outcomes"] is True
+
+
+@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+def test_cyber_pro_evidence_names_only_a_real_gap_including_one_opened_by_the_tests(candidate, monkeypatch, runtime_mode):  # noqa: F811
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    late = []
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: late.append(_settle_late(ctx, reference)))
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert late and "did not read" in landed, landed
+    decided = load_record(ledger_root(ctx), reference["review_record_id"])["author_decision"]
+    assert decided["evidence_at_decision"]["unread_outcomes"] is True, decided
+    assert load_state(ctx.drive_root).attempts[-1].author_disposition["evidence_at_decision"]["unread_outcomes"] is True
+
+
+@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+def test_cyber_pro_evidence_claims_no_gap_when_the_outcome_was_returned(candidate, monkeypatch, runtime_mode):  # noqa: F811
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "did not read" not in landed, landed
+    assert "unread_outcomes" not in load_state(ctx.drive_root).attempts[-1].author_disposition["evidence_at_decision"]
+
+
+def test_a_status_reference_has_shown_nothing_and_asks_for_the_free_read(candidate, monkeypatch):  # noqa: F811
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    ctx = candidate
+    reference, reviews = _returned_partial(ctx, monkeypatch)
+    projected = json.loads(_handle_review_status(ctx))
+    assert "shown_outcomes" not in projected["review_reference"] and "no author_disposition" in projected["next_step"]
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=projected["review_reference"], author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head, refused
+    assert json.loads(_handle_review_status(ctx))["review_reference"]["attempt"] == reference["attempt"] and len(reviews) == 1
+
+
+def test_a_seat_settled_on_the_record_ahead_of_its_row_is_not_named_as_shown(candidate, monkeypatch):  # noqa: F811
+    """Writers settle the record first: a handback in that gap renders the seat as running, so its reference must not
+    name the seat's answer."""
+    from ouroboros import review_pause
+    from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.review_waiting import shown_outcomes
+    from ouroboros.tools.review_collection import shown_field
+
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    left = {"task_id": reference["task_id"], "record_id": reference["review_record_id"], "retry_key": "",
+            "drive_root": str(ctx.drive_root), "canonical_root": str(ledger_root(ctx))}
+    seat = {"slot_id": "critic", "parts": ["change"], "model": "late-model", "status": "responded", "operation_id": "paid-original",
+            "operation_state": "settled", "late_result_pending": False, "raw_text": LATE_CRITICAL}
+    assert review_pause._settle_left_record(left, [seat], final=False)
+    row = _named_row(ctx, reference)
+    assert row.late_result_pending, "the row still shows the seat running"
+    shown = shown_field(ctx, row)
+    assert shown == {"shown_outcomes": reference["shown_outcomes"]}
+    assert shown["shown_outcomes"] != shown_outcomes(load_record(ledger_root(ctx), reference["review_record_id"]))
+
+
+def _handback_again(ctx, reference):
+    """The normal pending handback, which renders the attempt row as it stands."""
+    from ouroboros.tools import commit_gate
+
+    bound = {"fingerprint": reference["pre_review_fingerprint"]}
+    ctx._current_review_attempt_number, ctx._current_review_record_id = reference["attempt"], reference["review_record_id"]
+    return commit_gate._return_commit_feedback(ctx, "Fix amount", 0.0, bound, bound, pending=True)["review_reference"]
+
+
+@pytest.mark.parametrize("late", ["answered_after_failure", "continued_seat"])
+def test_a_row_showing_the_old_outcome_never_certifies_the_new_one_on_its_record(candidate, monkeypatch, late):  # noqa: F811
+    """Writers settle the record before the row. In that gap the row can show a seat closed with its OLD outcome while the
+    record already holds a NEW one (an answer after a technical failure, or a continued seat's successor): nothing about
+    the seat is pending, and only the rendered operation and outcome tell that the handback did not carry the new one."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_waiting import shown_outcomes
+    from ouroboros.tools import commit_gate
+
+    ctx = candidate
+    root = ledger.ledger_root(ctx)
+    if late == "answered_after_failure":
+        _reviews, reference = _ceiling_author(ctx, monkeypatch, failure="infra")
+        row = _named_row(ctx, reference)
+        ctx._pending_review_attempt, ctx._current_review_retry_key = row, row.review_retry_key
+        ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "raw_text": LATE_CRITICAL, "operation_id": "paid-original",
+                                        "operation_state": "settled", "parsed": json.loads(LATE_CRITICAL)}]
+        commit_gate.settle_commit_review_ledger(ctx, "Fix amount", pre_fingerprint={"fingerprint": reference["pre_review_fingerprint"]},
+                                                blocked=True, block_reason="critical_findings", combined_findings=json.loads(LATE_CRITICAL))
+        seat_id, shown_operation = "critic", "paid-original"
+    else:
+        reference, _reviews = _returned_partial(ctx, monkeypatch)
+
+        def reopen(record):  # the ledger write of an explicit continuation (``review_continuation``): a successor on the seat
+            record["rows"] = [{**seat, "status": "pending", "operation_state": "in_flight", "operation_id": "paid-coupling-2",
+                               "superseded_operation_ids": ["paid-coupling"]} if seat["seat_id"] == "coupling" else seat
+                              for seat in record["rows"]]
+            return record
+        ledger.revise_record(root, reference["review_record_id"], reopen)
+        ledger.settle_from_collected(root, reference["review_record_id"], [{
+            "slot_id": "coupling", "status": "responded", "operation_id": "paid-coupling-2", "parts": ["coupling"], "raw_text": LATE_CRITICAL,
+            "answers": {"coupling": {"status": "responded", "verdict": "FAIL", "findings": json.loads(LATE_CRITICAL), "critical": 1, "coverage": "full"}}}])
+        seat_id, shown_operation = "coupling", "paid-coupling"
+    current = ledger.load_record(root, reference["review_record_id"])
+    seat = next(item for item in current["rows"] if item["seat_id"] == seat_id)
+    assert seat["status"] == "responded" and not ledger.seat_open(seat), seat
+    shown = next(item for item in _named_row(ctx, reference).triad_raw_results if item["slot_id"] == seat_id)
+    assert shown["operation_id"] == shown_operation and shown.get("operation_state") == "settled", "the row shows it closed, with the old outcome"
+    again = _handback_again(ctx, reference)
+    assert again["shown_outcomes"] != shown_outcomes(current), "the handback rendered only the old outcome"
+    head = _head(ctx)
+    git.run_cmd(["git", "reset"], cwd=ctx.repo_dir)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=again, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and _head(ctx) == head, refused
+
+
+def test_a_refused_landing_keeps_a_managed_merge_and_its_index(candidate, monkeypatch):  # noqa: F811
+    """At the commit boundary a managed merge stays exactly resolved and retryable: its index, MERGE_HEAD and files are
+    untouched, and only its transaction phase returns to resolution. Real Git merge state; the transaction reader is
+    ``restore_assisted_resolution_after_commit_error``'s own, supplied here."""
+    from ouroboros.tools import commit_gate
+
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    _settle_late(ctx, reference)
+    repo = ctx.repo_dir
+    git.run_cmd(["git", "reset"], cwd=repo)
+    base = git.run_cmd(["git", "branch", "--show-current"], cwd=repo).strip()
+    git.run_cmd(["git", "checkout", "-q", "-b", "update-target"], cwd=repo)
+    (repo / "other.txt").write_text("merged\n", encoding="utf-8")
+    git.run_cmd(["git", "add", "other.txt"], cwd=repo)
+    git.run_cmd(["git", "commit", "-q", "-m", "target"], cwd=repo)
+    git.run_cmd(["git", "checkout", "-q", base], cwd=repo)
+    git.run_cmd(["git", "merge", "--no-commit", "--no-ff", "update-target"], cwd=repo)
+    merge_head, index, head = (git.run_cmd(["git", "rev-parse", "MERGE_HEAD"], cwd=repo), git.run_cmd(["git", "write-tree"], cwd=repo), _head(ctx))
+    ctx._author_commit_source = commit_gate.resolve_commit_review_reference(ctx, reference)
+    ctx._author_commit_reference = reference
+    restored = []
+    monkeypatch.setattr("supervisor.update_merge.restore_assisted_resolution_after_commit_error", lambda tx: restored.append(tx) or True)
+    tx = {"task_id": ctx.task_id, "phase": "committing_assisted"}
+    sha, refusal = git._commit_reviewed_candidate(ctx, "Merge update", 0.0, tx)
+    assert sha == "" and "REVIEW_AUTHOR_CONTINUATION_INVALID" in refusal and restored == [tx], refusal
+    assert (git.run_cmd(["git", "rev-parse", "MERGE_HEAD"], cwd=repo), git.run_cmd(["git", "write-tree"], cwd=repo), _head(ctx)) == (merge_head, index, head)
+    assert (repo / "other.txt").read_text(encoding="utf-8") == "merged\n" and (repo / "change.py").read_text(encoding="utf-8") == "value = 2\n"
+    assert load_state(ctx.drive_root).attempts[-1].block_reason == "review_outcome_unread"
+
+
+def test_a_refusal_whose_cleanup_fails_is_still_recorded_and_returned(candidate, monkeypatch):  # noqa: F811
+    """The landing refusal's index cleanup can fail; the refusal still returns typed, names that failure and records its
+    blocked attempt, and no commit lands."""
+    ctx = candidate
+    reference, _reviews = _returned_partial(ctx, monkeypatch)
+    head, calls, original = _head(ctx), [], git._unstage_candidate
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: _settle_late(ctx, reference) and None)
+
+    def failing_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("reset failed")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(git, "_unstage_candidate", failing_once)
+    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and "OSError: reset failed" in refused, refused
+    assert _head(ctx) == head and calls, refused
+    row = load_state(ctx.drive_root).attempts[-1]
+    assert row.status == "blocked" and row.block_reason == "review_outcome_unread" and "reset failed" in row.block_details

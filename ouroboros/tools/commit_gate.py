@@ -1166,11 +1166,13 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
             advisory_findings=getattr(ctx, "_review_advisory", []),
             triad_raw_results=getattr(ctx, "_last_triad_raw_results", []), scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
             degraded_reasons=getattr(ctx, "_review_degraded_reasons", []))
+    from ouroboros.tools.review_collection import shown_field
+
     state = load_state(pathlib.Path(ctx.drive_root))
     row = state.latest_attempt_for(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
         task_id=str(getattr(ctx, "task_id", "") or ""), tool_name="commit_reviewed", attempt=ctx._current_review_attempt_number)
     reference = {"surface": "commit", **{key: getattr(row, key) for key in ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")},
-                 "review_record_id": str(getattr(row, "review_record_id", "") or "")} if row is not None else {}
+                 "review_record_id": str(getattr(row, "review_record_id", "") or ""), **shown_field(ctx, row)} if row is not None else {}
     try:
         resolve_commit_review_reference(ctx, reference, state=state)
         continuable = True
@@ -1351,13 +1353,13 @@ def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, autho
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
     if review_reference is not None or author_disposition is not None:
         from ouroboros.review_records import build_author_disposition_from_mapping
-        from ouroboros.tools.review_collection import continuation_refusal, without_broken_subagent_check
+        from ouroboros.tools.review_collection import continuation_refusal, require_shown, without_broken_subagent_check
         try:
             if review_rebuttal:
                 raise ValueError("a paid rebuttal and free author continuation are separate choices")
             author_disposition = without_broken_subagent_check(ctx, author_disposition)
             build_author_disposition_from_mapping(author_disposition, subject_hash="pending-current-candidate")
-            ctx._author_commit_source = resolve_commit_review_reference(ctx, review_reference)
+            ctx._author_commit_source = require_shown(ctx, review_reference, resolve_commit_review_reference(ctx, review_reference))
             ctx._author_commit_reference, ctx._author_commit_decision = dict(review_reference), dict(author_disposition)
         except (OSError, ValueError) as exc:  # the text names the next call its cause leaves
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=continuation_refusal(exc)))
