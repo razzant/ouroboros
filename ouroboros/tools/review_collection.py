@@ -930,7 +930,7 @@ def default_commit_continuation(ctx, kwargs) -> str:
     latest = returned[-1]
     named = {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
              "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint,
-             **({"review_record_id": latest.review_record_id} if latest.review_record_id else {})}
+             **({"review_record_id": record_id} if (record_id := str(getattr(latest, "review_record_id", "") or "")) else {})}
     return ("⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: author_disposition names no review_reference, and a decision "
             "answers an outcome it has read. Nothing was staged or committed. Next: decide with the review_reference "
             f"that outcome (attempt {latest.attempt}, the latest returned for this copy) returned; without it, collect "

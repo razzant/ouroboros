@@ -94,7 +94,7 @@ def test_a_decision_without_a_reference_asks_for_the_review_or_names_the_exact_r
     call = {"author_disposition": DECISION}
     refusal = rc.default_commit_continuation(ctx, call)
     assert "Nothing was staged or committed" in refusal and call == {"author_disposition": DECISION}
-    named = json.loads(refusal.split("review_reference=", 1)[1].rstrip("."))
+    named = json.loads(refusal.split("review_reference=", 1)[1].split(" and no author_disposition", 1)[0])
     assert (named["attempt"], named["pre_review_fingerprint"], named["task_id"]) == (3, "c", "t1")
     call = {"author_disposition": DECISION, "review_reference": named}
     assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"] is named
