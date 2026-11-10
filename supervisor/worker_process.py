@@ -602,7 +602,7 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import CarrierTurn
 
-        carrier_turn = CarrierTurn(task, task_drive_root, out_q)
+        carrier_turn = CarrierTurn(task, task_drive_root, out_q, wid)
     # The task's own endpoint (the direct lane's TurnEventQueue shape): every
     # telemetry frame this task emits — live, or from a callback that
     # outlives it — carries its chat and lineage by value, so the
