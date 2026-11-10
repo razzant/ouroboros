@@ -204,6 +204,64 @@ def test_stop_avoids_reviews_nudges_and_question_parking(turn, monkeypatch):
     assert axes['execution']['task_completion']['action'] == 'stop'
 
 
+@pytest.mark.parametrize('pending_review', ['wait', 'finish', None])
+def test_a_stop_ends_in_its_batch_and_names_pending_review_as_its_own_key(turn, monkeypatch, pending_review):
+    """A stop waits for nothing: pending_review is accepted on a root and has no effect on it. The receipt names it as
+    its own key, never in ``ignored`` (whose emptiness keeps a root's summary), and a stop without it is unchanged."""
+    registry, calls, notes, run = turn
+    for name in ('wait_after_tools', 'park_for_left_review', '_finish_tool_round_budget'):
+        monkeypatch.setattr(loop, name, lambda *a, **kw: pytest.fail('a stop parked or bought a round'))
+    chosen = {'pending_review': pending_review} if pending_review else {}
+    text, usage, trace = run([finish('Work remains.', action='stop', rationale='The review is still running.',
+                                     summary='Stopped at an honest midpoint.', **chosen)])
+    assert text == 'Work remains.' and len(calls) == 1
+    assert usage['wake_summary'] == 'Stopped at an honest midpoint.'
+    receipt = json.loads(trace['tool_calls'][0]['result'])
+    assert {key: receipt[key] for key in ('status', 'action')} == {'status': 'completion_requested', 'action': 'stop'}
+    assert 'ignored' not in receipt
+    if pending_review:
+        assert receipt['pending_review'] == f'{pending_review}: no effect on a stop, which waits for nothing'
+    else:
+        assert set(receipt) == {'status', 'completion_control', 'action'}
+
+
+def test_a_stop_over_a_review_it_left_running_still_ends_in_its_batch(turn, monkeypatch):
+    """The incident's shape: the root left its change review for a message, then stops with pending_review="wait".
+    The stop waits for nothing (no park on the left review, no wait after the batch, no extra round) and its
+    receipt says the argument had no effect; the review it left is still running and unread."""
+    from ouroboros.review_pause import PROCESS_TOKEN
+
+    registry, calls, notes, run = turn
+    waits = []
+
+    def leave_the_wave(ctx, _resolved_binding=None, **_kw):  # the registry's target-sensitive form
+        ctx._left_review_wait = {"surface": "change", "binding": "change-review:k", "retry_key": "k",
+                                 "owner": PROCESS_TOKEN, "done": False, "msg_id": "change-review-settled:k",
+                                 "record_id": "rl-left"}
+        return json.dumps({"record_id": "rl-left", "state": "pending"})
+
+    registry.override_handler('review_change', leave_the_wave)
+    monkeypatch.setattr(loop, 'wait_after_tools', lambda *a, **kw: waits.append(len(calls)))
+    monkeypatch.setattr(loop, 'park_for_left_review', lambda *a, **kw: pytest.fail('a stop parked on its left review'))
+    review = {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'review', 'type': 'function', 'function': {
+        'name': 'review_change', 'arguments': json.dumps({'subject': 'worktree'})}}]}
+    left = []
+
+    def stop():
+        left.append(dict(registry._ctx._left_review_wait or {}))  # what the stop is chosen over
+        return finish('Not done: my review still runs.', action='stop', pending_review='wait',
+                      rationale='Ending while my review runs.', summary='Stopped mid-review.')
+
+    text, usage, trace = run([review, stop])
+    assert text == 'Not done: my review still runs.' and len(calls) == 2
+    assert left[0].get('record_id') == 'rl-left' and left[0]['done'] is False, 'the left review was still running'
+    assert waits == [1], 'only the review batch rejoined the wait tail; the stop batch ended'
+    assert usage['wake_summary'] == 'Stopped mid-review.'
+    assert trace['task_completion']['rationale'] == 'Ending while my review runs.'
+    receipt = json.loads(trace['tool_calls'][-1]['result'])
+    assert receipt['pending_review'] == 'wait: no effect on a stop, which waits for nothing'
+
+
 def test_completion_conflict_preserves_sources_and_requires_reselection(turn):
     registry, calls, notes, run = turn
     response = finish('first')

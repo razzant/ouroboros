@@ -311,11 +311,12 @@ def _finalize_pending_review(
         review_retry_key=str(getattr(ctx, "_current_review_retry_key", "") or ""),
     )
     from ouroboros.tools.commit_gate import watch_left_commit_review
+    from ouroboros.tools.review_change import after_left_wave
 
     if watch_left_commit_review(ctx):
         event = ("A selected outcome or wake time" if any(row.get("reason") in {"helper_result", "review_result", "wake_at"} for row in
                  getattr(ctx, "_review_detached_operations", []) or []) else "An addressed message")
-        message += f" {event} ended your wait; a [Review settled] notice follows the whole wave."
+        message += f" {event} ended your wait; a [Review settled] notice follows the whole wave while this task runs; {after_left_wave(commit=True)}"
     # The index is part of this live wave's identity. Retain it for exact
     # reconciliation; rebuilding it from the worktree could review new bytes.
     from ouroboros.tools.review_collection import reference_for

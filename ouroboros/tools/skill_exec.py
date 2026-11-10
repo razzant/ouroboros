@@ -900,9 +900,10 @@ def _handle_review_skill(
     # suggestions) — that is what the agent needs; forensic records stay on disk in review.json and the
     # review ledger (Skills page + on-demand reads).
     if payload.get("pending"):
+        from ouroboros.tools.review_change import after_left_wave
         markdown += ("\n\nThe review is still running: an addressed message reached you, or a seat is still answering. "
-                     "Read what reached you; the same skill_review call collects this review at $0 (no second dispatch), "
-                     "and a [Review settled] notice follows the whole wave.")
+                     "Read what reached you; the same skill_review call collects this review at $0 (no second dispatch); "
+                     "a wave a message left sends one [Review settled] notice while this task runs; " + after_left_wave())
     if payload.get("job_id") and payload.get("content_hash"):
         reference = {"job_id": payload["job_id"], "content_hash": payload["content_hash"]}
         if payload.get("record_id"):

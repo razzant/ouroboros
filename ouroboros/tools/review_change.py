@@ -1245,11 +1245,22 @@ def _handle_new_review_change(
     if (getattr(ctx, "_left_review_wait", None) or {}).get("surface") in {"change", RESULT, SKILL}:
         event = ("A selected outcome or wake time was ready" if any(row.get("reason") in {"helper_result", "review_result", "wake_at"} for row in
                  getattr(ctx, "_review_detached_operations", []) or []) else "An addressed message reached you")
-        result["message"] = (event + " while the reviewers ran: this call returned and their "
-                             "paid work continues separately; a [Review settled] notice follows the whole wave. "
-                             + str(result.get("message") or ""))
+        result["message"] = (event + " while the reviewers ran: this call returned and their paid work continues "
+                             "separately; a [Review settled] notice follows the whole wave while this task runs; "
+                             + after_left_wave() + " " + str(result.get("message") or ""))
     text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
     return f"{result['message']}\n\n{text}" if result.get("message") else text
+
+
+def after_left_wave(*, commit: bool = False) -> str:
+    """What becomes of a wave its author left once that author's task ends, for every pending return that
+    names the wave's settlement notice (a notice only a running task receives, ``review_pause.watch_left_review``):
+    the room's late feedback, placed only where ownership is proven (``late_review_marks.owning_room``), its
+    ledger record readable by id, and collection by reference limited to its author or, for a commit review,
+    its recorded Continue successor (``review_collection.resolve_reference``)."""
+    return ("after this task ends, the outcome is kept as late feedback (in this room when the room is known) and "
+            "its record stays readable by id; collecting it through review_reference is "
+            + ("this task's or its recorded Continue successor's." if commit else "this task's alone."))
 
 
 def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, continue_seats: Any = None,
@@ -1308,13 +1319,13 @@ _DESCRIPTION = (
     "judgment (it never starts itself and runs no tests: tests.policy=NOT_RUN). Subjects: base..head (commits), "
     "index (staged) or worktree (live) against base (default HEAD), frozen in an isolated checkout "
     "(only a synchronous caller reads the body's own staged index live). Mail mid-wave returns a pending outcome; "
-    "reviewers continue, a [Review settled] notice follows, and review_reference collects the original subject at "
-    "$0 even after edits. The body is read against the body layer, anything else against the universal core "
+    "reviewers continue, a [Review settled] notice follows while this task runs, and review_reference collects the "
+    "original subject at $0 even after edits. The body is read against the body layer, anything else against the universal core "
     "checklist. Panel: Blocking own-body reviews widen to the whole pool; Advisory may narrow with a reason (else a "
     "typed $0 refusal); Cyber Pro and other repositories compose freely. Omitted means the whole pool; an enabled "
     "unticked row is an added critic. surface=preflight seats only the ONE enabled row you name (pool member or "
     "not): an optional early look, never the commit panel. subject=system (surface=system) is /review: one row "
-    "(default the Main model) reads the whole system against BIBLE.md and reports. subject=result (surface=result) "
+    "(Main by default) reads the whole system against BIBLE.md and reports. subject=result (surface=result) "
     "reviews THIS task's result instead of a change: the reply (answer, default your latest), the files and "
     "effects the task produced, and what was asked; every seat answers one question, whether the result does what "
     "was asked, judged on the result, and on the method only where the owner's words or explicit choice fixed it. "

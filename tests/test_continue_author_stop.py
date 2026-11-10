@@ -315,7 +315,19 @@ def test_the_finish_task_schema_names_the_stop_continue_boundary(tmp_path):
     assert "A root's stop records unfinished work for explicit Continue" in text and "under the same limits" in text
     assert "Continue does not reopen an ordinary finish or a final reply without this tool" in text
     assert "even when its text calls it partial" in text
-    assert "why you are stopping" in text
+    # Finish first; a stop for a step still mine names the rails that can end a turn, and a full window is not one
+    # of them while the host can renew this task's view (``context_renewal``), which can still refuse.
+    assert "Use finish when nothing of this work is left for you. If you end while a step of it is still yours" in text
+    assert "(a deadline, a budget or a round limit can end a turn first), use stop" in text
+    assert "naming what remains and why you end" in text
+    assert ("A full window is not such a limit: after a real size refusal the host can renew this same task's view "
+            "from its exact record, keeping its custody and budget;") in text
+    assert "an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse" in text
+    pending = (schema.get("function") or schema)["parameters"]["properties"]["pending_review"]
+    assert "default" not in pending, "a stop reads no wait into the schema; finish delivery keeps the default"
+    assert pending["description"].startswith("For a finish while your result's review still runs: wait (the default)")
+    assert ("A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do "
+            "not end; collect it with its review_reference, a $0 call that waits for its running seats.") in pending["description"]
 
 
 def test_the_tool_description_says_what_the_door_admits():

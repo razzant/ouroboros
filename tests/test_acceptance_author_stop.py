@@ -184,6 +184,26 @@ def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, 
     assert verdict.startswith("Ouroboros stopped with unfinished work")
 
 
+def test_a_stop_carrying_pending_review_buys_nothing_and_its_receipt_says_so(tmp_path, monkeypatch):
+    """pending_review="wait" on a stop of produced work under Required changes nothing: one model round, no review,
+    no wait after the batch; the stop's reason and the root's summary stay, and the receipt names the argument as
+    having no effect (a stop waits for nothing), apart from ``ignored``."""
+    import ouroboros.loop as loop
+
+    monkeypatch.setattr(loop, "wait_after_tools", lambda *a, **kw: pytest.fail("a stop waited after its batch"))
+    arguments = {"action": "stop", "answer": STOP_TEXT, "rationale": STOP_RATIONALE, "pending_review": "wait",
+                 "summary": "Stopped with the export unfinished."}
+    stop = {"content": None, "tool_calls": [{"id": "stop-1", "type": "function", "function": {
+        "name": "finish_task", "arguments": json.dumps(arguments)}}]}
+    run = _run_stop_loop(tmp_path, monkeypatch, [stop], stop_services=False, produced=True)
+    assert len(run.model_inputs) == 1 and run.panels == [], "a stop never buys a round or a review"
+    assert run.result == STOP_TEXT and run.trace["task_completion"]["rationale"] == STOP_RATIONALE
+    assert run.usage["wake_summary"] == "Stopped with the export unfinished."
+    receipt = json.loads(run.trace["tool_calls"][0]["result"])
+    assert receipt["pending_review"] == "wait: no effect on a stop, which waits for nothing"
+    assert "ignored" not in receipt
+
+
 def test_the_same_teardown_round_still_buys_the_review_for_a_finish(tmp_path, monkeypatch):
     """The control: a FINISH over changed evidence is not honoured unseen — its result is reviewed."""
     run = _run_stop_loop(tmp_path, monkeypatch, [

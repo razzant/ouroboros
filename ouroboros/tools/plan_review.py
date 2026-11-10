@@ -102,7 +102,8 @@ _SCHEMA = {
         "first reading of declared body work is seated like a body plan's first ask. "
         "Participants answer in parallel the first time and see each other's answers on later "
         "asks; each receives the plan or its delta, the council so far, its own open objections, your message and your "
-        "attachments. Each answer reaches you at your next step and before an unhurried finish; the mailbox gets one frame "
+        "attachments. Each answer that arrives while this task runs reaches you at your next step; a pending ask holds no "
+        "ending, and a reply after the task ends is kept as late feedback; the mailbox gets one frame "
         "when every counted participant has settled, answered or not. READ (no arguments, free) shows the current revision, every open "
         "objection with who raised it, who saw which revision, the latest contributions and the pending asks. An "
         "objection stands until the participant who raised it withdraws it (ask that participant again after you "
@@ -404,7 +405,8 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
         lines.append(f"Dispatch outcome unknown for {', '.join(unknown)} ({next(p.get('error') for p in sent if p['seat_id'] == unknown[0])}): "
                      "the substrate held them when the host lost track, so a reply may still arrive through custody; a new ask to them may pay twice.")
     if pending:
-        lines.append("Answers settle in the background and reach you at your next step and before your final; plan_task() reads them. "
+        lines.append("Answers settle in the background and reach you at your next step while this task runs; plan_task() reads "
+                     "them; a pending ask holds no ending, and a reply after the task ends is kept as late feedback. "
                      f"Still working: {', '.join(pending)}.")
     return "\n".join(lines)
 
