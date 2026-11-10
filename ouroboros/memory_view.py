@@ -528,11 +528,10 @@ def _capture_story(store: ChronicleStore, sources: _StorySources, units: List[me
     story = [{**entry, "told_by": told[entry["id"]]} if entry["id"] in told else entry for entry in story]
     progress = memory_inventory.legacy_progress(units)
     open_units = [unit for unit in units if not unit.folded]
-    accounts = store.accounts()
     status = {"folded": progress["folded"], "total": progress["periods"], **memory_inventory.story_counts(store),
               "open_records": len(open_units), "open_rows": sum(unit.rows for unit in open_units),
               "open_chars": sum(unit.retelling_chars for unit in open_units), "helper_route": "",
-              "accounts": len(accounts),  # in the common view: whole there, not told by a later account
+              "accounts": len(store.records(kinds=("account",))),  # in the common view: whole there, not told by a later account
               "accounts_shown": sum(1 for entry in pages if entry["kind"] == "account" and not entry.get("told_by"))}
     if status["folded"] < status["total"]:
         status["helper_route"] = sources.helper_route()

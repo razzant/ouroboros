@@ -39,13 +39,6 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
     ("L7d", "T:mainw"): (
         "The same whole-tail read as T:main's L7d row (6,631 rows for 32 at k=30); the same owner decision.",
         {"rows_read": 7000}),
-    ("L7e", "T:main"): (
-        "A capture parses chronicle records again: 303 repeated parses at k=30 (13 at k=1), the same page body up to 17 "
-        "times: story reuse, sealed_by and linked_rows each read the records themselves. Remover: K2 (one parse "
-        "per record per snapshot).", {"records_parsed_again": 400}),
-    ("L7e", "T:mainw"): (
-        "The next turn's capture parses records again: 152 repeats at k=30 (7 at k=1), warm caches take the rest; the same "
-        "remover.", {"records_parsed_again": 250}),
     ("host", "census"): (
         "check_stray_server_processes spawns one ps per listed process: 2 children for one, 25 for 24 (26.10); a "
         "process's first owner turn on the owner's Mac paid 373 to 632. Remover: razzant/ouroboros#2025 (one ps "
