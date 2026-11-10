@@ -775,9 +775,15 @@
   },
   {
     "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/context_observation.js",
+    "kind": "contains",
+    "value": "export const CONTEXT_MODES = Object.freeze(['nano', 'low', 'max']);"
+  },
+  {
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
-    "value": "const CONTEXT_MODES = ['nano', 'low', 'max'];"
+    "value": "const modes = CONTEXT_MODES.map((mode) =>"
   },
   {
     "id": "test_subagents_and_context_dom_present",

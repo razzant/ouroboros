@@ -126,7 +126,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         note="the envelope every worker log line rides; the payload types that "
              "need their own answer are the nested_log_event rows below"),
     "main_llm_call_state": _handled(
-        "supervisor.events", "ouroboros/loop_llm_call.py",
+        "supervisor.events", "ouroboros/llm_observability.py",
         note="the last handler still resolving on the facade itself", idle_input=True),
     "owner_message_injected": _handled(
         # v7 L-B split: the drain that emits the receipt lives in the round-limits leaf.
