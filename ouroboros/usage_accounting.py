@@ -23,7 +23,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
-from ouroboros.physical_attempt_context import PhysicalAttemptContext
+from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
@@ -1428,6 +1428,8 @@ def _record_attempt_capture(
             setattr(exc, "physical_attempt_capture", capture)
         except Exception:
             pass
+    if state == "released":
+        _observe_dispatched(capture)
     return capture
 
 
@@ -1486,6 +1488,7 @@ def execute_physical_attempt(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)  # outside the pre-dispatch guard; it never raises
     try:
         from ouroboros._usage_wait import late_settler, model_send
         response = model_send(reservation, send, settle_late=late_settler(
@@ -1558,6 +1561,7 @@ async def execute_physical_attempt_async(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)
     async def complete():
         try:
             response = await send()

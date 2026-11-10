@@ -111,6 +111,11 @@ class ContextFitPlan:
     window_record: Optional[WindowRecord] = None
     window_witness_bound: bool = True
     route_base_url: str = ""
+    start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
+    # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
+    # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
+    # ``UNKNOWN_START``: a restored task whose continuation did not carry its start (``restored_start``).
+    start: Tuple[str, str] = ("", "")
 
     def reproject_for_route(self, *, window_tokens: int, known_window: bool, ratio: float, output_reserve: int,
                             tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None,
@@ -673,13 +678,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       kept: Optional[Mapping[str, Any]] = None, saving: Optional[Mapping[str, int]] = None,
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
-                      envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0,
+                      envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
                       ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
     Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
     its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
     ordinary estimate, the book, its note and the reply the ordinary view keeps must fit, else the named refusal.
+    ``retain``: how a host step captures its section (default ``section_floor.retain_section``).
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
@@ -749,7 +755,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             saving=owed(measure(selected, sent, section_views(sections[selected], previous)), reserve) if asked else 0,
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
-            budget_mode=selected if kept is None and target and target < window else None)
+            budget_mode=selected if kept is None and target and target < window else None,
+            **({"retain": retain} if retain is not None else {}))
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -833,6 +840,28 @@ def _whole_request(core, governance, mode, tool_schemas):
                 {"role": "user", "content": json.loads(core.user_content_json)},
                 *json.loads(core.supplementary_messages_json)]
     return messages, list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas)
+
+
+START_CAUSES = ("", "memory", "route", "window")  # ``memory_floor.start_cause``
+UNKNOWN_START = ("unknown", "")  # a restored task's start its continuation did not carry: never the restore's fit
+
+
+def carried_start(carried: Any) -> Tuple[str, str]:
+    """A continuation's stored start (``owner_wait.continuation_state``) as ``ContextFitPlan.start``: the task's own
+    (mode, cause), or ``UNKNOWN_START`` when it is missing, malformed or already unknown (a source written before
+    the start was carried); nothing is read to recover it."""
+    if (isinstance(carried, (list, tuple)) and len(carried) == 2 and carried[0] in ("max", "low", "nano")
+            and carried[1] in START_CAUSES):
+        return str(carried[0]), str(carried[1])
+    return UNKNOWN_START
+
+
+def restored_start(plan: Any, carried: Any) -> Any:
+    """``plan`` holding a continuation's carried start (``carried_start``): a cold restore's new fit is this process's
+    capture, never the task's start, so an uncarried one stays unknown through every later checkpoint and rebind."""
+    from dataclasses import replace
+
+    return replace(plan, start=carried_start(carried)) if isinstance(plan, ContextFitPlan) else plan
 
 
 @timed_section("fit")
@@ -946,6 +975,8 @@ def build_context_fit_plan(
         ensure_ascii=False,
         sort_keys=True,
     )
+    from ouroboros.memory_floor import start_cause
+
     return ContextFitPlan(
         view_kind=view_kind,
         core_sha256=hashlib.sha256(core_payload.encode("utf-8")).hexdigest(),
@@ -968,7 +999,8 @@ def build_context_fit_plan(
         model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""),
-        core=core,
+        core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
+        start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )
 
 
@@ -991,5 +1023,6 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         response_reserve_tokens=measurement.response_reserve_tokens,
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
-        required_book_tokens=measurement.required_book_tokens,
+        required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
+        mode_cause=measurement.mode_cause,
     )

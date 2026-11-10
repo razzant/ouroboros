@@ -119,6 +119,7 @@ def test_restore_at_every_boundary_yields_the_same_continuation_state(tmp_path, 
         {k: v for k, v in limit_ctx.accumulated_usage.items() if k not in wc._TRANSIENT_USAGE},
         limit_ctx.round_idx, limit_ctx.tool_schemas, set(limit_ctx.owner_msg_seen)), ensure_ascii=False))
     if boundary == wc.RESUMED:
+        expected["context_start"] = ["unknown", ""]  # this legacy continuation carried no original-start fact
         wc.save_resumed(limit_ctx.tools, {"round_idx": 4, "tool_schemas": limit_ctx.tool_schemas,
                                           "resume_point": {"budget_tail": "tool"}, "context_model_role": ""},
                         limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage, limit_ctx.owner_msg_seen)

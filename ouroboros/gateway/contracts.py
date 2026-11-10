@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
@@ -708,6 +709,7 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
