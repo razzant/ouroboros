@@ -448,7 +448,10 @@ breaks the line; Ctrl, Cmd or Alt with Enter send like Enter. Enter sends
 nothing when it commits an input-method composition or the field is empty,
 disabled, read-only or settled, and once when held; a rejected answer keeps
 its draft. A message field grows with its text or placeholder to one cap, then
-scrolls. Touch keyboards are asked for a Send label; support varies. Every
+scrolls; touch keyboards are asked for a Send label (support varies). Under a phone
+keyboard the composer caps at a quarter of the visible height, keeps a line and 60 px of
+feed; a shorter room sheds air and the capsule row, then feed. Reading back puts the keyboard
+away; it asks for prose (capitals, autocorrection, spelling), which may correct code too. Every
 other multiline field — file editors, JSON, settings and widget forms — keeps
 Enter as a line break.
 
@@ -507,16 +510,16 @@ frame wraps (`web/modules/capsule_morph.js`); reduced motion shows the strip at 
 Inside Telegram a level the finger reaches, and another level or mode pressed, ticks
 (§10, Haptics).
 
-**On a phone the row folds while the owner reads back.** Scrolling back through a
-room's history folds the row of capsules away: its line collapses, the capsules
-fade, and ☰, still the row's first control, waits beside the field on its last line, beside "+". Scrolling
-toward the latest, reaching it, focusing the field or another layout brings the row
-back; while the owner writes or works a capsule, or the field holds the focus, it
-stays. Only the owner's own scroll decides, as with Safari's bars: older history
-paging in or let go, and rows that arrive or grow, move nothing; nor does a swipe
-begun in a card's frame, which the feed never sees, or the app's own jump (the
-waiting pill to a question, which keeps the pill under the finger for the next one)
-(`web/modules/composer_fold.js`; owner 19.10).
+**On a phone the row folds while the owner reads back.** Reading back through
+history folds the capsule row away: its line collapses, the capsules fade and ☰
+waits on the field's last line, beside "+". Scrolling toward the latest, reaching
+it, the field's focus or another layout brings it back; writing, a worked capsule
+or the field's focus keep it, but a keyboard room too short for a line of history
+beside it (under Telegram fullscreen's band) folds it until the keyboard goes down
+or the room grows, unless a capsule is open (owner 9.11). Only the owner's own
+scroll decides, as with Safari's bars: history paging in or out, rows arriving or
+growing, a swipe begun in a card's frame and the app's own jump (the waiting pill
+to a question) move nothing (`web/modules/composer_fold.js`; owner 19.10).
 
 **Hover is an accelerator; the press always works.** With a hovering fine pointer a
 capsule opens ~160 ms after arrival (not while the other is open) and closes a
@@ -1357,7 +1360,12 @@ reader; composer files stay.
 ### History edges
 
 An initial read shows one disabled `Loading saved history…` pill at the feed edge,
-not a second loading sentence in the header. Task activity remains separate.
+not a second loading sentence in the header; where this origin kept the room's
+newest text, a bounded preview stands instead under one `Saved text preview ·
+updating` line: plain words under their speakers, no times, actions or read credit
+(`web/modules/chat_preview.js`). The first canonical page replaces it, a passage the
+owner selected staying until released; a failed read leaves it `not current` beside
+Retry; a refused session, sign-out or a deletion seen here erases only this copy. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
@@ -3083,8 +3091,8 @@ card, because it restyles the whole room. A room that is left keeps its
 rows through its exit and stays whole and quiet for its return; only its tasks'
 incidents still toast (§4). A reader a room opened closes when another place covers it; a Project room left also
 pauses what it plays, Main plays on, and a hidden window closes and pauses nothing. Visited rooms keep
-their state until page teardown or project deletion; memory grows with visits,
-without a second persistent archive of the conversation. Main is quiet only while
+their state until page teardown or project deletion; memory grows with visits;
+past the page only the saved preview (History edges) keeps words. Main is quiet only while
 nothing of it shows: beside a docked Project it stays live; covered by a Project (the
 phone's card, a finger's docked column), behind another page or in a hidden window it is away. Docked,
 navigation stays instant; the Project panel comes in from the window's right edge
@@ -3220,10 +3228,11 @@ bottom never grows to explain, since a line added under its row lifts the row (o
 opens and holds the field, the row and the pressed control still.
 
 **Telegram.** Inside the Telegram Mini App the page tells Telegram it is ready,
-fills the screen, turns off Telegram's swipe-down so lists scroll, shows
+fills the screen (fullscreen if granted, the owner's to leave), turns off
+Telegram's swipe-down so lists scroll, shows
 Telegram's Back while a layer is open and its Close otherwise, gives Telegram's
 header and bottom bar the room's colour, follows Telegram's light or dark as the
-System appearance, and respects Telegram's safe areas
+System appearance, and respects Telegram's safe areas on all four sides
 (`web/modules/host_telegram.js`). Everything else is the same page.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered

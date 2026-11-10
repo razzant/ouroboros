@@ -26,7 +26,7 @@ def answer_projects(route, rows):
 
 
 def producer_evidence_dir(fallback, name, *, env=()):
-    """Where one test producer's own diagnostics go: one destination per invocation.
+    """Where one test producer's published diagnostics (frames, DOM, JSON) go: one destination per invocation.
 
     A destination the operator exported explicitly for this family wins unchanged. Otherwise
     the shared channel decides: ``diagnostic_directory`` redirects to the launcher's
@@ -44,7 +44,7 @@ def producer_evidence_dir(fallback, name, *, env=()):
             path = pathlib.Path(explicit)
             path.mkdir(parents=True, exist_ok=True)
             return path
-    return diagnostic_directory(fallback, name)
+    return diagnostic_directory(fallback, name, publish=True)
 
 
 def retire_synthetic_retention(directory, *reasons, release=None) -> bool:

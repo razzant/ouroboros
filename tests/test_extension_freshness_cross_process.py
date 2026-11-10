@@ -267,7 +267,21 @@ def test_a_disable_landing_during_a_slow_reconcile_is_still_caught(live_route, m
 # Cost: hashes counted, not elapsed time
 # --------------------------------------------------------------------------
 
+def _discovery_keeps_nothing(monkeypatch):
+    """Count what discovery reads when it keeps nothing (inside its racy window, on Windows, on a non-local
+    filesystem): a slow run otherwise ages the fixture past ``_RACY_NS``, and the subject's load is then reused
+    by its change keys, which these counts do not measure."""
+    from collections import OrderedDict
+
+    from ouroboros import skill_discovery_reuse
+
+    monkeypatch.setattr(skill_discovery_reuse, "_trusted", lambda *_args: False)
+    for memo in ("_INVENTORIES", "_SKILLS"):
+        monkeypatch.setattr(skill_discovery_reuse, memo, OrderedDict())
+
+
 def _count_hashes(monkeypatch):
+    _discovery_keeps_nothing(monkeypatch)
     calls: list = []
     real = skill_loader.compute_content_hash
 

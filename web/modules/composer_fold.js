@@ -1,12 +1,16 @@
 /** The composer's row of capsules folds while the owner reads back through a room's history (owner 19.10, 2A;
- * docs/DESIGN.md "Composer owner controls").
+ * docs/DESIGN.md "Composer owner controls"), and in a keyboard room too short for it (owner 9.11).
  *
  * On a phone (the stack layout) the row (☰, Swarm, Context, Effort) takes its own line above the field. While the
  * owner scrolls back through the history it folds away: the composer keeps only the field, and ☰, still the row's
  * first control, waits beside it on its last line, beside "+". Scrolling toward the latest, reaching it, focusing the field or opening a capsule
  * brings the row back, and so does any other layout. Like Safari's bars, a direction decides: FOLD.run px one way.
  * A press on ☰, ↓, 📎 or Send is that control's own: the row stays as it is, so nothing slides under the finger
- * before the tap lands. While the owner writes, or the field holds the focus, the row never folds.
+ * before the tap lands. While the owner writes, or the field holds the focus, the row never folds, but in a short
+ * keyboard room (style.css --keyboard-short: Telegram fullscreen's band over a tall keyboard) the row would leave the
+ * feed no line of a message: there it folds while the keyboard is up, the field keeping its focus, until the keyboard
+ * goes down or the room grows. The room says so by resizing the feed, and the capsules' owner once a capsule has
+ * settled closed; a capsule being worked keeps the row.
  *
  * Only the owner's own scroll is a step. It is read from where the newest row stands below the feed's visible
  * bottom, and only between two reads of the same content: older history paged in or let go, a message or a newer
@@ -31,17 +35,23 @@ export const FOLD = Object.freeze({
     settle: 340,  // ms of the fold's own motion (style.css), after which an unfolded row lets go of its height
 });
 
+// The short keyboard room's step as the composer inherits it (style.css registers it as a length: 0px or 1px).
+const shortRoom = (win, el) => parseFloat(win?.getComputedStyle?.(el)?.getPropertyValue?.('--keyboard-short')) > 0;
+
 export function createComposerFold({ feed, wrap, row, win = globalThis.window, doc = globalThis.document,
     isStack = () => isStackLayout(), onLayout = (sync) => onLayoutChange(() => sync(), { w: win }),
-    readingBack = () => true } = {}) {
-    if (!feed || !wrap || !row) return { destroy() {}, folded: () => false };
+    readingBack = () => true, short = () => shortRoom(win, wrap) } = {}) {
+    if (!feed || !wrap || !row) return { destroy() {}, sync() {}, folded: () => false };
     let destroyed = false;
     let folded = false;
+    // Folded for the short keyboard room, not for reading back: only the room's own change brings this fold back.
+    let tight = false;
     // The last read: how far the newest row lay below the visible bottom, and the feed's content height then.
     let last = { away: null, height: 0 };
     let run = 0;
     let releaseTimer = 0;
     let frame = 0;
+    let roomFrame = 0;
     // ☰'s way down: the depth of ☰'s centre on the line, measured when the line is first held, and, read at every fold,
     // what lies between the line and the field and how far above the field's bottom its last line runs (the centre of
     // "+", which rides on it; the field holds a staged reply's strip, chat_reply.js).
@@ -60,16 +70,20 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         return { away, height: feed.scrollHeight };
     }
     const atLatest = () => feed.scrollHeight - feed.clientHeight - feed.scrollTop < FOLD.latest;
-    // While the owner writes or works a capsule the row stays: the keyboard is up (app.js's keyboard-open), the field
-    // holds the focus (with or without a keyboard), or a capsule is open, focused or has the line alone. ☰ stays in
-    // sight folded, so its focus (the drawer gives it back on closing) keeps nothing.
-    const busy = () => {
+    const keyboard = () => Boolean(doc?.body?.classList?.contains?.('keyboard-open'));
+    // A capsule is worked: open, focused or with the line alone. ☰ stays in sight folded, so its focus (the drawer gives
+    // it back on closing) keeps nothing.
+    const working = () => {
         const focused = doc?.activeElement;
         const menu = row.querySelector?.(':scope > .composer-menu');
-        return Boolean(doc?.body?.classList?.contains?.('keyboard-open'))
-            || Boolean(focused && (focused === field || (row.contains?.(focused) && !menu?.contains?.(focused))))
+        return Boolean(focused && row.contains?.(focused) && !menu?.contains?.(focused))
             || Boolean(row.dataset?.ownerSolo) || Boolean(row.querySelector?.('[data-open="true"]'));
     };
+    // While the owner writes or works a capsule the row stays: the keyboard is up (app.js's keyboard-open), the field
+    // holds the focus (with or without a keyboard), or a capsule is worked.
+    const busy = () => keyboard() || Boolean(field && doc?.activeElement === field) || working();
+    // But a short room with the keyboard up has no line of a message to spare for the row (owner 9.11).
+    const cramped = () => keyboard() && Boolean(isStack?.()) && short() && !working();
 
     // Folded, the line starts where what lay between it and the field does (the wrap's gap goes with the line), and ☰
     // keeps its place on the line: it goes down by that, then by the field's height less the last line's rise above the
@@ -85,7 +99,8 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         wrap.style.removeProperty('--fold-menu-dy');
     }
 
-    function fold() {
+    function fold(forRoom = false) {
+        tight = forRoom;
         if (folded) return;
         folded = true;
         if (releaseTimer) { win?.clearTimeout?.(releaseTimer); releaseTimer = 0; }
@@ -115,6 +130,7 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
     }
 
     function unfold() {
+        tight = false;
         if (!folded) return;
         folded = false;
         delete wrap.dataset.folded;
@@ -130,6 +146,7 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         // start (history paged in or let go, rows arriving or growing, the reserve), never the owner's step.
         const prev = now.height === last.height ? last.away : null;
         last = now;
+        if (cramped()) { run = 0; fold(true); return; }
         if (!isStack?.() || busy()) { run = 0; unfold(); return; }
         if (atLatest() || !readingBack()) { run = 0; unfold(); return; }
         if (now.away === null || prev === null) return;
@@ -144,28 +161,62 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         if (frame || destroyed) return;
         frame = typeof win?.requestAnimationFrame === 'function' ? win.requestAnimationFrame(read) : (read(), 0);
     };
+    // The room itself changed (the keyboard up or down, the visual viewport): the feed's box resized. A short keyboard
+    // room folds the row; a roomier one brings back the fold it made, never one of the owner's reading back. Neither is
+    // a step of the owner's, so the next read starts from here.
+    function sync() {
+        roomFrame = 0;
+        if (destroyed) return;
+        if (cramped()) fold(true);
+        else if (tight) unfold();
+        else return;
+        run = 0;
+        last = measure();
+    }
+    const onRoom = () => {
+        if (roomFrame || destroyed) return;
+        roomFrame = typeof win?.requestAnimationFrame === 'function' ? win.requestAnimationFrame(sync) : (sync(), 0);
+    };
     // Focusing the field (the owner is about to write; a folded row means it did not hold the focus) brings the row
-    // back. The focus or press of another control in the composer is that control's own and moves nothing.
-    const onFocus = (event) => { if (field && event?.target === field) { run = 0; unfold(); } };
+    // back, but in a short keyboard room. The focus or press of another control in the composer is that control's own
+    // and moves nothing.
+    const onFocus = (event) => {
+        if (!field || event?.target !== field) return;
+        run = 0;
+        if (cramped()) fold(true);
+        else unfold();
+    };
 
     feed.addEventListener('scroll', onScroll, { passive: true });
     wrap.addEventListener('focusin', onFocus);
-    // Folded, the field is narrower by ☰'s place, so a draft of several lines may take one more (its bottom stays where
-    // it was), and the mic, a busy Send or words put in change its height too: ☰ follows its last line.
-    const resized = box && typeof win?.ResizeObserver === 'function'
-        ? new win.ResizeObserver(() => { if (folded) aimMenu(box.offsetHeight); }) : null;
-    resized?.observe(box);
+    // The feed's box tells the room's changes. Folded, the field is narrower by ☰'s place, so a draft of several lines
+    // may take one more (its bottom stays where it was), and the mic, a busy Send or words put in change its height
+    // too: ☰ follows its last line.
+    const resized = typeof win?.ResizeObserver === 'function' ? new win.ResizeObserver((entries) => {
+        for (const entry of entries || []) {
+            if (entry.target === feed) onRoom();
+            else if (folded && box) aimMenu(box.offsetHeight);
+        }
+    }) : null;
+    resized?.observe(feed);
+    if (box) resized?.observe(box);
     const unwatchLayout = onLayout(() => { run = 0; last = measure(); unfold(); });
 
     return {
         folded: () => folded,
+        // A capsule closed by a press the field keeps its focus through moves neither the feed nor the focus: the
+        // capsules' owner asks again once it has settled closed (composer_owner_controls.js onSettled).
+        sync: onRoom,
         destroy() {
             if (destroyed) return;
             destroyed = true;
             feed.removeEventListener('scroll', onScroll);
             wrap.removeEventListener('focusin', onFocus);
             resized?.disconnect();
-            if (frame && typeof win?.cancelAnimationFrame === 'function') win.cancelAnimationFrame(frame);
+            if (typeof win?.cancelAnimationFrame === 'function') {
+                if (frame) win.cancelAnimationFrame(frame);
+                if (roomFrame) win.cancelAnimationFrame(roomFrame);
+            }
             if (releaseTimer) win?.clearTimeout?.(releaseTimer);
             unwatchLayout?.();
             delete wrap.dataset.folded;

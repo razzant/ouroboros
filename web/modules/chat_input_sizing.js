@@ -47,6 +47,8 @@ export function attachChatInputSizing(input) {
     let width = 0;
     // Something other than the width changed the wrapping: a loaded font, a placeholder.
     let stale = false;
+    // The max-height the last measurement capped at: a phone keyboard moves it (app.js `--chat-viewport-input-cap`).
+    let capAt = '';
     let queued = false;
     let frame = 0;
     input.dataset.sizing = measured ? 'fit' : 'content';
@@ -63,7 +65,8 @@ export function attachChatInputSizing(input) {
         if (!(input.clientWidth > 0)) { width = 0; return; }
         stale = false;
         const style = getComputedStyle(input);
-        const cap = parseFloat(style.maxHeight);  // NaN for `none`: never capped
+        capAt = style.maxHeight;
+        const cap = parseFloat(capAt);  // NaN for `none`: never capped
         const box = style.boxSizing === 'border-box'
             ? px(style.borderTopWidth) + px(style.borderBottomWidth)
             : -(px(style.paddingTop) + px(style.paddingBottom));
@@ -91,16 +94,17 @@ export function attachChatInputSizing(input) {
     }
 
     // Without an edit, only a changed wrapping width (a resize, the busy Send label, a
-    // reveal), a loaded font or a new placeholder re-measures: the height this module
-    // writes reports back and is ignored. The write waits for the next frame, because
-    // inside the observer it would resize the composer that chat.js observes higher in
-    // the same tree.
+    // reveal), a loaded font, a new placeholder or a moved cap (a viewport resize, the body's
+    // keyboard-open class) re-measures: the height this module writes reports back and is
+    // ignored. The write waits for the next frame, because inside the observer it would
+    // resize the composer that chat.js observes higher in the same tree.
     const remeasure = () => {
         if (queued) return;
         queued = true;
         frame = requestAnimationFrame(() => {
             queued = false;
-            if (!disposed && (stale || usedWidth() !== width)) measure(false);
+            const style = disposed ? null : getComputedStyle(input);
+            if (style && (stale || px(style.width) !== width || style.maxHeight !== capAt)) measure(false);
         });
     };
     const markStale = () => {
@@ -114,6 +118,7 @@ export function attachChatInputSizing(input) {
     const fontsLoading = () => fonts.ready.then(markStale);
     let observer = null;
     let placeholder = null;
+    let keyboard = null;
     if (measured && typeof ResizeObserver === 'function') {
         observer = new ResizeObserver(remeasure);
         observer.observe(input);
@@ -122,7 +127,17 @@ export function attachChatInputSizing(input) {
     if (measured && typeof MutationObserver === 'function') {
         placeholder = new MutationObserver(markStale);
         placeholder.observe(input, { attributes: true, attributeFilter: ['placeholder'] });
+        // app.js drops body.keyboard-open (and with it the keyboard's cap, style.css) in a dismissal's own frame,
+        // with no resize: a capped draft's written height is no size change a ResizeObserver could report.
+        const body = input.ownerDocument?.body || globalThis.document?.body;
+        if (body) {
+            keyboard = new MutationObserver(remeasure);
+            keyboard.observe(body, { attributes: true, attributeFilter: ['class'] });
+        }
     }
+    // A viewport resize can move the cap without changing the width; one that moves neither writes nothing.
+    const viewports = measured ? [globalThis.window?.visualViewport, globalThis.window].filter(Boolean) : [];
+    for (const target of viewports) target.addEventListener?.('resize', remeasure);
     fonts?.addEventListener('loading', fontsLoading);
     // A loading period already running sent its `loading` before this listener.
     if (fonts?.status === 'loading') fontsLoading();
@@ -141,6 +156,9 @@ export function attachChatInputSizing(input) {
             observer = null;
             placeholder?.disconnect();
             placeholder = null;
+            keyboard?.disconnect();
+            keyboard = null;
+            for (const target of viewports) target.removeEventListener?.('resize', remeasure);
             fonts?.removeEventListener('loading', fontsLoading);
             if (queued) cancelAnimationFrame(frame);
             queued = false;

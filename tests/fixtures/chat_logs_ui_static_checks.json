@@ -960,28 +960,28 @@
     "value": "cardVisible"
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-input\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocorrect=\"off\""
+    "value": "autocorrect=\"on\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocapitalize=\"off\""
+    "value": "autocapitalize=\"sentences\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "spellcheck=\"false\""
+    "value": "spellcheck=\"true\""
   },
   {
     "id": "test_history_replay_preserves_failed_task_summary_phase",

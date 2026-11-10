@@ -89,7 +89,7 @@ def test_engine_facts_status_line_at_both_widths(direct_server_with_data, tmp_pa
                     assert 'integrity ok, flusher up' in measured
                 assert page.locator('.agents-service').evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
                 line.scroll_into_view_if_needed()
-                output = diagnostic_directory(tmp_path, "engine-facts")
+                output = diagnostic_directory(tmp_path, "engine-facts", publish=True)
                 destination = output / f'engine-facts-{name}.png'
                 page.screenshot(path=str(destination))
                 print(f'UI_ENGINE_EVIDENCE {destination}')

@@ -130,7 +130,7 @@ class _Observations:
         return self.reviews[task_id]
 
     def prime_model_handoffs(self, root_ids: Iterable[str]) -> None:
-        """Every paused tree's model recipients over ONE read of their open attempts (``trees_model_handoffs``)."""
+        """Every paused tree's model recipients over ONE read of their unanswered sends (``trees_model_handoffs``)."""
         wanted = sorted({root for root in root_ids if root and root not in self.models})
         if wanted:
             from supervisor.continuation_admission import trees_model_handoffs

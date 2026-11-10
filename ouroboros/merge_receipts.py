@@ -36,8 +36,9 @@ PR does not prove the earlier request settled. An explicit ``continue_receipt_id
 decides one new request after it, a successor (``continues``) claimed at most once
 under the receipt lock and rejoined by a repeat of the decision; earlier receipts keep
 their own effect. A NO_EFFECT request holds no custody and its receipt is observed
-until GitHub shows the PR open without a queue; ``tool_custody`` releases every request
-of a task once one receipt shows its PR merged. One receipt feeds the task card row
+until GitHub shows the PR open without a queue; no request of a task holds once one
+receipt shows its PR merged, nor a settled unknown one a Resume named (``accept_unknown``:
+a decision beside its unchanged facts, never sent again). One receipt feeds the task card row
 and a cleaned PR-BODY block (unrelated text kept, publication read back); a failed
 publication never repeats the merge. Shell or web merges leave no receipt; nothing
 here parses shell commands.
@@ -179,6 +180,9 @@ def _merge_facts(prior: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, A
         [*(prior.get("launch_operation_ids") or []), *(incoming.get("launch_operation_ids") or [])]))
     if prior.get("effect"):
         merged["effect"] = prior["effect"]  # exactly one merge invocation owns this receipt
+    merged.pop("unknown_accepted", None)  # only ``accept_unknown`` records the decision; observers keep it
+    if prior.get("unknown_accepted"):
+        merged["unknown_accepted"] = prior["unknown_accepted"]
     states = ("intent_recorded", "effect_attempted", "settled")
     if prior.get("state") in states and incoming.get("state") in states:
         merged["state"] = max((prior["state"], incoming["state"]), key=states.index)
@@ -253,6 +257,64 @@ def continuation_refusal(receipt: Dict[str, Any], claims: Dict[str, Any], own: s
     if any(op != own and (claims.get(op) or {}).get("state") == "claimed" for op in receipt.get("launch_operation_ids") or []):
         return "its call may still be running"
     return ""
+
+
+# The one hold a caller may go on past (``local_custody_repair.ACCEPTABLE_UNKNOWN``): a settled request of unknown
+# outcome. A call still claimed, an unsettled request, a queue or GitHub's merged answer may still act.
+UNKNOWN_EFFECT = "merge_effect_unknown"
+
+
+def held_receipts(row: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
+    """The requests of one task record that hold its custody, each with why (``tool_custody`` blocks on each).
+
+    A request holds while its own effect is not definite, unless another receipt of the task shows its exact PR
+    merged (a merged PR cannot merge again; an unconfirmed request stays unconfirmed, never rewritten) or a
+    caller went on past its settled unknown outcome (``accept_unknown``); a later queue or call holds again."""
+    receipts = [r for r in row.get(RECEIPTS_KEY) or [] if isinstance(r, dict)]
+    claims = row.get("launch_handoffs") or {}
+    merged = {url for r in receipts if (r.get("outcome") or {}).get("status") == "merged"
+              and (url := (r.get("repo") or {}).get("url"))}
+    held = []
+    for receipt in receipts:
+        if (not receipt.get("launch_operation_ids") or effect_is_definite(receipt)
+                or (receipt.get("repo") or {}).get("url") in merged):
+            continue
+        why = ("merge_call_unreturned" if any((claims.get(op) or {}).get("state") == "claimed"
+                                               for op in receipt["launch_operation_ids"])
+               else "merge_unsettled" if receipt.get("state") != "settled"
+               else "merge_queued" if (receipt.get("outcome") or {}).get("status") == "queued"
+               else "merge_answered" if (receipt.get("effect") or {}).get("ok") else UNKNOWN_EFFECT)
+        if why != UNKNOWN_EFFECT or not receipt.get("unknown_accepted"):
+            held.append((receipt, why))
+    return held
+
+
+def accept_unknown(drive_root: Any, task_id: str, receipt_ids: Any, *, by: Dict[str, Any]) -> Dict[str, str]:
+    """A caller's decision to go on past named requests of this task whose settled outcome is unknown.
+
+    Judged under the receipt lock as ``held_receipts`` holds them: returns why each named one still held and
+    records ``unknown_accepted`` (``by``, its reason, ``replay_authorized=False``) beside each ``UNKNOWN_EFFECT``
+    one. No fact, revision or publication changes: the request is never sent again and its effect stays unknown,
+    a plain call still only reads it back and an explicit continuation stays its own decision."""
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+
+    wanted, judged = {str(value) for value in receipt_ids or () if value}, {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        require_writable_task_result_schema(current)
+        judged.clear()
+        judged.update((r["receipt_id"], why) for r, why in held_receipts(current) if r.get("receipt_id") in wanted)
+        decided = {receipt_id for receipt_id, why in judged.items() if why == UNKNOWN_EFFECT}
+        if not decided:
+            return None
+        decision = {**by, "reason": UNKNOWN_EFFECT, "replay_authorized": False}
+        return stamp_task_result_schema({**current, RECEIPTS_KEY: [
+            dict(r, unknown_accepted=decision) if isinstance(r, dict) and r.get("receipt_id") in decided else r
+            for r in current[RECEIPTS_KEY]]})
+
+    if wanted:
+        patch_document(drive_root, task_id, _mutate)
+    return judged
 
 
 def _claimed_instead(receipt: Dict[str, Any], rows: List[Dict[str, Any]], claims: Dict[str, Any],

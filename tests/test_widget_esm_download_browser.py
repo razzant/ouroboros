@@ -153,7 +153,7 @@ def test_desktop_saves_declared_files_as_bytes_and_streams_routes(esm_server, en
     reads, calls = [], esm_server.state.launcher_calls
     api, launcher_sha = native_file_api(esm_server.port, reads)
     esm_server.state.launcher = api
-    evidence = diagnostic_directory(tmp_path / 'evidence', f'widget-esm-download-desktop-{engine}')
+    evidence = diagnostic_directory(tmp_path / 'evidence', f'widget-esm-download-desktop-{engine}', publish=True)
     downloads = home / 'Downloads'
     outcome, base = {}, ''
     with sync_playwright() as playwright:
