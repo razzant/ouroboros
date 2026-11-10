@@ -320,7 +320,7 @@ def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_on
     import time
 
     from ouroboros import delegate_collection, delegate_custody_current as current
-    from ouroboros import delegate_message_store as frames, delegate_supervision
+    from ouroboros import delegate_message_store as frames, delegate_feed
     from ouroboros.gateways import claudexor as gw
 
     row, address = _tree(tmp_path)
@@ -346,7 +346,7 @@ def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_on
             time.sleep(0.02)
         return predicate()
 
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)  # the body's pass, quickened
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)  # the body's pass, quickened
     monkeypatch.setattr(gw, "ClaudexorGateway", undiscovered)
     if receipt_before_body:
         from ouroboros import owner_relay

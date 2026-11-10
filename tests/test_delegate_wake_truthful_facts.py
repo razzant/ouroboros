@@ -303,6 +303,7 @@ def test_a_quiet_wake_keeps_the_whole_sets_meaning_never_its_fitted_rows(tmp_pat
     work (``run_activity``) reads the body's same fact; rows that merely look async in a fitted preview never
     re-decide it."""
     from ouroboros.delegate_progress import paused_note
+    from ouroboros.delegate_feed import run_activity
 
     monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
     pending, tick = _quiet_question_tick(**({"async_questions_only": True} if whole_set_async else {}))
@@ -310,8 +311,8 @@ def test_a_quiet_wake_keeps_the_whole_sets_meaning_never_its_fitted_rows(tmp_pat
     wake = json.loads(wake_now(ctx, "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
     assert wake["note"] == paused_note(pending, async_only=whole_set_async)
     assert ("PAUSED" in wake["note"]) is not whole_set_async
-    assert supervision.run_activity({"answered": True, "run_state": "running", "waiting_on_user": True,
-                                     "async_questions_only": whole_set_async}) is whole_set_async
+    assert run_activity({"answered": True, "run_state": "running", "waiting_on_user": True,
+                         "async_questions_only": whole_set_async}) is whole_set_async
 
 
 @pytest.mark.parametrize("async_only", [True, False])

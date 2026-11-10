@@ -389,7 +389,7 @@ def test_a_held_delegated_run_types_while_it_works_and_resumes_by_itself(flow, m
     """running → paused on its question → running again, held by a turn that cannot sleep (its delegate_wait
     waits in the slot): the body observer's reads wake the idle cue when the held run works again, with no new
     turn or start, and its terminal ends the wait."""
-    from ouroboros import delegate_collection, delegate_custody as custody, delegate_supervision
+    from ouroboros import delegate_collection, delegate_custody as custody, delegate_feed, delegate_supervision
     from tests._run_wait_shared import scripted_reads
 
     class Engine:
@@ -403,7 +403,7 @@ def test_a_held_delegated_run_types_while_it_works_and_resumes_by_itself(flow, m
             pass
 
     engine = Engine()
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
     monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda: None)
     scripted_reads(monkeypatch, lambda _ctx, rid, *_a, **_k: json.dumps(
         {"status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 2}))
@@ -525,7 +525,7 @@ def test_stop_now_ends_the_cue_at_its_next_read(flow):
 def test_a_warm_sleep_on_its_own_run_types_and_resumes_when_the_body_sees_it_work_again(flow, monkeypatch):
     """await_messages(mode=warm, runs=[own run]): the pool's real park, the body observer's own
     reads, and its working-again announce through the supervisor's typing handler to the cue."""
-    from ouroboros import delegate_collection, delegate_custody as custody, delegate_supervision, model_sleep
+    from ouroboros import delegate_collection, delegate_custody as custody, delegate_feed, model_sleep
     from ouroboros import owner_wait
     from ouroboros.model_wait import TaskModelWait
     from supervisor import worker_owner_wait
@@ -541,7 +541,7 @@ def test_a_warm_sleep_on_its_own_run_types_and_resumes_when_the_body_sees_it_wor
             pass
 
     engine = Engine()
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
     meta = _running(flow, "root-s")
     assert custody.emit(flow.root, custody.STARTED, {
         "run_id": "run-s", "invocation_id": "invoke-s", "task_id": "root-s", "root_task_id": "root-s",

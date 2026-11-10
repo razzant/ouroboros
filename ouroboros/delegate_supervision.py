@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
+from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.owner_mailbox import (
     KIND_FINALIZE_NOW, KIND_HURRY, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
 )
@@ -27,14 +28,11 @@ from ouroboros.utils import utc_now_iso
 from ouroboros import delegate_supervision_state as checkpoints
 
 log = logging.getLogger(__name__)
-_TICK_SEC = 3  # the body's observation beat (``delegate_collection``, ``delegate_feed``)
 _QUIET_STATUSES = {"progress", "no_progress", "observation_pending"}
 _LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY}
 _MAX_COORDINATION_SEEN = 256
-# An in-slot wait's mark (a turn that cannot sleep) outlives one beat, then renews; an
-# observation older than a few beats says nothing current about the run's work.
+# An in-slot wait's mark outlives one beat, then renews.
 _HOLD_MARK_SEC = 120.0
-_OBSERVATION_CURRENT_SEC = 4 * _TICK_SEC
 # A read text the host could not parse as a JSON object (``_payload``): no daemon answer.
 _OBSERVATION_MALFORMED = "observation_malformed"
 
@@ -736,7 +734,7 @@ def _pending_payload(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
                     replay["wake_events"] = kept
                 else:
                     replay.pop("wake_events", None)
-            if str(replay.get("status") or "") in _QUIET_STATUSES and not replay.get("wake_events"):
+            if str(replay.get("status") or "") in _QUIET_STATUSES and not replay.get("wake_events") and not replay.get("questions"):
                 pending["acknowledged_at"] = utc_now_iso()
                 state["last_acknowledged_wake"] = pending
                 state["pending_wake"] = {}
@@ -811,7 +809,10 @@ def stage_pending_wake_exposure(ctx: Any, delivered: Any) -> None:
 
 
 def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str) -> None:
+    from ouroboros.model_sleep import acknowledge_question_delivery
+
     wake = payload.get("wake", payload) if isinstance(payload, dict) else {}
+    acknowledge_question_delivery(ctx, json.dumps(wake))
     if isinstance(wake, dict) and isinstance(wake.get("wake_events"), list):
         seen_mail = getattr(ctx, "_loop_mailbox_seen_ids", None)
         if seen_mail is None:
@@ -1037,20 +1038,6 @@ def _control_wakes(ctx: Any) -> list[dict[str, Any]]:
     return wakes
 
 
-def run_activity(observation: Any) -> Optional[bool]:
-    """What one dated observation of a run says of its work (the body observer's,
-    ``delegate_feed.current_activity``): True running (``async_questions_only`` questions hold
-    nothing), False waiting (queued for capacity, paused on its question, terminal), None
-    unanswered or unknown. A running run counts as working: an engine-internal provider wait
-    carries no typed fact."""
-    if not isinstance(observation, dict) or observation.get("answered") is not True:
-        return None
-    run_state = str(observation.get("run_state") or "")
-    if run_state == "running":
-        return not observation.get("waiting_on_user") or observation.get("async_questions_only") is True
-    return False if run_state == "queued" or run_state in custody.TERMINAL_STATES else None
-
-
 def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
     """The leaf route's DECLARED live-input capability (engine-static), read ONCE per
     publication through its transport (a one-read transport when none is given) and stamped
@@ -1197,7 +1184,7 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
     return None, states
 
 
-def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "") -> ToolResult:
+def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questions: Any = None) -> ToolResult:
     """Publish one wake of the runs a wait selected and render it: the ONE wake record (``pending_wake``:
     its mail, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
     wake still unacknowledged is returned instead (``_replay``). A terminal another collector is still
@@ -1259,6 +1246,12 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "") -> ToolRes
         _emit(ctx, "delegate_supervision_checkpoint_consumed", {
             "run_id": target, "reason": str(checkpoint.get("reason") or ""),
             "consumed_by": "scheduled_checkpoint" if due else "real_event"})
+    if not woke_by.startswith("control:"):
+        from ouroboros.model_sleep import question_sources
+
+        questions = question_sources(ctx) if questions is None else questions
+        if questions:
+            payload["questions"] = questions
     if wakes:
         payload["wake_events"] = wakes
     payload["coordination_context"] = coordination_live_context(ctx)
@@ -1422,7 +1415,7 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         return _fail("delegate_wait", "sleep_refused", str(exc))
     entered(outcome=outcome["reason"], **{key: outcome[key] for key in ("sleep_id", "mode") if outcome.get(key)})
     if outcome["reason"] == "ready":  # nothing parks: what is there answers through this result
-        return _publish(ctx, descriptor, str(outcome.get("woke_by") or ""))
+        return _publish(ctx, descriptor, str(outcome.get("woke_by") or ""), questions=outcome.get("questions", []))
     descriptor.update(sleep_id=outcome["sleep_id"], mode=outcome["mode"])
     ctx._pending_task_wait = descriptor  # owed to the first request after the wake (``native_task_wait.deliver_owed``)
     return delegate_result({

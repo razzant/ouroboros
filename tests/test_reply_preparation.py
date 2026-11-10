@@ -225,7 +225,7 @@ def _intent(world, task_id, *, policy, scope="single"):
 
     path = world.root / "state" / "cancel_intents.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    current = json.loads(path.read_text()) if path.exists() else {"intents": {}}
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"intents": {}}
     current["intents"][task_id] = {"task_id": task_id, "request_id": f"stop-{task_id}", "scope": scope,
                                    "stop_policy": policy, "requested_at": "2026-10-17T00:00:00+00:00",
                                    "state": "active"}
@@ -632,9 +632,9 @@ class _Engine:
 @pytest.fixture
 def body(world, monkeypatch):
     """The real body observer of held runs over a scripted daemon, ticking fast."""
-    from ouroboros import delegate_collection, delegate_supervision
+    from ouroboros import delegate_collection, delegate_feed
 
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
     engine = _Engine()
     runtime = delegate_collection.start_body_runtime(world.root, gateway_factory=lambda: engine)
     yield SimpleNamespace(engine=engine, runtime=runtime)

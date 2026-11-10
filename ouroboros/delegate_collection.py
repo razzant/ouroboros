@@ -737,7 +737,7 @@ class BodyRuntime:
         blocked thread to the socket's own end), so a pass ends within the tick plus the
         transport bound (``SHORT_POLL_TIMEOUT_SEC``: about eight seconds), never the engine's window.
         """
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
         from ouroboros.gateways import claudexor_observation as observation
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
         gateway = self._observer_gateway(entries)
@@ -820,7 +820,7 @@ class BodyRuntime:
         """Keep this read's execution fact for readers that must not poll the engine themselves
         (``gateway/reply_preparation.py``), including a received HTTP refusal; ``row`` is the
         compact wait's answer for a run whose detail this pass did not need."""
-        from ouroboros.delegate_supervision import run_activity
+        from ouroboros.delegate_feed import run_activity
         from ouroboros.gateways.claudexor_observation import question_attention
 
         summary = c.summary_of(detail) if detail is not None else {}
@@ -865,7 +865,7 @@ class BodyRuntime:
         write is seen at the next period, as every tick saw it before. A row is decoded only when its stamp moved, and
         what it owes is judged again only then or in a new generation (a transient collection retries in one): a
         settled run that keeps its patch costs a tick nothing while it stands."""
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
 
         now, writes, generation = time.monotonic(), current.local_writes(), self.runtime_id
         if self._listed is not None and now - self._listed[0] < _TICK_SEC and self._listed[1:] == (writes, generation):
@@ -947,7 +947,7 @@ class BodyRuntime:
                     self.reads[self._PRIME] = self.observers.submit(self._watch, fresh, hold=False)
 
     def _drive(self):
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
         try:
             while not self.stop.is_set() and not (self.external_stop is not None and self.external_stop.is_set()):
                 try:

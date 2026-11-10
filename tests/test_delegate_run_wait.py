@@ -99,6 +99,62 @@ def _body(notice):
     return json.loads(notice.split("[BEGIN_TASK_WAIT_OUTPUT]\n", 1)[1].rsplit("\n[END_TASK_WAIT_OUTPUT]", 1)[0])
 
 
+@pytest.mark.parametrize("continuation", [True, False])
+def test_already_pending_unselected_question_reaches_immediate_wait_result(tmp_path, reads, continuation):
+    from ouroboros import delegate_supervision as ds, model_sleep
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    ctx, _limit = _nanny(tmp_path)
+    if not continuation:
+        ctx.owner_wait_callback = None
+    _run(tmp_path, "run-selected")
+    _run(tmp_path, "run-other")
+    _asks(tmp_path, "run-other", "unselected-question")
+    first = ds.run_wait(ctx, "run-selected")
+    payload = _armed(first)
+    assert payload["sleep"]["woke_by"] == "run_question:run-other"
+    assert "unselected-question" in first.text and payload["questions"][0]["interaction_source"]
+    assert not getattr(ctx, "_sleep_interaction_seen", None), "publication alone exposes nothing"
+    row = {"result_meta": {"tool_result_meta": first.meta}}
+    ds.deliver_wake(ctx, row, {"result_partial": True}, "shortened")
+    assert not getattr(ctx, "_sleep_interaction_seen", None), "unshown interactions stay unseen"
+    ctx.task_attempt = 2  # another attempt must keep this quiet wake's unshown question sources
+    assert _armed(ds.run_wait(ctx, "run-selected"))["supervision_wake_id"] == payload["supervision_wake_id"]
+    ds.deliver_wake(ctx, row, {"result": first.text}, first.text)
+    flush_content_acks(ctx)
+    assert ctx._sleep_interaction_seen == {"run-other": ["unselected-question"]}
+    assert not model_sleep.wake_reason(ctx, {"runs": ["run-selected"]})
+    ctx.owner_wait_callback = lambda *_a, **_k: "unknown"
+    assert _armed(ds.run_wait(ctx, "run-selected"))["reason"] == "sleep_armed"
+
+
+@pytest.mark.parametrize("shape", ["outer_cut", "inner_spill"])
+def test_unselected_question_exposure_waits_for_the_exact_wake_source(tmp_path, monkeypatch, shape):
+    from tests.test_delegate_wake_mail_delivery import _call, _crowded, _nanny as registry_nanny, _page, _ready, _shown, _wide
+
+    registry, ctx = registry_nanny(tmp_path, monkeypatch, lambda _ctx, rid, *_a, **_kw: json.dumps(
+        {"status": "no_progress", "run_id": rid, "last_seq": 0}), runs=())
+    _run(tmp_path, "run-selected")
+    _run(tmp_path, "run-other")
+    _asks(tmp_path, "run-other", "unselected-question")
+    ctx.task_contract = {"delegation_budget": {"intent_note": "x" * (30_000 if shape == "inner_spill" else 4_000)}}
+    fit, messages, trace = _wide() if shape == "inner_spill" else _crowded()
+    wake = _call(registry, tmp_path, "wait", "delegate_wait", {"run_id": "run-selected"})
+    _shown(registry, wake, messages, trace, fit)
+    source, = ctx._wake_sources.values()
+    assert not getattr(ctx, "_sleep_interaction_seen", None)
+    half, fit = source["size"] // 2, _wide()[0]
+    _shown(registry, _call(registry, tmp_path, "half", "read_file", _page(source, 0, half)), messages, trace, fit)
+    _ready(registry, messages, trace)
+    assert not getattr(ctx, "_sleep_interaction_seen", None), "half a source is not a delivered notice"
+    _shown(registry, _call(registry, tmp_path, "rest", "read_file", _page(source, half, source["size"] + 1)),
+           messages, trace, fit)
+    assert ctx._sleep_interaction_seen == {"run-other": ["unselected-question"]}
+    _ready(registry, messages, trace)
+    next_wait = _call(registry, tmp_path, "again", "delegate_wait", {"run_id": "run-selected"})
+    assert json.loads(next_wait["result"])["reason"] == "sleep_armed"
+
+
 def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads):
     """Nothing there yet: the call arms the task's ordinary sleep on its runs (no slot, no tick, no read) and owes its
     result; the run's terminal wakes the sleep, and the first request after it carries one wake, published then and
@@ -116,7 +172,7 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
     assert reads == [] and _pending(ctx, "run-1") == ("", ""), "arming reads no run and publishes no wake"
     from ouroboros import delegate_custody as custody
 
-    trail = [row for row in map(json.loads, custody.event_log_path(tmp_path).read_text().splitlines())
+    trail = [row for row in map(json.loads, custody.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines())
              if row["type"] == "delegate_supervision_wait_entered"]
     assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", "cold")]
     chosen = dict(ctx._model_sleep)

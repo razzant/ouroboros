@@ -9,7 +9,7 @@ import pytest
 
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody_current as current
-from ouroboros.delegate_supervision import _TICK_SEC
+from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.gateways import claudexor_observation as obs
 from ouroboros.gateways import claudexor_run_events as run_events
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -388,7 +388,7 @@ def test_an_engine_that_lost_the_route_returns_the_observer_to_its_old_beat(tmp_
 def test_a_quiet_async_question_keeps_the_run_working_as_its_detail_said(tmp_path, runtime):
     """claudexor #628: the compact row an opted-in engine marks ``blocking: false`` says what the
     full detail said (a working run with attention), so the quiet pass never rewrites it as paused."""
-    from ouroboros.delegate_supervision import run_activity
+    from ouroboros.delegate_feed import run_activity
 
     instance, step = runtime
     entry = started(tmp_path)
@@ -410,7 +410,7 @@ def test_a_quiet_async_question_keeps_the_run_working_as_its_detail_said(tmp_pat
 
 
 def test_an_unknown_blocking_fact_keeps_the_paused_meaning(tmp_path, runtime):
-    from ouroboros.delegate_supervision import run_activity
+    from ouroboros.delegate_feed import run_activity
 
     instance, step = runtime
     entry = started(tmp_path)

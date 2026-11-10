@@ -661,9 +661,7 @@ def test_one_observer_reads_every_run_at_once_and_a_quiet_run_blocks_no_speech(w
 @pytest.mark.parametrize("runs", [20, 60, 200])
 def test_an_engine_outage_costs_each_followed_run_one_attempt_per_beat(world, monkeypatch, runs):
     """Every follow's transport refuses: each run retries once per observation beat, never in a busy loop."""
-    from ouroboros import delegate_supervision
-
-    monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.2)
+    monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.2)
     for index in range(runs):
         started(world.root, f"run-{index:03d}", f"task-{index:03d}")
         _asleep(world, f"task-{index:03d}")

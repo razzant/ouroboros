@@ -47,6 +47,8 @@ from typing import Any, Dict, Iterable, Optional
 from ouroboros.utils import atomic_write_json
 
 log = logging.getLogger(__name__)
+_TICK_SEC = 3  # the body's observation beat
+_OBSERVATION_CURRENT_SEC = 4 * _TICK_SEC
 
 _UNREACHABLE = "daemon_unreachable"  # the gateway's reason for a read nothing answered (``_observation_reason``)
 _ENDED = "ended"
@@ -290,7 +292,6 @@ class Feed:
         once its terminal is recorded (or custody let it go), until the journal ends or a beat brings
         nothing. A beat that could not read, or that the engine ended quiet before its time, waits out
         the beat: at most one read per run per beat, never a busy loop."""
-        from ouroboros.delegate_supervision import _TICK_SEC
 
         cursor, transport, entry = _Cursor(), [], None
         try:
@@ -319,7 +320,6 @@ class Feed:
         the engine refused for good is not read again; what it served is shown first (``emit_stream``), the window
         view shows the rest. Its retryable refusal is a failed read: the next beat asks again."""
         from ouroboros import delegate_activity, delegate_progress
-        from ouroboros.delegate_supervision import _TICK_SEC
         from ouroboros.execution_domain import run_gateway
         from ouroboros.gateways.claudexor_run_events import read_run_events
 
@@ -408,11 +408,26 @@ class Feed:
             log.debug("Delegation reach line for %s unavailable", task_id, exc_info=True)
 
 
+def run_activity(observation: Any) -> Optional[bool]:
+    """What one dated observation of a run says of its work (the body observer's,
+    ``delegate_feed.current_activity``): True running (``async_questions_only`` questions hold
+    nothing), False waiting (queued for capacity, paused on its question, terminal), None
+    unanswered or unknown. A running run counts as working: an engine-internal provider wait
+    carries no typed fact."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
+
+    if not isinstance(observation, dict) or observation.get("answered") is not True:
+        return None
+    run_state = str(observation.get("run_state") or "")
+    if run_state == "running":
+        return not observation.get("waiting_on_user") or observation.get("async_questions_only") is True
+    return False if run_state == "queued" or run_state in TERMINAL_STATES else None
+
+
 def current_activity(root: Any, task_id: str, run_id: str, invocation_id: str = "") -> Optional[bool]:
     """Whether a held run works now by the body's latest read: the same run, task and (when given)
     invocation, read within a few ticks; anything else is None (unknown)."""
     from ouroboros.delegate_collection import body_runtime
-    from ouroboros.delegate_supervision import _OBSERVATION_CURRENT_SEC, run_activity
 
     runtime = body_runtime(root)
     fact = runtime.observation(run_id) if runtime is not None else {}
