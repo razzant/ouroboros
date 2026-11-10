@@ -1,0 +1,208 @@
+"""The owner-visible trace of review decisions Blocking would have stopped (``ouroboros/review_overrides.py``).
+
+One writer keeps the event, the install counter and the work's card fact (count, latest reason) on its root task;
+a commit Git records later joins ``landed`` only from the call that met such a decision or from the reviewed attempt
+its author continuation names; the agent's restart notice and a settled adoption name those commits in one line,
+"running" only on the adoption record's word.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import subprocess
+import time
+import uuid
+from types import SimpleNamespace
+
+import pytest
+
+from ouroboros.review_overrides import (
+    COUNTER_REL, card_line, landed_line, note_override_landing, record_override,
+)
+from ouroboros.utils import read_json_dict
+from tests._git_review_pipeline_shared import _make_ctx
+from tests._store_shared import read_result, seed_result
+
+GATE = "over a review Blocking would have stopped (the review gate did not prohibit continuation)"
+
+
+def _events(ctx):
+    path = ctx.drive_root / "logs" / "events.jsonl"
+    return [row for row in map(json.loads, path.read_text(encoding="utf-8").splitlines())
+            if row.get("type") == "review_advisory_override"]
+
+
+def _decide(ctx, reason, message="finding"):
+    ctx._last_review_block_reason = reason
+    record_override(ctx, message)
+
+
+def _commit(repo, name):
+    (repo / name).write_text(name, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", name], cwd=repo, check=True, capture_output=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _landed(ctx, *rows):
+    (ctx.drive_root / COUNTER_REL).parent.mkdir(parents=True, exist_ok=True)
+    (ctx.drive_root / COUNTER_REL).write_text(json.dumps({"count": len(rows), "landed": [
+        {"sha": sha, "reason": reason, "task_id": "t", "at": "2026-11-11T10:00:00+00:00"} for sha, reason in rows]}),
+        encoding="utf-8")
+
+
+def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "root-1"
+    seed_result(ctx.drive_root, "root-1", {"status": "running", "chat_id": 1})
+    child = copy.copy(ctx)
+    child.task_id, child.task_metadata = "child-1", {"root_task_id": "root-1"}
+    _decide(ctx, "critical_findings", "[CRITICAL] tests_affected: broken")
+    _decide(child, "review_quorum", "Too few reviewers answered")
+    fact = read_result(ctx.drive_root, "root-1")["review_overrides"]
+    assert fact["count"] == 2 and fact["latest"]["reason"] == "review_quorum" and fact["latest"]["task_id"] == "child-1"
+    assert fact["latest"]["text"] == "Too few reviewers answered"
+    first, second = _events(ctx)
+    assert second["task_id"] == "child-1" and second["work_task_id"] == "root-1" and second["review_overrides"] == fact
+    assert second["decision_authority"] == "advisory" and second["block_reason"] == "review_quorum"
+    assert first["review_overrides"]["count"] == 1, "the live copy is the fact this decision left"
+    counter = read_json_dict(ctx.drive_root / COUNTER_REL)
+    assert counter["count"] == 2 and [row["block_reason"] for row in counter["recent"]] == ["critical_findings", "review_quorum"]
+    assert card_line(fact) == "Review: 2× continued where Blocking would have stopped · latest: review quorum"
+    assert card_line({"count": 0}) == card_line(None) == "", "no decision, no field"
+    # A work with no record to hold it: no partial row is minted; the event and the counter keep the decision.
+    ghost = copy.copy(ctx)
+    ghost.task_id = "ghost"
+    _decide(ghost, "infra_failure")
+    assert read_result(ctx.drive_root, "ghost") is None and "review_overrides" not in _events(ctx)[-1]
+    assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 3
+    _decide(ctx, "critical_findings", "word " * 100)  # a long reason keeps a head that says it is cut
+    latest = read_result(ctx.drive_root, "root-1")["review_overrides"]["latest"]["text"]
+    assert len(latest) <= 300 and latest.endswith("word…") and latest.startswith("word word")
+
+
+def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_continues(tmp_path):
+    from ouroboros.review_state import make_repo_key
+    from ouroboros.tools.git_review_cycle import _reset_commit_review_state
+
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "t1"
+
+    def call(attempt=None, *, continues=None):
+        _reset_commit_review_state(ctx)
+        ctx._current_review_attempt_number = attempt
+        if continues is not None:  # an author continuation naming a returned commit review
+            ctx._author_commit_source = SimpleNamespace(task_id="t1")
+            ctx._author_commit_reference = {"surface": "commit", "repo_key": make_repo_key(ctx.repo_dir),
+                                            "task_id": "t1", "tool_name": "commit_reviewed", "attempt": continues}
+
+    def landed():
+        return [row["sha"][:1] for row in (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("landed") or []]
+
+    call(3)
+    _decide(ctx, "critical_findings")  # Advisory hands this outcome back before Git
+    call(4)  # the revised candidate's review passes: no decision
+    call(continues=4)
+    note_override_landing(ctx, "a" * 40)
+    assert landed() == [], "a commit over a review that passed is not over the earlier decision"
+    call(continues=3)
+    note_override_landing(ctx, "b" * 40)
+    assert landed() == ["b"]
+    call()  # a later call that continues nothing keeps no stale reference alive
+    note_override_landing(ctx, "c" * 40)
+    assert landed() == ["b"]
+    call(continues=4)
+    _decide(ctx, "preflight")  # the continuation's own preflight, waved through in this very call
+    note_override_landing(ctx, "d" * 40)
+    assert landed() == ["b", "d"]
+    for index in range(70):
+        note_override_landing(ctx, f"{index:040d}")
+    assert len(landed()) == 64, "the newest 64 landings are kept"
+
+
+def test_the_restart_line_names_only_landed_commits_of_its_range_and_says_running_only_when_adopted(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    repo = ctx.repo_dir
+    old = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    base = _commit(repo, "base")
+    first, plain, last = _commit(repo, "one"), _commit(repo, "two"), _commit(repo, "three")
+    _landed(ctx, (old, "critical_findings"), (first, "critical_findings"), (last, "review_quorum"))
+    line = landed_line(repo, ctx.drive_root, base=base, target="HEAD", running=False)
+    assert line == (f"Committed {GATE}: {last[:12]} (review quorum), {first[:12]} (critical findings); deployment "
+                    "unconfirmed, as no record yet binds a running process to them.")
+    assert old[:12] not in line and plain[:12] not in line
+    running = landed_line(repo, ctx.drive_root, base=base, target=last, running=True)
+    assert running == f"Now running {GATE}: {last[:12]} (review quorum), {first[:12]} (critical findings)."
+    for said in (line, running):
+        assert "merged" not in said and "accepted" not in said
+    assert landed_line(repo, ctx.drive_root, base=last, target="HEAD", running=False) == ""
+    assert landed_line(repo, ctx.drive_root, base="", target="HEAD", running=False) == "", "an unknown base names nothing"
+
+
+def test_the_agent_restart_notice_carries_the_line_from_the_running_baseline(tmp_path, monkeypatch):
+    from ouroboros import server_process, server_restart
+
+    ctx = _make_ctx(tmp_path)
+    base = _commit(ctx.repo_dir, "base")
+    landed = _commit(ctx.repo_dir, "change")
+    _landed(ctx, (landed, "critical_findings"))
+    monkeypatch.setattr(server_process, "server_source_baseline", lambda: base)
+    monkeypatch.setattr(server_restart, "_AGENT_RESTART", {})
+    monkeypatch.setattr(server_restart, "_started_restart_work", lambda: {})
+    sent: list = []
+    host = SimpleNamespace(REPO_DIR=ctx.repo_dir, DRIVE_ROOT=ctx.drive_root, load_state=lambda: {"owner_chat_id": 7},
+                           send_with_budget=lambda chat, text, **kw: sent.append((text, kw.get("system_type"))))
+    server = SimpleNamespace(uuid=uuid, time=time, _pending_restart={}, _live_running_task_ids=lambda _ctx: ["busy"],
+                             _perform_supervisor_restart=lambda *a, **k: pytest.fail("the drain waits for live work"))
+    server_restart._handle_restart_in_supervisor(server, {"type": "restart_request", "reason": "body change"}, host)
+    assert sent[0] == (f"♻️ Restart requested by agent: body change\nCommitted {GATE}: {landed[:12]} (critical "
+                       "findings); deployment unconfirmed, as no record yet binds a running process to them.",
+                       "restart_notice")
+    sent.clear()
+    _landed(ctx)  # nothing landed over a decision: the notice says only what it always said
+    server_restart._AGENT_RESTART.clear()
+    server_restart._handle_restart_in_supervisor(server, {"type": "restart_request", "reason": "body change"}, host)
+    assert sent[0] == ("♻️ Restart requested by agent: body change", "restart_notice")
+
+
+@pytest.mark.parametrize("outcome,said", [("adopted", "Now running"), ("unconfirmed", "Committed"), ("not_applied", None)])
+def test_a_settled_adoption_names_its_landed_commits_running_only_when_adopted(tmp_path, monkeypatch, outcome, said):
+    from ouroboros import body_adoption
+
+    ctx = _make_ctx(tmp_path)
+    previous = _commit(ctx.repo_dir, "previous")
+    candidate = _commit(ctx.repo_dir, "candidate")
+    _landed(ctx, (candidate, "critical_findings"))
+    monkeypatch.setattr(body_adoption, "finalize_on_boot", lambda *a, **k: {
+        "outcome": outcome, "note": f"Adoption note ({outcome}).", "adoption_id": "a1", "task_id": "",
+        "candidate": candidate, "previous": previous, "branch": "ouroboros", "tests": {"tier": "smoke"}})
+    monkeypatch.setattr("supervisor.git_ops_reset._record_checkout_facts", lambda facts: None)
+    sent: list = []
+    monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append(text))
+    result = body_adoption.settle_on_boot(ctx.drive_root, ctx.repo_dir, supervisor_ready=True)
+    named = f"{candidate[:12]} (critical findings)"
+    if said is None:
+        assert named not in result["note"] and named not in "".join(sent)
+    else:
+        assert f"{said} {GATE}: {named}" in result["note"] and f"{said} {GATE}: {named}" in sent[0]
+
+
+def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id, ctx._current_review_attempt_number = "t1", 2
+
+    def unreadable(*_args):
+        raise OSError("repository identity unreadable")
+
+    monkeypatch.setattr("ouroboros.review_state.make_repo_key", unreadable)
+    _decide(ctx, "critical_findings")  # the decision still reaches its event and the counter
+    assert _events(ctx)[-1]["block_reason"] == "critical_findings"
+    assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
+    ctx._review_override_this_call = ""
+    ctx._author_commit_source = SimpleNamespace(task_id="t1")
+    ctx._author_commit_reference = {"task_id": "t1", "tool_name": "commit_reviewed", "attempt": 2}
+    note_override_landing(ctx, "a" * 40)  # Git already succeeded: the join's failure is logged, never raised
+    assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL)
+    assert landed_line(ctx.repo_dir, None, base="a", target="b", running=False) == "", "an unreadable counter names nothing"

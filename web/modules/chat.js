@@ -2051,8 +2051,8 @@ export function createChatInstance({
     function updateLiveCardFromLogEvent(evt) {
         if (!evt) return false;
         const eventType = evt.type || evt.event || '';
-        if (eventType === 'history_retention') {
-            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.task_id)), evt));
+        if (eventType === 'history_retention' || evt.review_overrides) {
+            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.work_task_id || evt.task_id)), evt));
         }
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;

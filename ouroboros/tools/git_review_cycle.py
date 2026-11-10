@@ -543,7 +543,7 @@ def _reset_commit_review_state(ctx):
     ctx._last_scope_model = ""
     ctx._last_triad_raw_results = []
     ctx._last_review_critical_findings = []
-    ctx._last_review_block_reason = ""
+    ctx._last_review_block_reason = ctx._review_override_this_call = ""  # a decision this call met (review_overrides)
     ctx._last_review_advisory_findings = []
     ctx._last_scope_raw_result, ctx._last_review_structured = {}, {}
     ctx._review_degraded_reasons = []

@@ -1,7 +1,9 @@
 // The settled task card's one seam: its Files row (result_files.js) and its
-// Continue action (task_continue.js) follow the same settled task detail.
+// Continue action (task_continue.js) follow the same settled task detail; the
+// work's review-gate field (review_gate_card.js) follows every detail, live ones too.
 
 import { syncResultFilesItem } from './result_files.js';
+import { syncReviewGateItem } from './review_gate_card.js';
 import { positiveTaskTerminalFact } from './chat_activity.js';
 import { isTerminalTaskDetail } from './log_events.js';
 import { syncContinueAction } from './task_continue.js';
@@ -17,7 +19,8 @@ export function closingLine(record, title = record?.titleEl?.textContent || reco
 /** @returns {boolean} whether the card's timeline items changed (the Files row) */
 export function syncSettledItems(record, detail, options) {
     syncContinueAction(record, detail, options);  // a late offer read writes through the caller's viewport seam
-    return syncResultFilesItem(record, detail);
+    const gate = syncReviewGateItem(record, detail);
+    return syncResultFilesItem(record, detail) || gate;
 }
 
 /** The task's own terminal detail or a new attempt replaces its sentence; history stamps only settle status. */
