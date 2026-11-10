@@ -659,8 +659,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
     envelope: dict[str, Any] = {
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
-                    "continuation", "continuation_note", "sleep", "cache_horizon_note",
-                    "leaf_live_input")
+                    "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
+                    "sleep", "cache_horizon_note", "leaf_live_input")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -705,8 +705,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
             **({"ok": False, "host_code": str(payload.get("host_code") or "")}
                if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
-            **{key: payload[key] for key in ("continuation", "continuation_note", "sleep",
-                                             "leaf_live_input") if key in payload},
+            **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
+                                             "continuation_note", "sleep", "leaf_live_input") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1072,16 +1072,17 @@ def _open_sleep_entry(state: dict[str, Any], run_id: str) -> None:
 
 def _record_observation(state: dict[str, Any], payload: dict[str, Any], answered: bool,
                         attempt: str = "") -> None:
-    """Dated observation facts (run-scoped): the supervisor's own ``status`` and the
-    file's ``updated_at`` move on every quiet renewal, failed reads included, so
-    freshness is the last ANSWERED observation plus the current failure, never mtime.
-    ``waiting_on_user`` and the task attempt let a reader judge the run's current
-    work (``observed_run_activity``) without the window payload."""
+    """Dated observation facts (run-scoped): the supervisor's own ``status`` and the file's ``updated_at`` move on
+    every quiet renewal, failed reads included, so freshness is the last ANSWERED observation plus the current
+    failure, never mtime. ``waiting_on_user``, ``async_questions_only`` and the task attempt let a reader judge
+    the run's current work (``observed_run_activity``) without the window payload."""
     at = utc_now_iso()
+    waiting = bool(payload.get("waiting_on_user")) or str(payload.get("status") or "") == "waiting_on_user"
     state["observation"] = {
         "at": at, "answered": bool(answered), "status": str(payload.get("status") or ""),
         "run_state": str(payload.get("state") or ""), "reason": str(payload.get("reason") or ""),
-        "waiting_on_user": bool(payload.get("waiting_on_user")), "at_unix": time.time(), "attempt": str(attempt),
+        "waiting_on_user": waiting, "async_questions_only": waiting and payload.get("async_questions_only") is True,
+        "at_unix": time.time(), "attempt": str(attempt),
     }
     if answered:
         state["last_answered_observation_at"] = at
@@ -1091,14 +1092,14 @@ def _record_observation(state: dict[str, Any], payload: dict[str, Any], answered
 
 def run_activity(observation: Any) -> Optional[bool]:
     """What one dated observation of a run says of its work (this supervision record's, or the
-    body observer's, ``delegate_collection.current_activity``): True running, False waiting
-    (queued for capacity, paused on its question, terminal), None unanswered or unknown.
-    A running run counts as working: an engine-internal provider wait carries no typed fact."""
+    body observer's, ``delegate_collection.current_activity``): True running (``async_questions_only``
+    questions hold nothing), False waiting (queued for capacity, paused on its question, terminal), None
+    unanswered or unknown. A running run counts as working: an engine-internal provider wait carries no typed fact."""
     if not isinstance(observation, dict) or observation.get("answered") is not True:
         return None
     run_state = str(observation.get("run_state") or "")
     if run_state == "running":
-        return not observation.get("waiting_on_user")
+        return not observation.get("waiting_on_user") or observation.get("async_questions_only") is True
     return False if run_state == "queued" or run_state in custody.TERMINAL_STATES else None
 
 
@@ -1201,8 +1202,7 @@ def _publish_wake_facts(ctx: Any, state: dict[str, Any], payload: dict[str, Any]
         payload.pop("quiet_for_sec", None)
         if payload.get("waiting_on_user"):
             from ouroboros.delegate_progress import paused_note
-
-            payload["note"] = paused_note(payload.get("pending_interactions"))
+            payload["note"] = paused_note(payload.get("pending_interactions"), async_only=payload.get("async_questions_only") is True)
         else:
             payload.pop("note", None)
     payload.pop("cache_horizon_note", None)
