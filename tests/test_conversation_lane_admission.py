@@ -272,7 +272,7 @@ def test_carrier_turn_receipt_measures_the_owner_wait_from_the_admission(tmp_pat
     assert (receipt["worker_id"], receipt["pid"]) == (7, os.getpid())  # the carrier slot and process it ran in (S11)
     assert receipt["phases"]["started"] >= 0.0 and turn.execution.phase == "started"
     turn.observe("log_event", {"type": "context_building_started", "task_id": "t9"})
-    assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1,
+    assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1, "worker_id": 7,
                                   "execution_id": turn.execution.execution_id, "phase": "context_building"}
 
 

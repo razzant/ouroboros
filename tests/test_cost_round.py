@@ -113,7 +113,7 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
 
     def fake_call(_llm, _messages, *_args, **_kwargs):
         counted("probe", key="same")  # a window carried over from the previous round would show it again
-        seen.append((section_spans().get("work"), set(round_receipt()["host_steps"]["steps"])))
+        seen.append((section_spans()["work"]["probe"], set(round_receipt()["host_steps"]["steps"])))
         return {"role": "assistant", **next(replies)}, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
@@ -124,7 +124,7 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
                       emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="window-task",
                       drive_root=tmp_path)
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "one effect"
-    assert seen == [({"probe": 1}, set()), ({"probe": 1}, {"round_top"})], seen
+    assert seen == [(1, set()), (1, {"round_top"})], seen
     assert section_spans() == {}
 
 
