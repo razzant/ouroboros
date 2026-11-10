@@ -144,7 +144,7 @@ FRAMES = """async ({ sel, frames }) => {
         for (let i = 0; i < frames; i += 1) {
             moving.forEach((animation) => { animation.currentTime = end * i / (frames - 1); });
             // The step is read once the product has refit to it: its ResizeObserver hands the fit to the next
-            // frame (composer_owner_controls.js observeLayout), so that frame runs before the read.
+            // frame (capsule.js observeLayout), so that frame runs before the read.
             for (let wait = 0; wait < 3; wait += 1) await frame();
             out.push(sample());
         }

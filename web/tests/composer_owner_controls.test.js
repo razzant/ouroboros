@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ElementStub } from './chat_dom_fixture.js';
-import { CHANGE_RULE, applyHandle, createEffortRangeControl, snapRange } from '../modules/composer_owner_controls.js';
+import { CHANGE_RULE } from '../modules/capsule.js';
+import { applyHandle, createEffortRangeControl, snapRange } from '../modules/composer_owner_controls.js';
 import { hoverWindow, mount, mountPair, sleep, stubDocument } from './composer_controls_fixture.js';
 import { observeContext } from '../modules/context_observation.js';
 
