@@ -1386,7 +1386,7 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
     (an unanswerable row is noise, not a question). Purely shape translation — no
     truncation here; bounding belongs to the delivery layer that knows its budget.
     ``strict`` rejects malformed observations instead of silently dropping rows:
-    only an actual empty list can prove there were no questions at read time.
+    only an actual empty list can prove there were no questions at read time. ``delivery``: ``blocking`` holds the run until answered, ``async`` (the agent keeps working) is attention; omitted/null is the legacy ``blocking``, a future kind stays verbatim (never async), a non-string is malformed.
     """
     rows = detail.get("pendingInteractions") if isinstance(detail, dict) else None
     if strict and not isinstance(rows, list):
@@ -1399,8 +1399,8 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
                     or not row["questions"]):
                 raise ValueError("malformed pendingInteractions row")
             if any(row.get(key) is not None and not isinstance(row[key], str) for key in (
-                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt")):
-                raise ValueError("malformed pendingInteractions identity or timestamp")
+                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt", "delivery")):
+                raise ValueError("malformed pendingInteractions identity, timestamp or delivery")
             for question in row["questions"]:
                 if (not isinstance(question, dict) or not isinstance(question.get("id"), str)
                         or not question["id"] or not isinstance(question.get("question"), str)
@@ -1441,6 +1441,7 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
             "source_tool": str(row.get("sourceTool") or "") or None,
             "requested_at": str(row.get("requestedAt") or ""),
             "timeout_at": str(row.get("timeoutAt") or "") or None,
+            "delivery": "blocking" if row.get("delivery") is None else row["delivery"] if isinstance(row["delivery"], str) and row["delivery"] else "malformed",
             "questions": questions,
         })
     return out

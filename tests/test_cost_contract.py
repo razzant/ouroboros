@@ -43,11 +43,15 @@ starts, counted up to the turn's first model request, where the driver refuses t
 history it must not reread (tests/_turn_shapes.py) is the old memory folded by parts, the archived dialogue sealed
 by pages and rooms sealed after the frontier, met in the steady state a long-lived install keeps (the tail facts
 stored, the OpenRouter catalogue recorded). L1: a project room's turn does the same work at k=1 and k=30; L2:
-Main's turns make the same round trips and decode the same rows (their payload is free: Main shows its story);
+Main's turns make the same round trips and decode the same rows (their payload is delivered once: Main shows its story);
 L3/L4 (k=1): after 40 live rooms and 10 running roots, 650 open rows, or 40 archived knowledge notes and old
 rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per page (their statements by the
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
-request carries the newest open row. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
+request carries the newest open row; L7 (the build's own equalities, on a window where both sizes walk Max -> Low):
+no piece or whole render of the view and no form of the request is produced twice, whole renders of the view equal the
+texts delivered (the walk builds a piece's text once per key to price it and keeps only its length), whole-request
+serializations equal the request's forms at every size, a capture reads what it shows and what is new, a chronicle
+record is parsed once. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
 strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
 The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
 every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
@@ -70,7 +74,7 @@ import pytest
 from tests._cost_driver import ACTIVITIES, name_owed, refused, schedule_child_job
 from tests._cost_meter import EXECUTION, HISTORY, VM_STEP, CostMeter, tagged
 from tests._stand_cache import STAND_MARKS, measuring
-from tests._turn_law import hold_turn_law, readers_of, turn_gap
+from tests._turn_law import TURN_GAPS, TurnLawBreach, hold_turn_law, hold_work_equal, readers_of, turn_gap
 
 pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
@@ -109,6 +113,20 @@ def _gap(table: Dict[Any, str], name: Hashable) -> tuple:
     """A known breach named in a gap table is driven and measured all the same: a strict xfail that flips
     (XPASS) the moment its cause is gone, so the marker is removed instead of forgotten."""
     return (pytest.mark.xfail(strict=True, raises=AssertionError, reason=table[name]),) if name in table else ()
+
+
+class KnownBreach(AssertionError):
+    """A room gap's breach as measured: only the counters its cause grows, by no more than its row records."""
+
+
+# A room read's known breach: its cause, and the k=1 -> k=30 growth of each counter it grows on this fixture's
+# drives (one causal pair, measured by the exact meter: 2f8ebe37's report). A precondition, an answer that differs,
+# any other counter, or more growth fails as a plain AssertionError; no growth at all is a strict XPASS.
+ROOM_GAPS: Dict[str, Tuple[str, Dict[str, int]]] = {"R_late": (
+    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
+    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
+    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB).",
+    {"dir_entries:archive": 203, "json_chars": 39044, "json_loads": 150, "read_bytes:archive": 39190})}
 
 
 # ---- measurement -------------------------------------------------------------------------------
@@ -202,7 +220,9 @@ def assert_publication_flat(measured: Dict[Any, Any], tag: str) -> None:
     assert_flat(measured, tag)
 
 
-def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
+def assert_flat(measured: Dict[Any, Any], tag: str, gap: Dict[str, int] | None = None) -> None:
+    """`tag` does not grow from k=1 to the large root; with a room `gap`, it grows exactly as that gap
+    records (KnownBreach), scaled to the large root's history as the gap's k=30 growth is."""
     large = measured["large"]
     answers = [{key: value for key, value in (measured[k].get("responses", {}).get(tag) or {}).items()
                 if key in ("status", "echo")} for k in (K_SMALL, large)]
@@ -214,8 +234,14 @@ def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
     growing = sorted(((source, amount - little.get("callers", {}).get(source, 0))
                       for source, amount in big.get("callers", {}).items()
                       if amount > little.get("callers", {}).get(source, 0)), key=lambda item: -item[1])[:8]
+    if gap is not None:
+        excused = {key: value for key, value in breaches.items()
+                   if key in gap and value[1] - value[0] <= gap[key] * (large - K_SMALL) / 29}
+        breaches = {key: value for key, value in breaches.items() if key not in excused}
     assert not breaches, (f"{tag} grows with unrelated history (k={K_SMALL} -> k={large}): {breaches}; "
                           f"history touched at k={large}: {touched}; growing readers: {growing}")
+    if gap is not None and excused:
+        raise KnownBreach(f"{tag} grows as its gap records (k={K_SMALL} -> k={large}): {excused}")
 
 
 # ---- B1-B5 and the room ------------------------------------------------------------------------
@@ -280,15 +306,36 @@ def test_b5_stop_of_a_tree_is_flat(measured):
     assert_flat(measured, "B5")
 
 
-@pytest.mark.parametrize("tag", ["R_active", pytest.param("R_late", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
-    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
-    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB)."))),
-    "R_activew"])
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=(pytest.mark.xfail(
+    strict=True, raises=KnownBreach, reason=ROOM_GAPS[tag][0]),) if tag in ROOM_GAPS else ())
+    for tag in ("R_active", "R_late", "R_activew")])
 def test_room_history_is_flat(measured, tag):
     for k in (K_SMALL, measured["large"]):  # a page, never the import window's refusal
         assert measured[k]["import"]["state"] == "done" and measured[k]["responses"][tag]["status"] == 200, k
-    assert_flat(measured, tag)
+    assert_flat(measured, tag, ROOM_GAPS[tag][1] if tag in ROOM_GAPS else None)
+
+
+def test_a_room_gap_excuses_only_its_own_counters_within_their_recorded_growth():
+    """The refusals of `assert_flat` with a gap, on synthetic counts: only exactly the recorded breach is known."""
+    gap = ROOM_GAPS["R_late"][1]
+
+    def measured(grown, answer=200, large=30):
+        root = {key: 1000 for key in (*gap, "json_loads", "stat:root")}
+        return {"large": large, K_SMALL: {"R_late": {"counts": root}, "responses": {"R_late": {"status": 200}}},
+                large: {"R_late": {"counts": {**root, **{key: root[key] + amount for key, amount in grown.items()}}},
+                        "responses": {"R_late": {"status": answer}}}}
+    with pytest.raises(KnownBreach):
+        assert_flat(measured(gap), "R_late", gap)
+    with pytest.raises(KnownBreach):  # a smaller history grows proportionally less
+        assert_flat(measured({key: amount * 14 // 29 for key, amount in gap.items()}, large=15), "R_late", gap)
+    for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1}):
+        with pytest.raises(AssertionError, match="grows with unrelated history") as caught:
+            assert_flat(measured(grown), "R_late", gap)
+        assert not isinstance(caught.value, KnownBreach), grown
+    with pytest.raises(AssertionError, match="answered differently") as caught:
+        assert_flat(measured(gap, answer=500), "R_late", gap)
+    assert not isinstance(caught.value, KnownBreach)
+    assert assert_flat(measured({}), "R_late", gap) is None  # cause gone: the strict xfail XPASSes and fails
 
 
 # ---- B9: the memory's addressed reads ------------------------------------------------------------
@@ -339,7 +386,7 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     """L2. An integrating turn makes the same round trips and decodes the same dialogue rows at k=1 and k=30:
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
-    every room's story and a line per live room). Its payload is free: an integrating view shows its story. The
+    every room's story and a line per live room). Its payload is delivered once: an integrating view shows its story. The
     transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
     bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
     large = measured["large"]
@@ -359,7 +406,7 @@ def test_b10_main_s_turn_reads_pages_not_rooms_roots_or_rows(measured, law, tag,
     or 40 archived knowledge notes and 40 old rescue snapshots (L3, the turn after the one that met them), only
     the dialogue's own page reads may grow: read transactions by B9's allowance per page of rows the step added
     (one page more when they cross a page edge), statements by as many transactions of the turn before's
-    statements per transaction; every other round trip stays within ``COUNT_JITTER``. Payload is free."""
+    statements per transaction; every other round trip stays within ``COUNT_JITTER``. Payload is delivered once."""
     earlier, later = at_request(measured, before, K_SMALL), at_request(measured, tag, K_SMALL)
     rows = measured[K_SMALL]["turn_shapes"][step]["rows"]
     pages = -(-rows // ROWS_PER_PAGE) + bool(rows)
@@ -386,6 +433,90 @@ def test_b10_main_s_turn_carries_the_newest_open_row(measured):
     the newest row that step wrote to Main."""
     needle = measured[K_SMALL]["turn_shapes"]["rows"]["main_newest"]
     assert at_request(measured, "T:main:rows", K_SMALL)["carries"] == [needle], needle
+
+
+# ---- L7: one build does each piece of work once, and delivers what it did ------------------------
+# The equalities the build owes on the branch a live install walks (Max -> Low, a window tight for both sizes): what the
+# host rendered whole, serialized, read and parsed is what it delivered, and a piece of the view is built once per key
+# to be priced. Each stands beside a turn's own receipt
+# (``context_memory_view.work``); a breach in today's code is a ``TURN_GAPS`` row with its numbers.
+
+WORK_TURNS = ("T:main", "T:mainw")  # Main's first turn of the process and the next one, at both sizes
+
+
+def _build_work(measured: Dict[Any, Any], tag: str) -> Dict[int, Dict[str, int]]:
+    """Each size's build work of this turn; the laws speak of the Max -> Low branch, so a turn that kept Max is a broken precondition."""
+    views = {k: at_request(measured, tag, k)["view"] for k in (K_SMALL, measured["large"])}
+    for k, view in views.items():
+        assert view["mode_switch"] == {"from": "max", "to": "low"}, (
+            f"{tag} k={k}: the build laws are about the live branch Max -> Low; this turn ran {view['mode']} "
+            f"(window {view['window_tokens']}, switch {view['mode_switch']})")
+    return {k: view["work"] for k, view in views.items()}
+
+
+def _pairs(works: Dict[int, Dict[str, int]], verb: str, delivered: Callable[[Dict[str, int]], int]) -> Dict[str, Tuple[int, int]]:
+    return {f"{verb}(k={k})": (work.get(verb, 0), delivered(work)) for k, work in works.items()}
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7a", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_never_repeats_a_view_form_or_a_request_form(measured, tag):
+    """L7a. No piece of the view is built twice, no form of it is rendered whole twice and no form of the request is
+    serialized twice in one build: every ``_again`` is zero. A repeated piece is the class of 222 story renders per
+    build, in one equality. A delivered form is built twice by design, once as a piece and once whole (L7b)."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7a", tag, {**_pairs(works, "view_renders_again", lambda _work: 0),
+                                 **_pairs(works, "view_pieces_again", lambda _work: 0),
+                                 **_pairs(works, "request_serializations_again", lambda _work: 0)})
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7b", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_renders_the_view_it_delivers(measured, tag):
+    """L7b. Whole renders of the view equal the texts this start delivers (a story and a room for the projection it
+    ships). The walk prices a form by its pieces: each piece's text is built once per key to take its length and is
+    dropped (``view_pieces``, L7a), and only the delivered texts are built whole (``view_renders``)."""
+    hold_work_equal("L7b", tag, _pairs(_build_work(measured, tag), "view_renders", lambda work: work.get("view_texts_kept", 0)))
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7c", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_serializes_the_request_once_per_form_at_every_size(measured, tag):
+    """L7c. The whole request is serialized once for each of its forms and the number of forms does not grow with the
+    history: a form is a frame's shape (mode, schemas, whether memory is present), never a probe of the walk."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7c", tag, {**_pairs(works, "request_serializations", lambda work: work.get("request_forms", 0)),
+                                 "request_serializations(k=30 vs k=1)": (works[measured["large"]].get("request_serializations", 0),
+                                                                         works[K_SMALL].get("request_serializations", 0))})
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7d", tag)) for tag in WORK_TURNS])
+def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
+    """L7d. The capture reads what it shows and what is new: every row of the tail read is open somewhere or arrived
+    since the stored facts. The one named debt of this class (``TURN_GAPS``): whole tail reads stay until the exact
+    skip of sealed rows is designed."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7d", tag, _pairs(works, "rows_read", lambda work: work.get("rows_open", 0) + work.get("rows_new", 0)),
+                    scale=(measured["large"] - K_SMALL) / 29)
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7e", tag)) for tag in WORK_TURNS])
+def test_b10_a_capture_parses_each_record_once(measured, tag):
+    """L7e. A chronicle record is parsed once per snapshot: ``records_parsed_again`` is zero."""
+    hold_work_equal("L7e", tag, _pairs(_build_work(measured, tag), "records_parsed_again", lambda _work: 0))
+
+
+def test_the_work_law_fails_a_breach_no_gap_names_and_excuses_only_its_own(monkeypatch):
+    """``hold_work_equal`` both ways, on synthetic counts: equal work passes; a breach without a row fails for real
+    (a plain AssertionError); a row excuses only the pairs it names, within their recorded work."""
+    assert hold_work_equal("Lx", "tag", {"verb(k=1)": (3, 3)}) is None
+    with pytest.raises(AssertionError, match="unexcused") as plain:
+        hold_work_equal("Lx", "tag", {"verb(k=1)": (4, 3)})
+    assert not isinstance(plain.value, TurnLawBreach)
+    monkeypatch.setitem(TURN_GAPS, ("Lx", "tag"), ("known", {"verb": 9}))
+    with pytest.raises(TurnLawBreach):
+        hold_work_equal("Lx", "tag", {"verb(k=1)": (9, 3)})
+    for pairs in ({"verb(k=1)": (10, 3)}, {"other(k=1)": (2, 1)}):  # past its ceiling; a pair it does not name
+        with pytest.raises(AssertionError, match="unexcused") as caught:
+            hold_work_equal("Lx", "tag", pairs)
+        assert not isinstance(caught.value, TurnLawBreach)
 
 
 # ---- B6: the rest law of the named maintenance jobs ---------------------------------------------

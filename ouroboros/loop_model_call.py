@@ -947,7 +947,7 @@ def _dispatch_round_model(
             send_clock_policy=main_clock_policy(
                 getattr(ctx.tools._ctx, "task_metadata", {}), task_type=ctx.task_type),
             configured_api_child=is_configured_api_child(ctx.tools._ctx),
-            physical_send_claim=ctx.physical_send_claim,
+            physical_send_claim=ctx.physical_send_claim, response_meta_out=output_recovery.response_facts(ctx.tools._ctx),
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
@@ -1053,12 +1053,12 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
     from ouroboros.send_clock import MainSendClock
     from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.llm_attempt import single_physical_send
+    from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
 
     # Any vision work belongs to this actual reprepare, outside both the Main
     # fit probe and the failed attempt's physical precondition/measurement —
     # and outside Main's clock and send claim: a helper is not a Main request.
-    with bind_physical_attempt_context(None), MainSendClock(None).bound(), single_physical_send(None):
+    with bind_physical_attempt_context(None), MainSendClock(None).bound(), single_physical_send(None), track_physical_attempts(None):
         kwargs["messages"] = _prepare_main_messages(
             ctx.messages, model=model, model_role=role,
             model_account_override=kwargs.get("model_account_override"),

@@ -23,14 +23,14 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
-from ouroboros.physical_attempt_context import PhysicalAttemptContext
+from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
-from ouroboros.transport_custody import release_pre_dispatch_attempt
+from ouroboros.transport_custody import release_pre_dispatch_attempt, report_attempt_end
 from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     QUARANTINE_REL, BillingAuthorityUnavailable, ControlAuthorityUnavailable, UsageAccountingError,
     UsageLedgerCorrupt, UsageLockUnavailable, _drive_root, _named_lock, _number, _TERMINAL,
@@ -99,14 +99,12 @@ def _stash_root_accounting(
     *,
     integrity_degraded: bool = False,
 ) -> None:
-    """Refresh the process-local root snapshot. ``spend`` is the rendered
-    bucket: its ``settled_usd`` is the known spend money readers decide on, its
-    ``accounted_usd`` the exposure including holds; a missing field stays
-    unknown (``None``), never borrowed from the other. ``reservation`` is the identity
-    of a row this call has just APPENDED (attempt id, task, category, review
-    slot): only a successful ``reserve_attempt`` passes one, so a reader that
-    finds its own identity here has observed its own reservation — a refresh,
-    a settlement or a refused reservation never leaves one."""
+    """Refresh the process-local root snapshot from the rendered ``spend`` bucket.
+    ``settled_usd`` is known spend; ``accounted_usd`` includes holds. Missing values
+    stay unknown (``None``), never borrowed from the other field. Only a successful
+    ``reserve_attempt`` supplies ``reservation``: the row it just appended (attempt
+    id, task, category, review slot). Finding that identity confirms its reservation;
+    refreshes, settlements and refused reservations add no identity."""
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         return
@@ -1428,6 +1426,9 @@ def _record_attempt_capture(
             setattr(exc, "physical_attempt_capture", capture)
         except Exception:
             pass
+    if state == "released":
+        _observe_dispatched(capture)
+    report_attempt_end(capture, exc)
     return capture
 
 
@@ -1486,6 +1487,7 @@ def execute_physical_attempt(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)  # outside the pre-dispatch guard; it never raises
     try:
         from ouroboros._usage_wait import late_settler, model_send
         response = model_send(reservation, send, settle_late=late_settler(
@@ -1558,6 +1560,7 @@ async def execute_physical_attempt_async(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)
     async def complete():
         try:
             response = await send()

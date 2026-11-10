@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import queue
 import threading
 import time
@@ -70,6 +71,7 @@ def test_the_receipt_rides_the_first_dispatch_frame_and_the_consumer_records_it_
     # Order, not a tick: two reads of a coarse clock (Windows) can be equal.
     assert receipt["census"] == {"direct_turns_at_entry": 1} and receipt["dispatched_at"] >= receipt["entered_at"]
     assert (receipt["chat_id"], receipt["task_id"], receipt["execution_id"]) == (1, "owner", execution.execution_id)
+    assert (receipt["worker_id"], receipt["pid"]) == (None, os.getpid())  # no carrier named a slot: unknown, not 0
 
     ctx = SimpleNamespace(RUNNING={"a": {}}, PENDING=[1, 2], DRIVE_ROOT=tmp_path)
     events._handle_main_llm_call_state(sent, ctx)
@@ -110,6 +112,17 @@ def test_a_wake_leaves_no_receipt_on_its_frame():
     frames.get_nowait()
     turn.put(_frame("observed", task_id="wake", model_activity={"phase": "dispatching"}))
     assert execution.phase == "dispatched" and "direct_turn" not in frames.get_nowait()
+
+
+def test_a_pooled_review_operation_advances_past_preparing_without_a_main_call():
+    execution = TurnExecution(chat_id=0, task_id="deep-review", owner_turn=False)
+
+    execution.observe("cognitive_operation", {
+        "task_id": "deep-review", "operation_id": "review-1", "kind": "review", "phase": "started",
+    })
+
+    assert execution.phase == "requested"
+    assert [phase for phase, _ in execution.marks] == ["accepted", "context_built", "requested"]
 
 
 def test_a_turn_that_never_dispatches_records_not_observed_from_its_unregister(monkeypatch):

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
@@ -13,6 +14,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.launch_custody import (  # noqa: F401 -- public re-exports
+    KeptService, KeptServiceStopRequest, KeptServiceStopResponse, KeptServicesResponse,
+)
 from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
     StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
 )
@@ -708,10 +712,11 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
-    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker; a worker-held running root: worker
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
@@ -1094,6 +1099,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]
@@ -1575,6 +1582,7 @@ __all__ = [
     "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
+    "KeptService", "KeptServicesResponse", "KeptServiceStopRequest", "KeptServiceStopResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

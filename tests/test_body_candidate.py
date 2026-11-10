@@ -842,6 +842,41 @@ def test_commit_seams_use_the_candidate_branch_and_never_the_serving_push(body, 
     assert body_candidate.publication_note(plain) == ""
 
 
+@pytest.mark.parametrize("conversation", [True, False])
+def test_only_a_baseline_of_the_body_attributes_its_candidate(body, tmp_path, conversation):
+    """Opus, 8 Nov 2026: every root now baselines its admitted Git folder, a direct turn's too. That folder's
+    baseline says nothing about the body: a candidate the turn authors keeps the explicit/whole-tree staging
+    contract. A queued root's baseline observes the body (its serving checkout), so its candidate is recorded and
+    its commits are attributed, as before."""
+    from ouroboros.mutation_attribution import capture_root_baseline
+    from ouroboros.tools import git as git_tools
+
+    serving, data = body
+    folder = tmp_path / "project"
+    folder.mkdir()
+    git(folder, "init", "-q")
+    (folder / "README.md").write_text("an admitted project\n", encoding="utf-8")
+    git(folder, "add", "-A")
+    git(folder, "commit", "-qm", "base")
+    task_id = "root-direct" if conversation else "root-queued"
+    ctx = make_ctx(serving, data, task_id)
+    evidence = capture_root_baseline(data, {"id": task_id}, system_repo=serving, workspace=folder,
+                                     conversation=conversation)
+    assert sorted(row["surface_type"] for row in evidence["baseline"]["surfaces"]) == (
+        ["external_workspace"] if conversation else ["external_workspace", "system_repo"])
+    receipt = body_candidate.prepare(ctx)
+    candidate = pathlib.Path(ctx.repo_dir)
+    (candidate / "ouroboros" / "mod_a.py").write_text("GEN = 'GEN_CAND'\n", encoding="utf-8")
+    staged = git_tools._task_attributed_commit_paths(ctx, None)
+    if conversation:
+        assert receipt["attribution"] == {"state": "no_baseline"}
+        assert staged == (None, None, "", None), "the folder's baseline never attributes another root"
+    else:
+        assert receipt["attribution"]["state"] == "original"
+        selected, _attribution, error, binding = staged
+        assert (selected, error, binding) == (["ouroboros/mod_a.py"], "", (data, task_id))
+
+
 def test_candidate_start_service_uses_isolated_environment(body):
     """An ordinary (non-executor) service launched inside a candidate must not inherit live data."""
     import json

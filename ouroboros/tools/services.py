@@ -50,6 +50,10 @@ from ouroboros.tool_access import (
     shell_cwd_block_message,
 )
 from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.tools.kept_service_outputs import (
+    KEPT_DECLARATION, KEPT_DIRECTORY, consume_own_declaration, declare_kept, executor_launch, retire_kept_declaration,
+    retire_kept_declarations,
+)
 from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import overlay_env, resolve_process_env, service_env, validate_process_env
 from ouroboros.workspace_executor import kill_all_services as executor_kill_all_services
@@ -381,7 +385,7 @@ def archive_task_service_logs(
     task_id: str,
     task: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Archive and remove leftover live service logs for a terminal task."""
+    """Archive and remove leftover live service logs for a terminal task, once nothing of it may still write them."""
 
     task_text = str(task_id or "").strip()
     if isinstance(task, dict):
@@ -429,6 +433,11 @@ def archive_task_service_logs(
         return report
     if not stat.S_ISDIR(task_stat.st_mode):
         return report
+    from ouroboros import body_candidate
+
+    # A kept service outlives its task, and a killed worker's processes may not be settled yet: while anything of
+    # this task may still write here, its live logs stay for retention (``prune_service_logs``), which has the proof.
+    live_writers = bool(body_candidate.live_lineage_processes(drive_root, task_text))
     try:
         for child in task_dir.glob("*.log"):
             try:
@@ -436,6 +445,9 @@ def archive_task_service_logs(
             except OSError:
                 continue
             if not stat.S_ISREG(child_stat.st_mode):
+                continue
+            if live_writers:
+                report["retained_files"] += 1
                 continue
             archive_result = _archive_stale_service_log(
                 pathlib.Path(drive_root),
@@ -583,6 +595,9 @@ def _start_service(
     # kills it once the task ends — breaking the keep contract for a service a
     # verifier still needs (triad review r1, gpt-5.5 critical).
     keep_alive = bool(keep_alive) or task_service_teardown(ctx) == "keep"
+    kept = dict(name=service_name, cwd=str(workdir), cwd_root=cwd_root, cwd_base=str(binding.base_path),
+                cwd_source=binding.source, skill_name=binding.skill_name, outputs=declared_outputs,
+                before_outputs=before_outputs) if keep_alive else None
     if existing is not None:
         # Retire the exited host record before a new process can append to its log with a
         # different environment (or switch to an executor backend); never start beside its
@@ -622,7 +637,9 @@ def _start_service(
                 secret_values=secret_values,
                 output_context=output_context,
             )
-            return json.dumps({**payload, **baseline_note}, ensure_ascii=False, indent=2)
+            # A start answered by the launch already running starts nothing: that launch's declaration stands.
+            declared = declare_kept(ctx, None if payload.get("note") == "already_running" else kept, executor_key=key)
+            return json.dumps({**payload, **baseline_note, **declared}, ensure_ascii=False, indent=2)
         except OwnerPauseRefused as exc:
             return _publish_tool_result(ctx, launch_refusal_result(exc))
         except body_candidate.CandidateRefused:
@@ -728,6 +745,7 @@ def _start_service(
         log_fh.close()
         return redact_known_values(f"⚠️ SERVICE_START_ERROR: {type(exc).__name__}: {exc}", secret_values)
     record = published[0]  # a stop during its registration may already have retired it
+    kept_note = declare_kept(ctx, kept, launch=(ctx.drive_root, task_id, proc.pid, scope_marker))
     try:
         system_root = pathlib.Path(
             getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir")
@@ -754,7 +772,7 @@ def _start_service(
         if proc.poll() is not None:
             break
         time.sleep(0.2)
-    return json.dumps({**_status_payload(record), **baseline_note}, ensure_ascii=False, indent=2)
+    return json.dumps({**_status_payload(record), **baseline_note, **kept_note}, ensure_ascii=False, indent=2)
 
 
 def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
@@ -886,7 +904,42 @@ class _UnconfirmedStopText(str):
     result and no part of the text is consulted."""
 
 
-def _stop_service(ctx: ToolContext, name: str = "service") -> str:
+def _stop_kept_service(ctx: ToolContext, service_id: str, reason: str) -> str:
+    """A root task's stop of ONE kept service a FINISHED task left running, by its durable launch id (the owner's
+    choice, quiz f4023bf9): the owner's Activity Stop and this land on ``launch_custody.stop_kept_service``, this one
+    refusing while the starting task is live or not proven finished. A delegated or Presence-bounded task never
+    reaches another task's service."""
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.presence_authority import presence_ceiling_from_context
+    from ouroboros.tool_access_types import _TOP_LEVEL_PRINCIPAL_PROFILES
+
+    if str(active_tool_profile(ctx)) not in _TOP_LEVEL_PRINCIPAL_PROFILES or presence_ceiling_from_context(ctx) is not None:
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code="ACCESS_BLOCKED", meta={"operation_outcome": "completed_no_effect"},
+            text="⚠️ SERVICE_STOP_BLOCKED: only a root task stops a service another task kept; stop_service(name=...) "
+                 "still stops this task's own services."))
+    receipt = stop_kept_service(canonical_data_root(ctx), service_id, reason=reason,
+                                actor=f"agent:{getattr(ctx, 'task_id', '') or 'unknown'}", finished_producer=True)
+    rendered = json.dumps(receipt, ensure_ascii=False, indent=2)
+    if receipt.get("ok"):  # ended, and its declared outputs are kept (a not_found one: by this call's capture)
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=rendered))
+    if receipt.get("outcome") == "stopped" or "outputs" in receipt and receipt.get("outcome") == "not_found":
+        # ended, but its declared outputs are not all captured: typed, not done
+        return _publish_tool_result(ctx, ToolResult(status="error", code="ARTIFACT_OUTPUT_ERROR", text=(
+            "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): the service has ended; its declared outputs are "
+            f"{receipt.get('outputs', {}).get('state', 'unknown')}.\n\n{rendered}")))
+    if receipt.get("outcome") in ("refused", "not_found"):
+        return _publish_tool_result(ctx, ToolResult(
+            status="error" if receipt["outcome"] == "refused" else "unavailable",
+            code="TOOL_ARG_ERROR" if receipt["outcome"] == "refused" else "LEGACY_UNAVAILABLE",
+            meta={"operation_outcome": "completed_no_effect"},
+            text=f"⚠️ SERVICE_STOP_{receipt['outcome'].upper()}: {receipt.get('detail', '')}\n\n{rendered}"))
+    return _UnconfirmedStopText(f"⚠️ SERVICE_STOP_ERROR (stop_service): {receipt.get('detail', '')}\n\n{rendered}")
+
+
+def _stop_service(ctx: ToolContext, name: str = "service", service_id: str = "", reason: str = "") -> str:
+    if str(service_id or "").strip():
+        return _stop_kept_service(ctx, str(service_id), str(reason or ""))
     service_name, name_error = _sanitize_service_name(name)
     if name_error:
         return name_error
@@ -907,8 +960,18 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
         finally:
             _release_name(record)
     registered: List[bool] = []  # the winning stop registers its outputs while it still holds the name
+    try:  # a kept executor service's declaration, consumed below once its own capture is complete
+        from ouroboros.workspace_executor import _services_snapshot
+
+        kept = any(item.service_id == key and item.keep_alive for item in _services_snapshot())
+        kept_launch = executor_launch(key) if kept else None
+    except Exception:  # noqa: BLE001 — none known: nothing is consumed, an owed declaration stays owed
+        kept_launch = None
     payload = executor_stop_service(ctx, service_name, lambda done: registered.append(_finalize_executor_service_outputs(ctx, done)))
     if payload is not None:
+        if kept_launch is not None and not payload.get("stop_failed") and payload.get("cleanup_dispatched") is not False \
+                and not payload.get("artifact_output_failed"):
+            consume_own_declaration(kept_launch)
         if payload.get("stop_failed"):
             return _UnconfirmedStopText(
                 "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n"
@@ -977,6 +1040,11 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
     if artifact_note:
         payload["artifact_outputs"] = artifact_note.strip()
     payload["artifact_output_failed"] = bool(artifact_failed)
+    if record.keep_alive and not artifact_failed:  # its own stop captured them: its kept declaration owes nothing
+        from ouroboros.process_custody import custody_record_id
+
+        consume_own_declaration((record.drive_root or ctx.drive_root, record.task_id, custody_record_id(
+            {"pid": record.proc.pid, "scope_marker": record.scope_marker})))
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     if artifact_failed:
         text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
@@ -986,6 +1054,8 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
                 status="error",
                 code="ARTIFACT_OUTPUT_ERROR",
                 text=text,
+                # Another output this stop did register stays observed production beside the failure.
+                meta={"artifact_registered": True} if artifact_registered else {},
             ),
         )
     return _publish_tool_result(
@@ -1196,7 +1266,8 @@ def prune_service_logs(
     *,
     now: float | None = None,
 ) -> Dict[str, Any]:
-    """Archive old logs only after local and durable process custody release their writers."""
+    """Archive old logs, and retire a kept declaration naming no outputs (beside its log) with them, only after process
+    custody releases their writers; an owed declaration waits for its capture (``retire_kept_declarations``)."""
     from ouroboros import body_candidate
     from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
 
@@ -1218,14 +1289,17 @@ def prune_service_logs(
     }
     if not services_root.exists():
         return report
+    retire_kept_declarations(pathlib.Path(drive_root), cutoff, report)
     for task_dir in list(services_root.iterdir()):
         try:
             task_stat = task_dir.lstat()
         except OSError:
             continue
-        if not stat.S_ISDIR(task_stat.st_mode):
+        if not stat.S_ISDIR(task_stat.st_mode) or task_dir.name == KEPT_DIRECTORY:  # that directory: visited above
             continue
         try:
+            for declaration in task_dir.glob(f"*{KEPT_DECLARATION}"):
+                retire_kept_declaration(pathlib.Path(drive_root), task_dir.name, declaration, cutoff, report)
             for child in task_dir.glob("*.log"):
                 try:
                     child_stat = child.lstat()
@@ -1301,6 +1375,8 @@ def get_tools() -> List[ToolEntry]:
             "description": "Stop a service and the processes still traceable to it, then capture its declared outputs into the task artifact store.",
             "parameters": {"type": "object", "properties": {
                 "name": {"type": "string", "default": "service"},
+                "service_id": {"type": "string", "default": "", "description": "Root tasks only: the launch_id of a service a finished task kept running (Runtime kept_services); refused while that task or its helpers may still run. Stops that one launch; its log stays and its declared outputs go to the task that started it (repeat the call to retry an incomplete capture); name is then ignored."},
+                "reason": {"type": "string", "default": "", "description": "Required with service_id: why it is stopped (at most 1000 characters), recorded with the outcome."},
             }, "required": []},
         }, _stop_service, is_code_tool=True, timeout_sec=30, mutates_worktree=True),
     ]

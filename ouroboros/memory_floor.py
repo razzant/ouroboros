@@ -10,17 +10,18 @@ import hashlib
 import json
 import logging
 import math
-from functools import cached_property, lru_cache
-from typing import Callable, Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from functools import cached_property
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
-from ouroboros.chat_chain import parse_address
-from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
+from ouroboros.context_timing import timed_section
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
-from ouroboros.utils import estimate_tokens
-from ouroboros.section_floor import PROTECTED, retain_section, relocated_text, section_views
+from ouroboros.chat_chain import parse_address
+from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
+from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,41 @@ _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note list
 _SEALING_TOOLS = frozenset({"chronicle_write", "enable_tools"})  # sent, or loadable through enable_tools
 
 
+def tokens_of(chars: int) -> int:
+    """The host's estimate of a text of ``chars`` JSON-escaped characters inside a request (``view_tokens``)."""
+    return max(1, (chars + 5) // 4) if chars else 0
+
+
 def view_tokens(text: str) -> int:
     """The host's estimate of a text inside a request: its JSON-escaped characters / 4."""
-    return estimate_tokens(json.dumps(str(text), ensure_ascii=False)) if text else 0
+    return tokens_of(mv.json_chars(str(text))) if text else 0
+
+
+class ViewFit:
+    """One frame's memory view: ``level``, its receipt ``note`` and ``facts``, priced from the snapshot's pieces. Its
+    whole texts are drawn only when read, so a frame the fit walks away from is only priced, piece by piece."""
+
+    def __init__(self, snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, note: str, facts: Dict[str, Any]):
+        self.snapshot, self.level, self.note, self.facts = snapshot, level, note, facts
+
+    @cached_property
+    def story(self) -> str:
+        return mv.render_story(self.snapshot, self.level)
+
+    @cached_property
+    def room(self) -> str:
+        return mv.render_room(self.snapshot, self.level, floor_note=self.note)
+
+    @cached_property
+    def story_chars(self) -> int:
+        return mv.story_chars(self.snapshot, self.level)
+
+    @cached_property
+    def room_chars(self) -> int:
+        return mv.room_chars(self.snapshot, self.level, floor_note=self.note)
+
+
+NO_VIEW = SimpleNamespace(story="", room="", facts={}, level=None, story_chars=0, room_chars=0)  # a frame with no memory
 
 
 def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -161,40 +194,12 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
             "budget": start["with_margin_tokens"] if target_tokens else None}
 
 
-def _memoized_measure(measure):
-    """One walk's immutable forms; never cache across captures or request envelopes."""
-    prices = {}
-    def measured(level):
-        if level.addressed not in prices:
-            prices[level.addressed] = measure(level)
-        return prices[level.addressed]
-    return measured
-
-
-def _shortest_prices(sent, measure):
-    """``(characters, compare)`` of a walk with no target, where only an optional form's order against what it joins decides.
-
-    Two levels of one walk differ in the request only by what they ``sent``: a story's presence never depends on the
-    level, and both sides of an optional form show its room or the receipt its earlier forms earned, so no separator or
-    block comes or goes. The request's estimate is its JSON characters / 4 rounded up, so a trial of no fewer characters
-    never prices lower and one at least four fewer always does; only between them can the whole request's rounding
-    decide, and there both levels are ``measure``d whole, each beside this walk's own host forms and receipt.
-    """
-    measure = _memoized_measure(measure)
-    characters = _memoized_measure(lambda level: sum(len(json.dumps(text, ensure_ascii=False)) for text in sent(level)))
-
-    def compare(taken, trial):
-        before, after = characters(taken), characters(trial)
-        return (before, after) if after >= before or before - after >= 4 else (measure(taken), measure(trial))
-    return characters, compare
-
-
-def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: str, fixed: int,
+def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
                   schemas: int, window: int, reserve: int, work: int, ratio: float,
                   allowance: Optional[int]) -> Optional[Dict[str, Any]]:
     """The Max room of one start, the host's measure in the owner's Max frame with whole books.
 
-    ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
+    ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
     is the books, core, knowledge with scratchpad and runtime facts (``dynamic_head_text`` and ``dynamic_text``:
     Health, recent activity, skills, drive state too), assignment, reply reserve and work room; ``zero_need`` adds the tool
     schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut):
@@ -209,7 +214,7 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
     ordinary = mv.FloorLevel(tuple((step, tuple(_elements(snapshot).ids.get(step, ())))
                                    for step in _ORDINARY)) if snapshot else mv.FULL_VIEW
-    memory = {"story": view_tokens(story), "room": view_tokens(mv.render_room(snapshot, ordinary)) if snapshot else 0,
+    memory = {"story": story, "room": tokens_of(mv.room_chars(snapshot, ordinary)) if snapshot else 0,
               "unfolded": unfolded_pages(snapshot)["tokens"]}
     zero = math.ceil(fixed * ratio) + reserve + work
     return {"window": window, "allowance": allowance, "floor_need": math.ceil((fixed - schemas) * ratio) + reserve + work,
@@ -263,6 +268,37 @@ def floor_parts(fact: Mapping[str, Any]) -> str:
     return f"{named}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}"
 
 
+def start_cause(facts: Optional[Mapping[str, Any]]) -> str:
+    """Why a start fit's own projection (its ``memory_facts``) is below the owner's mode: ``""`` without a mode
+    switch (``floor.mode_switch``); ``memory`` when memory crowded the Max room (``crowded_by_memory``), ``route``
+    when the window cannot hold the books and core, else ``window``."""
+    facts = facts or {}
+    if not (facts.get("floor") or {}).get("mode_switch"):
+        return ""
+    room = facts.get("max_room")
+    return "memory" if crowded_by_memory(room) else "route" if (room or {}).get("cause") == "route" else "window"
+
+
+def drawn_tokens(entry: Mapping[str, Any]) -> int:
+    """One story entry as the full view draws it: a retold record whole (``F3``'s whole form), else its own page
+    lines (``memory_view._page_lines``; an account's told lines aside). Told by an account, it is not drawn: 0."""
+    if entry.get("told_by"):
+        return 0
+    return view_tokens(legacy.retold_record(entry) if entry.get("kind") == "legacy" else "\n".join(mv._page_lines(entry)))
+
+
+def story_measure(story: Iterable[Mapping[str, Any]], status: Optional[Mapping[str, Any]] = None,
+                  refusals: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+    """My story from its captured entries alone (``memory_view.capture_story``): ``tokens`` as the full view draws
+    the whole block (``render_story``), ``drawn`` each entry's own tokens by id (``drawn_tokens``) and ``unfolded``
+    (``unfolded_pages``). What ``memory_read(story=true)`` reports; a measure, never a mode."""
+    story = tuple(story)
+    snapshot = mv.MemoryViewSnapshot(spec=mv.ViewSpec("integrator"), store_status={"state": "active"}, frontier={},
+                                     story=story, legacy_blocks=dict(status or {}), fallback_refusals=tuple(refusals))
+    return {"tokens": view_tokens(mv.render_story(snapshot)), "unfolded": unfolded_pages(snapshot),
+            "drawn": {str(entry["id"]): drawn_tokens(entry) for entry in story if not entry.get("told_by")}}
+
+
 def unfolded_pages(snapshot: Optional[mv.MemoryViewSnapshot]) -> Dict[str, Any]:
     """My story's pages no part or account holds yet, from the captured snapshot alone: how many, their tokens and
     ``rooms`` as ``[label, tokens, pages]``, the room holding most of them first (where they pile up)."""
@@ -270,7 +306,7 @@ def unfolded_pages(snapshot: Optional[mv.MemoryViewSnapshot]) -> Dict[str, Any]:
     for entry in snapshot.story if snapshot else ():
         if entry.get("kind") == "page" and not entry.get("told_by"):
             room = rooms.setdefault(str(entry.get("room_id")), [str(entry.get("label") or entry.get("room_id")), 0, 0])
-            room[1] += view_tokens("\n".join(mv._page_lines(entry)))
+            room[1] += drawn_tokens(entry)
             room[2] += 1
     ranked = sorted(rooms.values(), key=lambda room: (-room[1], room[0]))
     return {"pages": sum(room[2] for room in ranked), "tokens": sum(room[1] for room in ranked), "rooms": ranked}
@@ -324,22 +360,18 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
     return "\n".join(lines)
 
 
+@timed_section("fit.walk")
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,
                     kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0,
-                    measure: Optional[Callable[[mv.FloorLevel], int]] = None,
-                    compare: Optional[Callable[[mv.FloorLevel, mv.FloorLevel], Tuple[int, int]]] = None) -> mv.FloorLevel:
-    """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected.
-
-    ``compare(taken, trial)`` prices an optional form against the level it joins; by default each is ``measure``d.
-    """
+                    measure: Optional[Callable[[mv.FloorLevel], int]] = None) -> mv.FloorLevel:
+    """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected. A level is priced
+    from the snapshot's pieces (``render_view_for_mode``'s ``measure``, by default its story and room characters)."""
     table = _elements(snapshot)
     elements = table.priced
     labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
     taken = set(old)
-    measure = _memoized_measure(measure or (
-        lambda level: view_tokens(mv.render_story(snapshot, level)) + view_tokens(mv.render_room(snapshot, level))))
-    compare = compare or (lambda before, after: (measure(before), measure(after)))
+    measure = measure or (lambda level: tokens_of(mv.story_chars(snapshot, level)) + tokens_of(mv.room_chars(snapshot, level)))
     current = measure(kept)
     bounds = [b for b in (allowances.get("margin"), allowances.get("budget"), allowances.get("physical")) if b is not None]
     bound = min(bounds) if bounds else None
@@ -369,7 +401,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                 trial.update((s, i) for s, i, *_ in elements if s == 'F8')
             if step in _LIST_FORMS and not any(s in _LIST_FORMS[step] for s, _ in trial):
                 continue
-            before, after = compare(level(taken), level(trial))
+            before, after = measure(level(taken)), measure(level(trial))
             if after >= before:
                 continue
             current, delta = after, before - after
@@ -660,8 +692,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None,
-                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> Tuple[str, str, Dict[str, Any]]:
-    """``(story text, room text, facts)`` of one mode's projection, the floor decided once.
+                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
+    """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
     only the mode the owner selected: task-local Low and a mode the window lowered have
@@ -672,9 +704,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     What ``kept.by_budget`` counts the owner's mode target took (only it carries one), so the note
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
-    completed receipt -- what a start's host walk judges beside the window (``_host_steps``). Its ``measure_text``
-    prices a whole request: only a tie within one token of it needs measuring (``_shortest_prices``).
+    completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
     ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
+    A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
+    the two memory texts of a whole request (by default their own tokens).
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -685,9 +718,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                                   work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
-    size = lambda shown: view_tokens(mv.render_story(snapshot, shown)) + view_tokens(mv.render_room(snapshot, shown))
+    size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     uncovered = uncovered_owner_rows(snapshot)
-    @lru_cache(maxsize=128)
     def receipt(level):
         note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room)
@@ -699,21 +731,18 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                 "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
                 if owners else "what my memory shows even in its shortest forms exceeds it.")
         return note
-    # The request owner can measure JSON separators and rounding in the actual envelope.
-    measure_text = measure_text or (lambda story, room: view_tokens(story) + view_tokens(room))
-    def sent(level):  # the two texts this level adds to a request, its receipt included
-        return mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=receipt(level))
-    measure = lambda level: measure_text(*sent(level))
+    # The request owner measures JSON separators and rounding in the actual envelope, beside these two texts' characters.
+    measure_text = measure_text or (lambda story_chars, room_chars: tokens_of(story_chars) + tokens_of(room_chars))
+    def measure(level):  # the two texts this level adds to a request, its receipt included
+        return measure_text(mv.story_chars(snapshot, level), mv.room_chars(snapshot, level, floor_note=receipt(level)))
     if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
-        characters, compare = _shortest_prices(sent, measure)  # stops it before owner rows.
         level = fit_memory_view(snapshot, {**allowances, "physical": None}, kept=kept or mv.FULL_VIEW, saving=math.inf,
-                                measure=characters, compare=compare)
+                                measure=measure)  # stops it before owner rows.
     elif level is None:
         level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
-    note = receipt(level)
-    return (mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note),
-            view_facts(snapshot, level, window_tokens=window, mode=mode, allowances=allowances, target_tokens=target,
-                       lowered_from=lowered_from))
+    return ViewFit(snapshot, level, receipt(level), view_facts(snapshot, level, window_tokens=window, mode=mode,
+                                                                allowances=allowances, target_tokens=target,
+                                                                lowered_from=lowered_from))
 
 
 TRACE_FIELDS = ("role", "room_id", "floor", "story_status", "max_room", "host_sections_addressed")  # what a task trace keeps of a view receipt
@@ -743,7 +772,7 @@ HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
 
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -763,7 +792,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     (``render_view_for_mode(shortest=True)``). After each new address that receipt can
     grow, so the frame re-prices the walk's level beside the new forms and walks again
     only when the level no longer fits (``context_fit._view_projections``).
-    ``bare(addressed)`` measures a request without memory: when even every candidate at
+    ``retain`` captures a section before its pointer (``retain_section``; a write-free fit passes
+    ``section_floor.predicted_section``). ``bare(addressed)`` measures a request without memory: when even every candidate at
     its shorter form exceeds the window that way, no price here can fit, so each candidate
     steps for the window unpriced and the saving stays unpaid.
     Every frame begins from what was shown (``previous``) and pays what that frame
@@ -805,7 +835,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
         try:
-            row = retain_section(part, root=root, task_id=task_id)
+            row = (retain or retain_section)(part, root=root, task_id=task_id)
         except (OSError, ValueError):
             log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
             continue
@@ -818,3 +848,140 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
     return receipts, max(0, saving - (initial - current))
+
+
+# --- a pairwise start fit of other memories in one captured frame ------------------------------------------------
+
+STORY_FIELDS = ("legacy", "under_parts", "told")  # this room's records whose form my story decides
+
+
+def reprojected(captured: mv.MemoryViewSnapshot, fresh: mv.MemoryViewSnapshot) -> mv.MemoryViewSnapshot:
+    """The captured view with only what my story decides read again (``fresh``, a capture of the same spec with no
+    lanes, conversations or marks): the story, its status and refusals, this room's retold records, pages under parts
+    and told records. Rows, conversations, marks, notes and every other fact stay as this task captured them."""
+    room = captured.room
+    if room is not None and fresh.room is not None:
+        room = {**room, **{key: fresh.room[key] for key in STORY_FIELDS if key in fresh.room}}
+    return dataclasses.replace(captured, story=fresh.story, legacy_blocks=fresh.legacy_blocks,
+                               store_status=fresh.store_status, fallback_refusals=fresh.fallback_refusals, room=room)
+
+
+def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapshot]) -> Dict[str, Any]:
+    """Each named memory fitted as a fresh start of this plan's one captured frame by the start's own fitter
+    (``context_fit._view_projections``): the same core, books, assignment, tool schemas the start priced, window
+    record, reply and working reserves, density and owner mode; nothing else is read. A host step's section is
+    priced at the address its capture would publish (``section_floor.predicted_section``) and nothing is written: no
+    view receipt, calibration, checkpoint or plan. When no view holds the whole input, the start's own rescue applies
+    as production's (``context_input_selection.rescued_start``) to the deliveries this start captured, in its order
+    (``rescued_inputs``); an arm on one says ``"input": "rescued"``. ``{"measured": False, "missing": [...]}`` names
+    inputs this plan lacks; each arm is ``{"mode", "max_room", "steps", "host"}``, ``{"refused": reason}`` when no
+    start view fits, or ``{"unmeasured": reason}`` (a further rescue this start never captured included)."""
+    from ouroboros import context_fit as cf
+    from ouroboros.section_floor import predicted_section
+
+    core, record = getattr(plan, "core", None), getattr(plan, "window_record", None)
+    missing = [name for name, held in (
+        ("the captured context core and memory view", core is not None and bool(getattr(core, "memory_view_json", ""))),
+        ("the tool schemas its start priced", getattr(plan, "start_tool_schemas_json", None) is not None),
+        ("its window record", record is not None)) if not held]
+    if missing:
+        return {"measured": False, "missing": missing}
+    schemas, ratio = json.loads(plan.start_tool_schemas_json), float(plan.max_projection.calibration_ratio)
+    governance = {form: cf._governance_blocks(None, core, mode=form) for form in ("max", "low")}
+    rescues, last = rescued_inputs(plan)
+    arms: Dict[str, Any] = {}
+    for name, snapshot in snapshots.items():
+        if not snapshot.active:
+            arms[name] = {"unmeasured": "memory capture unavailable: " + str(snapshot.store_status.get("state"))}
+            continue  # an unreadable journal is not an empty history that fits Max
+        def fit(user_content_json: str, snapshot=snapshot) -> Tuple[Dict[str, Any], str]:
+            return cf._view_projections(
+                dataclasses.replace(core, memory_view_json=mv.snapshot_json(snapshot)), governance,
+                user_content_json, preferred=plan.preferred_mode, tool_schemas=schemas,
+                window_tokens=record.total_equivalent, known_window=record.usable is not None,
+                output_reserve=plan.output_reserve_tokens, window_record=record, ratio=ratio,
+                working_reserve_tokens=plan.working_reserve_tokens, work_room_levels=snapshot.spec.work_room_levels,
+                retain=predicted_section)
+        rescued = False
+        try:
+            try:
+                contents, mode = fit(core.user_content_json)
+            except cf.MinimumViewUnfit as unfit:
+                if not unfit.physical or unfit.required_book_tokens or not rescues:
+                    raise  # a refusal production names too; or, with no captured rescue, unknown below
+                for rescue in rescues:  # production's order; the last refusal stands as its own
+                    try:
+                        contents, mode = fit(rescue)
+                        break
+                    except cf.MinimumViewUnfit as refused:
+                        unfit = refused
+                else:
+                    if not last:
+                        raise _UncapturedRescue("every rescue this start captured is refused; its further forms "
+                                                "were never captured") from unfit
+                    raise unfit
+                rescued = True
+        except cf.MinimumViewUnfit as unfit:
+            arms[name] = ({"unmeasured": "the whole input does not fit and this start captured no rescue of it"}
+                          if unfit.physical and not unfit.required_book_tokens and not rescues else {"refused": str(unfit)})
+            continue
+        except Exception as exc:  # the read keeps its other answers; this arm is unknown, never a mode
+            if not isinstance(exc, _UncapturedRescue):
+                log.warning("pairwise start fit of %s not measured", name, exc_info=True)
+            arms[name] = {"unmeasured": str(exc) if isinstance(exc, _UncapturedRescue) else type(exc).__name__}
+            continue
+        facts = contents[mode][1]
+        arms[name] = {"mode": mode, "max_room": facts.get("max_room"), "steps": dict((facts.get("floor") or {}).get(
+            "steps") or {}), "host": [(row["section_id"], row["tokens_saved"]) for row in facts.get(
+                "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {})}
+    frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
+             "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
+             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode}  # the start's own mode
+    return {"measured": True, "frame": frame, "arms": arms}
+
+
+class _UncapturedRescue(Exception):
+    """A pairwise start fit reached past the rescues its start captured: unknown, never a refusal."""
+
+
+def rescued_inputs(plan: Any) -> Tuple[List[str], bool]:
+    """The deliveries this plan's start used in place of its whole input (``context_input_selection.rescued_start``,
+    held on its projections), in production's rescue order: a wake's bound form (every mode's) first, owner-Nano's
+    exact input pointer (Nano's alone) last; and whether that last is production's last rescue, so its refusal is
+    one. Nothing is read or written: what the start did not capture is not here."""
+    held = {mode: plan.projection(mode).user_content_json for mode in MODES}
+    wake = held["max"] or held["low"]
+    pointer = held["nano"] if held["nano"] and held["nano"] != wake else None
+    rescues = [text for text in (wake, pointer) if text]
+    return rescues, bool(pointer) and plan.preferred_mode == "nano"
+
+
+def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
+    """``counterfactual_starts`` as the reader's lines: the frame, then each arm's start mode and Max room in the
+    host's measured parts (``measure_text``), its floor steps and predicted host steps; a missing input is named."""
+    head = "## The next start in this task's captured frame (a pairwise fit; nothing written)"
+    if not fit.get("measured"):
+        return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
+    f = fit["frame"]
+    lines = ["", head, (
+        f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
+        f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
+        f"{f['ratio']:.3f}, {f['schemas']} tool schemas as this task's start priced them; my story, its status and this "
+        "room's retold records read now, everything else as this task captured it. "
+        + ("This task's original start is not known: its continuation did not carry it."
+           if f["started"] == "unknown" else f"This task started in {f['started']} (its start projection, a separate "
+           "fact: my chronicle may have changed since)."))]
+    for name, arm in fit["arms"].items():
+        if "refused" in arm or "unmeasured" in arm:
+            lines.append(f"- {name}: no start view fits ({arm['refused']})" if "refused" in arm
+                         else f"- {name}: not measured ({arm['unmeasured']}); its mode is unknown")
+            continue
+        room = arm["max_room"]
+        steps = ", ".join(f"{step} {count}" for step, count in arm["steps"].items()) or "none"
+        host = ", ".join(f"{section} ~{saved:,}" for section, saved in arm["host"])
+        lines.append(f"- {name}: starts {arm['mode'].capitalize()}"
+                     + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
+                     + (f"; Max room {room['cause']}: {measure_text(room)}" if room else "; no Max room measured")
+                     + f"; floor steps {steps}"
+                     + (f"; host sections by address, if their capture succeeds: {host}" if host else ""))
+    return lines

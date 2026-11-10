@@ -346,7 +346,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
 
     // Each composer owns its room's Subagents, Context and Effort settings.
     const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
-        projectId, saveEffortRange: apiClient.ownerEffortRange,
+        projectId, chatId, saveEffortRange: apiClient.ownerEffortRange,
         saveSubagentsMode: apiClient.ownerSubagentsMode,
         openSettings: () => openSettings?.('agents'), refreshState, onLayout, readingBack });
 

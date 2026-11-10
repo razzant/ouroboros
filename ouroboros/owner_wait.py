@@ -42,7 +42,8 @@ from ouroboros.task_store import patch_document
 
 # ``tools.review_result``'s facts of what its delivery step already showed (findings, a changed request asked
 # about, a refusal), each JSON at its owner; carried by value, never decided here.
-_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused")
+_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused",
+                        "_result_review_revision_asked")
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +201,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
+        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them.
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
@@ -1215,8 +1218,10 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     from ouroboros.memory_floor import MODES
     from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
+    from ouroboros.context_fit import restored_start
 
     ctx = tools._ctx
+    ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
     model_wait = getattr(ctx, "model_wait_context", None)
     role, account = task_model_binding(
         {"model_role": state.get("context_model_role"), "task_metadata": ctx.task_metadata},

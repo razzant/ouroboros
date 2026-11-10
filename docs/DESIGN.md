@@ -471,15 +471,16 @@ tells them apart, and Swarm never fills the capsule (owner 28.10).
 Until the room's values arrive the ring stays unlit and the value secondary,
 never a faded capsule. Closed, Effort names only the primary level; its ring (a 300°
 arc: band minimum..maximum, dot primary) and the button's name carry the range.
-Context's ring is three arcs, the chosen one lit: one of three modes, never a fill
-level or capacity. Subagents' mark is a small network (owner 27.10, G): Ouroboros joined by threads to three helpers; Off lights none, Auto one helper and its thread, Swarm every helper and the threads between them.
+Context's word/arcs show its root works' observed modes, not the setting or helpers (owner 08.11).
+Its dot marks the chosen arc when they differ; `Mixed` lights the observed modes, unseen is `—`.
+Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three helpers: Off lights none,
+Auto one helper/thread, Swarm all helpers and their connecting threads.
 
-**A capsule opens inline, in the row, never as a dropdown or a panel, one at a time** (owner 11.10; the panels tried
-on 26.10 were withdrawn on 27.10); its value yields to the strip. Context's is Nano · Low · Max under a glass thumb; a
-choice posts at once and the strip waits for the answer. Subagents' is Off · Auto · Swarm the same way. While any
-capsule is open, the one hint ("Hints") stands above it (owner 28.10): the value's word and what it means (a mouse
-resting on another of Subagents' or Context's modes previews that one's) and «Applies to new steps; running work
-finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
+**A capsule opens inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
+withdrawn 27.10); its value yields to the strip. Context: Nano · Low · Max under a glass thumb;
+choosing posts at once, then waits for the answer. Subagents: Off · Auto · Swarm, likewise. Open, one
+hint ("Hints") above it (owner 28.10) gives the mode's meaning (hovering another previews it), Context's
+dated observation/cause, and «Applies to new steps; running work finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
 and Swarm are disabled and the hint says why with `Open Settings`, the keyboard's next stop after the strip; the room
 keeps its own value. Effort's seven levels carry
 a primary pill and two helper bounds; the primary may lie outside them. A
@@ -522,8 +523,10 @@ growing, a swipe begun in a card's frame and the app's own jump (the waiting pil
 to a question) move nothing (`web/modules/composer_fold.js`; owner 19.10).
 
 **Hover is an accelerator; the press always works.** With a hovering fine pointer a
-capsule opens ~160 ms after arrival (not while the other is open) and closes a
-second after it leaves a 32 px zone unless a press pinned it; the press unpins.
+capsule opens ~160 ms after arrival (not while the other is open) and closes
+~300 ms after it leaves its zone (the capsule, its hint and the corridor between,
+a few px wider; never the message field) unless a press pinned it; the press unpins;
+a mouse arriving after Escape opens it as hover, not keyboard.
 Touch and keyboard use the press: Enter or Space opens onto the recommended handle
 or the chosen mode; arrows step a handle (PageUp/PageDown too) or choose the next
 mode, Home/End reach the ends; Esc closes and returns focus to the head; an outside
@@ -701,14 +704,15 @@ keeps a neutral owner anchor visible but hides task status and typing until a
 real task status or activity arrives; review presence alone never means
 `Working`, `Done`, or owner attention.
 
-A review only awaited when its task ended is not a warning: reviewers that had
-simply not answered yet leave the task `Done`. For a plan review the task result
-keeps the host's typed disclosure that the review was still open (the
-`terminal_host_notice` field, read by the CLI and by parents), the card states
-the same fact as its cause sentence, and no second chat bubble carries it; a
-card that reads `Done with warnings` or `Failed` for another reason keeps that
-reason, with the open review stated beside it when the result records it. For a result review the card's
-cause sentence already says when a delivered answer lacks the reviewers' sign-off. A real
+A plan review only awaited when its task ended is not a warning: the task stays
+`Done`, its result keeps the host's typed disclosure that the review was still
+open (`terminal_host_notice`, read by the CLI and by parents), the card states it
+as its cause sentence, and no second chat bubble carries it; a card that reads
+`Done with warnings` or `Failed` for another reason keeps that reason, with the
+open review stated beside it when the result records it. A result Ouroboros
+accepted without its reviewers' approval (failed, degraded or still running)
+always reads `Done with warnings`, its reason in the cause sentence (owner,
+8 Nov 2026); an accepted revision of a version they passed reads `Done`. A real
 outcome keeps its word: no reviewer quorum, a failed, refused or unresolved
 slot, a collected blocking finding, a reviewer verdict nobody closed, a rail or
 a blocking exit still read `Done with warnings` or `Failed`.
@@ -727,8 +731,11 @@ exact applied record as a download once the host stored it, and a cut of the
 whole row names that record only then, never a guessed link. Slot ids, verdict
 tokens and omission markers stay in that record and the model's mailbox. The row
 lands inside the finished card (its Reviews group carries the note, the timeline
-keeps the row) without changing the card's chip, title or meta; a standalone row
-appears only when the task has no card record in the page. Saving and showing
+keeps the row); a standalone row appears only when the task has no card here.
+A late PASS of exactly an answer delivered before its reviewers answered clears
+only that wait's warning. The existing late-review event carries the current
+outcome to the finished card; history reads the same outcome beside the original
+ending row. Newer card facts win over older outcomes. Title and meta stay. Saving and showing
 late criticism does not replace passing it to Ouroboros: the host owns sources
 and fact delivery; Ouroboros judges the evidence, explains it and chooses any
 further work on an admissible turn. The untyped terminal host notice and the
@@ -2360,11 +2367,12 @@ draws no chrome or status from it. A block that existed only for open attention 
 closes: a wait-only block when its wait resolves, and the resolved
 episode's no-reopen ledger stays with the record, so a stale revision cannot
 revive it. A host wait (accounting access, control storage: the typed
-`usage_lock_wait`/`control_store_wait` episodes) is how the host ran, not the
+`usage_lock_wait`/`control_store_wait`/`safety_check_wait` episodes) is how the host ran, not the
 turn's work: a block's episodes of one kind are one receipt row, live while one
 is open, then their count and the longest measured one, so a wait never makes or
 keeps a block, live or on reload; Logs keep every phase, and the model's progress
-window folds them the same way (`checkpoint_waits`).
+window folds them the same way (`checkpoint_waits`); an open Safety check also shows a quiet still-mark line under a
+closed card's current action.
 
 An addressing call (`start_task`, `move_to_project`, `tell_task`: the
 routing-verb family `ouroboros/tool_capabilities.py::ROUTING_VERBS` owns) is

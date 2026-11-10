@@ -427,14 +427,14 @@ def test_native_review_episode_total_reaches_its_llm_usage_row_truthfully(tmp_pa
     assert _persisted_usage(event, tmp_path / "supervisor") == expected
 
 
-@pytest.mark.parametrize("raw,round_idx,hit,cold", [
-    (FULL, 2, 40 / 165, False),
-    (PARTIAL, 1, None, False),  # a first round is never a RE-start, whatever was reported
-    (PARTIAL, 2, None, None),  # total prompt and cache unknown: no ratio, no verdict
+@pytest.mark.parametrize("raw,round_idx,hit", [
+    (FULL, 2, 40 / 165),
+    (PARTIAL, 1, None),
+    (PARTIAL, 2, None),  # total prompt and cache unknown: no ratio
     ({"input_tokens": 10, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 990},
-     2, 0.0, True),
+     2, 0.0),
 ])
-def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch, offline, raw, round_idx, hit, cold):
+def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch, offline, raw, round_idx, hit):
     accumulated = {}
     step = {"kind": "response", "status_code": 200, "json": {
         "id": "msg_round", "role": "assistant", "content": [{"type": "text", "text": "done"}],
@@ -442,7 +442,7 @@ def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch,
     counters, _persisted, adapter = _loop_round(tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step,
                                                 round_idx=round_idx, accumulated=accumulated)
     [row] = [row for row in _rows(tmp_path / "logs" / "events.jsonl") if row["type"] == "llm_round"]
-    assert (row["cache_hit_rate"], row["cache_cold_restart"]) == (pytest.approx(hit) if hit else hit, cold)
+    assert row["cache_hit_rate"] == (pytest.approx(hit) if hit else hit) and "cache_cold_restart" not in row
     # Cache routing keeps reading the billing-shaped counters it always read.
     parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
     record = dict(accumulated["_last_round_cache_usage"])

@@ -2,7 +2,7 @@
 
 ``skill_sources`` reads the source list (and, on the owner's instruction or in Cyber Pro, adds,
 re-trusts or removes a source). ``skill_search`` finds catalog ids in the connected sources (ClawHub
-joins a text search). ``skill_install`` installs one by catalog id, never by URL: from a trusted source
+joins a text search; named alone, it lists its most downloaded skills). ``skill_install`` installs one by catalog id, never by URL: from a trusted source
 the skill gets the keys it asks for (under the owner's auto-grant setting) and turns on when ready; from
 a review source the configured review checks it (in Cyber Pro Ouroboros may record its own check instead).
 ``skill_update`` applies one update choice. Skipping without a check stays the owner's act.
@@ -129,7 +129,7 @@ def _compact(item: Dict[str, Any], drive: pathlib.Path) -> Dict[str, Any]:
 
 
 def _handle_skill_search(ctx: ToolContext, query: str = "", source: str = "", category: str = "", **_kw: Any) -> str:
-    from ouroboros.skill_source_catalog import catalog_view, read_snapshot, refresh_source, registry_items
+    from ouroboros.skill_source_catalog import catalog_view, read_snapshot, refresh_source, registry_browse, registry_items
     from ouroboros.skill_sources import load_sources
 
     drive = _drive(ctx)
@@ -151,8 +151,20 @@ def _handle_skill_search(ctx: ToolContext, query: str = "", source: str = "", ca
                     items.extend(registry_items(row, " ".join(words)))
                 except Exception as exc:
                     notes.append(f"{row['name']}: {exc}")
+    listing: Dict[str, str] = {}
+    registry = next((row for row in rows if row["kind"] == "registry" and row["id"] == source), None)
+    if registry is not None and not words:
+        if category:
+            notes.append(f"{registry['name']}: its skills have no categories here; search it with words instead.")
+        else:
+            try:
+                items.extend(registry_browse(registry)["items"])
+                listing = {"listing": f"{registry['name']}'s most downloaded skills, first page; "
+                                      "query words search all of it."}
+            except Exception as exc:
+                notes.append(f"{registry['name']}: {exc}")
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_dump({
-        "count": len(items), "items": [_compact(item, drive) for item in items[:_MAX_RESULTS]],
+        "count": len(items), **listing, "items": [_compact(item, drive) for item in items[:_MAX_RESULTS]],
         "omitted": max(0, len(items) - _MAX_RESULTS), "notes": notes, "categories": view["categories"],
         "hint": "Install with skill_install(id, reason); the id is <source>/<name>."})))
 
@@ -280,13 +292,14 @@ _SCHEMAS = {
     },
     "skill_search": {
         "description": (
-            "Search the skills offered by the connected sources (ClawHub joins a text search). Returns catalog ids "
+            "Search the skills offered by the connected sources (ClawHub joins a text search; source=clawhub "
+            "with no query lists its most downloaded skills). Returns catalog ids "
             "for skill_install with source, trust, digest, keys, permissions, type and installed state; "
             "local_digest names an installed copy's current bytes. skill_install, skill_update and skill_sources "
             "load with enable_tools."
         ),
         "properties": {
-            "query": {"type": "string", "description": "Words to match in names and descriptions; empty lists all."},
+            "query": {"type": "string", "description": "Words to match in names and descriptions; empty lists the local catalogs."},
             "source": {"type": "string", "description": "Optional source id."},
             "category": {"type": "string", "description": "Optional category id."},
         },

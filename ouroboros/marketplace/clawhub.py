@@ -24,6 +24,10 @@ _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024       # mirrors fetcher cap
 _USER_AGENT = "Ouroboros-Marketplace/4.50 (+https://github.com/razzant/ouroboros)"
 _BROWSE_PATH = "packages"
 _LEXICAL_SEARCH_PATH = "search"
+# Our browse orders and the value GET packages takes for each; it answers 400 to anything else, so an order
+# outside this map (the legacy "registry") sends no sort at all.
+BROWSE_SORTS = {"popular": "downloads", "downloads": "downloads", "installs": "downloads",
+                 "updated": "updated", "recommended": "recommended"}
 _SEARCH_ENRICH_WORKERS = 8
 _SEARCH_ENRICH_LIMIT = 16
 _SEARCH_ENRICH_TIMEOUT_SEC = 2
@@ -519,9 +523,7 @@ def search(
 ) -> Any:
     """Browse or lexical-search the modern ClawHub package catalogue."""
     base = _registry_base_url(registry_url)
-    sort_key = (sort or "downloads").strip().lower()
-    if sort_key not in {"registry", "updated"}:
-        sort_key = "registry"
+    sort_key = BROWSE_SORTS.get((sort or "").strip().lower(), "registry")
     cleaned_query = (query or "").strip()
     max_limit = _SEARCH_ENRICH_LIMIT if cleaned_query else 100
     safe_limit = max(1, min(int(limit or 25), max_limit))
@@ -533,6 +535,8 @@ def search(
     if not cleaned_query:
         if official_only:
             query_params["isOfficial"] = "true"
+        if sort_key != "registry":
+            query_params["sort"] = sort_key
         cleaned_cursor = str(cursor or "").strip()
         if cleaned_cursor:
             query_params["cursor"] = cleaned_cursor

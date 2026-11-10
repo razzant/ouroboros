@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import os
+import subprocess
 
 import pytest
 
@@ -71,13 +72,13 @@ def test_git_mode_capture_is_batched_and_read_only(tmp_path, monkeypatch):
     for path in paths[2:]:
         (root / path).write_text("new\n", encoding="utf-8")
     index_before = hashlib.sha256((root / ".git/index").read_bytes()).hexdigest()
-    calls, run = [], attribution.subprocess.run
+    calls, run = [], subprocess.run
 
     def observe(argv, **kwargs):
         calls.append(argv)
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(attribution.subprocess, "run", observe)
+    monkeypatch.setattr(subprocess, "run", observe)
     fingerprints = attribution._git_path_fingerprints(root, paths)
     assert len(calls) == 2, "one config and one index read, independent of path count"
     assert all(row["sha256"] and row["git_mode"] == "100644" for row in fingerprints.values())

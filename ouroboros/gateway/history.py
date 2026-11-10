@@ -30,7 +30,7 @@ from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noq
 from ouroboros.gateway.history_paging import (
     HistoryCursorError, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page, latest_arrival, notes_stamp, parse_around,
-    IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
+    chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
@@ -280,28 +280,6 @@ def _recent_entries(root: pathlib.Path, stream: str, want: int, counts) -> list:
     return entries
 
 
-def _chat_quota_predicate(row_matches_thread):
-    """Human-row quota predicate shared by the rotated chat read and the
-    window-truncation accounting (must equal the render loop's filter)."""
-
-    def _counts_toward_thread(e):
-        if not isinstance(e, dict):
-            return False
-        if str(e.get("direction", "")).lower() not in ("in", "out"):
-            return False
-        if e.get("type") == "routing_options":
-            # LLM-grounding rows (#198) are skipped by the render loop, so
-            # they must not consume the human-row quota either — a run of
-            # picker refusals would silently evict real messages.
-            return False
-        if is_a2a_chat_id(e.get("chat_id", 1)):
-            return False
-        ec = _stored_chat_id(e.get("chat_id"), 1)
-        return row_matches_thread(ec, e)
-
-    return _counts_toward_thread
-
-
 def _history_identity(entry):
     from ouroboros.chat_references import projection_fields
     return {**({"row_address": entry["row_address"]} if entry.get("row_address") else projection_fields(entry)),
@@ -379,6 +357,7 @@ def _annotate_terminal_task_truth(
     """
 
     try:
+        from ouroboros.late_review_marks import late_current_outcome
         from ouroboros.project_dialogue import outcome_phase
         from ouroboros.projects_registry import task_presentation_name
         from ouroboros.task_status import FINAL_STATUSES
@@ -448,8 +427,11 @@ def _annotate_terminal_task_truth(
         live_cost_by_task: Dict[str, Dict[str, Any]] = {}
         finalizing_tasks: set = set()
         unfinished_tasks: set = set()
+        unread_tasks: set = set()  # no answer from the store (``_load_terminal_result``'s {}): unknown, not absent
         for task_id in result_task_ids:
             result = _load_terminal_result(data_dir, task_id, cache)
+            if not result:
+                unread_tasks.add(task_id)
             if carriers.get(task_id, {}).get("system_type") == "task_evidence":
                 carriers[task_id]["_is_direct_chat"] = bool(result.get("_is_direct_chat"))
             child_meta = subagent_message_meta(result, task_id=task_id)
@@ -461,18 +443,16 @@ def _annotate_terminal_task_truth(
                 str(checkpoint.get("post_task_synthesis") or "")
                 if isinstance(checkpoint, dict) else ""
             )
-            # An OPEN post-task checkpoint means the final answer is stored
-            # but synthesis (and the settled task_done) has not landed: the
-            # task is FINALIZING, not terminal. This covers the plain root
-            # (status already "completed") AND the split-drive project root,
-            # whose canonical status stays scheduled/running until copy-back.
-            # A cancelled record stays terminal immediately, and a
-            # record without a checkpoint keeps the legacy terminal semantics.
+            # An open post-task checkpoint is still finalizing, even with a stored final answer:
+            # plain roots may already say completed; split-drive roots stay scheduled/running until copy-back.
+            # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
             if checkpoint_open and (status in {"completed", "failed"} or status not in FINAL_STATUSES):
                 finalizing_tasks.add(task_id)
             elif status in FINAL_STATUSES:
                 terminal_status_by_task[task_id] = status
+                if task_id in carriers and (current := late_current_outcome(data_dir, result)):
+                    carriers[task_id]["current_outcome"] = current  # children also need the stored revision on reload
             elif status:
                 unfinished_tasks.add(task_id)
             if task_id in finalizing_tasks or task_id in terminal_status_by_task:
@@ -542,6 +522,10 @@ def _annotate_terminal_task_truth(
             if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
                 latest_progress_by_task[task_id] = message
 
+        # Answer first (agent_task_pipeline): a root's final is saved before its result is. Until the store
+        # answers, its own status is a claim the saved nonterminal result refutes: its card holds Finalizing….
+        answered_unstored = {str(m.get("task_id") or "") for m in combined if not m.get("is_progress")
+                             and m.get("task_terminal_status") and str(m.get("task_id") or "") in unfinished_tasks}
         anchored = anchored_children or set()
         for message in combined:
             task_id = str(message.get("task_id") or "")
@@ -582,6 +566,14 @@ def _annotate_terminal_task_truth(
             if task_id in finalizing_tasks:
                 message["task_phase"] = "finalizing"
                 message.update(terminal_truth_by_task[task_id])
+            elif task_id in answered_unstored:
+                message.pop("task_terminal_status", None)
+                message.update(task_phase="finalizing", outcome_final=False)
+            elif task_id in unread_tasks and not message.get("is_progress") and message.get("task_terminal_status"):
+                # #2801: an unread result confirms no outcome; the row's own status is a claim, never Done, and a
+                # known absent result (``_history_result_absent``) keeps its legacy/historical terminal instead.
+                message.pop("task_terminal_status", None)
+                message["task_phase"] = "unfinished"
             elif task_id in unfinished_tasks:
                 # A saved nonterminal result refutes the legacy "plain speech
                 # is a final" fallback; it does not attest current execution.
@@ -722,7 +714,7 @@ def _collect_chat_rows(
     combined: list = []
     chat_quota_rows = 0
     stream_gaps: set[str] = set()
-    _chat_counts_toward_quota = _chat_quota_predicate(row_matches_thread)
+    _chat_counts_toward_quota = chat_quota_predicate(row_matches_thread, _stored_chat_id)
     try:
         _chat_entries = (_recent_entries(chat_path.parent.parent, "chat", n_human, _chat_counts_toward_quota)
                          if selected_entries is None else selected_entries)
@@ -1436,7 +1428,7 @@ def _assemble_history_response(
     view = room_view_fingerprint(thread_id, project_chat_ids, project_source_refs, bindings_by_task)
     page = select_history_page(data_dir, thread_id, view, cursor,
                                {"human": n_human, "progress": n_progress},
-                               {"chat": _chat_quota_predicate(row_matches_thread),
+                               {"chat": chat_quota_predicate(row_matches_thread, _stored_chat_id),
                                 "progress": progress_quota_predicate(row_matches_thread, _stored_chat_id)},
                                {"human": _MAX_N_HUMAN, "progress": _MAX_N_PROGRESS},
                                room_lens(data_dir, thread_id, project_chat_ids, project_source_refs, bindings_by_task),
@@ -1528,7 +1520,7 @@ def _assemble_history_response(
 
     # Hidden source evidence shares ordinary keyed replay. It carries no new
     # review/cost authority and never consumes the conversation quota.
-    messages.extend(replay_evidence_rows(messages, replay_evidence))
+    messages.extend(replay_evidence_rows(messages, replay_evidence, result_cache, data_dir))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})

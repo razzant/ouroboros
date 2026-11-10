@@ -60,7 +60,9 @@ def record_extension_health(
     ``newly_regressed`` (returned, not persisted) marks the live->broken transition
     so callers can log/alert once per transition rather than every restart.
     Worker observations are qualifiers only: they never replace server authority or
-    advance the server's ``last_known_good``.
+    advance the server's ``last_known_good``; one equal to the recorded worker
+    observation but for its time is not written again (every worker birth repeats it),
+    so a worker observation's ``ts`` names when workers first saw it so.
     """
     process = "worker" if process == "worker" else "server"
     now = utc_now_iso()
@@ -85,6 +87,11 @@ def record_extension_health(
             observations["server"] = dict(legacy, process="server")
         prior_server = observations.get("server")
         prior_status = str(prior_server.get("status") or "") if isinstance(prior_server, dict) else ""
+        prior_worker = observations.get("worker")
+        if process == "worker" and "observations" in prior and isinstance(prior_worker, dict) \
+                and {**prior_worker, "ts": now} == observed:
+            result.update(prior, newly_regressed=False)
+            return None  # the same worker observation again: nothing new to record
         observations[process] = observed
         last_known_good = prior.get("last_known_good")
         if not isinstance(last_known_good, dict):

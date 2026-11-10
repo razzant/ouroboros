@@ -143,7 +143,8 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         tools=tools, messages=messages, llm_trace=trace, accumulated_usage=usage, owner_msg_seen=seen,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
-        context_model_role=str(state.get("context_model_role") or "")), RESUMED)
+        context_model_role=str(state.get("context_model_role") or ""),
+        context_start=state.get("context_start")), RESUMED)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -152,23 +153,20 @@ def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
     A part's bytes are the element's ``observability._json_bytes`` (plain JSON, sorted keys), the
     same bytes a request view's part has, so a message the views stored is not stored again.
     Only an element on which custody projection and redaction are no-ops is shared: its bytes
-    are public-safe, as every CAS part is. Live handles and secret-bearing elements stay inline.
+    are public-safe, as every CAS part is. Live handles, opaque values (not plain JSON) and
+    secret-bearing elements stay inline. The verdict is the task's redaction fact of those bytes,
+    the one its request records keep (``observability.task_parts``): what either met is not scanned again.
     """
-    try:
-        raw = json.dumps(element, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    except (TypeError, ValueError):
-        return None  # not plain JSON: the checkpoint encoder names its opaque values inline
-    digest = hashlib.sha256(raw).hexdigest()
-    known = getattr(ctx, "_working_parts_public", None)
-    if known is None:
-        known = ctx._working_parts_public = {}
-    public = known.get(digest)
-    if public is None:
-        from ouroboros.anthropic_native_custody import observability_custody_projection
-        from ouroboros.observability import redact_projection
+    from ouroboros.observability import _json_bytes, task_parts
+    from ouroboros.redaction import part_fact
 
-        public = known[digest] = redact_projection(observability_custody_projection(element)).value == element
-    return raw if public else None
+    found = part_fact(element, task_parts(_root(ctx), str(ctx.task_id))[1])
+    if found is None or found[0] is not None:
+        return None
+    try:
+        return _json_bytes(element)
+    except TypeError:  # keys of mixed types have no sorted form: it stays inline
+        return None
 
 
 def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
@@ -180,7 +178,7 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     the earlier listings. A part counts as listed only once a manifest naming it landed, so a
     failed write is written again by the next save. Returns the number of parts written.
     """
-    from ouroboros.observability import call_manifest_path, write_blob_bytes, write_call_manifest
+    from ouroboros.observability import call_manifest_path, write_call_manifest, write_part
 
     root, task_id = _root(ctx), str(ctx.task_id)
     attempt = int(getattr(ctx, "task_attempt", None) or 1)
@@ -200,8 +198,7 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
         return 0
     union = dict(listed)
     for digest, raw in new.items():
-        ref = write_blob_bytes(root, raw)
-        union[digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
+        union[digest] = write_part(root, digest, raw)
     created_at = getattr(ctx, "_working_parts_created_at", None)
     write_call_manifest(root, task_id=task_id, call_id=call_id, manifest={
         "call_type": WORKING_PARTS_CALL_TYPE, "task_attempt": attempt, "shared_parts": list(union.values()),
@@ -249,6 +246,9 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
         state["context_model_role"] = model_call.model_role or state["context_model_role"]
     if boundary == RESUMED:  # written before the rebind: the plan is still the new worker's
         state["context_model_role"] = limit_ctx.context_model_role
+        from ouroboros.context_fit import carried_start
+
+        state["context_start"] = list(carried_start(limit_ctx.context_start))  # the source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}
@@ -890,9 +890,10 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             row: {"task_id": source, **record[row]} for row in ("first", "repeat") if isinstance(record.get(row), dict)})}
         if not same_id:
             usage.setdefault("_vision_caption_memo", dict(state["usage"].get("_vision_caption_memo") or {}))
-    from ouroboros.loop_output_exhaustion import KEY as OUTPUT_RECOVERY_KEY
-    if record := (state.get("usage") or {}).get(OUTPUT_RECOVERY_KEY):
-        usage[OUTPUT_RECOVERY_KEY] = dict(record)
+    from ouroboros.loop_output_exhaustion import RECORD_KEYS as OUTPUT_RECOVERY_KEYS
+    for key in OUTPUT_RECOVERY_KEYS:
+        if record := (state.get("usage") or {}).get(key):
+            usage[key] = dict(record)
     # Saved prose is evidence, never permission to skip today's finalization:
     # a restored attempt holds no seal of the interrupted one.
     ctx._task_acceptance_sealed_fence_token = None

@@ -798,7 +798,10 @@ def _edit_text(
             drive_root=pathlib.Path(ctx.drive_root),
         )
         if short_form.ignored_reason:
-            result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+            from ouroboros.tools.tool_result import append_published_text
+
+            # The editor's typed receipt (its changed paths) stays paired with the returned text.
+            result = append_published_text(ctx, result, f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}.")
         return result
     selected_payload = normalized == "skill_payload" or bound_skill_payload
     try:
@@ -852,7 +855,12 @@ def _edit_text(
                 "File is on disk but NOT committed.\n"
                 "Run skill_review for this skill before enabling or declaring it ready."
             )
-            return result + (f"\n{newline_note}" if newline_note else "")
+            from ouroboros.tools.git_repo_edit import _with_path_facts
+
+            # A bound payload in active_workspace/system_repo is written here, not by the Git editor: the same
+            # typed receipt of the target this binding resolved names it for the result review.
+            return _with_path_facts(ctx, "edit_text", result + (f"\n{newline_note}" if newline_note else ""),
+                                    binding.base_path, [target.relative_to(binding.base_path).as_posix()])
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
             f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"

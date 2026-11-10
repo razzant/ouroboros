@@ -53,6 +53,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
+from ouroboros.context_timing import counted, timed_section
 from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
                                            row_class, row_provenance)
 
@@ -266,6 +267,7 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
     return capture_memo(root, "tail", lambda: _read_tail(root, frontier))
 
 
+@timed_section("memory_view.tail")
 def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False) -> Tail:
     """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone)."""
     from ouroboros import dialogue_store as ds
@@ -282,11 +284,15 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
             gap = _projected(live[1:] if anchor else live)
             if state.get("complete") and end > state["upper"]:  # one zero-wait attempt; a busy lock leaves it
                 store.extend_tail(state, gap, {**state, "upper": end, "anchor": gap[-1][1:3] if gap else anchor})
-            return Tail([_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None],
-                        bool(state.get("complete")))
+            rows = [_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None]
+            counted("rows_read", 0 if terminal_only else len(rows))
+            counted("rows_new", 0 if terminal_only else len(gap))
+            return Tail(rows, bool(state.get("complete")))
     lower = chat_chain.position_boundary(root, source["frontier"])
-    return Tail([_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
-                 if not terminal_only or fact[5] is not None], False)
+    rows = [_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
+            if not terminal_only or fact[5] is not None]
+    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row is read live, and none is new
+    return Tail(rows, False)
 
 
 _FILL_ROWS = 2_000  # rows per index transaction: bounds one publication-lock hold, so publishers interleave
@@ -422,6 +428,7 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
                 rooms[room] = in_reading_order(kept, timed, lambda entry: entry[1])
             if sealed is not None and refs and len(kept) < len(entries) and row_provenance(entries[-1][1]) == "place":
                 sealed[room] = [entry for entry in entries if entry[0]["row_sha256"] in refs]
+    counted("rows_open", len({entry[0]["row_sha256"] for entries in rooms.values() for entry in entries}))
     return rooms
 
 

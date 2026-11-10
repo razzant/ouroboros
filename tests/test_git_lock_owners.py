@@ -208,6 +208,8 @@ def managed_boot(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_runtime_branch_defaults", lambda: ("ouroboros", "ouroboros-stable"))
     monkeypatch.setattr(server, "_has_active_evolution_transaction", lambda: False)
     monkeypatch.delenv("OUROBOROS_DISABLE_MANAGED_UPDATES", raising=False)
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")  # safe_restart's own read of the launcher's identity
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(repo))
     return SimpleNamespace(server=server, repo=repo, data=data)
 
 
@@ -261,6 +263,57 @@ def test_owner_restart_reports_a_refused_checkout_and_does_not_exit(managed_boot
     assert "first.txt" in _git(managed_boot.repo, "ls-files").split()
 
 
+@pytest.mark.parametrize("failing", ["deps", "import"])
+def test_an_unmanaged_owner_restart_refuses_before_anything_stops(managed_boot, monkeypatch, failing):
+    from ouroboros import server_restart
+
+    def must_not_run(*_a, **_kw):
+        raise AssertionError("a refused restart must not stop anything")
+
+    monkeypatch.delenv("OUROBOROS_MANAGED_BY_LAUNCHER")
+    monkeypatch.delenv("OUROBOROS_MANAGED_REPO_DIR")
+    monkeypatch.setattr(server_restart, "_stop_owned_work", must_not_run)
+    monkeypatch.setattr(server_restart, "_request_restart_exit", must_not_run)
+    if failing == "deps":
+        monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda **_kw: (False, "pip exited 1"))
+    else:
+        monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": False, "returncode": 1, "stderr": "boom"})
+    before = _git(managed_boot.repo, "rev-parse", "HEAD"), _git(managed_boot.repo, "status", "--porcelain")
+
+    ok, message = server_restart._perform_owner_restart(SimpleNamespace(safe_restart=git_ops.safe_restart))
+
+    assert ok is False and message.endswith("the checkout was left untouched.")
+    assert (_git(managed_boot.repo, "rev-parse", "HEAD"), _git(managed_boot.repo, "status", "--porcelain")) == before
+
+
+def test_adoption_still_binds_to_a_restart_that_keeps_an_unmanaged_checkout(tmp_path, monkeypatch):
+    """Adoption switches at the restart exit (`body_switch`): `safe_restart` only has to leave the tree alone."""
+    from ouroboros import body_adoption, body_candidate
+    from tests.body_candidate_support import isolate, make_ctx, make_serving, restart_receipt, rich_commit
+
+    serving, data = make_serving(tmp_path), isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    ctx = make_ctx(serving, data, "root-unmanaged-adoption")
+    body_candidate.prepare(ctx)
+    cand = rich_commit(ctx.repo_dir)
+    body_candidate.record_reviewed_commit(ctx, cand)
+    body_adoption.authorize(ctx, cand, reason="adopt it")
+    restart_receipt(data, cand, "adopt it")
+    for name, value in {"REPO_DIR": serving, "DRIVE_ROOT": data, "BRANCH_DEV": "ouroboros",
+                        "BRANCH_STABLE": "ouroboros-stable"}.items():
+        monkeypatch.setattr(git_ops, name, value)
+    monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda **_kw: (True, "fixture"))
+    monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": True})
+    monkeypatch.setattr(git_ops, "checkout_and_reset", lambda *_a, **_k: pytest.fail("no tree move at this door"))
+    head = _git(serving, "rev-parse", "HEAD")
+
+    ok, message = body_adoption.bind_restart(git_ops.safe_restart, data, "adopt it")(
+        reason="agent_restart_request", unsynced_policy="rescue_and_block")
+
+    assert ok is True and message.startswith("OK: unmanaged checkout kept")
+    assert body_adoption.read(data)["restart_bound"] is True and _git(serving, "rev-parse", "HEAD") == head
+
+
 def test_a_refused_restart_checkout_abandons_the_authorized_adoption(tmp_path, monkeypatch):
     """`bind_restart` abandons an adoption on a returned refusal; a raised one left it authorized."""
     from ouroboros import body_adoption, body_candidate
@@ -277,6 +330,8 @@ def test_a_refused_restart_checkout_abandons_the_authorized_adoption(tmp_path, m
     for name, value in {"REPO_DIR": serving, "DRIVE_ROOT": data, "BRANCH_DEV": "ouroboros",
                         "BRANCH_STABLE": "ouroboros-stable"}.items():
         monkeypatch.setattr(git_ops, name, value)
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(serving))
     monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda **_kw: (True, "fixture"))
     monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": True})
     lock = _orphan_lock(serving)

@@ -13,6 +13,14 @@ into the run's live turn through the engine's capability-declared channel
 (``liveInput`` on the route's catalog row), typed end to end and never guessed.
 ``tools.delegate`` re-exports these names, so every existing reference (and the
 tests) still finds them there, and ``_REPORTED_INTERACTIONS`` stays one object.
+
+A row's ``delivery`` decides what the engine's ``delivered`` means. ``blocking``
+held the run, and the answer resumes it. ``async`` held nothing: the run never
+stopped, the answer is only handed to the agent's next user message, so it
+confirms no ``source_response``. A call reads the row only where the answer
+depends on it (``reply_to``, a verified source); the ordinary answer reads none
+just for a sentence, so its receipt names both meanings and claims neither, and
+an unread or unknown kind confirms no source.
 """
 
 from __future__ import annotations
@@ -125,22 +133,44 @@ def _bounded_interactions(pending: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "source_tool": _preview_scalar(row.get("source_tool"), _SCALAR_PREVIEW_CHARS),
             "requested_at": _preview_scalar(row.get("requested_at"), _SCALAR_PREVIEW_CHARS),
             "timeout_at": _preview_scalar(row.get("timeout_at"), _SCALAR_PREVIEW_CHARS),
+            **({"delivery": _preview_scalar(row["delivery"], _SCALAR_PREVIEW_CHARS)} if "delivery" in row else {}),
             "questions": shown,
             "questions_omitted": max(0, len(questions) - len(shown)),
         })
     return out
 
 
-def _waiting_on_user_note(pending: List[Dict[str, Any]]) -> str:
+def _waiting_on_user_note(pending: List[Dict[str, Any]], async_only: bool = False) -> str:
     """The immediate waiting note, its expiry claim keyed on the rows' own
     ``timeout_at`` (R2-7e): a null ``timeout_at`` means NO automatic expiry, so
     promising a benign decline there would invite waiting for a timeout that
-    never comes."""
+    never comes. ``async_only`` is the whole set's fact (claudexor #628): the
+    agent keeps working, and an answer is a handoff to its next user message."""
     from ouroboros.delegate_progress import waiting_expiry_clause
 
+    if async_only:
+        return (
+            "The run KEEPS WORKING: the question(s) above hold nothing (async_questions_only; "
+            f"each row's delivery is async); {waiting_expiry_clause(pending, True)}. Answer "
+            "with delegate_answer(run_id, interaction_id, answers=[{question_id, "
+            "selected_labels, free_text}]) when an answer would help: it reaches the agent "
+            "as its next user message in this session, and `delivered` means the engine "
+            "handed it over, not that the agent read it. A question ABOVE your authority "
+            "(spending money, changing scope, external actions) is not yours to guess: "
+            "escalate it with escalate(question, options, stake, assumption, reply_to=<address "
+            "above>) — as a subagent you escalate to your PARENT task — and keep waiting with "
+            "delegate_wait. If the question carries a source-request envelope, answer with "
+            "source_response={schema:1, kind:'source_response', complete_sha256, source, "
+            "start_char, end_char, text}; the host verifies the exact canonical range before "
+            "delivering it, and that handoff alone does not confirm its delivery. Do not "
+            "promote a partial preview to complete authority. Do not cancel a run merely "
+            "because it asked a question."
+        )
+    mixed = (" Rows whose delivery is async hold nothing; the others hold the run."
+             if any(row.get("delivery") == "async" for row in pending if isinstance(row, dict)) else "")
     return (
         "The run is PAUSED on the question(s) above and stays paused until "
-        f"answered; {waiting_expiry_clause(pending)}. Answer with "
+        f"answered; {waiting_expiry_clause(pending)}.{mixed} Answer with "
         "delegate_answer(run_id, interaction_id, answers=[{question_id, "
         "selected_labels, free_text}]) — answer from the task context you "
         "already hold. A question ABOVE your authority (spending money, "
@@ -168,13 +198,25 @@ SAME_SESSION_CONTINUATION: Dict[str, str] = {
     "continuation_note": ("the answer resumes THIS session (delegate_answer, free_text "
                           "included); each resumed turn is a paid/quota round"),
 }
+# The same route for questions that hold nothing (claudexor #628): the agent never paused, and
+# an answer is handed to THIS running session as its next user message, not a resumed turn.
+ASYNC_SESSION_CONTINUATION: Dict[str, str] = {
+    "continuation": "same_session",
+    "continuation_note": ("the answer reaches THIS running session as the agent's next user "
+                          "message (delegate_answer, free_text included); nothing was paused"),
+}
 
 
 def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
                              last_seq: int, pending: List[Dict[str, Any]],
                              seen: Any = None, source_request: Any = None,
-                             source_verification: Any = None) -> str:
+                             source_verification: Any = None, async_only: bool = False,
+                             detail: Any = None) -> str:
     """The IMMEDIATE typed return for a run that is waiting on an answer.
+
+    ``async_only`` says no question of this WHOLE set holds the run; given the run
+    ``detail`` it is judged there (``claudexor_observation.question_attention``),
+    before any preview below can shed the only blocking row.
 
     The full question text rides inline when it fits the tool budget; otherwise
     the WHOLE set spills to the task drive (sha256/size receipt — never the
@@ -188,6 +230,10 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
     journal advances ride the immediate return too — compact and bounded — so
     cutting the window short for a question does not lose the run's sequence.
     """
+    if detail is not None:
+        from ouroboros.gateways.claudexor_observation import question_attention
+
+        async_only = question_attention(detail, pending)[1]
     pending = addressed_questions(str(getattr(ctx, "task_id", "") or ""), run_id, pending)
     full: Dict[str, Any] = {
         "status": "waiting_on_user",
@@ -195,8 +241,9 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         "state": state,
         "last_seq": last_seq,
         "pending_interactions": pending,
-        "note": _waiting_on_user_note(pending),
-        **SAME_SESSION_CONTINUATION,
+        **({"async_questions_only": True} if async_only else {}),
+        "note": _waiting_on_user_note(pending, bool(async_only)),
+        **(ASYNC_SESSION_CONTINUATION if async_only else SAME_SESSION_CONTINUATION),
     }
     if isinstance(source_request, dict) and source_request:
         full["work_order_source_request"] = dict(source_request)
@@ -288,18 +335,28 @@ def _interactions_payload(ctx: ToolContext, full: Dict[str, Any], tool_name: str
 # What each typed answer outcome MEANS for the nanny — relayed verbatim so the
 # model never re-derives semantics from an enum member.
 _ANSWER_NOTES = {
-    "delivered": "The answer reached the live session; the run resumes on it. "
-                 "Keep watching with delegate_wait.",
-    "already_resolved": "The interaction was resolved before this answer arrived — "
-                        "the engine timed out into a benign decline, the run ended, "
-                        "or an earlier answer landed. The run already continued; do "
+    # The plain receipt: this call did not read the answered row, or read a kind this host
+    # does not know. The two below are earned by a row it did read.
+    "delivered": "The engine reports the answer delivered to the live session; this receipt "
+                 "alone does not say whether the question held the run. If it did "
+                 "(delivery=blocking), the run resumes on the answer; if it held nothing "
+                 "(delivery=async), the answer reaches the agent as its next user message, "
+                 "which does not prove the agent read it. Keep watching with delegate_wait.",
+    "delivered_blocking": "The answer reached the live session; the run resumes on it. "
+                          "Keep watching with delegate_wait.",
+    # ``delivered`` for a question that held nothing (claudexor #628): a handoff only.
+    "delivered_async": "The engine handed the answer to the running session as the agent's "
+                       "next user message; that is a handoff, not proof the agent read it, "
+                       "and the run was never paused on it. Keep watching with delegate_wait.",
+    "already_resolved": "The interaction was already resolved: it expired, the run ended, "
+                        "or an earlier answer landed. This answer was not accepted; do "
                         "NOT re-post this or any other answer for it.",
     "not_found": "No such pending interaction (or run) exists on the daemon. "
                  "Re-read the run with delegate_wait before doing anything else.",
     "rejected": "The engine refused the answer set as invalid for these questions "
-                "(see detail). Fix the answer rows — same interaction, corrected "
-                "shape — or stop answering (a question with a timeout_at declines "
-                "benignly at the engine timeout; one without waits until answered).",
+                "(see detail). Fix the answer rows for this interaction or leave it "
+                "unanswered. This refusal says nothing about whether the run is held "
+                "or when the question expires.",
 }
 
 
@@ -432,6 +489,22 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
     })
 
 
+def _observed_delivery(gateway: Any, run_id: str, interaction_id: str, seconds_left: float) -> Optional[str]:
+    """The pending row's ``delivery`` by one bounded read before a source answer is sent:
+    the fact its receipt rests on. ``None`` when unread or absent: unknown, never blocking."""
+    if seconds_left <= 0:
+        return None
+    try:
+        from ouroboros.delegate_progress import poll_bound
+        from ouroboros.gateways.claudexor import pending_interactions as cx_pending
+
+        detail = gateway.get_run(run_id, timeout_sec=poll_bound(seconds_left))
+        return next((row["delivery"] for row in cx_pending(detail) if row["interaction_id"] == interaction_id), None)
+    except Exception:
+        log.debug("delivery of %s/%s unread before its source answer", run_id, interaction_id, exc_info=True)
+        return None
+
+
 # The 4xx codes that are PAYLOAD-SEMANTIC — a verdict about these answer bytes
 # (fix the rows), mapped to the `rejected` shape (F3, narrowed by R2-1): 400/422
 # validation, 409 conflict, 413 too large. Everything else — 401/403 (auth),
@@ -441,8 +514,8 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
 _REJECTED_STATUS_CODES = frozenset({400, 409, 413, 422})
 
 # The internal wall-clock budget for ONE delegate_answer call, strictly below
-# its ToolEntry timeout (120s, pinned by test): handshake, the answer POST and
-# the ambiguity re-read are budgeted against what remains, and exhaustion
+# its ToolEntry timeout (120s, pinned by test): handshake, any row read, the answer
+# POST and the ambiguity re-read are budgeted against what remains, and exhaustion
 # returns the typed ``delivery_unknown`` instead of letting the executor
 # thread-kill the call mid-wire (F8/sol #5). The handshake gets at most a short
 # slice so the POST always has room inside the budget.
@@ -526,6 +599,7 @@ def _delegate_answer(
     except ValueError as exc:
         return _fail("delegate_answer", "reply_to_mismatch", str(exc), run_id=rid)
     deadline = time.monotonic() + _ANSWER_DEADLINE_SEC
+    delivery: Optional[str] = None  # the answered row's own kind, when this call read it
 
     def _left() -> float:
         return deadline - time.monotonic()
@@ -537,6 +611,10 @@ def _delegate_answer(
         return _fail("delegate_answer", exc.code, str(exc), run_id=rid)
     try:
         try:
+            # This read spends the call's budget (a spent one reads nothing), so it
+            # precedes the check that guards the POST.
+            if address is None and verified_source is not None:
+                delivery = _observed_delivery(gateway, rid, iid, _left())
             if _left() <= 0:
                 # Budget spent before the POST: typed, and NO further wire calls
                 # (the zero budget also suppresses the re-read inside).
@@ -551,15 +629,15 @@ def _delegate_answer(
 
                 try:
                     detail = _strict_poll(gateway, rid, poll_bound(_left(), strict=True))
-                    require_pending_address(address, pending_interactions(detail, strict=True))
+                    rows = pending_interactions(detail, strict=True)
+                    require_pending_address(address, rows)
+                    delivery = next((row["delivery"] for row in rows if row["interaction_id"] == iid), None)
                 except (ValueError, ClaudexorUnavailable) as exc:
                     return _fail("delegate_answer", "reply_to_unresolved", str(exc), run_id=rid)
                 if _left() <= 0:
                     return _fail("delegate_answer", "reply_to_unresolved",
                                  "Question validation exhausted the deadline; no answer was sent.", run_id=rid)
-                body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
-            else:
-                body = gateway.answer_interaction(rid, iid, wire)
+            body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
         except ClaudexorUnavailable as exc:
             status_code = int(getattr(exc, "status_code", 0) or 0)
             if isinstance(exc, ClaudexorSubscriptionWindowExhausted):
@@ -590,7 +668,9 @@ def _delegate_answer(
                     "This engine build has no interaction-answer service. A "
                     "question carrying a timeout_at benign-declines at the engine "
                     "timeout (the run continues on stated assumptions); one with "
-                    "timeout_at=null stays parked until the run is cancelled.",
+                    "timeout_at=null stays parked until the run is cancelled. An async "
+                    "question (delivery=async) holds nothing: the run keeps working and "
+                    "the question closes unanswered at its timeout_at, sending nothing.",
                     run_id=rid)
             if status_code == 404:
                 # A bodyless 404 is the daemon's own "no such run" — a definite
@@ -623,7 +703,10 @@ def _delegate_answer(
                                             seconds_left=_left())
         status = str(body.get("status") or "")
         source_receipt = None
-        source_delivery_proven = status == "delivered"
+        # ``delivered`` proves the answer reached a session that was HELD on it. For a question
+        # that held nothing it is the engine's handoff to the agent's next user message, never
+        # its consumption, so it confirms no source; an unread kind confirms nothing either.
+        source_delivery_proven = status == "delivered" and delivery == "blocking"
         if status == "already_resolved" and verified_source is not None:
             from ouroboros.delegate_source_coverage import source_delivery_confirmed
 
@@ -662,6 +745,7 @@ def _delegate_answer(
                 "status": "cannot_verify",
                 "reason": "source_delivery_unconfirmed",
                 "can_authorize": False,
+                **({"interaction_delivery": delivery or "unknown"} if status == "delivered" else {}),
             }
         if status in ("delivered", "already_resolved"):
             # F6 (gemini #2): the reported-question memo is stale the moment the
@@ -673,13 +757,15 @@ def _delegate_answer(
             "run_id": rid, "interaction_id": iid, "status": status,
             "questions_answered": len(wire),
         })
+        # The row this call read picks the sentence; unread or unknown keeps the plain receipt.
+        kind_note = _ANSWER_NOTES.get(f"delivered_{delivery}") if status == "delivered" else None
         result = {
             "status": status,
             "run_id": rid,
             "interaction_id": iid,
             "accepted": bool(body.get("accepted")),
             "detail": str(body.get("message") or ""),
-            "note": _ANSWER_NOTES.get(status, ""),
+            "note": kind_note or _ANSWER_NOTES.get(status, ""),
         }
         if status in ("rejected", "not_found"):
             # A definite typed refusal is recorded, never an OK observation: rejected

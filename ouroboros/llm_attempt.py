@@ -14,8 +14,6 @@ candidate-attached facts rather than provider prose.
 from __future__ import annotations
 
 import copy
-import contextlib
-import contextvars
 import hashlib
 import inspect
 import json
@@ -31,7 +29,9 @@ from ouroboros.context_budget import (
 )
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
-from ouroboros.transport_custody import ProviderNotDispatched, is_loopback_base_url
+from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
+    ProviderNotDispatched, is_loopback_base_url, physical_attempt_tracker, single_physical_send,
+    single_physical_send_active, single_send_claim, track_physical_attempts)
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
@@ -57,23 +57,6 @@ _CACHE_TTL_SECONDS = {"5m": 300, "1h": 3600}
 
 
 PROVIDER_POLICY_REFUSAL = "provider_policy_refusal"
-
-# The caller owns the allowance; this scope carries its write-ahead claim to
-# every physical lane, without another counter or any accounting authority.
-_SINGLE_SEND = contextvars.ContextVar("single_physical_send", default=None)
-
-
-@contextlib.contextmanager
-def single_physical_send(claim):
-    token = _SINGLE_SEND.set(claim)
-    try:
-        yield
-    finally:
-        _SINGLE_SEND.reset(token)
-
-
-def single_physical_send_active() -> bool:
-    return _SINGLE_SEND.get() is not None
 
 
 class PhysicalDispatchInterrupted(PhysicalAttemptPreconditionFailed):
@@ -758,6 +741,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
             raise PhysicalAttemptPreparationFailed(
                 "physical candidate changed before dispatch", attempt_id=reservation.attempt_id,
             )
+        from ouroboros.llm_observability import host_step
         from ouroboros.observability import persist_physical_candidate
 
         scope = current_usage_scope()
@@ -778,6 +762,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 ),
             },
         )
+        host_step("physical_candidate")
         # One frozen send copy and one durable pre-send record. Disk read-back
         # comparison is the explicit historical audit's work, not dispatch IO.
         if predicate is not None:
@@ -801,6 +786,13 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
         if prepare is not None:
             prepare(reservation, canonical_bytes=raw, sha256=request.candidate_raw_sha256,
                     size_bytes=request.candidate_raw_size_bytes)
+        tracker = physical_attempt_tracker()  # after admission; durable before mark_dispatched/send
+        if tracker is not None:
+            try:
+                tracker(reservation)
+            except BaseException as exc:
+                exc.candidate_manifest_ref = persisted["manifest_ref"]
+                raise
         return persisted["manifest_ref"]
 
     return _persist
@@ -836,7 +828,7 @@ def _deadline_checked_send(send: Any, before_dispatch: Any):
         except PhysicalDispatchInterrupted as exc:
             exc.candidate_manifest_ref = manifest
             raise
-        claim = _SINGLE_SEND.get()
+        claim = single_send_claim()
         if claim is not None:
             claim(reservation)  # after admission; durable before mark_dispatched/send
         return manifest

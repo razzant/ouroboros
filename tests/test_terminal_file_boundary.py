@@ -92,8 +92,8 @@ def test_worker_saves_once_after_prior_frames_and_before_done(worker, monkeypatc
     thread.start()
     try:
         assert entered.wait(hang), "terminal file preparation never started"
-        assert [worker.output.get_nowait()["type"] for _ in range(2)] == [
-            "send_message", "task_metrics_event"]
+        assert [worker.output.get_nowait()["type"] for _ in range(3)] == [
+            "direct_turn_phase", "send_message", "task_metrics_event"]
         assert worker.output.empty(), "task_done must not release the busy slot before saving"
         assert len(worker.reads) == 1, "this worker cannot take another task while saving"
         from supervisor.events import dispatch_event
@@ -132,7 +132,7 @@ def test_file_failure_does_not_crash_worker_or_replay_task(worker, monkeypatch, 
     monkeypatch.setattr(headless, "prepare_terminal_task_files", prepare, raising=False)
     worker.run()
     assert worker.calls == ["file-root"] and len(worker.reads) == 2 and not worker.crashes
-    frames = [worker.output.get_nowait() for _ in range(3)]
+    frames = [worker.output.get_nowait() for _ in range(4)]  # its start phase, the two producer frames, task_done
     assert frames[-1]["_files_prepared_attempt"] == 3
     assert load_task_result(worker.root, "file-root") is None, "a stamp is not a saved result"
 

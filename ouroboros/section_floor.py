@@ -68,8 +68,22 @@ def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:
     ref = store_actor_source_bytes(root, task_id, category="context_checkpoints",
                                    source_id="host-" + section.section_id,
                                    data=section.full_text.encode("utf-8"), extension="md")
-    reader = f"read_file(root='artifact_store', path={ref['path']!r})"
-    return {"section_id": section.section_id, "source_ref": ref, "reader": reader}
+    return {"section_id": section.section_id, "source_ref": ref, "reader": _reader(ref)}
+
+
+def predicted_section(section: HostSection, *, root: str = "", task_id: str = "") -> dict:
+    """``retain_section``'s row for a fit that writes nothing: the digest-named address its capture would publish
+    for these bytes (``artifacts.actor_source_reference``), so the pointer costs what it would. It holds only if
+    that capture succeeds (a failed one keeps the section whole); ``predicted`` keeps it out of every sent view."""
+    from ouroboros.artifacts import actor_source_reference
+
+    ref = actor_source_reference(category="context_checkpoints", source_id="host-" + section.section_id,
+                                 data=section.full_text.encode("utf-8"), extension="md")
+    return {"section_id": section.section_id, "source_ref": ref, "reader": _reader(ref), "predicted": True}
+
+
+def _reader(ref: Mapping[str, Any]) -> str:
+    return f"read_file(root='artifact_store', path={ref['path']!r})"
 
 
 def section_views(sections: Iterable[HostSection], receipts: Iterable[Mapping]) -> dict[str, str]:

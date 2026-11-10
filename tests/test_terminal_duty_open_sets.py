@@ -39,7 +39,8 @@ def _reads(monkeypatch):
     return reads
 
 
-def test_operation_gone_ends_the_search_but_keeps_the_late_receipt_right(env, monkeypatch):
+@pytest.mark.parametrize("code", ["not_found", "model_operation_not_found"])
+def test_operation_gone_ends_the_search_but_keeps_the_late_receipt_right(env, monkeypatch, code):
     _terminal(env)
     reservation = _attempt(env, provider="claudexor")
     _remote_request(env, reservation, "gone")
@@ -48,14 +49,15 @@ def test_operation_gone_ends_the_search_but_keeps_the_late_receipt_right(env, mo
     def gone(*a, **kw):
         assert env.lock_depth[0] == 0
         calls.append(kw)
-        raise ClaudexorUnavailable("not_found", "gone", status_code=404)
+        raise ClaudexorUnavailable(code, "gone", status_code=404)
 
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
                         lambda: SimpleNamespace(get_model_operation=gone, close=lambda: None))
     reconcile_abandoned_usage(env.root)
     first = _final(env, reservation)
     assert first["recovery"]["outcome"] == "operation_gone"
-    assert first["recovery"]["basis"] == {"operation_get_status": 404, "code": "not_found"}
+    assert first["recovery"]["basis"] == {"operation_get_status": 404, "code": code}
+    assert first["cost_usd"] is None and first["cost_final"] is False
     # The engine said the call is over: no payload read and no HTTP, even with a retained receipt.
     _remote_receipt(env, reservation, "gone")
     reconcile_abandoned_usage(env.root)

@@ -18,10 +18,10 @@ owner decision 2A, 2026-10-22) and each red test of its size check (`pytest -m s
 measured against the check's base; the window's book-growth mode comes from the `growth` step).
 Each FAILED test or finding is bisected over the first-parent commits since the base to the merge
 that broke it; that pull request's author gets one comment and Ouroboros an issue labelled
-`post-merge-red` for that leg's system (scripts/post_merge_routing.py), which the check closes by
-itself once the tests pass and the findings are gone. It blocks nothing, reverts nothing, runs on
-no schedule and talks to GitHub only with the workflow's own GITHUB_TOKEN. Its subprocesses are
-git, ruff and `scripts/run_tests.py`; everything else is stdlib.
+`post-merge-red` for that leg's system (scripts/post_merge_routing.py), which the check narrows as
+its tests pass and its findings go, and closes once none is left. It blocks nothing, reverts
+nothing, runs on no schedule and talks to GitHub only with the workflow's own GITHUB_TOKEN. Its
+subprocesses are git, ruff and `scripts/run_tests.py`; everything else is stdlib.
 
 DIR is the evidence root of `scripts/run_tests.py --selected --keep-going --evidence-dir DIR`
 (selection.json, parallel/, serial/: tests/ci_evidence.py's results.json and events.jsonl). Each
@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # run as a script, only scripts/ is on sys.path
@@ -48,6 +49,7 @@ if str(REPO_ROOT) not in sys.path:  # run as a script, only scripts/ is on sys.p
 from scripts.post_merge_routing import (  # noqa: E402  -- stdlib only, as is this module
     BRANCH, LINT_PREFIX, NODE_LANE, SIZE_PREFIX, SYSTEMS, GitHub, _reason, route,
 )
+from tests.ci_verdicts import expected_failures, platform_name  # noqa: E402  -- stdlib only
 
 WORKFLOW_FILE = "post-merge.yml"
 LINT_ARGS = ("check", "--select", "F", "--output-format", "json", "--exit-zero")  # the release lint gate
@@ -62,7 +64,11 @@ ZERO_SHA = "0" * 40
 # on Windows the thread method ends the session, whose journal still names the test that was
 # running. Either way a hang ends as a named failure instead of the job's timeout, and a module
 # that does not import leaves the other ids running.
-SESSION_FLAGS = ("--continue-on-collection-errors", "--timeout=300")
+ROUTE_STEP_SECONDS, TEST_SECONDS = 600, 300  # post-merge.yml's route step limit; each session's per-test bound
+SESSION_FLAGS = ("--continue-on-collection-errors", f"--timeout={TEST_SECONDS}")
+# The recheck of the open issues starts no test after this (pytest-timeout checks between tests), so one begun at the
+# edge may still run its whole bound; 75 s is this author's reserve from run 42588728248, not a protocol maximum.
+RECHECK_SECONDS = ROUTE_STEP_SECONDS - TEST_SECONDS - 75
 _USAGE_ERROR = 4
 
 
@@ -153,6 +159,9 @@ def read_session(directory: Path) -> dict:
 
     `final`: it exported results.json; without that its incremental journal (events.jsonl) gives
     the reports. `running`: tests the journal saw start and never finish. `exit`: pytest's status.
+    `github` and `system`: the commit, run and operating system its export names (a journal names none).
+    `unmatched`: the `--ci-listed` ids its complete collection found no test for (tests/ci_evidence.py).
+    `selected`: the tests it chose to run after every filter, None where it names none (an older producer, a journal).
     """
     directory = Path(directory)
     running, journal_rows, journal = {}, [], True
@@ -176,14 +185,22 @@ def read_session(directory: Path) -> dict:
     data = _read_json(directory / "results.json")
     reports = data.get("reports") if isinstance(data, dict) else None
     if isinstance(reports, list):
-        status = data.get("session_exit_code")
+        status, environment = data.get("session_exit_code"), data.get("environment")
+        selected = data.get("selected_nodeids")
         return {"final": True, "evidence": True, "rows": [row for row in reports if _report(row)],
                 "collection": [row["nodeid"] for row in data.get("collection_failures") or []
                                if isinstance(row, dict) and isinstance(row.get("nodeid"), str)],
+                "collection_skips": [node for node in data.get("collection_skips") or [] if isinstance(node, str)],
                 "running": list(running), "exit": status if type(status) is int else None,
-                "collected": data.get("tests_collected")}
-    return {"final": False, "evidence": journal, "rows": journal_rows, "collection": [],
-            "running": list(running), "exit": None}
+                "collected": data.get("tests_collected"),
+                "selected": [node for node in selected if isinstance(node, str)] if isinstance(selected, list) else None,
+                "github": data["github"] if isinstance(data.get("github"), dict) else {},
+                "system": platform_name(environment.get("platform", "")) if isinstance(environment, dict) else "",
+                "unmatched": [node for node in (data.get("listed") or {}).get("unmatched") or [] if isinstance(node, str)]
+                if isinstance(data.get("listed"), dict) else []}
+    return {"final": False, "evidence": journal, "rows": journal_rows, "collection": [], "collection_skips": [],
+            "running": list(running), "exit": None, "collected": None, "selected": None, "github": {}, "system": "",
+            "unmatched": []}
 
 
 def candidates(session: dict) -> dict[str, str]:
@@ -202,34 +219,46 @@ def candidates(session: dict) -> dict[str, str]:
     return found
 
 
-def outcomes(session: dict, ids) -> dict[str, str]:
-    """Each id in one session: failed, passed, skipped or unknown (no report).
+def _inside(node: str, nodeid: str) -> bool:
+    """Whether `node` is `nodeid` or lies within it: a test of a module or class, a parametrization of a function."""
+    return node == nodeid or node.startswith((nodeid + "::", nodeid + "["))
 
-    A module id stands for every reported test of that module; a skipped member is not a pass.
-    A completed session can deselect a live test. Only ``check_ids`` establishes a missing module.
-    """
-    failed, passed, skipped = set(session["running"]), set(), set()  # a test running at the end hung
+
+def _ran_whole(session: dict) -> tuple[set[str], set[str]]:
+    """(whole, spoiled): the tests whose setup, call and teardown passed with nothing else, and those that did not."""
+    phases, spoiled = {}, set(session["running"])
     for row in session["rows"]:
-        if row["outcome"] == "failed" or row["phase"] == "crash":
-            failed.add(row["nodeid"])
-        elif row["outcome"] == "skipped":
-            skipped.add(row["nodeid"])
-        elif row["phase"] == "call":
-            passed.add(row["nodeid"])
-    broken = set(session["collection"])
+        if row["outcome"] != "passed" or row["phase"] == "crash":
+            spoiled.add(row["nodeid"])
+        elif not row.get("is_subtest"):
+            phases.setdefault(row["nodeid"], set()).add(row["phase"])
+    return {node for node, seen in phases.items() if seen >= {"setup", "call", "teardown"}} - spoiled, spoiled
+
+
+def outcomes(session: dict, ids) -> dict[str, str]:
+    """Classify ids within the selected lane: failures/hangs fail, test/collector skips never pass, executed xfails stay
+    xfailed (ci_verdicts). Aggregates need every selected member to run whole; excluded exact ids stay unknown.
+    Without selection, exact calls and completed (exit 0/1) aggregate exports retain legacy semantics.
+    Only check_ids/recheck_ids establish absence; a filtered member is not missing."""
+    failed = set(session["running"]) | {row["nodeid"] for row in session["rows"]
+                                        if row["outcome"] == "failed" or row["phase"] == "crash"}
+    expected = set(expected_failures(session["rows"])) - failed
+    skipped = {row["nodeid"] for row in session["rows"] if row["outcome"] == "skipped"} - failed - expected
+    skipped |= set(session["collection_skips"])
+    called = {row["nodeid"] for row in session["rows"] if row["phase"] == "call" and row["outcome"] == "passed"}
+    seen, ended = failed | expected | skipped | called, session["final"] and session["exit"] in (0, 1)
+    selected, done = session["selected"], (seen if session["selected"] is None else _ran_whole(session)[0] | expected)
     result = {}
     for nodeid in ids:
-        path = nodeid.split("::", 1)[0]
-        members = ({nodeid} if "::" in nodeid
-                   else {node for node in failed | passed | skipped if node.split("::", 1)[0] == path})
-        if path in broken or members & failed:
+        members = {node for node in seen if _inside(node, nodeid)}
+        if members & failed or any(_inside(node, nodeid) or _inside(nodeid, node) for node in session["collection"]):
             result[nodeid] = "failed"
         elif members & skipped:
             result[nodeid] = "skipped"
-        elif members & passed:
-            result[nodeid] = "passed"
         else:
-            result[nodeid] = "unknown"
+            chosen = ({node for node in selected if _inside(node, nodeid)} if selected is not None
+                      else members if members == {nodeid} or ended else set())
+            result[nodeid] = "unknown" if not chosen or chosen - done else "xfailed" if chosen & expected else "passed"
     return result
 
 
@@ -308,6 +337,28 @@ def check_ids(ids, directory: Path, *, read_source, run=run_pytest) -> dict[str,
     if args:
         run(args, directory)
         result.update(outcomes(read_session(directory), [nodeid for nodeid in ids if nodeid not in absent]))
+    return result
+
+
+def recheck_ids(ids, directory: Path, *, head: str = "", read_source=working_source, run=run_pytest,
+                budget=RECHECK_SECONDS) -> dict[str, str]:
+    """`outcomes` of exactly `ids` at `head` after one session that collects their modules whole, runs only the tests they
+    name (tests/ci_evidence.py `--ci-listed`; older trees: ``check_ids``) and starts none after `budget` s, from the module
+    `head` picks (sorted, rotated by its CRC-32: a slow red front holds back no fixed tail): the rest stays unknown. An id
+    is absent when its file is gone, or its module collected without an error yet held no test it names (a renamed test,
+    a parameter that left); a deselected test, a skip at collection or a session without its final export proves none."""
+    present = [nodeid for nodeid in ids if read_source(nodeid.split("::", 1)[0]) is not None]
+    result = {nodeid: "absent" for nodeid in ids if nodeid not in present}
+    if present:
+        (listed := Path(directory) / "listed.txt").parent.mkdir(parents=True, exist_ok=True)
+        listed.write_text("".join(nodeid + "\n" for nodeid in present), encoding="utf-8")
+        start = zlib.crc32(head.encode()) % len(modules := sorted({nodeid.split("::", 1)[0] for nodeid in present}))
+        run([*modules[start:], *modules[:start], f"--ci-listed={listed}", f"--session-timeout={budget}"], directory)
+        session = read_session(directory)
+        result.update(outcomes(session, present))
+        broken = {node.split("::", 1)[0] for node in session["collection"]}  # a module that did not collect whole
+        result.update({nodeid: "absent" for nodeid in session["unmatched"]
+                       if result.get(nodeid) == "unknown" and nodeid.split("::", 1)[0] not in broken})
     return result
 
 
@@ -436,10 +487,9 @@ def size_session(directory: Path, *, base: str, mode: str = "block", cwd: Path |
 
 def size_status(session: dict | None, ids) -> dict[str, str]:
     """`outcomes` of size ids in one size session; every one unknown when it did not run to its end."""
-    if not (session and session["final"] and session["exit"] in (0, 1)):
-        return dict.fromkeys(ids, "unknown")
-    found = outcomes(session, [nodeid.removeprefix(SIZE_PREFIX) for nodeid in ids])
-    return {nodeid: found[nodeid.removeprefix(SIZE_PREFIX)] for nodeid in ids}
+    ended = session and session["final"] and session["exit"] in (0, 1)
+    found = outcomes(session, [nodeid.removeprefix(SIZE_PREFIX) for nodeid in ids]) if ended else {}
+    return {nodeid: found.get(nodeid.removeprefix(SIZE_PREFIX), "unknown") for nodeid in ids}
 
 
 def size_findings(session: dict | None) -> tuple[dict[str, str] | None, list[str]]:
@@ -623,16 +673,14 @@ class Prober:
             return {nodeid: "error" for nodeid in ids}
         try:
             answers = lint_answers(tree, [nodeid for nodeid in ids if nodeid.startswith(LINT_PREFIX)], self.lint)
-            if sized := [nodeid for nodeid in ids if nodeid.startswith(SIZE_PREFIX)]:
-                found = size_status(self.size(tree, self.evidence / "probes" / f"{label}-size"), sized)
-                answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
-                                for nodeid, value in found.items()})
+            sized = [nodeid for nodeid in ids if nodeid.startswith(SIZE_PREFIX)]
+            found = size_status(self.size(tree, self.evidence / "probes" / f"{label}-size"), sized) if sized else {}
             tests = [nodeid for nodeid in ids if nodeid != NODE_LANE and not nodeid.startswith((LINT_PREFIX, SIZE_PREFIX))]
             if tests:
-                found = check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
-                                  run=lambda args, directory: self.run(args, directory, cwd=tree))
-                answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
-                                for nodeid, value in found.items()})
+                found.update(check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
+                                       run=lambda args, directory: self.run(args, directory, cwd=tree)))
+            answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
+                            for nodeid, value in found.items()})
             if NODE_LANE in ids:
                 answers[NODE_LANE] = "pass" if self.node(tree) == 0 else "fail"
             record["answers"] = answers
@@ -694,42 +742,88 @@ def command_attribute(args) -> int:
 
 # --- route -----------------------------------------------------------------------------------
 
+def same_run_passes(evidence: Path, ids, *, head: str, system: str, run_id: str = "") -> dict[str, str]:
+    """{id: "passed"} of the test ids this run's selected passes ran whole at `head` on `system` (setup, call and
+    teardown reported, every report passed, wherever it ran): the recheck need not repeat those. A module, class or
+    function id, or a pass of another commit, run or system or without its final export, proves nothing here."""
+    selection = _read_json(Path(evidence) / "selection.json")
+    wanted, passed, spoiled = set(ids), set(), set()
+    for label in (selection.get("outcomes") or {}) if isinstance(selection, dict) else ():
+        session = read_session(Path(evidence) / label)
+        if not (session["final"] and head and session["github"].get("sha") == head and session["system"] == system
+                and (not run_id or session["github"].get("run_id") == run_id)):
+            continue
+        whole, bad = _ran_whole(session)
+        broken = {node.split("::", 1)[0] for node in session["collection"]}
+        passed |= whole
+        spoiled |= bad | {nodeid for nodeid in wanted if nodeid.split("::", 1)[0] in broken}
+    return dict.fromkeys(sorted(wanted & passed - spoiled), "passed")
+
+
 def command_route(args, environ=os.environ) -> int:
     evidence = Path(args.evidence_dir)
     head = args.head or environ.get("GITHUB_SHA") or _git("rev-parse", "HEAD")
     record = route(GitHub(environ.get("GITHUB_REPOSITORY", ""), environ.get("GH_TOKEN", "")),
                    classification=_read_json(evidence / "classification.json") or {},
                    attribution=_read_json(evidence / "attribution.json") or {}, head=head, run_url=args.run_url,
-                   recheck=lambda ids: check_ids(ids, evidence / "recheck", read_source=working_source),
+                   recheck=lambda ids: recheck_ids(ids, evidence / "recheck", head=head),
+                   same_run=lambda ids: same_run_passes(evidence, ids, head=head, system=args.os,
+                                                        run_id=environ.get("GITHUB_RUN_ID", "")),
                    # A book that grew is measured strictly here: a later approval covers its own merge only.
                    size_recheck=lambda base, ids: size_status(size_session(
-                       evidence / "recheck-size" / base[:12], base=base), ids), system=args.os)
+                       evidence / "recheck-size" / base[:12], base=base), ids), system=args.os,
+                   # What a step killed during the recheck leaves: this run's reds, already handed over.
+                   checkpoint=lambda handed: _write_json(evidence / "routing.json", handed))
     _write_json(evidence / "routing.json", record)
     print(f"post-merge hand-over: comments on {record['comments']}, created {record['created']}, "
-          f"updated {record['updated']}, closed {record['closed']}, {len(record['warnings'])} warning(s)")
+          f"updated {record['updated']}, narrowed {[row['issue'] for row in record['narrowed']]}, "
+          f"closed {record['closed']}, {len(record['warnings'])} warning(s)")
     return 0
 
 
 # --- summary ---------------------------------------------------------------------------------
 
 def _cost_summary(evidence: Path, outcome: str) -> tuple[list[str], bool]:
-    """The independent workflow step and its existing session evidence, without retry or attribution."""
+    """The independent workflow step and its existing session evidence, without retry or attribution.
+
+    A known breach is a gap row's xfail that ran and failed as expected (tests/ci_verdicts.py): listed with
+    its reason, it alone does not make the leg red. A skip, an xfail that never ran or broke in teardown, a
+    strict XPASS and a collected test without a report leave the contract unverified."""
     session = read_session(evidence / "cost-contract")
     failed = candidates(session)
-    skipped = sorted({row["nodeid"] for row in session["rows"] if row["outcome"] == "skipped"})
+    expected = {node: why for node, why in expected_failures(session["rows"]).items() if node not in failed}
+    skipped = sorted({row["nodeid"] for row in session["rows"] if row["outcome"] == "skipped"} - set(expected) - set(failed))
     passed = {row["nodeid"] for row in session["rows"] if row["phase"] == "call" and row["outcome"] == "passed"}
-    passed.difference_update(failed, skipped)
-    complete = session["final"] and session["exit"] == 0 and bool(passed) and not failed and not skipped
-    collected = session.get("collected")
-    if type(collected) is int and collected > len(passed):
-        complete = False
+    passed.difference_update(failed, skipped, expected)
+    collected = session["collected"]  # a collected test without a report never ran
+    complete = (session["final"] and session["exit"] == 0 and bool(passed) and not failed and not skipped
+                and not (type(collected) is int and collected > len(passed) + len(expected)))
     lines = [f"Cost contract: workflow **{outcome or 'unknown'}**; pytest exit {session['exit']}; "
-             f"{len(passed)} passed, {len(failed)} failed/unfinished, {len(skipped)} skipped."]
+             f"{len(passed)} passed, {len(failed)} failed/unfinished, {len(skipped)} skipped"
+             + (f", {len(expected)} known breach(es) measured" if expected else "") + "."]
     lines += [f"- Cost check `{_cell(node)}`: {_cell(why)}." for node, why in failed.items()]
-    lines += [f"- Cost check `{_cell(node)}` was skipped." for node in skipped]
+    lines += [f"- Cost check `{_cell(node)}` {_unmeasured([row for row in session['rows'] if row['nodeid'] == node])}."
+              for node in skipped]
+    lines += [f"- Known breach `{_cell(node)}`, measured as its xfail marker expects; it does not make this leg red: "
+              f"{_cell(why) or 'no reason recorded'}" for node, why in sorted(expected.items())]
     if not complete:
         lines.append("- **Cost contract not fully verified:** missing, interrupted, failed or skipped session evidence.")
     return lines, outcome != "success" or not complete
+
+
+def _unmeasured(rows) -> str:
+    """Why a cost check with a skipped report measured nothing (`expected_failures` took those that did)."""
+    skips = [row for row in rows if row["outcome"] == "skipped"]
+    if any("wasxfail" not in row for row in skips):
+        return "was skipped, by evidence older than the xfail record: whether it ran is unknown"
+    if any(row["phase"] == "teardown" and row["wasxfail"] is not None for row in skips):
+        return "failed in teardown, which its xfail marker absorbed"
+    if any(row["phase"] == "setup" and row["wasxfail"] is not None for row in skips):
+        return "is an xfail that never ran its test"
+    if any(row.get("error_type") == "XFailed" for row in skips):
+        return "ended in pytest.xfail() instead of measuring"
+    return ("is an xfail without its setup or teardown on record, so it is unknown whether it ran whole" if any(
+        row["phase"] == "call" and row["wasxfail"] is not None for row in skips) else "was skipped")
 
 
 def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linux", *,
@@ -797,10 +891,19 @@ def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linu
                   + (" …" if len(nodes) > 20 else "")]
     lines += [f"- {_cell(note)}" for note in attribution.get("notes") or []]
     if routing:
+        narrowed = [f"{_numbers([row.get('issue')], web, 'issues')} ({len(row.get('ids') or [])} passing again)"
+                    for row in routing.get("narrowed") or [] if isinstance(row, dict)]
         lines += ["", "### Hand-over", "", f"Pull request comments: {_numbers(routing.get('comments'), web, 'pull')}. "
                   f"Issues created: {_numbers(routing.get('created'), web, 'issues')}; updated: "
-                  f"{_numbers(routing.get('updated'), web, 'issues')}; closed as green: "
-                  f"{_numbers(routing.get('closed'), web, 'issues')}."]
+                  f"{_numbers(routing.get('updated'), web, 'issues')}; "
+                  + (f"narrowed: {', '.join(narrowed)}; " if narrowed else "")
+                  + f"closed as green: {_numbers(routing.get('closed'), web, 'issues')}."]
+        if routing.get("complete") is False:
+            lines.append("- The hand-over above went out, but the recheck of the open issues did not finish: "
+                         "what it narrowed or closed afterwards is not recorded here.")
+        if stalled := [node for node, status in (routing.get("rechecked") or {}).items() if status == "unknown"]:
+            lines.append(f"- {len(stalled)} tracked test(s) got no result in the recheck (it starts none after "
+                         f"{RECHECK_SECONDS} s, and a deselected test never reports), so they stay tracked.")
         lines += [f"- **Warning:** {_cell(warning)}" for warning in routing.get("warnings") or []]
     return "\n".join(lines) + "\n", red
 
@@ -850,6 +953,9 @@ def command_summary(args) -> int:
     sys.stdout.flush()
     for row in ((_read_json(evidence / "classification.json") or {}).get("failed") or [])[:10]:
         print(f"::error title=Post-merge red on {SYSTEMS[args.os]}::{row['id']} ({row['why']})")
+    if args.os == "linux":  # beside the reds, never one of them: the summary lists each with its reason
+        for node in sorted(expected_failures(read_session(evidence / "cost-contract")["rows"]))[:10]:
+            print(f"::notice title=Known cost-contract breach on Linux::{node} (an expected failure, measured)")
     return 1 if red else 0
 
 

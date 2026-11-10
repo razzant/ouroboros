@@ -1271,7 +1271,8 @@ textarea.ui-control { resize: vertical; }
 .ui-hint[data-cramped="true"] { overflow-y: auto; overscroll-behavior: contain; }
 .ui-hint-line, .ui-hint-rule { margin: 0; }
 .ui-hint-word { margin-inline-end: var(--space-2); color: var(--text-primary); font-weight: 600; }
-.ui-hint-rule { margin-top: 2px; color: var(--text-secondary); }
+.ui-hint-rule, .ui-hint-fact { margin-top: 2px; }
+.ui-hint-rule { color: var(--text-secondary); }
 .ui-hint-action {
     display: block;
     margin-top: var(--space-1);

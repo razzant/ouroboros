@@ -41,6 +41,11 @@ def test_cold_resume_keeps_the_current_choice_and_never_a_stale_finish(tmp_path,
     loop_module._arm_delivery_control(registry, ctx, trace)
     registry._ctx._completion_observation = completion_observation(registry._ctx, trace)
     request = {"action": "finish", "answer_sha256": candidate.content_sha256, **({"pending_review": choice} if choice else {})}
+    if choice == "finish":  # finishing before the reviewers answer is a conscious exception with its reason (8 Nov)
+        refused = stage_completion_request(registry._ctx, request)
+        assert "pending_review=finish requires a rationale" in refused
+        assert getattr(registry._ctx, "_completion_request", None) is None, "nothing was staged"
+        request["rationale"] = "The owner asked for the draft now; the review's late verdict will follow."
     assert json.loads(stage_completion_request(registry._ctx, request))["status"] == "completion_requested"
     assert consume_completion_request(registry, ctx, trace)
     expected = choice == "finish"

@@ -46,7 +46,7 @@ response-assembly truth is covered transitively by the next round's
 | Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob); the blob is a request view stored once — its messages and tool schemas are parts, its skeleton placement is spliced back into the exact whole on read (`shared_values`, PERSISTENCE observability row), so the CAS digest and size are the whole's | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
 | Attempt lifecycle `reserved → dispatched → settled|unresolved` / `reserved → released`, short-lock append + sequence replay | `usage_accounting` | The join target for the reverse direction |
 | Anthropic native custody projection (opaque provider-native content replaced before persistence; disclosed as `anthropic_native_custody_projected`) | `anthropic_native_custody.physical_custody_projection` | Prototype of a typed exclusion |
-| Secret redaction with per-hit `RedactionRecord`s | `observability._redact_text` + rules | Prototype of a typed exclusion |
+| Secret redaction with per-hit `RedactionRecord`s, worked out once per part of a request view and reused by the task's other records (`redaction.part_fact`) | `redaction._redact_text` + rules | Prototype of a typed exclusion |
 
 An identity gate that compares only two **in-memory** serializations cannot
 establish whether the durable record matches either copy.
@@ -84,7 +84,11 @@ The existing physical-candidate manifest carries a
 The send seam holds one frozen request representation, verifies its in-memory
 identity and persists one durable pre-send record. It never calls
 `verify_sealed_candidate` or reads that record back. Persistence remains a
-precondition of dispatch.
+precondition of dispatch. Its redaction scans only parts the task has not met:
+`redaction.part_fact` keeps each part's result by its bytes, in their key order,
+and its parent's flags (`observability.task_parts`, shared with the logical request,
+the Claudexor request and the working checkpoint), re-roots its records where the
+part stands, and the stored bytes and exclusion rows equal the whole walk's.
 
 The explicit audit compares the manifest's raw digest and size with the
 attempt's recorded digest and size, checks serializer/exclusion metadata and
@@ -217,3 +221,33 @@ from "our two copies agree" to "the durable record agrees with the wire".
   non-blocking dispatch and reverse joins. History folded before the usage store
   existed is resolved through the retained evidence described in
   [Usage store](USAGE_STORE.md#8-explicit-history-audit).
+
+## 8. Round receipt
+
+Each round's `llm_round` carries what the host did to prepare its request
+(`llm_observability.round_window` around the model call; `round_starts` marks
+the batch's end). When the round's own call fails, its recovery (a configured
+fallback, an owner-wait resend) runs in a window of its own: the answer's row
+carries the recovery's facts from its start, without `round_top`, its
+`model_call` step including the choice and fit of the route. Facts for the log
+only; nothing decides by them.
+
+- `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
+  the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
+  of shared parts the CAS stored for the first time (`observability.write_part`).
+  R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
+  any start size. A scan is keyed by the part's own key order and the CAS by its
+  sorted bytes, so a part met in two orders is scanned twice and stored once.
+- `host_steps.steps`: `[wall ms, thread CPU ms]` between marks: `round_top`
+  (the batch's end to the model call), `model_call` (to the first record),
+  `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
+  (CPU null: it ends on the model sender's thread).
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
+  `lock_wait` and `manifest_write`; `context_facts`;
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+- `host_steps.rusage`: the process's voluntary and involuntary context
+  switches, major faults and block writes since the batch's end; absent on
+  Windows.
+
+About a kilobyte a round lands in the events archive kept for good (~14 MB a
+day at the 14,000 rounds a busy install made on 09.11).
