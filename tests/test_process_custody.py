@@ -77,6 +77,9 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/claudexor_harness_install.py",
     "ouroboros/extension_process_runner.py",  # waited calls and session-owned response streams
     "ouroboros/workspace_executor.py",    # custody write-through added at spawn
+    # One work-domain effect's docker CLI: published through shell_process.tracked_start, its container group
+    # under the executor's foreground record (execution_domain.attached_launch), waited and settled before return.
+    "ouroboros/work_domain.py",
     "ouroboros/local_model.py",           # custody record added at spawn
     "ouroboros/extension_companion.py",   # custody write-through added at spawn
     "ouroboros/tools/services.py",        # routed through spawn_supervised

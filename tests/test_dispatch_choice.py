@@ -138,56 +138,6 @@ def test_one_free_slot_walks_a_held_prefix_in_memory_and_reads_only_the_row_it_t
     assert workers.RUNNING["eligible"]["worker_id"] == 0
 
 
-@pytest.mark.parametrize("dispatch", ["possible", "none"])
-def test_the_dead_row_is_never_chosen_and_launches_nothing(assigning, monkeypatch, dispatch):
-    """S01's dead row: a silence diagnostic whose source moved on (``control_reason`` says ``cancelled``) at the head
-    of the queue. The chooser asks the launch's own check once, keeps the refusal by the row's revision and takes the
-    row behind it; nothing claims, releases or launches the dead row. One that may have been sent stays queued,
-    published with its reason, never cancelled here; one that provably never was is withdrawn once."""
-    from ouroboros import cancel_intents, work_diagnostics
-    from supervisor import worker_assignment
-
-    real_reason, asked, cancels, claims = work_diagnostics.control_reason, [], [], []
-
-    def control_reason(row, root, **kwargs):
-        if row.get("id") == "silence-dead":
-            asked.append(row["id"])
-            return "cancelled"
-        return real_reason(row, root, **kwargs)
-
-    real_claim = worker_assignment._claim_worker_launch
-
-    def claim(queue_module, row, worker, **kwargs):
-        claims.append(row["id"])
-        return real_claim(queue_module, row, worker, **kwargs)
-
-    monkeypatch.setattr(work_diagnostics, "control_reason", control_reason)
-    monkeypatch.setattr(worker_assignment, "_claim_worker_launch", claim)
-    monkeypatch.setattr(cancel_intents, "request_cancel", lambda *a, **kw: cancels.append(a[1]))
-    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(2))
-    workers.RUNNING.clear()
-    assigning.original.busy_task_id = None
-    dead = task("silence-dead", admitted_dispatch=dispatch, delegation_role="subagent", root_task_id="owner",
-                parent_task_id="owner", depth=1, metadata={"work_diagnostic": {"kind": "silence"}})
-    workers.PENDING.extend([dead, task("behind"), task("later")])
-    for _tick in range(3):
-        workers.assign_tasks()
-    assert claims[0] == "behind" and "silence-dead" not in claims and "silence-dead" not in workers.RUNNING
-    assert asked == ["silence-dead"], "asked once; the refusal stands while the row's revision does"
-    assert "_launch_claim" not in dead and dead in workers.PENDING
-    assert dispatch_choice.refusals() == {"silence-dead": "cancelled"}
-    assert cancels == ([] if dispatch == "possible" else ["silence-dead"])
-    from supervisor.queue_publication import _pool_counts
-
-    assert _pool_counts()["dispatch_refusals"] == {"silence-dead": "cancelled"}
-    dead["_attempt"] = 2  # the other direction: a new revision is asked again, and a live source is chosen
-    monkeypatch.setattr(work_diagnostics, "control_reason", lambda row, root, **kw: None)
-    assigning.original.busy_task_id = None
-    workers.RUNNING.pop("behind", None)
-    workers.assign_tasks()
-    assert "silence-dead" in claims
-
-
 @pytest.mark.parametrize("control", ["none", "pause_before", "pause_between", "latch_between", "resume_between",
                                      "resume_elsewhere"])
 def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_launch(env, monkeypatch, control):

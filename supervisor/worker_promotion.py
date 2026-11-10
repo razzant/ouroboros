@@ -127,6 +127,10 @@ def _canonical_promoted_repair_constraint(value: Any) -> tuple[Optional[dict], s
         return None, "invalid_skill_repair_constraint"
     if not payload_dir.is_dir():
         return None, "skill_repair_payload_missing"
+    from ouroboros.deployment_extensions import change_refusal, payload_write_refusal
+
+    if change_refusal(canonical.skill_name, "repair") or payload_write_refusal(payload_dir, data_root=_pool().DRIVE_ROOT):
+        return None, "managed_by_deployment"  # a required package is its administrator's: no repair task starts
     # X3 (owner 11=B): the repair is admitted against ONE exact payload state.
     # An unreadable payload cannot anchor a hash chain — fail closed here, not
     # after the task has already spent rounds.
@@ -375,6 +379,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "context_requires_self_body_docs": evt.get("context_requires_self_body_docs", False),
         **({"context_requires_development": evt["context_requires_development"]}
            if isinstance(evt.get("context_requires_development"), bool) else {}),
+        **({"review_answer": True} if evt.get("review_answer") is True else {}),  # task_contract.review_answer
         **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),  # explicit start only
         "objective_author": dict(evt.get("objective_author") or {}),
         "owner_corpus": list(evt.get("owner_corpus") or []),
@@ -451,6 +456,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
+    if isinstance(evt.get("ui_control"), dict) and evt.get("ui_control"):
+        task.setdefault("metadata", {})["ui_control"] = dict(evt["ui_control"])  # the press that started it
     pid = str(evt.get("project_id") or "").strip()
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:

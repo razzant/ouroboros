@@ -557,17 +557,12 @@ class TreeActivity(NamedTuple):
 
 
 def _tree_activity(pending_events: Any = frozenset()) -> TreeActivity:
-    """Walk RUNNING and PENDING once (NO I/O: a timeout pass runs under the queue lock). A queued
-    or running diagnostic is attention to its source, never that source's subtree at work."""
-    from ouroboros.work_diagnostics import diagnostic_ref
-
+    """Walk RUNNING and PENDING once (NO I/O: a timeout pass runs under the queue lock)."""
     activity = TreeActivity({}, set(), set())
     for tid, meta in list(_queue().RUNNING.items()):
         if not isinstance(meta, dict):
             continue
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        if diagnostic_ref(task):
-            continue
         # Real progress only (NOT the bare 30s liveness heartbeat): a child that merely
         # pings but makes no progress must not keep its ancestor alive.
         newest = float(meta.get("last_progress_at") or meta.get("started_at") or 0.0)
@@ -578,7 +573,7 @@ def _tree_activity(pending_events: Any = frozenset()) -> TreeActivity:
             if observing:
                 activity.observing.add(ancestor)
     for task in list(_queue().PENDING):
-        if isinstance(task, dict) and not diagnostic_ref(task):
+        if isinstance(task, dict):
             activity.queued.update(_ancestors(task) - {str(task.get("id") or "")})
     return activity
 

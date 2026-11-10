@@ -542,7 +542,8 @@ def task_words_text(drive_root: Any, task: dict, *, audience: str = "child", ind
     own drive and named by path.
     ``marks``: the acting marks the caller's capture holds, so the marked rows are cut from them (``_live_words``)."""
     from ouroboros.owner_words import (_deduped, _held_words, _live_words, _mapping, _room_of, owner_place_accounts,
-                                       render_owner_words, task_governing_words)
+                                       render_owner_words, render_schedule_text, task_governing_words,
+                                       task_schedule_items)
 
     record = _mapping(task)
     meta = _mapping(record.get("metadata"))
@@ -559,7 +560,9 @@ def task_words_text(drive_root: Any, task: dict, *, audience: str = "child", ind
             held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
         if stage and task_id:
             stage_birth_files(drive_root, record, task_id, rows)
-    return render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
+    words = render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
+    schedule = render_schedule_text(task_schedule_items(record), audience=audience, indent=indent)
+    return "\n\n".join(part for part in (words, schedule) if part)
 
 
 def stage_birth_files(drive_root: Any, record: dict, task_id: str, rows: list[dict[str, Any]]) -> None:

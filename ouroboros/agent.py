@@ -616,34 +616,21 @@ class OuroborosAgent:
             emit_dispatch_resolution(self._event_queue, task, dispatch)
         return dispatch, amended
 
-    def _capture_mutation_baseline(self, task: Dict[str, Any], task_metadata: Dict[str, Any]) -> None:
-        """Mutation-attribution baseline: snapshot the system repo's clean/dirty
-        state once, when a queued ROOT task starts. Evidence only — a capture
-        failure never blocks the task; commit staging then simply has no
-        attributed candidate set to consume."""
-        if (
-            str(task.get("id") or "").strip()
-            and not conversation_origin(task)  # a queued root, never an owner's or correspondent's turn
-            and str(task_metadata.get("delegation_role") or "").lower() != "subagent"
-        ):
+    def _capture_mutation_baseline(self, task: Dict[str, Any], task_metadata: Dict[str, Any],
+                                   ctx: Optional[ToolContext] = None) -> None:
+        """Mutation-attribution baseline of a root's admitted resources before its first operation
+        (``mutation_attribution.capture_root_baseline``): the system repo for a queued root, the admitted Git
+        folder for any root. Evidence only — a capture failure never blocks the task; commit staging and the
+        result review then name the missing baseline."""
+        if str(task.get("id") or "").strip() and str(task_metadata.get("delegation_role") or "").lower() != "subagent":
             try:
-                from ouroboros.mutation_attribution import capture_mutation_baseline
+                from ouroboros.mutation_attribution import capture_root_baseline
 
-                predecessor = (task.get("predecessor_authority") or {}).get("source")
-                if not isinstance(predecessor, dict):
-                    predecessor = None
-                capture_mutation_baseline(
-                    pathlib.Path(
-                        str(task.get("budget_drive_root") or "")
-                        or self.env.budget_drive_root
-                        or self.env.drive_root
-                    ),
-                    str(task.get("id") or ""),
-                    [{"surface_type": "system_repo", "host_root": str(self.env.repo_dir)}],
-                    owner_kind="task_root",
-                    owner_id=str(task.get("root_task_id") or task.get("id") or ""),
-                    predecessor_source=predecessor,
-                )
+                capture_root_baseline(
+                    pathlib.Path(str(task.get("budget_drive_root") or "") or self.env.budget_drive_root or self.env.drive_root),
+                    task, system_repo=self.env.repo_dir,
+                    workspace=ctx.active_repo_dir() if ctx is not None else task.get("workspace_root"),
+                    conversation=conversation_origin(task))  # an owner's or correspondent's turn: its folder only
             except Exception:
                 log.warning("mutation baseline capture failed for %s", task.get("id"), exc_info=True)
 
@@ -803,7 +790,7 @@ class OuroborosAgent:
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
-        self._capture_mutation_baseline(task, task_metadata)  # before the rebind records the candidate in it
+        self._capture_mutation_baseline(task, task_metadata, ctx)  # before the rebind records the candidate in it
         body_candidate.restore(ctx)  # a retry, Resume or new worker authors the candidate this lineage owns
         # Existing ToolContext stays the loop's carrier; these process-local
         # references are not serialized state or a new routing authority.
@@ -855,9 +842,9 @@ class OuroborosAgent:
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)
         from ouroboros.config import get_context_mode
         from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
-        from ouroboros.context_timing import measured_sections
+        from ouroboros.context_timing import collector_rests, measured_sections
 
-        with measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
+        with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             messages, cap_info = build_llm_messages(
                 env=self.env,
                 memory=self.memory,
@@ -977,7 +964,6 @@ class OuroborosAgent:
         from ouroboros.usage_accounting import usage_scope
         from ouroboros.model_wait import task_model_wait_scope
         from ouroboros.utils import in_worker_process
-
         from ouroboros.config import task_settings_scope
 
         with task_model_wait_scope(task=task, drive_root=self.env.drive_root, event_queue=self._event_queue,
@@ -991,8 +977,9 @@ class OuroborosAgent:
                 from ouroboros._usage_wait import retry_presend
                 from ouroboros.model_wait import dispatch_control_reason
                 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+                from ouroboros.deployment_extensions import hold_reason  # a required extension not running HERE
                 reason = retry_presend(lambda: dispatch_control_reason(waiter, before_task_start=True),
-                                       check=False, before_task_start=True)
+                                       check=False, before_task_start=True) or hold_reason()
                 if reason:
                     raise PhysicalDispatchInterrupted(reason)
             except Exception as exc:

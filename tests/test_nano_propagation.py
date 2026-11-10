@@ -27,6 +27,14 @@ def test_usage_ledger_accepts_nano_physical_context():
     _validate_candidate_facts(_row(measurement_density=None), 1)
 
 
+def test_usage_ledger_keeps_the_mode_at_send_and_its_cause_and_rejects_any_other():
+    _validate_candidate_facts(_row(preferred_mode="max", mode_cause="memory"), 1)
+    _validate_candidate_facts(_row(preferred_mode="nano", mode_cause=""), 1)  # absent before they existed: above
+    for bad in ({"preferred_mode": "huge"}, {"mode_cause": "guess"}, {"mode_cause": None}):
+        with pytest.raises(UsageLedgerCorrupt):
+            _validate_candidate_facts(_row(**bad), 1)
+
+
 @pytest.mark.parametrize("density", [0, -1.0, "1.0"])
 def test_usage_ledger_rejects_an_impossible_measurement_density(density):
     with pytest.raises(UsageLedgerCorrupt):

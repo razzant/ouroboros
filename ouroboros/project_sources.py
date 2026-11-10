@@ -111,6 +111,7 @@ def _unstage_sensitive_paths(path: pathlib.Path, *, warnings=None) -> list[str]:
     staged = subprocess.run(
         ["git", "diff", "--cached", "--name-only", "-z"],
         cwd=str(path), capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="surrogateescape",  # Git's UTF-8 path bytes, whatever the locale's code page
     )
     skipped = [
         rel for rel in (staged.stdout or "").split("\0")

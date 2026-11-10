@@ -180,3 +180,11 @@ FIXED = {
     "child_main": {"max": 50_428, "low": 50_428, "nano": 31_921},
     "nanny": {"max": 50_428, "low": 50_428, "nano": 31_921},
 }
+
+
+def conversations_text(groups, gone) -> str:
+    """``## Other conversations`` as its pieces join, for a test's reading."""
+    from ouroboros import memory_view_conversations as conversations
+
+    groups = list(groups)
+    return "\n\n".join(conversations.pieces(groups, gone, lambda _key, make: make())) if groups else ""

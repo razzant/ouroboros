@@ -190,14 +190,16 @@ def replay_frames(root: Any, run: Any) -> bool:
     from ouroboros.delegate_interactions import (_ANSWER_HANDSHAKE_MAX_SEC, _MESSAGE_DEADLINE_SEC, _message_result,
                                                  _post_live_message)
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway
 
     try:
         ctx = starter(root, run)
         if pending := pending_frames(ctx, run.run_id):
-            deadline, gateway = time.monotonic() + _MESSAGE_DEADLINE_SEC, ClaudexorGateway()
+            bound = poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC))
+            deadline, gateway = time.monotonic() + _MESSAGE_DEADLINE_SEC, run_gateway(run, ClaudexorGateway, timeout_sec=bound)
             try:
-                gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+                gateway.handshake(timeout_sec=bound)
                 for row in pending:
                     verdict, _body = _post_live_message(gateway, run.run_id, row, lambda: deadline - time.monotonic())
                     _message_result(ctx, {"run_id": run.run_id, "message_id": row["frame"]["message_id"],

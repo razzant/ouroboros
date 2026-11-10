@@ -881,8 +881,9 @@ def _refuse_exhausted(ctx: ToolContext, wave: _Wave, exhausted: Dict[str, Any]) 
         task_id=str(getattr(ctx, "task_id", "") or ""), cycles_paid=int(exhausted["cycles_paid"]),
         cap=int(exhausted["cap"]), enforcement=wave.enforcement, root_task_id=wave.root_task_id,
         fingerprint=str(wave.frozen.diff_sha), root=str(wave.root))
-    outcome = {"blocked": True, "block_reason": "review_cycles_exhausted",
-               "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": str(exhausted["message"])}}
+    outcome = {"blocked": True, "block_reason": "review_cycles_exhausted",  # ``cap``: the ceiling it met, a raise lifts it
+               "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": str(exhausted["message"]),
+                                    "cap": int(exhausted["cap"])}}
     result = _settle(ctx, wave, wave_facts(ctx, wave, outcome=outcome, forensic={}), outcome)
     result["message"] = str(exhausted["message"])
     return result
@@ -1254,6 +1255,7 @@ def _handle_new_review_change(
 def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, continue_seats: Any = None,
                           _resolved_binding: Any = None, **args: Any) -> str:
     from ouroboros.review_continuation import ContinuationRefused
+    from ouroboros.review_state_records import ReviewStateLockError
     from ouroboros.review_waiting import publish_delivery
     from ouroboros.tools.review_collection import collect_change
 
@@ -1275,6 +1277,12 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, con
             text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         except ContinuationRefused as exc:  # a typed $0 refusal naming the current offer
             return json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str)
+        except ReviewStateLockError as exc:  # recoverable: the wave and its record stay as they are (#2779)
+            from ouroboros.tools.review_collection import state_busy_refusal
+            from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE",
+                                                        text=state_busy_refusal(exc)))
         except (ValueError, LookupError) as exc:
             return argument_refusal(ctx, "TOOL_ARG_ERROR (review_change)", [str(exc)],
                                     effect="No reviewer was dispatched.")
@@ -1296,33 +1304,32 @@ def _review_change_tool_timeout_sec() -> Optional[float]:
 
 _DESCRIPTION = (
     "Review a change WITHOUT committing it: one paid reviewer wave over a subject in any registered repository, "
-    "written to the review ledger. commit_reviewed stays the only landing in the system repository; use "
-    "review_change by judgment for any other root (it never starts on its own and never runs tests: "
-    "tests.policy=NOT_RUN). Subjects: base..head (commits), index (staged) or worktree (live) against base "
-    "(default HEAD), frozen and read in an isolated checkout of its tree (only a synchronous caller reads the body's "
-    "own staged index live). An addressed message mid-wave returns its pending outcome: the reviewers "
-    "continue, a [Review settled] notice follows, and review_reference collects the original subject at $0 even after edits. "
-    "Rules follow the subject: the body is read against the body "
-    "layer, anything else against the universal core checklist. Panel: Blocking own-body reviews widen to the whole "
-    "pool; Advisory may narrow with a reason (else a typed $0 refusal); Cyber Pro composes freely. "
-    "Other repositories allow composed panels. Omitted means the whole pool; an enabled unticked row is an added "
-    "critic. surface=preflight seats exactly the ONE enabled catalog row you name (pool member or "
-    "not): an optional early look, never the commit panel. subject=system with surface=system is /review: one row "
-    "(default: the Main model) reads the whole system against BIBLE.md and returns a report. subject=result "
-    "(surface=result) reviews THIS task's result instead of a change: the reply (answer, default your latest reply), "
-    "the files and effects the task produced, and what was asked; every seat answers one question, whether the "
-    "result does what was asked, judged on the result, and on the method only where the owner's words or "
-    "explicit choice fixed it. On a Required root, Blocking widens a "
-    "named subset to every ticked reviewer; Advisory names ticked reviewers and needs a reason when narrowed "
-    "(else a typed $0 refusal); if you did not review before delivery the host seats the whole pool. "
-    "Auto composes the rows you name in every strictness. Cyber Pro composes freely and never holds. A child's "
-    "own result review composes freely. Under Auto ask when another mind's "
-    "check could change what you deliver, or when your human asks for a careful check. Task review Off refuses "
-    "it; it has its own paid-cycle count. The same subject, surface, panel and ask return the "
-    "settled verdict free (reused=true), even after a guide changed; after a settled wave formed no verdict they "
-    "buy a new wave, while a running or unknown one is collected, never resent. Enforcement is recorded and on "
-    "another root never locks anything. Returns JSON {record_id, aggregate, per_question, panel, rows, subject, "
-    "checklist, tests, cost, reused, findings} (+ report for subject=system)."
+    "written to the review ledger. commit_reviewed alone lands in the system repository; other roots use this by "
+    "judgment (it never starts itself and runs no tests: tests.policy=NOT_RUN). Subjects: base..head (commits), "
+    "index (staged) or worktree (live) against base (default HEAD), frozen in an isolated checkout "
+    "(only a synchronous caller reads the body's own staged index live). Mail mid-wave returns a pending outcome; "
+    "reviewers continue, a [Review settled] notice follows, and review_reference collects the original subject at "
+    "$0 even after edits. The body is read against the body layer, anything else against the universal core "
+    "checklist. Panel: Blocking own-body reviews widen to the whole pool; Advisory may narrow with a reason (else a "
+    "typed $0 refusal); Cyber Pro and other repositories compose freely. Omitted means the whole pool; an enabled "
+    "unticked row is an added critic. surface=preflight seats only the ONE enabled row you name (pool member or "
+    "not): an optional early look, never the commit panel. subject=system (surface=system) is /review: one row "
+    "(default the Main model) reads the whole system against BIBLE.md and reports. subject=result (surface=result) "
+    "reviews THIS task's result instead of a change: the reply (answer, default your latest), the files and "
+    "effects the task produced, and what was asked; every seat answers one question, whether the result does what "
+    "was asked, judged on the result, and on the method only where the owner's words or explicit choice fixed it. "
+    "On a Required root, Blocking widens a named subset to every ticked reviewer; Advisory names ticked reviewers, "
+    "with a reason when narrowed (else a $0 refusal); delivering unreviewed, the host seats the whole pool. Under "
+    "Blocking any settled review of the delivered result holds it until one passes; under Advisory a result "
+    "revised after a review reached you is reviewed again only if you ask, delivery being your own acceptance. "
+    "Auto composes the named rows in every strictness. Cyber Pro composes freely and never holds. A child's "
+    "own result review composes freely. Under Auto ask when another mind's check could change what you deliver or "
+    "your human asks for one. Task review Off refuses it; it counts its own paid cycles. The same subject, "
+    "surface, panel and ask return the settled verdict free (reused=true), even after a guide changed; after a "
+    "settled wave formed no verdict they buy a new wave, while a running or unknown one is collected, never "
+    "resent. Enforcement is recorded and on another root never locks anything. Returns JSON {record_id, "
+    "aggregate, per_question, panel, rows, subject, checklist, tests, cost, reused, findings} (+ report for "
+    "subject=system)."
 )
 
 

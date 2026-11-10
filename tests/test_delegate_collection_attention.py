@@ -50,6 +50,8 @@ class Engine:
     routes = [{"method": "POST", "path": "/v2/runs/wait-many"}]
     repaired = True
     probe_answer = None  # when set, the contract probe raises (an exception) or returns it instead
+    blocking_opt_in = False  # the route also answers the ``includeBlocking`` opt-in (claudexor #628)
+    opt_in_probes: list = []
     wakes: list = []
     details: dict = {}
     requests: list = []
@@ -63,8 +65,11 @@ class Engine:
             raise Engine.catalog.pop(0)
         return list(self.routes)
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
+            if include_blocking and not Engine.blocking_opt_in:  # a strict input that predates the opt-in
+                Engine.opt_in_probes.append(wait_ms)
+                raise ClaudexorUnavailable("invalid_request", "Unrecognized key(s): 'includeBlocking'", status_code=400)
             Engine.probes.append(wait_ms)
             if isinstance(Engine.probe_answer, BaseException):
                 raise Engine.probe_answer
@@ -73,7 +78,8 @@ class Engine:
             if not Engine.repaired:
                 raise ClaudexorUnavailable("invalid_request", "targets[0].seen: expected string", status_code=400)
             return _wake("timeout", [{"status": None, "pending": None, "token": None, "problem": "not_found"}])
-        Engine.requests.append({"targets": targets, "wait_ms": wait_ms})
+        Engine.requests.append({"targets": targets, "wait_ms": wait_ms,
+                                **({"include_blocking": True} if include_blocking else {})})
         if Engine.hold:
             time.sleep((25_000 if wait_ms is None else wait_ms) / 1000)
         answer = Engine.wakes.pop(0)
@@ -99,6 +105,7 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(run_events, "_SUPPORT", {})
     Engine.wakes, Engine.details, Engine.requests, Engine.detail_reads, Engine.catalog = [], {}, [], [], []
     Engine.probes, Engine.hold, Engine.repaired, Engine.probe_answer = [], False, True, None
+    Engine.blocking_opt_in, Engine.opt_in_probes = False, []
     release, entered = threading.Event(), threading.Event()
     tick = body.BodyRuntime.tick
 
@@ -376,3 +383,40 @@ def test_an_engine_that_lost_the_route_returns_the_observer_to_its_old_beat(tmp_
     assert instance._compact_wait is False
     step()
     assert Engine.detail_reads == [entry.run_id, entry.run_id] and len(Engine.requests) == 1
+
+
+def test_a_quiet_async_question_keeps_the_run_working_as_its_detail_said(tmp_path, runtime):
+    """claudexor #628: the compact row an opted-in engine marks ``blocking: false`` says what the
+    full detail said (a working run with attention), so the quiet pass never rewrites it as paused."""
+    from ouroboros.delegate_supervision import run_activity
+
+    instance, step = runtime
+    entry = started(tmp_path)
+    Engine.blocking_opt_in = True
+    Engine.details[entry.run_id] = {
+        "summary": {"runId": entry.run_id, "state": "running", "waitingOnUser": True, "asyncQuestionsOnly": True},
+        "lastSeq": 2, "pendingInteractions": [{**_question(), "delivery": "async"}]}
+    marked = {**_summary(pending=True, token=TOKEN_B), "blocking": False}
+    Engine.wakes += [_wake("attention", [marked], [0]), _wake("timeout", [marked])]
+    step()
+    assert Engine.detail_reads == [entry.run_id] and Engine.requests[0]["include_blocking"] is True
+    fetched = instance.observation(entry.run_id)
+    assert fetched["waiting_on_user"] is True and fetched["async_questions_only"] is True
+    assert run_activity(fetched) is True, "a question that holds nothing leaves the run working"
+    step()
+    assert Engine.detail_reads == [entry.run_id], "the quiet pass reads no detail"
+    quiet = instance.observation(entry.run_id)
+    assert (quiet["waiting_on_user"], quiet["async_questions_only"], run_activity(quiet)) == (True, True, True)
+
+
+def test_an_unknown_blocking_fact_keeps_the_paused_meaning(tmp_path, runtime):
+    from ouroboros.delegate_supervision import run_activity
+
+    instance, step = runtime
+    entry = started(tmp_path)
+    Engine.wakes.append(_wake("timeout", [_summary(pending=True, token=TOKEN_B)]))
+    instance.seen[entry.run_id] = TOKEN_B
+    step()
+    fact = instance.observation(entry.run_id)
+    assert fact["waiting_on_user"] is True and fact["async_questions_only"] is False
+    assert run_activity(fact) is False, "an engine that does not say keeps the old meaning"

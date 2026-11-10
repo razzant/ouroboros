@@ -429,3 +429,81 @@ test('dispose disconnects, cancels a queued frame and makes later calls inert', 
     assert.deepEqual(field.writes, []);
     sizing.dispose();
 });
+
+test('a viewport resize that moves the cap re-measures the same width in a frame, one that moves nothing writes nothing', (t) => {
+    const priorWindow = globalThis.window;
+    t.after(() => { globalThis.window = priorWindow; });
+    const resizable = () => ({ heard: new Set(),
+        addEventListener(type, fn) { if (type === 'resize') this.heard.add(fn); },
+        removeEventListener(type, fn) { if (type === 'resize') this.heard.delete(fn); },
+        resize() { this.heard.forEach((fn) => fn()); } });
+    for (const fieldSizing of [false, true]) {
+        const engine = installEngine({ fieldSizing });
+        t.after(engine.restore);
+        globalThis.window = Object.assign(resizable(), { visualViewport: resizable() });
+        const field = new Field();
+        const sizing = attachChatInputSizing(field);
+        if (fieldSizing) {
+            assert.equal(globalThis.window.heard.size + globalThis.window.visualViewport.heard.size, 0,
+                'the engine sizes a content field: nothing to hear');
+            engine.restore();
+            continue;
+        }
+        field.type(lines(5));
+        sizing.sync();
+        assert.equal(field.dataset.sizing, 'fit');
+        // A resize that moves neither the width nor the cap writes nothing.
+        const quiet = field.writes.length;
+        globalThis.window.visualViewport.resize();
+        engine.flush();
+        assert.equal(field.writes.length, quiet, 'nothing moved: nothing measured');
+        // The phone keyboard rises in a short viewport: a quarter of it caps the field, the width unchanged.
+        field.computed.maxHeight = '62px';
+        globalThis.window.visualViewport.resize();
+        globalThis.window.resize();
+        assert.equal(engine.pending(), 1, 'one frame for both sources');
+        engine.flush();
+        assert.equal(field.dataset.sizing, 'capped');
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '62px');
+        sizing.dispose();
+        assert.equal(globalThis.window.heard.size + globalThis.window.visualViewport.heard.size, 0);
+        engine.restore();
+    }
+});
+
+test('the keyboard going away without a resize gives a capped draft its resting cap back in a frame', (t) => {
+    // app.js drops body.keyboard-open in the focusout's own frame and the cap (style.css, a quarter of the keyboard's
+    // viewport) returns to 140px with no resize: the written 62px changes no size a ResizeObserver could report.
+    for (const fieldSizing of [false, true]) {
+        const engine = installEngine({ fieldSizing });
+        t.after(engine.restore);
+        const body = globalThis.document.body;
+        const hears = () => engine.mutations.filter((o) => o.targets.some(([target, options]) => target === body
+            && options.attributeFilter?.includes('class')));
+        const field = new Field({ style: { maxHeight: '62px' } });
+        const sizing = attachChatInputSizing(field);
+        if (fieldSizing) {
+            assert.equal(hears().length, 0, 'the engine sizes a content field to its live cap: nothing to hear');
+            engine.restore();
+            continue;
+        }
+        field.type(lines(12));
+        sizing.sync();
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '62px');
+        assert.equal(hears().length, 1, 'a measured field hears the body class that scopes its cap');
+        field.computed.maxHeight = '140px';
+        hears()[0].callback([{ attributeName: 'class' }]);
+        engine.flush();
+        assert.equal(field.dataset.sizing, 'capped');
+        assert.equal(field.style.getPropertyValue('--chat-input-height'), '140px', 'the resting cap, without an edit');
+        // A class change that moves no cap (the drawer, a Project) writes nothing.
+        const quiet = field.writes.length;
+        hears()[0].callback([{ attributeName: 'class' }]);
+        engine.flush();
+        assert.equal(field.writes.length, quiet);
+        const observer = hears()[0];
+        sizing.dispose();
+        assert.ok(observer.disconnected, 'dispose stops listening');
+        engine.restore();
+    }
+});

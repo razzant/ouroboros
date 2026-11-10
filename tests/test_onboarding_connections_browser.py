@@ -71,7 +71,7 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"named-servers-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"named-servers-{engine}", publish=True)
     # The running fixture owns this isolated root. Absence is the actual first-install proof.
     (ui["data_dir"] / "settings.json").unlink()
     report = {"candidate_identity": ui["candidate_identity"], "sentinel": ui["candidate_sentinel"].decode(),
@@ -291,7 +291,7 @@ def test_undo_named_server_edits_restores_the_current_wizard_draft(direct_server
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"undo-server-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"undo-server-{engine}", publish=True)
     (ui["data_dir"] / "settings.json").unlink()
     with _server() as (url, calls), sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)

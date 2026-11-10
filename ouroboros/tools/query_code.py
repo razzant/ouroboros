@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from typing import Any, Callable, List
 
+from ouroboros import work_domain
 from ouroboros.config import runtime_setting
 from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.tool_access import (
@@ -17,7 +18,7 @@ from ouroboros.tool_access import (
     path_is_relative_to,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.tool_result import completed_local_read
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 _OPS = (
     "relevant_files",
@@ -57,19 +58,20 @@ def _walk_candidate_files(scope: pathlib.Path, repo_root: pathlib.Path) -> tuple
     so a structural query over an external user_files target cannot wander the
     whole filesystem. Stops at a file cap or the wall-clock budget and returns a
     disclosed-truncation note (P1, never silent)."""
-    if scope.is_file():
+    if work_domain.is_file(scope):
         return [scope], ""
-    root_resolved = repo_root.resolve(strict=False)
+    root_resolved = work_domain.settle(repo_root)
     deadline = time.monotonic() + _structural_wall_budget()
     files: list[pathlib.Path] = []
-    for dirpath, dirnames, filenames in os.walk(scope, followlinks=False):
+    for dirpath, dirnames, filenames in (work_domain.walk(scope) if work_domain.is_work(scope)
+                                       else os.walk(scope, followlinks=False)):
         if time.monotonic() > deadline:
             return files, f"walk stopped after {_structural_wall_budget():.0f}s wall budget (narrow path=)"
         dirnames.sort()
         for name in sorted(filenames):
             fp = pathlib.Path(dirpath) / name
             try:
-                rp = fp.resolve(strict=False)
+                rp = work_domain.settle(fp)
                 if rp != root_resolved and not path_is_relative_to(rp, root_resolved):
                     continue
             except Exception:
@@ -84,9 +86,9 @@ def _safe_path(repo_root: pathlib.Path, path: str) -> str:
     text = str(path or "").strip().replace("\\", "/")
     if not text or text == ".":
         return ""
-    target = (repo_root / text).resolve(strict=False)
+    target = work_domain.settle(repo_root / text)
     try:
-        return target.relative_to(repo_root.resolve(strict=False)).as_posix()
+        return target.relative_to(work_domain.settle(repo_root)).as_posix()
     except ValueError as exc:
         raise ValueError(f"path escapes root: {path}") from exc
 
@@ -99,7 +101,7 @@ def _visible_file(
     runtime_check: Callable[[pathlib.Path], str] | None = None,
 ) -> bool:
     try:
-        target = (repo_root / rel_path).resolve(strict=False)
+        target = work_domain.settle(repo_root / rel_path)
     except Exception:
         return False
     from ouroboros.tools.core_file_tools import _runtime_data_read_block
@@ -186,7 +188,7 @@ def _structural(
         return found
 
     want_grammar = _filter_grammar(lang)
-    scope = (repo_root / (path or ".")).resolve(strict=False)
+    scope = work_domain.settle(repo_root / (path or "."))
     candidates, walk_note = _walk_candidate_files(scope, repo_root)
     rows: list[str] = []
     unavailable_seen: set = set()
@@ -198,7 +200,7 @@ def _structural(
             break
         if len(rows) >= cap:
             break
-        if not fp.is_file():
+        if not work_domain.is_file(fp):
             continue
         lang_id, grammar = _file_lang_grammar(fp)
         # Skip non-code files (no grammar, not python) unless the user explicitly filtered
@@ -222,12 +224,13 @@ def _structural(
             skipped[reason] += 1
             continue
         try:
-            with fp.open("rb") as source:
-                raw = source.read(MAX_FILE_SIZE_BYTES + 1)
+            raw = work_domain.read_bytes(fp, limit=MAX_FILE_SIZE_BYTES + 1)
             if len(raw) > MAX_FILE_SIZE_BYTES or b"\0" in raw:
                 skipped["oversized_or_binary"] += 1
                 continue
             text = raw.decode("utf-8", errors="replace")
+        except work_domain.WorkDomainUnsettled:
+            raise
         except Exception:
             skipped["read_error"] += 1
             continue
@@ -260,8 +263,26 @@ def _structural(
     return rows
 
 
-@completed_local_read
 def _query_code(
+    ctx: ToolContext, op: str, _resolved_binding: ResolvedResourceBinding | None = None, **options: Any,
+) -> str:
+    """Keep an unsettled work process outside the ordinary completed-local-read projection."""
+    try:
+        return _query_code_read(ctx, op, _resolved_binding, **options)
+    except work_domain.WorkDomainUnsettled as exc:
+        observed = exc.result
+        def text(value):
+            return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+        partial = (f"\nObserved command result (not a completed query): exit_code={observed.returncode}"
+                   f"\nstdout:\n{text(observed.stdout)}\nstderr:\n{text(observed.stderr)}" if observed is not None else "")
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ERROR",
+            text=f"⚠️ QUERY_CODE_ERROR: WorkDomainUnsettled: {exc}{partial}",
+            meta={"backend_settled": False, "process_not_started": False}))
+
+
+@completed_local_read
+def _query_code_read(
     ctx: ToolContext,
     op: str,
     _resolved_binding: ResolvedResourceBinding | None = None,
@@ -322,10 +343,10 @@ def _query_code(
             # home-membership rejection; the credential/control-plane block
             # reasons still apply inside resolve_user_file_path.
             target = binding.target_path
-            if target.is_dir():
-                repo_root = target.resolve(strict=False)
-            elif target.is_file():
-                repo_root = target.parent.resolve(strict=False)
+            if work_domain.is_dir(target):
+                repo_root = work_domain.settle(target)
+            elif work_domain.is_file(target):
+                repo_root = work_domain.settle(target.parent)
             else:
                 raise ValueError(f"user_files path does not exist: {str(path).strip()}")
         else:
@@ -342,7 +363,7 @@ def _query_code(
     from ouroboros.tools.core_file_tools import _runtime_data_read_check
 
     runtime_check = _runtime_data_read_check(ctx, root=binding.root)
-    if scoped_path and (repo_root / scoped_path).is_file() and not _visible_file(
+    if scoped_path and work_domain.is_file(repo_root / scoped_path) and not _visible_file(
         ctx, repo_root, scoped_path, binding, runtime_check,
     ):
         # A scope header must not re-expose a protected operand omitted by the
@@ -415,7 +436,7 @@ def _query_code(
             rows = [row for row in rows if row not in markers]
         else:
             inventory_scope = scoped_path
-            if op == "impact" or (op in {"references", "callers"} and (repo_root / scoped_path).is_file()):
+            if op == "impact" or (op in {"references", "callers"} and work_domain.is_file(repo_root / scoped_path)):
                 inventory_scope = ""
             # Occurrence scans parse only token-matched current sources, so these two
             # operations start from admitted paths instead of a repository-wide parse;
@@ -431,6 +452,8 @@ def _query_code(
                 depth=depth, deadline=deadline, path_allowed=admitted,
             )
             rows = view.rows
+    except work_domain.WorkDomainUnsettled:
+        raise
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (query_code): {exc}"
     except Exception as exc:

@@ -8,25 +8,13 @@ disable/reload can tear them down and purge modules cleanly.
 
 from __future__ import annotations
 
-import functools  # noqa: F401
 import importlib
 import importlib.util
-import inspect  # noqa: F401
-import hashlib  # noqa: F401
-import json  # noqa: F401
 import logging
 import os
 import pathlib
-import re  # noqa: F401
-import secrets  # noqa: F401
-import shutil  # noqa: F401 — facade compatibility
 import sys
 import threading
-import time  # noqa: F401
-import urllib.request  # noqa: F401
-import uuid  # noqa: F401
-from dataclasses import dataclass, field  # noqa: F401
-from types import ModuleType  # noqa: F401
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ouroboros.contracts.plugin_api import (
@@ -38,6 +26,7 @@ from ouroboros.contracts.plugin_api import (
     available_capabilities,  # noqa: F401
     capability_available,  # noqa: F401
 )
+from ouroboros.deployment_extensions import discloses_failure, failure_words
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.extension_contributions import stage_contributions
 from ouroboros.extension_companion import CompanionDescriptor, get_global_supervisor, is_server_process  # noqa: F401
@@ -105,7 +94,7 @@ from ouroboros.extension_registry_state import (
     live_module_sources,  # noqa: F401 — facade re-export (extraction contract)
     live_widget_projection,  # noqa: F401 — facade re-export (extraction contract)
     snapshot,  # noqa: F401 — facade re-export (extraction contract)
-    _ExtensionLoadFailure,
+    _ExtensionLoadFailure,  # noqa: F401 — facade re-export (extraction contract)
     _ExtensionRegistrations,  # noqa: F401 — facade re-export (extraction contract)
     _PluginAPIConfig,
     _extension_modules,
@@ -113,6 +102,7 @@ from ouroboros.extension_registry_state import (
     _lifecycle_lock_for,
     _lifecycle_locks,  # noqa: F401
     _load_failures,
+    record_load_failure,
     _lock,
     _record_companion_name,  # noqa: F401
     _routes,  # noqa: F401 — facade re-export (extraction contract)
@@ -274,7 +264,8 @@ def _run_unload_callback(skill_name: str, callback: Callable[[], Any], timeout_s
         return
     if errors:
         exc = errors[0]
-        log.warning("extension %s unload callback failed", skill_name, exc_info=(type(exc), exc, exc.__traceback__))
+        log.warning("extension %s unload callback failed: %s", skill_name, failure_words(skill_name, exc),
+                    exc_info=(type(exc), exc, exc.__traceback__) if discloses_failure(skill_name) else False)
 
 
 def _finalize_extension_reconcile(
@@ -439,15 +430,10 @@ def reconcile_extension(
                 repo_path=resolved_repo_path,
             )
         except Exception as exc:  # an unexpected raise must still revert enable + record
-            log.exception("extension %s reconcile load raised", skill_name)
-            err = f"skill {skill_name!r} load failure: {type(exc).__name__}: {exc}"
+            log.error("extension %s reconcile load raised", skill_name, exc_info=discloses_failure(skill_name))
+            err = f"skill {skill_name!r} load failure: {failure_words(skill_name, exc)}"
         if err:
-            with _lock:
-                _load_failures[skill_name] = _ExtensionLoadFailure(
-                    content_hash=loaded.content_hash,
-                    skill_dir=str(loaded.skill_dir.resolve()),
-                    error=err,
-                )
+            record_load_failure(skill_name, loaded, err)
             state["reason"] = "load_error"
             state["load_error"] = err
             state["action"] = "extension_load_error"
@@ -635,6 +621,8 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
         skills=skills,
         repo_path=repo_path,
     )
+    if runtime_state["reason"] == "deployment_untrusted":  # nothing of it is imported, cataloged or launched
+        return f"skill {skill.name!r} does not run on this service: {runtime_state['load_error']}"
     if runtime_state["reason"] == "skill_conflict":
         conflict_names = list((runtime_state.get("conflict") or {}).get("skills") or [])
         return (
@@ -650,8 +638,6 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
             f"stale={skill.review.is_stale_for(current_hash)}, "
             f"reason={gate.get('blocking_reason')})"
         )
-    if runtime_state["reason"] == "disabled":
-        return f"skill {skill.name!r} is disabled"
     # ABI-1: negotiate the manifest against this host's PluginAPI BEFORE any
     # plugin import or out-of-process catalog. Absent field -> the LEGACY
     # generation (grandfathered on its existing hash-bound PASS); a declared
@@ -735,8 +721,8 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
                 return None
         except Exception as exc:
             unload_extension(skill.name)
-            log.exception("extension %s failed to catalog out-of-process", skill.name)
-            return f"skill {skill.name!r} out-of-process catalog failure: {type(exc).__name__}: {exc}"
+            log.error("extension %s failed to catalog out-of-process", skill.name, exc_info=discloses_failure(skill.name))
+            return f"skill {skill.name!r} out-of-process catalog failure: {failure_words(skill.name, exc)}"
     staged_import_root: Optional[pathlib.Path] = None
     module_key = _module_key(skill.name)
     api: Optional[PluginAPIImpl] = None
@@ -811,13 +797,13 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
         if api is not None:
             api._abort_registration()
         unload_extension(skill.name)
-        return f"skill {skill.name!r} registration error: {exc}"
+        return f"skill {skill.name!r} registration error: {failure_words(skill.name, exc, typed=False)}"
     except Exception as exc:
         if api is not None:
             api._abort_registration()
         unload_extension(skill.name)
-        log.exception("extension %s failed to load", skill.name)
-        return f"skill {skill.name!r} load failure: {type(exc).__name__}: {exc}"
+        log.error("extension %s failed to load", skill.name, exc_info=discloses_failure(skill.name))
+        return f"skill {skill.name!r} load failure: {failure_words(skill.name, exc)}"
     finally:
         if skill.name not in _extensions:
             if staged_import_root is not None:
@@ -918,10 +904,13 @@ def reload_all(
     *,
     repo_path: str | None = None,
 ) -> Dict[str, Any]:
-    """Refresh all extension liveness and return ``skill: error_or_None``."""
+    """Refresh all extension liveness and return ``skill: error_or_None``; the measured window counts the
+    ``skills`` it discovered (hashes and catalog runs are counted where they happen)."""
+    from ouroboros.context_timing import counted
     from ouroboros.extension_health import fresh_code_stamp, record_health_for_runtime_state
 
     skills = discover_skills(drive_root, repo_path=repo_path)
+    counted("skills", len(skills))
     health_stamp = fresh_code_stamp()
     skill_names = {s.name for s in skills if s.manifest.is_extension()}
     with _lock:
@@ -938,8 +927,8 @@ def reload_all(
             unload_extension(gone)
             _sweep_stale_extension_imports(drive_root, gone)
         except Exception as exc:
-            log.exception("Extension reload cleanup failed for %s; continuing", gone)
-            results[gone] = f"{type(exc).__name__}: {exc}"
+            log.error("Extension reload cleanup failed for %s; continuing", gone, exc_info=discloses_failure(gone))
+            results[gone] = failure_words(gone, exc)
     for skill in skills:
         if not skill.manifest.is_extension():
             continue
@@ -959,18 +948,9 @@ def reload_all(
                 log.error("Extension reload failed for %s: %s", skill.name, load_error)
             results[skill.name] = load_error or (None if state.get("desired_live") else state.get("reason"))
         except Exception as exc:
-            log.exception("Extension reload failed for %s; continuing", skill.name)
-            error = f"{type(exc).__name__}: {exc}"
-            try:
-                skill_dir = str(skill.skill_dir.resolve())
-            except OSError:
-                skill_dir = str(skill.skill_dir)
-            with _lock:
-                _load_failures[skill.name] = _ExtensionLoadFailure(
-                    content_hash=skill.content_hash,
-                    skill_dir=skill_dir,
-                    error=error,
-                )
+            log.error("Extension reload failed for %s; continuing", skill.name, exc_info=discloses_failure(skill.name))
+            error = failure_words(skill.name, exc)
+            record_load_failure(skill.name, skill, error)
             results[skill.name] = error
             try:
                 record_health_for_runtime_state(drive_root, skill.name, {

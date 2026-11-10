@@ -147,21 +147,21 @@ def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, path
 
 
 def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
-    """Guard settings.json across direct Files API writes/deletes/uploads."""
+    """Settings and the named deployment policy, including symlink and hardlink aliases, are control files."""
     from ouroboros import config as _cfg
-    settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
-    try:
-        if target.exists() and settings_path.exists():
-            if target.samefile(settings_path):
+    from ouroboros.deployment_policy import POLICY_ENV
+
+    for raw in (_cfg.SETTINGS_PATH, os.environ.get(POLICY_ENV, "").strip()):
+        if not raw:
+            continue
+        path = pathlib.Path(raw).expanduser()
+        try:
+            if target.exists() and path.exists() and target.samefile(path):
                 return True
-    except OSError:
-        pass
-    try:
-        if target.parent.resolve() == settings_path.parent.resolve():
-            if target.name.lower() == settings_path.name.lower():
+            if target.parent.resolve() == path.parent.resolve() and target.name.lower() == path.name.lower():
                 return True
-    except OSError:
-        pass
+        except OSError:
+            continue
     return False
 
 
@@ -172,7 +172,9 @@ def _is_owner_only_file(target: pathlib.Path) -> bool:
         return True
     from ouroboros import config as _cfg
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    return is_skill_owner_state_alias(target, data_root)
+    if is_skill_owner_state_alias(target, data_root):
+        return True
+    return False
 
 
 def _contains_owner_only_file(target: pathlib.Path) -> bool:
@@ -227,6 +229,16 @@ _CONTROL_PLANE_FILES_API_ERROR = JSONResponse(
     },
     status_code=400,
 )
+
+
+def _managed_extension_error(*targets: Any) -> "JSONResponse | None":
+    """A deployment's required package, or a second package of its name, is never changed here."""
+    from ouroboros.deployment_extensions import subtree_refusal
+
+    for target in targets:
+        if target is not None and (refusal := subtree_refusal(target)):
+            return JSONResponse({"error": refusal, "code": "managed_by_deployment"}, status_code=403)
+    return None
 
 
 # Match tools/core.py guard wording across mutation surfaces.
@@ -575,6 +587,8 @@ async def api_files_write(request: Request) -> JSONResponse:
             return _OWNER_ONLY_FILES_API_ERROR
         if _contains_skill_control_plane_file(target):
             return _CONTROL_PLANE_FILES_API_ERROR
+        if (managed := _managed_extension_error(target)) is not None:
+            return managed
         if not target.exists():
             if not create:
                 return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
@@ -650,6 +664,8 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
             return _OWNER_ONLY_FILES_API_ERROR
         if _is_skill_control_plane_api_target(destination):
             return _CONTROL_PLANE_FILES_API_ERROR
+        if (managed := _managed_extension_error(destination)) is not None:
+            return managed
         if destination.exists():
             return JSONResponse({"error": f"Path already exists: {name}"}, status_code=409)
         destination.mkdir(parents=False, exist_ok=False)
@@ -686,6 +702,8 @@ async def api_files_delete(request: Request) -> JSONResponse:
             return _OWNER_ONLY_FILES_API_ERROR
         if _contains_skill_control_plane_file(target):
             return _CONTROL_PLANE_FILES_API_ERROR
+        if (managed := _managed_extension_error(target)) is not None:
+            return managed
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
 
@@ -734,6 +752,8 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         if _contains_skill_control_plane_file(source):
             return _CONTROL_PLANE_FILES_API_ERROR
         destination_check = dest_dir / source.name
+        if (managed := _managed_extension_error(source if mode == "move" else None, destination_check)) is not None:
+            return managed
         if _is_owner_only_file(destination_check):
             return _OWNER_ONLY_FILES_API_ERROR
         if _is_skill_control_plane_api_target(destination_check):
@@ -829,6 +849,8 @@ async def api_files_upload(request: Request) -> JSONResponse:
             return _OWNER_ONLY_FILES_API_ERROR
         if _is_skill_control_plane_api_target(destination):
             return _CONTROL_PLANE_FILES_API_ERROR
+        if (managed := _managed_extension_error(destination)) is not None:
+            return managed
         if destination.exists():
             return JSONResponse({"error": f"File already exists: {filename}"}, status_code=409)
 

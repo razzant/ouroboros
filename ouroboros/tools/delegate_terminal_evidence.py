@@ -61,8 +61,9 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         return delegate_result({**retained, "owner_task_id": predecessor,
             "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
     borrowed = gateway is not None
-    try:
-        gateway = gateway if borrowed else read_owned_gateway()
+    try:  # the run's own engine (``execution_domain``) unless a caller lends its transport
+        from ouroboros.execution_domain import run_gateway
+        gateway = gateway if borrowed else run_gateway(entry, read_owned_gateway)
         bound = float(window_within_deadline(ctx, int(_READ_TIMEOUT_SEC)))
         if not getattr(gateway, "engine_version", ""):
             gateway.handshake(timeout_sec=bound)

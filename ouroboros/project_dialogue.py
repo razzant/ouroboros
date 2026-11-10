@@ -685,23 +685,6 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
     return f"{prefix} ({reason_text})" if reason_text else prefix
 
 
-def routing_options_with_labels(drive_root: Any, options: Any) -> List[Dict[str, Any]]:
-    """Stamp human labels on manual task choices while retaining their raw ids."""
-    rows: List[Dict[str, Any]] = []
-    for raw in list(options or [])[:100]:
-        if not isinstance(raw, dict):
-            continue
-        row = dict(raw)
-        task_id = str(row.get("task_id") or "").strip()
-        if task_id and not str(row.get("label") or "").strip():
-            row["label"] = routing_target_label(
-                drive_root, str(row.get("action") or "steer_task"), task_id,
-                task=row, project_id=str(row.get("project_id") or ""),
-            )
-        rows.append(row)
-    return rows
-
-
 def routing_option_label(option: Any) -> str:
     """One human label per manual-routing option — the HOST SSOT (the durable
     routing_options history row and the Telegram skill both render through it;
@@ -733,6 +716,7 @@ TASK_CAUSE_PHRASES = {
     "author_stop": "Ouroboros stopped with unfinished work.",
     "review_outcome_received": "Ouroboros received the reviewers' outcome and finished on that.",
     "author_finish": "Ouroboros delivered this answer without the reviewers' sign-off.",
+    "author_finish_pending": "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives.",
     "review_degraded": "The reviewers did not reach a verdict on this answer.",
     "infra_failure": "The review could not run because of an infrastructure failure, so there is no verdict.",
     "acceptance_preparation_failed": "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
@@ -785,7 +769,7 @@ TASK_CAUSE_PHRASES = {
     "context_overflow": "The task outgrew its context before it could finish cleanly",
     "context_capacity": "This route's window cannot hold the task's context",
     "required_reference_unavailable": "The handbook this task requires could not be read",
-    "output_recovery_exhausted": "Empty length-limited replies exhausted recovery; saved work remains available",
+    "output_recovery_exhausted": "Incomplete model replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
     # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code,
     # spoken on its grace toast, its kill notice and its salvage line through this same table, never as the code.
@@ -807,6 +791,8 @@ TASK_CAUSE_PHRASES = {
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
+    "configured_actor_incomplete": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
+    "configured_actor_unknown": "This helper was set to run as a coding session; whether that run succeeded is unknown.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
     # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
     # (task_finalization.terminal_result_fields), a standing limitation of the
@@ -911,8 +897,8 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
     if (lifecycle == "rejected_duplicate" or objective_warned(axes.get("objective"), debt)
             or axis.get("execution") in {"degraded", "best_effort"}
             or axis.get("objective") in {"degraded", "best_effort"}
-            or (axis.get("review") == "degraded" and not author_finished)):
-        return "warn"
+            or axis.get("review") == "degraded" or (author_finished and axis.get("review") in {"fail", "awaiting"})):
+        return "warn"  # an author's acceptance without the reviewers' approval is always flagged (owner, 8 Nov 2026)
     return "done"
 
 
@@ -1235,7 +1221,6 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     veto: Dict[str, Any] = {}
     objective: Dict[str, Any] = {}
     completion: Dict[str, Any] = {}
-    review: Dict[str, Any] = {}
     execution: Dict[str, Any] = {}
     artifacts: Dict[str, Any] = {}
     for source in (event, result):
@@ -1249,10 +1234,8 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         if isinstance(objective.get("receipt_veto"), dict):
             veto = objective["receipt_veto"]
         for holder in (source.get("review_status"), axes.get("review")):
-            if isinstance(holder, dict):
-                review = holder
-                if isinstance(holder.get("acceptance_decision"), dict):
-                    decision = holder["acceptance_decision"]
+            if isinstance(holder, dict) and isinstance(holder.get("acceptance_decision"), dict):
+                decision = holder["acceptance_decision"]
     status = str(decision.get("status") or "").strip()
     cause = str(decision.get("reason") or "")
     raw_reason = str(result.get("reason_code") or event.get("reason_code") or "")
@@ -1271,15 +1254,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
                          or ((phase == "error" or (phase == "cancelled" and author_stop))
                              and status != ACCEPTANCE_ACCEPTED and not custody
                              and reason in {REASON_FINAL_MESSAGE, ""})) else "")
-    # Author-accepted completion is not reviewer approval. Required mode, explicit
-    # debts and unknown enforcement are not inferred optional from a reason string.
-    trigger = str(review.get("trigger") or "").removesuffix("_after_agent_tool").removesuffix("_after_agent_advisory")
-    author_closed = (objective.get("status") == "pass" and objective.get("source") == "author_acceptance"
-                     and decision.get("enforcement") == "advisory"
-                     and trigger in {"auto_effect", "auto_contract", "auto_agent_request"}
-                     and not decision.get("open_obligations") and not review.get("acceptance_obligations"))
-    if not include_review_details and (review_cause == "previous_revision_accepted"
-                                      or (review_cause == "author_finish" and author_closed and review.get("status") != "fail")):
+    # Author-accepted completion is not reviewer approval: its sentence explains its warning in every view (owner,
+    # 8 Nov 2026); only an earlier version's approval stays a details-view fact.
+    if not include_review_details and review_cause == "previous_revision_accepted":
         review_cause = ""
     held = phase == "error" and str(objective.get("source") or "").startswith("plan_review_")
     if reason == "foreign_install_root" and (result.get("reason_detail") or event.get("reason_detail")):
@@ -1353,12 +1330,11 @@ def _incident_cause_clauses(decision: Dict[str, Any], reason: str) -> List[str]:
 
 
 def _author_stop_rationale(decision: Dict[str, Any], completion: Optional[Dict[str, Any]] = None) -> str:
-    """The agent's own reason for an explicit stop, beside the typed sentence (TZ-2 C4).
-
-    Only the AUTHOR's recorded rationale reaches the row: the reviewer rationale
-    stays in the card; a finish carries none. The twin of ``authorStopRationale``."""
-    author = completion if (completion or {}).get("action") == "stop" else (
-        decision.get("author_disposition") if recorded_author_stop(decision) else None)
+    """The agent's own reason for an explicit stop, or for accepting a result its reviewers did not approve, beside
+    the typed sentence (TZ-2 C4). Only the AUTHOR's recorded rationale reaches the row: the reviewer rationale stays
+    in the card. The twin of ``authorStopRationale``."""
+    author = completion if (completion or {}).get("action") == "stop" else (decision.get("author_disposition") if (
+        recorded_author_stop(decision) or decision.get("reason") in {"author_finish", "author_finish_pending"}) else None)
     return " ".join(strip_markdown(str(author.get("rationale") or "")).split()) if isinstance(author, dict) else ""
 
 
@@ -1595,6 +1571,6 @@ __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",
-    "routing_options_with_labels", "routing_target_label", "resolve_owner_message_source",
+    "routing_target_label", "resolve_owner_message_source",
     "source_refs_for_project",
 ]

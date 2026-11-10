@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED, LANE_CONVERSATION
+from ouroboros.task_carrier import EXECUTOR_INLINE_CALL, EXECUTOR_INLINE_DEGRADED, LANE_CONVERSATION
 from supervisor import conversation_lane, inline_carrier, worker_chat_lane, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
@@ -272,3 +272,39 @@ def test_start_inline_turn_refuses_a_row_a_carrier_already_holds(degraded):
     assert meta["worker_id"] == 5 and "executor" not in meta and _inline_slot() is None
     assert get_direct_activity_registry().get("t-held") is None
     assert inline_carrier.inline_vitals()["inline_executions"] == []
+
+
+@pytest.mark.parametrize("executor", [EXECUTOR_INLINE_CALL, EXECUTOR_INLINE_DEGRADED])
+def test_inline_start_phases_reach_the_admitted_row(degraded, monkeypatch, executor):
+    """The real inline thread/worker endpoint keeps admission's generation, like the pool handoff."""
+    out = InputQueue()
+    monkeypatch.setattr(workers, "get_event_q", lambda *a, **k: out)
+
+    def handle(task):
+        degraded.actor.ran.append(task)
+        for kind in ("context_building_started", "context_building_finished"):
+            degraded.actor._event_queue.put({"type": "log_event", "data": {"type": kind, "task_id": task["id"]}})
+        return []
+
+    monkeypatch.setattr(degraded.actor, "handle_task", handle)
+    task = worker_chat_lane._seed_task(1, "hello", None, None, {"client_message_id": "cm-phase"})
+    task["_conversation_prepare"] = {"quiet": False}
+    with workers._queue_lock:
+        meta = conversation_lane.admit_turn(task, chat_id=1, client_message_id="cm-phase", reserved=True)
+    assert conversation_lane.publish_awaiting_rows()
+    with workers._queue_lock:
+        slot = inline_carrier.start_inline_turn(meta, executor=executor, reason="test")
+    _await_inline(slot)
+    frames = []
+    while not out.empty():
+        frame = out.get_nowait()
+        if frame.get("type") == "direct_turn_phase":
+            frames.append(frame)
+    assert [frame["phase"] for frame in frames] == ["context_building", "context_built"]
+    ctx = SimpleNamespace(RUNNING=workers.RUNNING)
+    conversation_lane.handle_direct_turn_phase({**frames[0], "phase_generation": "previous", "phase": "dispatched"}, ctx)
+    assert not meta.get("turn_phase")
+    for frame in frames:
+        conversation_lane.handle_direct_turn_phase(frame, ctx)
+        assert meta.get("turn_phase") == frame["phase"]
+    assert all(frame.get("phase_generation") == meta["phase_generation"] for frame in frames)

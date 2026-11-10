@@ -524,6 +524,28 @@ test('Active · Silent · Paused in one control; the note says what the chosen s
     assert.match(placeSheetBodyHtml(mail), /Away from this place: no wakes, no actions\. Still connected; reported events are saved\./);
 });
 
+test('while consciousness is off the sheet says the place only hears: Active\'s note and Silent\'s wake note', () => {
+    // Owner 06.11: «Lives here: listens, wakes…» stayed on every sheet for the 28 hours Off left the places hearing.
+    const off = (place) => ({ ...place, onlyHears: true });
+    const active = placeSheetBodyHtml(off(slack));
+    assert.match(active, /<p class="place-state-note">Consciousness is off: it only hears here\.<\/p>/);
+    assert.doesNotMatch(active, /Lives here: listens/);
+    // «A checked kind calls it here at once» stays the rule; the exception under it says Off suspends it, as Paused does.
+    assert.match(active, /While consciousness is off, nothing here wakes it\./);
+    assert.doesNotMatch(placeSheetBodyHtml(slack), /While consciousness is off/);
+    const silent = placeSheetBodyHtml(off(community));
+    assert.match(silent, /While consciousness is off, nothing here wakes it\./);
+    assert.doesNotMatch(silent, /these still wake it to read and think/);
+    assert.match(silent, /class="place-silent-card"/, 'what Silent blocks is still said, once');
+    assert.doesNotMatch(silent, /class="place-state-note"/);
+    // With the switch on the stored choice says what it does; the host's fact is a strict boolean.
+    assert.match(placeSheetBodyHtml(slack), /Lives here: listens, wakes when its list says so, speaks and acts\./);
+    assert.match(placeSheetBodyHtml(community), /Silent: these still wake it to read and think/);
+    assert.doesNotMatch(placeSheetBodyHtml(community), /While consciousness is off/);
+    assert.deepEqual([true, 'true', undefined].map((only_hears) => normalizePlace({ place_id: 'x', state: 'active', only_hears }).onlyHears),
+        [true, false, false]);
+});
+
 test('Silent shows the host\'s card: the note and, verbatim, what it blocks and what it cannot', () => {
     const html = placeSheetBodyHtml(community);
     const card = html.match(/<p class="place-silent-card" role="note">([^<]*)<\/p>/)?.[1] || '';

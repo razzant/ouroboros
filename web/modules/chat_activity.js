@@ -477,7 +477,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
-    const result = ws?.send?.({ type: 'command', cmd: '/restart' }, { queue: false });
+    const result = ws?.send?.({ type: 'command', cmd: '/restart', ui_control: { name: 'restart' } }, { queue: false });
     return result?.status === 'sent' ? 'sent' : 'not_connected';
 }
 
@@ -686,7 +686,8 @@ export function costPresentationMeta(presentation, context = null) {
     if (!known && (context?.ledger_integrity_degraded === true
         || context?.cost_custody?.status === 'unavailable')) return ['Cost unknown'];
     if (!presentation.has_rows) {
-        if (!presentation.accounting_open) return [];
+        // Closed: an intact empty ledger has no line; a run closed without a cost record is unknown, never pending.
+        if (!presentation.accounting_open) return presentation.has_unpriced ? ['Cost unknown'] : [];
         // Pending delegated custody has an unpriced row even before a priced
         // row arrives; an empty open carrier is instead an integrity gap.
         return presentation.has_unpriced ? ['Cost pending'] : ['Cost unknown'];
@@ -780,14 +781,19 @@ export function taskCostMeta(payload = {}) {
  * Project one frame's task-scope cost evidence into the sticky structured form
  * `{meta, ts, final}` (v6.82 P1). Returns null when the frame carries NO
  * task-scope accounting evidence (e.g. an llm_round_finished per-round delta)
- * — such frames must never touch a card's cost.
+ * — such frames must never touch a card's cost. A readable closed-empty carrier is evidence: the versioned clear
+ * `{meta: [], cleared, ts, scope}` draws no line yet settles an earlier pending; never final, so a retry still shows.
  */
 export function taskCostProjection(payload = {}, rawTs = '') {
     const meta = taskCostMeta(payload);
-    if (!meta.length) return null;
+    const presentation = payload?.cost_presentation;
+    if (!meta.length) {
+        return presentation?.has_rows === false && presentation.accounting_open === false && !presentation.has_unpriced
+            && payload.cost_accounting_status !== 'unavailable'
+            ? { meta: [], cleared: true, ts: rawTimestampEpoch(rawTs), scope: presentation.scope, final: false, unavailable: false } : null;
+    }
     const detail = costPresentationDetail(payload.cost_presentation, payload);
     const unavailable = payload.cost_accounting_status === 'unavailable' || payload.cost_presentation === null;
-    const presentation = payload.cost_presentation;
     const legacyRollup = payload.cost_presentation === null && (
         payload.accounted_upper_bound_usd_with_children !== undefined || payload.cost_usd_with_children !== undefined);
     return {
@@ -816,25 +822,19 @@ export function taskCostProjection(payload = {}, rawTs = '') {
  * must not pin the card for the whole run) and a settled value outranks both.
  * Among equal rank the newer raw source timestamp wins, so an older history replay
  * can never overwrite newer evidence; frames without evidence (null `next`) keep
- * the previous projection, so an unavailable snapshot is still sticky.
+ * the previous projection, so an unavailable snapshot is still sticky (a `cleared` one is pending-rank evidence).
  */
 export function mergeStickyCostMeta(previous, next) {
-    if (!next || !Array.isArray(next.meta) || !next.meta.length) return previous || null;
-    if (!previous || !Array.isArray(previous.meta) || !previous.meta.length) return next;
+    const evidenced = (p) => Boolean(p && Array.isArray(p.meta) && (p.meta.length || p.cleared === true));
+    if (!evidenced(next)) return previous || null;
+    if (!evidenced(previous)) return next;
     if (previous.scope === 'root_tree' && next.scope !== 'root_tree') return previous;
     if (next.scope === 'root_tree' && previous.scope !== 'root_tree') return next;
     if (previous.scope === 'rollup' && next.scope === 'own') return previous;
     if (next.scope === 'rollup' && previous.scope === 'own') return next;
-    // Rank: unavailable < pending < final. An `unavailable` snapshot is sticky (a
-    // costless frame must not erase it) but must NOT outrank a later HONEST reading:
-    // one transient ledger-read failure would otherwise pin the card to "cost
-    // unavailable" for the rest of the run.
     const rank = (p) => (p.final ? 2 : (p.unavailable ? 0 : 1));
-    const prevRank = rank(previous);
-    const nextRank = rank(next);
-    if (prevRank !== nextRank) return nextRank > prevRank ? next : previous;
-    const prevTs = Number(previous.ts);
-    const nextTs = Number(next.ts);
+    if (rank(previous) !== rank(next)) return rank(next) > rank(previous) ? next : previous;
+    const [prevTs, nextTs] = [Number(previous.ts), Number(next.ts)];
     if (Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs < prevTs) return previous;
     // A frame whose source timestamp is unreadable must not defeat a
     // timestamped previous value of equal finality.
@@ -878,7 +878,7 @@ export function clearStickyCardState(record) {
     // The folded evidence is cycle state too: a recycled slot must not count
     // the previous cycle's invocations.
     record.toolFold = null;
-    record.waitFolds = null;
+    record.waitFolds = null; if (record.waitFaceEl) record.waitFaceEl.hidden = true;  // and its face line (syncWaitFace)
     record.durationSec = null;
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;

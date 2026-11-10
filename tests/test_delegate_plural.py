@@ -9,6 +9,7 @@ from ouroboros.delegate_shared import delegate_payload, delegate_result
 from ouroboros.delegate_start_claims import claimed_start_request
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests.test_builtin_refusal_results import _delegate_registry
+from tests._shared import full_disk_at
 from tests.test_delegate_retry_replay import _Engine, PROMPT
 
 
@@ -105,6 +106,37 @@ def test_custody_authority_still_gates_a_new_claim(tmp_path, monkeypatch, unread
     assert accepted is not unreadable
     if unreadable:
         assert refusal["reason"] == "replacement_custody_unknown"
+
+
+@pytest.mark.parametrize("cause", ["full_disk", "contention"])
+def test_an_unavailable_actor_lock_keeps_its_platform_cause(tmp_path, monkeypatch, cause):
+    """The lock owner keeps the platform's outcome; contention claims no OS cause (#2647)."""
+    import errno
+    import os
+
+    from ouroboros import platform_layer
+
+    if cause == "full_disk":
+        full_disk_at(monkeypatch, "delegate_actor_claims")
+    else:
+        real = platform_layer.acquire_exclusive_file_lock
+
+        def held(path, **kwargs):  # what the platform reports when the holder outlives the bound
+            if "delegate_actor_claims" not in str(path):
+                return real(path, **kwargs)
+            kwargs["outcome"].update(reason="contention", errno=None)
+            return None
+        monkeypatch.setattr(platform_layer, "acquire_exclusive_file_lock", held)
+    with pytest.raises(custody.ActorDecisionLockUnavailable) as caught:
+        with custody.actor_decision_lock(tmp_path, "task"):
+            pytest.fail("the lock was not taken")
+    assert isinstance(caught.value, TimeoutError)  # the callers' existing contract
+    assert (caught.value.reason, caught.value.errno) == (
+        ("unknown", errno.ENOSPC) if cause == "full_disk" else ("contention", None))
+    accepted, refusal = claimed_start_request(tmp_path, task_id="task", invocation_id="new", request={"prompt": "w"})
+    assert not accepted and refusal["reason"] == "replacement_custody_unknown"
+    assert (os.strerror(errno.ENOSPC) in refusal["detail"]) is (cause == "full_disk")
+    assert custody.invocation_record(tmp_path, "new") is None
 
 
 def test_restart_observes_initial_identity_without_another_start(tmp_path, monkeypatch):

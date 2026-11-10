@@ -1,18 +1,17 @@
 """Choosing queued work for free capacity: one predicate read in cost order, and a pass that stops at k.
 
 A queued row starts only when every gate passes, and the chooser reads the launch's own gates with the launch's own
-functions, so it never takes a row the launch would refuse (S01: a silence diagnostic its source had outlived was
-chosen and refused about once a tick for days, three SQLite reads a look and forty looks a tick). Gates, cheapest first:
+functions, so it never takes a row the launch would refuse (S01: a row the launch refused by its own facts was chosen
+and refused about once a tick for days, three SQLite reads a look and forty looks a tick). Gates, cheapest first:
 
 1. memory (``worker_assignment._candidate_ineligible``, under Q): claims and holds, depth, the root's latch and
    cancellation fence, the direct actor and the Presence carrier, the per-root child limit and the one-writer lane;
    its stat reads (a moved room's binding before the lane, a copied root's verdict, Off/Panic, the writer gate, the
    paid route at the limit) only for a row every memory gate before them passed;
-2. store (``_screen``, outside Q): the agent restart's holds, an evolution's campaign authority, a silence
-   diagnostic's source (``work_diagnostics.control_reason``), a schedule's control
+2. store (``_screen``, outside Q): the agent restart's holds, an evolution's campaign authority, a schedule's control
    (``followup_policy.scheduled_start``), the owner Pause and the row's own sleep (``owner_pause._validate_launch``),
-   read in one short transaction per store (``store_hot_facts.read_ahead``) beside the reads only diagnostics,
-   schedules, evolution and a restart need;
+   read in one short transaction per store (``store_hot_facts.read_ahead``) beside the reads only schedules,
+   evolution and a restart need;
 3. C2 (``events_budget.budget_resume_dispatch_allowed``), decided under Q from what step 2 read
    (``store_hot_facts.serving``, strict: nothing under Q opens the store).
 
@@ -31,11 +30,13 @@ worker and no start it chooses nothing and reads nothing. Otherwise one walk in 
 type priority, then ``_queue_seq``) stops at the rows it can use: one per idle worker (the owner's cap on acting tasks,
 when set, counts them) and, while processes may start, as many as the booting slots and those starts can carry. With
 no idle worker a start is one probe row until the walk chose work that needs a new process; only then is the machine
-read (``pool_admission``, once, outside Q), and a further walk collects what the starts it admitted may carry. A refusal is not kept as a hold: the next pass asks again,
-except a refusal by the row's own facts (a diagnostic whose source moved on, or bound to nothing), kept while the
-row's revision stands (``_revision``), published (``refusals``) and cancelled only when the row provably never
-reached a worker (``withdraw_revoked_diagnostic``), as the launch decided before. Both memories are bounded by the
-queue and forgotten with their row (``_forget``).
+read (``pool_admission``, once, outside Q), and a further walk collects what the starts it admitted may carry. A
+refusal is not kept as a hold: the next pass asks again. C2's kept admissions are bounded by the queue and forgotten
+with their row (``_forget``).
+
+A walk reads one lane's rows (``lane``): the project pool's, or my human's returned turns, which the conversation
+lane's carriers take with the same predicate (``conversation_lane.resumes_on_lane``,
+``worker_assignment._assign_returned_turns``).
 
 Disclosed residual (§10 invariant 24): with free capacity the memory gates still walk the held prefix, O(P) a pass,
 and a superseded selection beyond the rows a pass reaches waits for a pass that reaches it; the tick's cancel hygiene
@@ -52,6 +53,8 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ouroboros.task_carrier import LANE_CONVERSATION, LANE_PROJECT
+
 log = logging.getLogger(__name__)
 
 # The walk; a second only when its rows were refused after it (store gates, a refused claim); one more when the
@@ -61,12 +64,6 @@ _COUNT_KEYS = ("passes", "rows_examined", "rows_screened", "store_reads", "chose
 _COUNTS = dict.fromkeys(_COUNT_KEYS, 0)
 _DRAINED = dict(_COUNTS)
 _COUNTS_LOCK = threading.Lock()
-# A diagnostic refused for one of these can never be admitted at the same revision: its source moved on, its time
-# ran out, or its binding names nothing it may observe.
-_FINAL = frozenset({"cancelled", "deadline", "absolute_ceiling",
-                    "owner_launch_authority_unavailable:diagnostic_binding_invalid",
-                    "owner_launch_authority_unavailable:diagnostic_binding_mismatch"})
-_REFUSED: Dict[str, Tuple[tuple, str]] = {}  # row id -> (revision, reason): refused by its own facts for good
 _ADMITTED: Dict[str, Tuple[tuple, str]] = {}  # row id -> (identity, actor): C2 admitted it under this identity
 _CONTROL_KEYS = ("_attempt", "_budget_pause", "_budget_pause_resume", "_resume_selection", "_budget_pause_hold",
                  "_owner_hold", "_owner_wait_resume", "_working_recovery", "_continuation_prepared")
@@ -104,11 +101,6 @@ def drain() -> Dict[str, int]:
     return window
 
 
-def refusals() -> Dict[str, str]:
-    """The queued rows the launch would refuse for good by their own facts, with the reason (published, never held)."""
-    return {task_id: reason for task_id, (_revision_, reason) in list(_REFUSED.items())}
-
-
 def _tid(row: Dict[str, Any]) -> str:
     return str(row.get("id") or "")
 
@@ -131,17 +123,6 @@ def _json(value: Any) -> str:
 
 def _controls(row: Dict[str, Any]) -> Dict[str, Any]:
     return {key: row[key] for key in _CONTROL_KEYS if key in row}
-
-
-def _revision(row: Dict[str, Any]) -> tuple:
-    from ouroboros.work_diagnostics import diagnostic_ref
-
-    return (id(row), row.get("_attempt"), row.get("admitted_dispatch"), _json(diagnostic_ref(row)))
-
-
-def _refused_for_good(row: Dict[str, Any]) -> str:
-    kept = _REFUSED.get(_tid(row))
-    return kept[1] if kept is not None and kept[0] == _revision(row) else ""
 
 
 def _identity(queue: Any, row: Dict[str, Any], index: tuple, actor: str,
@@ -207,23 +188,11 @@ def _drives(queue: Any) -> Dict[str, Any]:
 
 
 def _forget(pending: List[Dict[str, Any]]) -> None:
-    """Under Q: a memory lives only while its row is queued."""
-    if _REFUSED or _ADMITTED:
+    """Under Q: a kept admission lives only while its row is queued."""
+    if _ADMITTED:
         live = {_tid(row) for row in pending}
-        for kept in (_REFUSED, _ADMITTED):
-            for task_id in [task_id for task_id in kept if task_id not in live]:
-                kept.pop(task_id, None)
-
-
-def withdraw_revoked_diagnostic(row: Dict[str, Any], reason: str, *, unsent: bool) -> None:
-    """A diagnostic whose source moved on ends through the single-scope cancellation owner, but only when this row
-    provably never reached a worker (its dispatch is ``none``, or this process holds its unsent witness); one that may
-    have been sent stays queued, refused with its reason (``refusals``), never cancelled here."""
-    if reason == "cancelled" and (row.get("admitted_dispatch") == "none" or unsent):
-        from ouroboros.cancel_intents import request_cancel
-
-        request_cancel(_pool().DRIVE_ROOT, row["id"], reason="Diagnostic source authority ended before dispatch",
-                       source="silence_resolved", requested_by="supervisor", scope="single")
+        for task_id in [task_id for task_id in _ADMITTED if task_id not in live]:
+            _ADMITTED.pop(task_id, None)
 
 
 def _restart_holds(row: Dict[str, Any], held: Dict[int, bool]) -> bool:
@@ -238,25 +207,12 @@ def _restart_holds(row: Dict[str, Any], held: Dict[int, bool]) -> bool:
 
 def _own_refusal(queue: Any, row: Dict[str, Any], held: Dict[int, bool]) -> str:
     """Outside Q: the launch's refusals that read beyond the row's pause and fence, in cost order ("" when none)."""
-    from ouroboros.work_diagnostics import control_reason
-
-    wa, metadata = _assignment(), row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    if final := _refused_for_good(row):
-        return final
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     if _restart_holds(row, held):
         return "agent_restart"
     error = _pool()._evolution_assignment_error(row)  # "" for any other row, read only for an evolution
     if error:
         return "evolution_authority:" + error
-    if "work_diagnostic" in metadata:
-        _count(store_reads=1)
-        reason = control_reason(row, _pool().DRIVE_ROOT, before_handoff=True)
-        if reason:
-            if reason in _FINAL:
-                _REFUSED[_tid(row)] = (_revision(row), reason)
-            if not row.get(wa._LAUNCH_CLAIM) and any(item is row for item in list(queue.PENDING)):
-                withdraw_revoked_diagnostic(row, reason, unsent=wa._unsent(row) is not None)
-            return reason
     if metadata.get("schedule_id"):
         from supervisor.followup_policy import scheduled_start
         from supervisor.queue_schedules import automatic_acquisitions
@@ -375,12 +331,13 @@ def _root_resume(queue: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, excluded: set,
-             decided: set, carried: Any = ()) -> Optional[tuple]:
-    """Under Q: up to ``limit`` rows the memory gates (then their few stat reads) admit, in queue order, each seen by
-    the lanes and child limits of the rows before it and of the rows an earlier walk of this pass chose for growth
-    (``carried``), and every row it passes whose selection C2 must decide (not yet this pass, ``decided``, and no
-    admission kept); None when a malformed depth could not be terminalized."""
+             decided: set, carried: Any = (), lane: str = LANE_PROJECT) -> Optional[tuple]:
+    """Under Q: up to ``limit`` rows of ``lane`` the memory gates (then their few stat reads) admit, in queue order,
+    each seen by the lanes and child limits of the rows before it and of the rows an earlier walk of this pass chose
+    for growth (``carried``), and every row of ``lane`` it passes whose selection C2 must decide (not yet this pass,
+    ``decided``, and no admission kept); None when a malformed depth could not be terminalized."""
     from ouroboros.project_lease import lane_holders, running_project_ids
+    from supervisor.conversation_lane import resumes_on_lane
 
     wa = _assignment()
     picked: List[Dict[str, Any]] = []
@@ -393,9 +350,9 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
         for row in list(_pool().PENDING):
             if len(picked) >= limit:
                 break
+            if resumes_on_lane(row) != (lane == LANE_CONVERSATION):
+                continue  # the other lane's row: its own walk decides and repairs it
             _count(rows_examined=1)
-            if _REFUSED and _refused_for_good(row):
-                continue
             if id(row) not in decided and _repairable(row):
                 index = _index(queue) if index is None else index
                 decided.add(id(row))
@@ -471,11 +428,11 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
 
 
 def choose(queue: Any, remaining: float, invalid_ids: Any = (), *, limit: int = 1,
-           excluded: Any = ()) -> Optional[List[Dict[str, Any]]]:
-    """Up to ``limit`` queued rows every gate admits now, in queue order, claiming nothing (selections it passes are
-    decided and repaired as in a pass); None when the pass must stop (a malformed depth whose terminal could not be
-    written). The caller holds no lock."""
-    collected = _collect(queue, remaining, set(invalid_ids), limit, set(excluded), set())
+           excluded: Any = (), lane: str = LANE_PROJECT) -> Optional[List[Dict[str, Any]]]:
+    """Up to ``limit`` queued rows of ``lane`` every gate admits now, in queue order, claiming nothing (selections it
+    passes are decided and repaired as in a pass); None when the pass must stop (a malformed depth whose terminal could
+    not be written). The caller holds no lock."""
+    collected = _collect(queue, remaining, set(invalid_ids), limit, set(excluded), set(), lane=lane)
     if collected is None:
         return None
     rows, undecided, plans = collected

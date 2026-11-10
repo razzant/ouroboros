@@ -775,9 +775,15 @@
   },
   {
     "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/context_observation.js",
+    "kind": "contains",
+    "value": "export const CONTEXT_MODES = Object.freeze(['nano', 'low', 'max']);"
+  },
+  {
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
-    "value": "const CONTEXT_MODES = ['nano', 'low', 'max'];"
+    "value": "const modes = CONTEXT_MODES.map((mode) =>"
   },
   {
     "id": "test_subagents_and_context_dom_present",
@@ -960,28 +966,28 @@
     "value": "cardVisible"
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-input\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocorrect=\"off\""
+    "value": "autocorrect=\"on\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "autocapitalize=\"off\""
+    "value": "autocapitalize=\"sentences\""
   },
   {
-    "id": "test_chat_input_disables_autocorrect",
+    "id": "test_chat_input_enables_writing_assistance",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "spellcheck=\"false\""
+    "value": "spellcheck=\"true\""
   },
   {
     "id": "test_history_replay_preserves_failed_task_summary_phase",

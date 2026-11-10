@@ -1,11 +1,10 @@
 """Current facts in ``state/current.sqlite`` and the SQLite protocol shared with ``usage_store``.
-PERSIST (WAL only on a fixed SQLite and proven local filesystem; only a private build or a lifecycle
-owner chooses, an ordinary open keeps the file's choice: ``store_journal``), ``synchronous=FULL``; a lazy
-connection per file and thread, short ``BEGIN IMMEDIATE`` writes, every name-tier access under its name
-lock. SQLite 3.24 floor. ``probe``/``open_store``: boot imports within the import window; first writes
-import absent stores; reads never import (facts present: ``StoreMigrating`` until publication; no facts:
-empty). The write gate requires a closed import window and PUBLISHED phase; ``service`` serves the
-importer/exporter/seam."""
+SQLite 3.24 floor; lazy connections per file/thread, short ``BEGIN IMMEDIATE`` writes and name-tier locks.
+``store_journal`` owns PERSIST/WAL: only a private build or lifecycle owner chooses; WAL requires fixed
+SQLite and a proven local filesystem. Ordinary opens keep that choice and ``synchronous=FULL``.
+``probe``/``open_store`` import at boot within the import window; first writes import absent stores.
+Reads never import: present facts give ``StoreMigrating`` until publication, no facts give empty.
+Writes require a closed import window and PUBLISHED phase; ``service`` serves importer/exporter/seam."""
 
 from __future__ import annotations
 
@@ -45,17 +44,14 @@ _APPLICATION_ID = {TIER_ENFORCED: 0x4F554345, TIER_NAME: 0x4F55434E}
 TYPED_COLUMNS = ("status", "parent_task_id", "root_task_id", "delegation_role", "superseded_by",
                  "retry_task_id", "project_id", "ts", "updated_at", "child_drive_root",
                  "headless_child_drive_root", "drive_root", "presence_binding_id")
-# set name -> flag column; the writer decides ``pending_drive`` (nonterminal, or terminal files not ready).
-# A column added after schema 1 is nullable: a whole-row write by an older body (its own column list)
-# leaves NULL, "not derived", which the next boot derives (``store_import._derive_flag_columns``).
+# set name -> flag column; writer decides ``pending_drive`` (nonterminal or files not ready). Post-schema-1
+# flags are nullable: old bodies leave NULL (not derived); ``store_import._derive_flag_columns`` fills it at boot.
 FLAG_COLUMNS = {"synthesis": "owes_synthesis", "terminal_projection": "owes_terminal_projection",
                 "promotions": "has_pending_promotion", "pause_notices": "has_pause_notices",
                 "delegated_runs": "delegated_runs_unreconciled", "pending_drives": "pending_drive",
                 "owner_questions": "has_owner_questions"}
-# The per-operation projections of a document that live in ``task_handoffs`` rows (``kind`` = the
-# field): a claim, a wait or a retirement writes its one row, never the body. The body keeps a
-# present key as ``{}`` (its place and presence); ``load`` puts the rows back there, so a document
-# round-trips byte for byte. A key the body never had appears while it has rows.
+# Per-operation ``task_handoffs`` (kind = field): claim/wait/retirement writes one row, not the body.
+# Present keys stay as {} at their place; load restores exact bytes. A new key appears while it has rows.
 ROW_BACKED_FIELDS: Tuple[str, ...] = ("launch_handoffs", "model_waits", "retired_model_consumers", "swarm_fanouts")
 TERMINAL_WRITES = "terminal_writes"  # meta: terminal row writes (``obligations.task_written``, which stamps ``terminal_seq``)
 TERMINAL_SEQ_INDEX = "CREATE INDEX IF NOT EXISTS tasks_terminal_seq ON tasks(terminal_seq) WHERE terminal_seq IS NOT NULL;"
@@ -944,7 +940,8 @@ def busy(exc: BaseException) -> bool:
 
 
 def commit(conn: sqlite3.Connection) -> None:
-    """COMMIT, rolling back on failure; the ``sqlite3.OperationalError`` is the caller's to type."""
+    """COMMIT, rolling back on failure (``store_timing.ended`` stamps it, marks a busy error); the caller types it."""
+    began = store_timing.clock()
     try:
         conn.execute("COMMIT")
     except sqlite3.OperationalError as exc:
@@ -954,7 +951,9 @@ def commit(conn: sqlite3.Connection) -> None:
             exc.rollback_confirmed = not conn.in_transaction
         except sqlite3.Error:
             pass
+        store_timing.ended(conn, began, exc if busy(exc) else None)
         raise
+    store_timing.ended(conn, began)
 
 
 def fsync_directory(directory: pathlib.Path) -> None:
@@ -975,21 +974,24 @@ def fsync_directory(directory: pathlib.Path) -> None:
 @contextlib.contextmanager
 def transaction(conn: sqlite3.Connection, *, write: bool, commit_wait_sec: Optional[float] = None,
                 finish: Optional[Callable[[], None]] = None) -> Iterator[sqlite3.Connection]:
-    """One transaction: a write locks at ``BEGIN IMMEDIATE``, a read at ``SELECT 1`` (its snapshot, its only wait);
-    an error rolls back and propagates; ``finish`` (``commit``) ends it, a write's COMMIT waiting ``commit_wait_sec``
-    for readers to drain (a read's never waits). The hold goes to ``store_timing``, a failed COMMIT's as failed."""
-    began, held = False, None
+    """Lock at BEGIN IMMEDIATE (write) or SELECT 1 (read snapshot's only wait); errors roll back and propagate.
+    ``finish`` (default ``commit``) ends it on ``conn``; only writes wait ``commit_wait_sec`` for readers.
+    ``store_timing`` records acquire/body/end, failed holds and busy refusals; busy errors carry their phase."""
+    began, held, ending = False, None, None
+    asked = store_timing.clock()
     try:
         conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         began = True
         if not write:  # take the read lock now
             conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
-        held = store_timing.started()
+        held = store_timing.started(conn)
         if write and commit_wait_sec is not None:
             conn.execute(f"PRAGMA busy_timeout = {int(commit_wait_sec * 1000)}")
         yield conn
+        ending = store_timing.clock()
         (finish or (lambda: commit(conn)))()
     except BaseException as exc:
+        failed_at = store_timing.clock()
         if not began:
             exc.rollback_confirmed = not conn.in_transaction
         elif not (getattr(exc, "rollback_confirmed", False) and not conn.in_transaction):
@@ -998,10 +1000,10 @@ def transaction(conn: sqlite3.Connection, *, write: bool, commit_wait_sec: Optio
                 exc.rollback_confirmed = not conn.in_transaction
             except sqlite3.Error:
                 exc.rollback_confirmed = False
-        if held:
-            store_timing.record(conn, write, held, failed=True)
+        store_timing.failed(exc, conn, write, held, asked=asked, ending=ending, failed_at=failed_at,
+                            contended=isinstance(exc, sqlite3.OperationalError) and busy(exc))
         raise
-    store_timing.record(conn, write, held)
+    store_timing.record(conn, write, held, asked=asked, ending=ending)
 
 
 def store_path(root: Any) -> pathlib.Path:
@@ -1009,8 +1011,7 @@ def store_path(root: Any) -> pathlib.Path:
 
 
 def generation_stamped(root: Any) -> bool:
-    """Whether ``state/migrations.json`` records a completed store generation (a torn
-    file proves nothing and reads as unstamped)."""
+    """Completed generation in ``state/migrations.json``; a torn file reads as unstamped."""
     from ouroboros.startup_migrations import watermarks
 
     try:
@@ -1049,7 +1050,7 @@ def retired_sibling(root: Any) -> Optional[pathlib.Path]:
 
 def _typed(exc: sqlite3.Error) -> StoreError:
     if isinstance(exc, sqlite3.OperationalError) and busy(exc):
-        error = StoreBusy(f"current store busy: {exc}", reason="contention")
+        error = StoreBusy(f"current store busy: {exc}{store_timing.busy_note(exc)}", reason="contention")
         if hasattr(exc, "rollback_confirmed"):
             error.rollback_confirmed = exc.rollback_confirmed
         return error
@@ -1578,11 +1579,9 @@ class Txn:
 
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
                 pending_drive: Any = None) -> Optional[Dict[str, Any]]:
-    """Merge CURRENT under the published write gate; ``None`` commits without a write.
-    ``pending_drive`` is a value or ``(txn, current, updated) -> Optional[bool]``, ``current`` the
-    pristine document (the mutator works on its own copy, decoded from the same stored bytes, not
-    an encoded deep copy). Schema preparation precedes the callback, including on a first-touched
-    old child store."""
+    """Merge CURRENT under the published write gate; ``None`` commits without writing. Schema preparation
+    precedes callbacks, including for old child stores. ``pending_drive`` is a value or (txn, current, updated)
+    -> Optional[bool]; pristine current and the mutator's copy are decoded separately from the same bytes."""
     while True:
         with open_store(root, write=True) as txn:
             if int(txn.meta("schema_version") or 1) >= SCHEMA_VERSION:

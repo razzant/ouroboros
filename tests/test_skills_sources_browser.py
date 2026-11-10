@@ -7,6 +7,7 @@ mirror it; the tests read what the page asks for (method, address, body) and wha
 from __future__ import annotations
 
 import copy
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -271,6 +272,293 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
             {"id": "clawhub/steipete/weather", "turn_on_when_ready": True, "replace": True}]
         assert [path for path, _ in skills.posts] == ["/api/skill-catalog/install"], "no separate uninstall"
         assert no_overflow(page)
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+def _claw_item(slug, downloads, *, updated="2026-11-01T10:00:00+00:00"):
+    return {"id": f"clawhub/{slug}", "source_id": "clawhub", "source_name": "ClawHub", "trust": "review",
+            "name": slug.replace("-", "_"), "registry_slug": slug, "description": f"{slug} helps with one job.",
+            "category": [], "version": "1.0.0", "digest": "", "official": False, "recommended": False, "signals": None,
+            "withdrawn": None, "type": "", "needs_keys": [], "permissions": [], "installed": None,
+            "registry_stats": {"downloads": downloads, "stars": downloads // 100}, "owner": "someone", "updated_at": updated}
+
+
+class _ClawHub:
+    """The search route as the host answers it: pages by cursor, popular or updated."""
+
+    def __init__(self, skills):
+        self.skills, self.queries = skills, []
+        skills.answers["/api/skill-catalog/search"] = self.answer
+
+    def answer(self, request):
+        query = parse_qs(urlsplit(request.url).query)
+        self.queries.append({key: values[0] for key, values in query.items()})
+        if query.get("q"):
+            return {"items": [_claw_item("typed-hit", 5)]}
+        if query.get("sort") == ["updated"]:
+            return {"items": [_claw_item("just-uploaded", 0)]}
+        if query.get("cursor"):
+            return {"items": [_claw_item("third", 300), _claw_item("second", 400)]}
+        return {"items": [_claw_item("first", 491000), _claw_item("second", 400)], "next_cursor": "skillcat:{\"offset\":2}"}
+
+
+def _board_names(page):
+    return page.locator("[data-browse-board] .marketplace-card").evaluate_all("cards => cards.map(card => card.dataset.item)")
+
+
+def _choose_clawhub(page):
+    _tab(page, "browse")
+    page.locator('[data-browse-source] option[value="clawhub"]').wait_for(state="attached")
+    assert page.locator('[data-browse-source] option[value="clawhub"]').inner_text() == "ClawHub"
+    page.locator("[data-browse-source]").select_option("clawhub")
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("chromium", 390)])
+def test_clawhub_chosen_alone_shows_its_popular_page_and_pages_on(skills_browser, browser_name, width):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 700})
+        skills = _open(page)
+        claw = _ClawHub(skills)
+        _tab(page, "browse")
+        _card(page, "ouroboros/weather").wait_for()
+        assert claw.queries == [], "All sources never asks the registry when Browse opens"
+        all_status = page.locator("[data-browse-status]").inner_text()
+        assert "ClawHub joins the list when you search" in all_status
+        capture(page, browser_name, width, "clawhub-all-sources")
+
+        skills.hold = {"/api/skill-catalog/search"}
+        _choose_clawhub(page)
+        skills.wait_for_request("/api/skill-catalog/search")
+        assert "Asking ClawHub for its most downloaded skills" in page.locator("[data-browse-status]").inner_text()
+        assert "Nothing to show" not in page.locator("[data-browse-board]").inner_text()
+        skills.hold.clear()
+        skills.release("/api/skill-catalog/search")
+        _card(page, "clawhub/first").wait_for()
+        assert claw.queries == [{"source": "clawhub", "sort": "popular"}]
+        assert _board_names(page) == ["clawhub/first", "clawhub/second"], "the registry's order, never re-sorted here"
+        status = page.locator("[data-browse-status]").inner_text()
+        assert "2 skills from ClawHub, most downloaded first" in status and "search all of ClawHub" in status
+        assert "491.0k downloads" in _card(page, "clawhub/first").inner_text()
+        assert "Ouroboros reviews it before it runs" in _card(page, "clawhub/first").inner_text()
+        sort = page.locator("[data-browse-sort]")
+        assert sort.locator("option").all_inner_texts() == ["Popular", "Recently updated"] and sort.input_value() == "popular"
+        assert no_overflow(page)
+        capture(page, browser_name, width, "clawhub-popular")
+
+        # A page that comes back after the person moved on hands the keyboard nowhere: not when another source
+        # was chosen meanwhile (that answer is left behind), nor when they put the focus somewhere else.
+        more = page.locator('[data-browse-action="browse_more"]')
+        search = page.locator("[data-browse-search]")
+        source = page.locator("[data-browse-source]")
+        skills.hold = {"/api/skill-catalog/search"}
+        more.focus()
+        more.press("Enter")
+        skills.wait_for_request("/api/skill-catalog/search")
+        source.select_option("all")
+        _card(page, "ouroboros/weather").wait_for()
+        skills.hold.clear()
+        with page.expect_request_finished(lambda request: "/api/skill-catalog/search" in request.url):
+            skills.release("/api/skill-catalog/search")
+        page.wait_for_timeout(150)
+        assert page.evaluate("document.activeElement.closest('.marketplace-card')") is None, "a left-behind page moves no focus"
+        assert _card(page, "clawhub/third").count() == 0
+        source.select_option("clawhub")
+        _card(page, "clawhub/second").wait_for()
+        skills.hold = {"/api/skill-catalog/search"}
+        more.focus()
+        more.press("Enter")
+        skills.wait_for_request("/api/skill-catalog/search")
+        search.focus()
+        skills.hold.clear()
+        skills.release("/api/skill-catalog/search")
+        _card(page, "clawhub/third").wait_for()
+        page.wait_for_timeout(150)
+        assert page.evaluate("document.activeElement.matches('[data-browse-search]')"), "the focus stays where the person put it"
+        source.select_option("all")
+        _card(page, "ouroboros/weather").wait_for()
+        source.select_option("clawhub")
+        _card(page, "clawhub/second").wait_for()
+        assert _board_names(page) == ["clawhub/first", "clawhub/second"]
+        skills.hold = {"/api/skill-catalog/search"}
+        more.focus()
+        more.press("Enter")
+        skills.wait_for_request("/api/skill-catalog/search")
+        _card(page, "clawhub/first").locator('[data-browse-action="open"]').focus()
+        skills.hold.clear()
+        skills.release("/api/skill-catalog/search")
+        _card(page, "clawhub/third").wait_for()
+        page.wait_for_timeout(150)
+        assert page.evaluate("document.activeElement.closest('.marketplace-card')?.dataset.item") == "clawhub/first", \
+            "a card the person moved to keeps the keyboard when the page grows"
+        source.select_option("all")
+        _card(page, "ouroboros/weather").wait_for()
+        source.select_option("clawhub")
+        _card(page, "clawhub/second").wait_for()
+
+        # Show more appends the next page by its cursor, keeps the place and hands the keyboard on; a repeat is one card.
+        assert more.inner_text() == "Show more"
+        more.focus()
+        scroller = "document.querySelector('.skills-scroll')"
+        page.evaluate(f"{scroller}.scrollTop = {scroller}.scrollHeight")
+        before = page.evaluate(f"{scroller}.scrollTop")
+        more.press("Enter")
+        _card(page, "clawhub/third").wait_for()
+        assert claw.queries[-1] == {"source": "clawhub", "sort": "popular", "cursor": 'skillcat:{"offset":2}'}
+        assert _board_names(page) == ["clawhub/first", "clawhub/second", "clawhub/third"]
+        assert not more.is_visible(), "no next page, no button"
+        assert page.evaluate("document.activeElement.closest('.marketplace-card')?.dataset.item") == "clawhub/third"
+        assert page.evaluate(f"{scroller}.scrollTop") >= before - 1, "the reader stays where the new cards landed"
+        assert no_overflow(page)
+        capture(page, browser_name, width, "clawhub-show-more")
+
+        # A card installs through the same id as a search hit.
+        skills.answers["/api/skill-catalog/install"] = {"ok": True, "job_id": "job-c", "name": "first", "basis": "review"}
+        _card(page, "clawhub/first").locator('[data-browse-action="install"]').click()
+        skills.wait_for_count(("POST", "/api/skill-catalog/install"), 1)
+        assert skills.posted("/api/skill-catalog/install") == [{"id": "clawhub/first", "turn_on_when_ready": True}]
+
+        # Changing the order reads the first page of that order.
+        sort.select_option("updated")
+        _card(page, "clawhub/just-uploaded").wait_for()
+        assert claw.queries[-1] == {"source": "clawhub", "sort": "updated"}
+        assert _board_names(page) == ["clawhub/just-uploaded"]
+        assert "recently updated first" in page.locator("[data-browse-status]").inner_text()
+
+        # A typed search is the same as before, and clearing it brings the registry's page back.
+        count = len(claw.queries)
+        search.fill("weather")
+        search.press("Enter")
+        _card(page, "clawhub/typed-hit").wait_for()
+        assert claw.queries[count] == {"q": "weather", "source": "clawhub"}
+        search.fill("")
+        _card(page, "clawhub/first").wait_for()
+        assert sort.input_value() == "popular" and claw.queries[-1] == {"source": "clawhub", "sort": "popular"}
+
+        # Back to All sources: no registry cards and no further request.
+        count = len(claw.queries)
+        page.locator("[data-browse-source]").select_option("all")
+        _card(page, "ouroboros/weather").wait_for()
+        assert _card(page, "clawhub/first").count() == 0 and len(claw.queries) == count
+        assert sort.locator("option").all_inner_texts()[:2] == ["Popular", "Name"]
+
+        # An order or a category of the catalogs doesn't empty the registry's page: it has its own, and no categories.
+        sort.select_option("name")
+        page.locator('[data-browse-category="games"]').click()
+        page.locator("[data-browse-source]").select_option("clawhub")
+        _card(page, "clawhub/first").wait_for()
+        assert claw.queries[-1] == {"source": "clawhub", "sort": "popular"}
+        assert not page.locator("[data-browse-categories]").is_visible()
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+class _LongClawHub:
+    """A first page taller than the window, then a second page of two."""
+
+    def __init__(self, skills):
+        skills.answers["/api/skill-catalog/search"] = self.answer
+
+    def answer(self, request):
+        if parse_qs(urlsplit(request.url).query).get("cursor"):
+            return {"items": [_claw_item("late-one", 2), _claw_item("late-two", 1)]}
+        return {"items": [_claw_item(f"skill-{n:02d}", 10000 - n) for n in range(24)], "next_cursor": "skillcat:{\"offset\":24}"}
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("chromium", 390)])
+def test_show_more_keeps_the_reader_in_place_in_an_overflowing_shell(skills_browser, browser_name, width):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 700})
+        skills = _open(page)
+        # The harness lays the page out at its full height; the app's shell holds it to the window,
+        # so the Skills panel itself scrolls. Hold it the same way here.
+        page.add_style_tag(content="main { height: 100vh; }")
+        _LongClawHub(skills)
+        _choose_clawhub(page)
+        _card(page, "clawhub/skill-23").wait_for()
+        scroller = "document.querySelector('.skills-scroll')"
+        page.wait_for_function(f"{scroller}.scrollHeight > {scroller}.clientHeight + 400")
+        more = page.locator('[data-browse-action="browse_more"]')
+        more.focus()
+        page.evaluate(f"{scroller}.scrollTop = {scroller}.scrollHeight")
+        before = page.evaluate(f"{scroller}.scrollTop")
+        assert before > 400, "the page overflows the shell, so a jump to the top would show"
+
+        # While the next page is read, the shown cards stay exactly where they are.
+        skills.hold = {"/api/skill-catalog/search"}
+        more.press("Enter")
+        skills.wait_for_request("/api/skill-catalog/search")
+        assert more.inner_text() == "Reading…"
+        assert page.evaluate(f"{scroller}.scrollTop") >= before - 1
+        skills.hold.clear()
+        skills.release("/api/skill-catalog/search")
+
+        # The appended page lands below them; the reader stays and the keyboard is on the first new card, on screen.
+        _card(page, "clawhub/late-two").wait_for()
+        page.wait_for_function("document.activeElement.closest('.marketplace-card')?.dataset.item === 'clawhub/late-one'")
+        page.wait_for_timeout(150)
+        assert page.evaluate(f"{scroller}.scrollTop") >= before - 1, "the reader stays where the new cards landed"
+        top, bottom, height = page.evaluate(
+            "(() => { const r = document.activeElement.getBoundingClientRect(); return [r.top, r.bottom, innerHeight]; })()")
+        assert top >= 0 and bottom <= height, "the focused new card is on screen"
+        assert no_overflow(page)
+        capture(page, browser_name, width, "clawhub-show-more-long")
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
+def test_clawhub_that_cannot_be_read_says_so_and_can_be_retried(skills_browser, browser_name, width):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 700})
+        skills = _open(page)
+        skills.answers["/api/skill-catalog/search"] = {"items": [], "registry_error": "ClawHub: HTTP 503 from registry"}
+        _choose_clawhub(page)
+        status = page.locator("[data-browse-status]")
+        page.wait_for_function("document.querySelector('[data-browse-status]').textContent.includes('Couldn’t read ClawHub')")
+        assert "HTTP 503 from registry" in status.inner_text() and status.get_attribute("data-tone") == "danger"
+        board = page.locator("[data-browse-board]")
+        assert "Nothing to show" not in board.inner_text() and "Nothing was loaded from ClawHub" in board.inner_text()
+        assert not page.locator('[data-browse-action="browse_more"]').is_visible()
+        assert no_overflow(page)
+        capture(page, browser_name, width, "clawhub-error")
+
+        # Try again asks once more; a transport failure reads the same way, and a good answer clears it.
+        retry = page.locator('[data-browse-action="browse_retry"]')
+        skills.fail("/api/skill-catalog/search", "no route to host")
+        retry.click()
+        page.wait_for_function("document.querySelector('[data-browse-status]').textContent.includes('no route')")
+        assert "Couldn’t read ClawHub" in status.inner_text()
+        claw = _ClawHub(skills)
+        page.locator('[data-browse-action="browse_retry"]').click()
+        _card(page, "clawhub/first").wait_for()
+        assert status.get_attribute("data-tone") == "muted"
+
+        # A page that fails keeps what is shown, says why, and Show more retries the same cursor.
+        skills.answers["/api/skill-catalog/search"] = {"items": [], "registry_error": "ClawHub: rate limited"}
+        more = page.locator('[data-browse-action="browse_more"]')
+        more.click()
+        page.wait_for_function("document.querySelector('[data-browse-status]').textContent.includes('rate limited')")
+        assert "couldn’t read more from ClawHub" in status.inner_text()
+        assert _board_names(page) == ["clawhub/first", "clawhub/second"] and more.is_visible()
+        skills.answers["/api/skill-catalog/search"] = claw.answer
+        more.click()
+        _card(page, "clawhub/third").wait_for()
+
+        # Official only hides unmarked registry skills and says so, instead of an unexplained blank.
+        page.locator(".skills-official-toggle").click()
+        page.wait_for_function("document.querySelector('[data-browse-board]').textContent.includes('Official only hides')")
+        assert "Nothing to show" not in page.locator("[data-browse-board]").inner_text()
+        assert not more.is_visible()
     finally:
         if skills:
             skills.close(browser)

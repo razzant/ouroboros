@@ -889,6 +889,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
     host already owes, or no usable source keeps the ordinary interrupted path;
     a returned owner turn cut before its first save starts again from its input (D5).
     """
+    from ouroboros.project_admission import returned_basis
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
     from supervisor.task_admission import SEED_RETURN, seed_returnable
@@ -912,6 +913,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
                                 else "stopped" if _cancel_intent_active(root, task_id) else "")
             if refused[task_id]:
                 continue
+            task.update(returned_basis(task, stored, attempt))  # #2725: a room basis its result holds, the row lacks
             auto = task_id in returning
             source_cause = "restart" if auto and cause != "update_aborted" else cause
             seed = task.pop(SEED_RETURN, None)  # the stop's own decision (``retain_saved_running``)

@@ -212,6 +212,7 @@ def validate_evidence_snapshot(value: Any, *, subject_hash: str = "") -> Optiona
         "subject_hash": subject,
         "observed_at": observed,
         "seats": seats,
+        **({"unread_outcomes": True} if value.get("unread_outcomes") else {}),
     }
 
 
@@ -476,7 +477,8 @@ def enrich_author_commit(author: Dict[str, Any], *, actors: Any, prior_decision:
     return body
 
 
-_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta")
+_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta",
+                "decided_by_task")  # the task that decided, distinct from the record's (a recorded Continue successor)
 
 
 def decision_for_ledger(decision: Any, record_id: str) -> Dict[str, Any]:
@@ -608,7 +610,8 @@ def doctrine_result_lines(decision: Any) -> List[str]:
         )
     snapshot = decision.get(EVIDENCE_KIND)
     if isinstance(snapshot, dict) and snapshot.get("feedback_at_decision"):
-        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}")
+        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}"
+                     + ("; the record held outcomes this decision did not read" if snapshot.get("unread_outcomes") else ""))
     lines.append("landing: this commit, recorded separately from the evidence at decision.")
     return lines
 

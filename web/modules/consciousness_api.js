@@ -68,6 +68,8 @@ export function normalizePlace(raw) {
         label: text(place.label),
         revision: count(place.revision),
         state: text(place.state),
+        // The host's derived fact: consciousness is off (or Panic) and the place is not Paused, so it only hears.
+        onlyHears: place.only_hears === true,
         destination: text(place.destination),
         icon: normalizeIcon(place.icon),
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
@@ -161,7 +163,7 @@ export function normalizeWake(raw) {
     const wake = object(raw) || {};
     return {
         taskId: text(wake.task_id), chatId: count(wake.chat_id), cause: text(wake.cause),
-        placeLabel: text(wake.place_label), conversation: text(wake.conversation),
+        placeLabel: text(wake.place_label), placeId: text(wake.place_id), conversation: text(wake.conversation),
         as: object(wake.as),
         startedAt: text(wake.started_at), endedAt: text(wake.ended_at), firstReplyAt: text(wake.first_reply_at),
         live: wake.live === true, phase: text(wake.phase), quiet: wake.quiet === true,

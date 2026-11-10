@@ -201,7 +201,18 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path]) -> 
                 measured, local = stream_artifact_file(row["local"], expected=expected), pathlib.Path(row["local"])
             else:
                 staging = temporary_sibling(root / SELECTED_DIR / name)
-                measured = copy_artifact_file(row.get("local") or row["source"], staging, expected=expected)
+                origin = row.get("local") or row["source"]
+                from ouroboros import work_domain
+
+                if work_domain.is_work(origin):  # a work file's bytes: the streamed confined intake, never a service open
+                    staging.parent.mkdir(parents=True, exist_ok=True)
+                    with staging.open("xb") as sink:
+                        measured = work_domain.measure(origin, sink)
+                    if expected and any(expected[key] != measured[key] for key in ("sha256", "size")):
+                        staging.unlink(missing_ok=True)
+                        raise ArtifactIdentityError(f"selected input changed: {origin}")
+                else:
+                    measured = copy_artifact_file(origin, staging, expected=expected)
                 local = root / SELECTED_DIR / measured["sha256"][:ADDRESS_HEX] / name  # hash-stable, never positional
                 local.parent.mkdir(parents=True, exist_ok=True)
                 if local.exists() or local.is_symlink():  # a repeated selection's same bytes stay; others refuse
@@ -303,8 +314,12 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
     turn = thread_folder is not None
     outside = [{**row, "carrier": "outside_scope_path"} for row in (rows if entries else copy_selection(rows, None))
                ] if container is None or turn else []  # the run keeps its folder and names the retained copies
-    note = _selection_note(pathlib.Path(outside[0]["retained"]).parents[3] / "inputs.json", outside,
-                           inside_scope=False) if outside else ""
+    manifest = pathlib.Path(outside[0]["retained"]).parents[3] / "inputs.json" if outside else None
+    beside = thread_folder or getattr(ctx, "workspace_root", "") or (manifest.parent if manifest else "")
+    if outside and (delivered := _work_delivery(ctx, invocation_id, None, outside, beside)) is not None:
+        outside = [{**row, "local": str(delivered / _selected_rel(row))} for row in outside]  # what the work reads
+        manifest = delivered / "inputs.json"
+    note = _selection_note(manifest, outside, inside_scope=False) if outside else ""
     if container is None:
         return ReadonlyInputs("", "\n" + note, outside, note)
     if turn:
@@ -314,6 +329,9 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
     lineage = [] if rows else _lineage_copies(ctx, root)  # a nonempty selection is the whole set
     receipt = [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
     _write_manifest(root, lineage, receipt)
+    if (delivered := _work_delivery(ctx, invocation_id, root, receipt, root)) is not None:  # the scope the engine reads
+        receipt = [{**row, "local": str(delivered / pathlib.Path(row["local"]).relative_to(root))} for row in receipt]
+        root = delivered
     note = note or (_selection_note(root / "inputs.json", receipt, inside_scope=True, scope=root) if receipt else "")
     return ReadonlyInputs(str(root), (
         "\nREADONLY INPUTS: This invocation has its own scratch scope, not a workspace grant. "
@@ -321,6 +339,59 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
     ) + note, receipt, note)
+
+
+def _selected_rel(row: Dict[str, Any]) -> str:
+    return f"{SELECTED_DIR}/{row['sha256'][:ADDRESS_HEX]}/{pathlib.Path(row['local']).name}"
+
+
+def _work_delivery(ctx: Any, invocation_id: str, root: Optional[pathlib.Path], rows: List[Dict[str, Any]],
+                   execution: Any) -> Optional[pathlib.Path]:
+    """Managed (``work_domain``): this invocation's inputs materialized in the work domain, so the work engine reads
+    their bytes there and nothing of the service. The folder is a session scratch its task's drive owns
+    (``session_scratch_owners/inputs-<invocation>``, made by ``workspace_preflight._session_scratch`` apart from
+    ``execution``): the custody pass retires it once that task is over or its drive settles, a producer's retention
+    marker or an unlistable subtree holding it as any scratch's, and a plan-thread turn keeps naming it meanwhile.
+    ``root``: the folderless scope the service staged, mirrored whole (``inputs.json`` included); else the selected
+    rows' verified copies under ``inputs/selected`` with their own ``inputs.json``. One tar stream the container
+    unpacks as the work domain. None unmanaged: the service's own copies stay what the run reads."""
+    from ouroboros import work_domain
+
+    if not work_domain.managed():
+        return None
+    from ouroboros.task_results import validate_task_id
+    from ouroboros.tool_access_paths import canonical_data_root
+    from ouroboros.workspace_preflight import (
+        SESSION_SCRATCH_DIRNAME,
+        _note_open_scratch,
+        _owned_directory,
+        _session_scratch,
+    )
+
+    task_id, key, execution = validate_task_id(str(getattr(ctx, "task_id", "") or "")), f"inputs-{invocation_id}", \
+        work_domain.settle(execution)
+    owner = _owned_directory(getattr(ctx, "drive_root", ""), ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, key), execution)
+    target = _session_scratch(owner, execution)
+    _note_open_scratch(canonical_data_root(ctx), task_id, key, owner)
+    members = []
+    if root is not None:
+        for folder, _dirs, files in os.walk(root, followlinks=False):
+            for name in sorted(files):
+                path = pathlib.Path(folder) / name
+                if not path.is_symlink():
+                    members.append((path.relative_to(root).as_posix(), path,
+                                    stat.S_IMODE(path.stat().st_mode)))
+    else:
+        selected = []
+        for row in rows:
+            rel = _selected_rel(row)
+            members.append((rel, pathlib.Path(row["local"]), 0o644))  # the service's own verified copy
+            selected.append({"root": row["root"], "source": row["source"], "local": rel, "selected_path": row["path"],
+                             "source_sha256": row["sha256"], "source_size": row["size"],
+                             "sha256": row["sha256"], "size": row["size"]})
+        members.append(("inputs.json", json.dumps(selected, ensure_ascii=False, indent=2).encode("utf-8"), 0o644))
+    work_domain.import_tree(target, members)
+    return target
 
 
 def _write_manifest(root: pathlib.Path, lineage: List[Dict[str, Any]], receipt: List[Dict[str, Any]]) -> None:

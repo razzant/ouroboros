@@ -1298,13 +1298,15 @@ def registered_task_artifact(drive_root: Any, task_id: str, name: str) -> Option
     return dict(row) if isinstance(row, dict) else None
 
 
-def registered_source_capture(ctx: Any, source: Any, manifest: Any = None) -> Optional[Dict[str, Any]]:
+def registered_source_capture(ctx: Any, source: Any, manifest: Any = None, *,
+                              spelled: bool = False) -> Optional[Dict[str, Any]]:
     """The row capturing ``source`` (path resolved in this task's store) from ``manifest`` or the manifest
     file, else None. A registered store file is its own capture, mutable or immutable; another source has
-    only its mutable copy, never an immutable delivery of it (``send_file``, retained material)."""
+    only its mutable copy, never an immutable delivery of it (``send_file``, retained material). ``spelled``:
+    ``source`` is a work path, compared as spelled (the service never resolves it)."""
     drive_root, task_id = pathlib.Path(getattr(ctx, "drive_root")), task_id_for_artifacts(ctx)
     store = task_artifact_dir_path(drive_root, task_id).resolve(strict=False)
-    wanted = pathlib.Path(source).expanduser().resolve(strict=False)
+    wanted = pathlib.Path(source) if spelled else pathlib.Path(source).expanduser().resolve(strict=False)
     rows = (read_json_dict(store / _ARTIFACT_MANIFEST) or {}).get("artifacts") if manifest is None else manifest
     for row in (rows.values() if isinstance(rows, dict) else ()):
         path = pathlib.Path(str(row["path"])).resolve(strict=False) if isinstance(row, dict) and row.get("path") else None
@@ -1339,9 +1341,43 @@ def _archive_previous_artifact_version(drive_root: pathlib.Path, task_id: str, d
             continue
 
 
-def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str], *, kind: str = "user_file", immutable: bool = False, expected: Any = None) -> Dict[str, Any] | None:
+def _copy_work_file_to_task_artifacts(ctx: Any, source: pathlib.Path, *, kind: str, immutable: bool,
+                                      expected: Any) -> Dict[str, Any] | None:
+    """A work file's copy: its bytes read through the confined intake (``work_domain.read_bytes``; a link on its
+    path is the work domain's own read), never a service open of its pathname, staged in a private folder and
+    published like any other source; the record names the work path it came from."""
+    import errno
+    import shutil
+    import tempfile
+
+    from ouroboros import work_domain
+
+    private = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-work-file-")).resolve()
+    try:
+        staged = private / source.name
+        try:
+            with staged.open("xb") as sink:  # streamed in bounded chunks, never held whole
+                work_domain.measure(source, sink)
+        except OSError as exc:  # absent, or not a regular file: as a missing service file is
+            staged.unlink(missing_ok=True)
+            if not isinstance(exc, FileNotFoundError) and exc.errno != errno.EINVAL:
+                raise
+            if not (immutable and isinstance(expected, dict) and expected.get("name")):
+                return None
+        return copy_file_to_task_artifacts(ctx, staged, kind=kind, immutable=immutable, expected=expected, logical=source)
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str], *, kind: str = "user_file", immutable: bool = False, expected: Any = None,
+                                logical: Any = None) -> Dict[str, Any] | None:
     """Copy a generated file, preserving an immutable rebase's original identity. A store file keeps
     its source and kind while its bytes stay unchanged; a conversion becomes its own result."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(source_path):
+        return _copy_work_file_to_task_artifacts(ctx, work_domain.settle(source_path), kind=kind,
+                                                 immutable=immutable, expected=expected)
     source = pathlib.Path(source_path).expanduser().resolve(strict=False)
     if not source.is_file() and not (immutable and isinstance(expected, dict) and expected.get("name")):
         return None
@@ -1353,7 +1389,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
     manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
     manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
-    captured = registered_source_capture(ctx, source, manifest)  # a store file's own row, else its mutable copy
+    captured = registered_source_capture(ctx, logical or source, manifest, spelled=logical is not None)  # own row, else mutable copy
     if captured and captured.get("immutable"):  # only a store file's own row: an immutable capture stays one
         immutable, expected = True, expected or captured
     dest = artifact_dir / source.name
@@ -1382,7 +1418,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     ):
         suffix = source.suffix
         stem = source.name[: -len(suffix)] if suffix else source.name
-        digest = sha256(str(source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
+        digest = sha256(str(logical or source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
         dest = artifact_dir / f"{stem}.{digest}{suffix}"
     if reused_existing_source and dest.resolve(strict=False) != source.resolve(strict=False):  # user files and process outputs alike
         _archive_previous_artifact_version(drive_root, task_id, dest, source)
@@ -1396,7 +1432,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
                        and captured.get("sha256") == measured["sha256"]) else {}
     record = {"kind": own.get("kind") or kind, "name": dest.name,
               "path": str(dest), **measured, "status": ARTIFACT_STATUS_READY, "errors": [],
-              "source_path": own.get("source_path") or str(source), **({"immutable": True} if immutable else {})}
+              "source_path": own.get("source_path") or str(logical or source), **({"immutable": True} if immutable else {})}
     _register_task_artifact_records(artifact_dir, [record])
     return record
 

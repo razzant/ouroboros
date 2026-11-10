@@ -312,7 +312,7 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
                                      code="invalid_continuation_handle")
     record_terminal_money(root, entry, detail)  # the stopped run's money; the final settlement takes the successor's
     successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
-        continuation_of=entry.run_id, ledger_root=str(root),
+        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=custody.admitted_store_id(handle),
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
             "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
             "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})
@@ -330,6 +330,27 @@ def continuation_send(invocation: Any) -> bool:
     from ouroboros.review_continuation import PREFIX
 
     return str(getattr(invocation, "operation_id", "") or "").startswith(PREFIX)
+
+
+def prepare_continuation_send(invocation: Any, data_root: Any, record: Optional[Dict[str, Any]], run_id: str) -> None:
+    """Before EVERY POST of an explicit continuation's recorded start (no run bound yet), the first send and a crash or
+    restart replay alike: the released read-only checkout its START names is put back from the START row's exact
+    mapping (``review_continuation.RESTORE_KEY``, ``review_subject.restore_released_subject``). A failure raises before
+    any POST, so the start stays pending, decided and unsent, for a later collection to repair; a start with no
+    mapping (a writable seat, a live root, an older row) is untouched."""
+    from ouroboros.review_continuation import RESTORE_KEY
+
+    mapping = (record or {}).get(RESTORE_KEY)
+    if run_id or not continuation_send(invocation) or not isinstance(mapping, dict) or not mapping.get("root"):
+        return
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.tools.review_subject import restore_released_subject
+
+    try:
+        restore_released_subject(data_root, mapping)
+    except ValueError as exc:
+        raise ReviewRouteUnavailable(f"the reviewed checkout this continuation reads is unavailable: {exc}; its "
+                                     "recorded start was not POSTed", code="review_subject_unavailable") from exc
 
 
 def continuation_generation_end(invocation: Any, record: Optional[Dict[str, Any]], run_id: str) -> Optional[float]:

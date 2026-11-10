@@ -142,6 +142,8 @@ jobs:
       # `ui-smoke` reconciliation reads that verdict, never a hidden red.
       # Native tab-visibility cases need a display even though most tests are headless.
       # Playwright's --with-deps above installs Xvfb; keep it around both retry rounds.
+      # Each safe_test invocation keeps its own run directory (custom frames, startup logs) under
+      # ci-raw, outside the proof; a retry round's go beneath its retry-<k> (scripts/ci_retry.py).
       - name: Run complete host UI lane with collection and availability guards
         id: ui_tests
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
@@ -154,7 +156,8 @@ jobs:
           SEPARATE_UI_CADDY: ${{ steps.install_caddy.outputs.path }}
         run: >-
           xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
-          python -I -S scripts/safe_test.py -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host"
+          -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
           --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
@@ -176,7 +179,8 @@ jobs:
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
         run: >-
-          python -I -S scripts/safe_test.py -- python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/tools"
+          -- python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
           --junitxml="${{ runner.temp }}/ci-private/ui/tools.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/tools"
       # The lane's projection is this shard's proof for `ui-smoke`, not a diagnostic: an
@@ -196,6 +200,25 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence/ui/
           retention-days: 30
           if-no-files-found: error
+      # Diagnostics, never proof: only what each run's producers declared public (ui/, and the folders of
+      # diagnostic_directory(publish=True), startup logs among them; ouroboros/test_evidence.py run_diagnostics),
+      # at their run's relative path, in an artifact no proof download matches. A gap or failed upload is
+      # diagnostics_incomplete.
+      - name: Select UI diagnostics for publication
+        id: ui_diagnostics_export
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        continue-on-error: true
+        run: python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" "${{ runner.temp }}/ci-diagnostics/ui"
+      - name: Upload UI diagnostics
+        id: ui_diagnostics
+        if: ${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-diagnostics-full-shard-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-diagnostics/ui/
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Summarize host UI test results
         id: ui_summary
         if: ${{ !cancelled() }}
@@ -239,7 +262,8 @@ jobs:
           ${{ !cancelled() &&
           (steps.ui_summary.outcome != 'success' ||
            (steps.browser_tools.outcome != 'skipped' && steps.tools_summary.outcome != 'success') ||
-           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '') }}
+           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '' ||
+           steps.ui_diagnostics_export.outcome == 'failure' || steps.ui_diagnostics.outcome == 'failure') }}
         run: |
           echo "::warning::UI diagnostics are incomplete; see the original test and reporting steps."
           echo "UI diagnostics_incomplete. The original test outcomes are unchanged." >> "$GITHUB_STEP_SUMMARY"

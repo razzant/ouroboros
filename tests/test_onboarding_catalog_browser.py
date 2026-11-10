@@ -27,7 +27,7 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         status=response["status"], json=response["body"]))
     page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
     page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
-    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback")
+    evidence = diagnostic_directory(tmp_path / "frames", "discovery-feedback", publish=True)
     compact = viewport[0] <= 900 or viewport[1] <= 820
     columns = 1 if viewport[0] <= 760 else 2
     measurements = {}
@@ -144,7 +144,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     expect(main.locator('[data-model-role-source] option[value="subscription:service"]')).to_have_text('Codex (model)')
     expect(main.locator('[data-model-role-status]')).to_have_text('')
     kept()
-    evidence = diagnostic_directory(tmp_path / 'frames', 'mixed-catalog')
+    evidence = diagnostic_directory(tmp_path / 'frames', 'mixed-catalog', publish=True)
     report = []
     for label, response, status, expected_main, note in (
         ('transport', {'error': 'Controlled offline'}, 503, ['same-model'], 'could not be read'),

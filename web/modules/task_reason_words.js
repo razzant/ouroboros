@@ -9,6 +9,7 @@ export const TASK_CAUSE_PHRASES = {
     author_stop: "Ouroboros stopped with unfinished work.",
     review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
     author_finish: "Ouroboros delivered this answer without the reviewers' sign-off.",
+    author_finish_pending: "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives.",
     review_degraded: "The reviewers did not reach a verdict on this answer.",
     infra_failure: "The review could not run because of an infrastructure failure, so there is no verdict.",
     acceptance_preparation_failed: "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
@@ -57,7 +58,7 @@ export const TASK_CAUSE_PHRASES = {
     context_overflow: "The task outgrew its context before it could finish cleanly",
     context_capacity: "This route's window cannot hold the task's context",
     required_reference_unavailable: "The handbook this task requires could not be read",
-    output_recovery_exhausted: "Empty length-limited replies exhausted recovery; saved work remains available",
+    output_recovery_exhausted: "Incomplete model replies exhausted recovery; saved work remains available",
     children_unabsorbed: "Some sub-task results were never folded in, so the task had to wrap up",
     // The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code.
     absolute_ceiling: "The task reached its maximum running time",
@@ -77,6 +78,9 @@ export const TASK_CAUSE_PHRASES = {
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
     delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     authoring_handover_incomplete: "The replacement model stopped before resuming tool work.",
+    // A helper set to run as a coding session that finished without a succeeded run of it (subagent_bootstrap).
+    configured_actor_incomplete: "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
+    configured_actor_unknown: "This helper was set to run as a coding session; whether that run succeeded is unknown.",
     delegated_custody_unreconciled: "Some delegated work was never reconciled.",
     // The one non-reason-code key: the task-result FIELD terminal_plan_review_open, a standing limitation.
     terminal_plan_review_open: "The plan review was still open when this answer was delivered",
@@ -134,16 +138,28 @@ const TOOL_NOUNS = {
     pr_merge: 'A pull request merge',
     review_change: 'A review request',
     finish_task: 'A finish request',
+    // The effects the main view names once command failures stay in the details (owner 09.11, A).
+    write_file: 'A file write',
+    edit_text: 'A file edit',
+    edit_batch: 'A file edit',
+    apply_patch: 'A file edit',
+    github_write: 'A GitHub write',
+    send_user_message: 'A message send',
+    schedule_subagent: 'A helper start',
+    commit_reviewed: 'A commit',
+    vcs_commit_reviewed: 'A commit',
+    skill_exec: 'A skill run',
 };
 const LISTED = 20;  // outcomes keeps at most this many errors per list
 
-/** The residual-warning clause naming the first recorded tool error that is not a failed read (owner 06.11, A) in
- *  plain words (never a tool name, its result text or a path), or '' when the record names none. */
+/** The residual-warning clause naming the first recorded LOUD tool error in plain words (never a tool name, its
+ *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a
+ *  details-only leftover (`details_only`, owner 09.11 A: a command that ran and failed, a call refused before running)
+ *  stay in the details. Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
 export function residualToolErrorsPhrase(execution = {}) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
     const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
-    // A failed read stays in the details (owner 06.11, A): the sentence names effects and commands.
-    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !item.read_only));
+    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
     const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
@@ -157,7 +173,10 @@ export function residualToolErrorsPhrase(execution = {}) {
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
-    const tail = listed[0].length >= LISTED || listed[1].length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
+    // "More" only when a capped list is loud through and through; otherwise the retained loud errors are counted exactly.
+    const capped = (listed[0].length >= LISTED && unresolved.length === listed[0].length)
+        || (listed[1].length >= LISTED && cosmetic.length === listed[1].length);
+    const tail = capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
     return fmt('{subject}{tail}.', { subject, tail });

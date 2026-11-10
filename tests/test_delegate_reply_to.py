@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import delegate_custody as custody
-from ouroboros.delegate_interactions import _delegate_answer, _waiting_on_user_payload
+from ouroboros.delegate_interactions import _ANSWER_NOTES, _delegate_answer, _waiting_on_user_payload
 from ouroboros.gateways.claudexor import pending_interactions
 from ouroboros.owner_mailbox import (acknowledged_task_message_ids, drain_owner_entries,
                                      write_task_message)
@@ -168,6 +168,43 @@ def test_multi_question_address_allows_an_explicit_partial_answer(setup):
     result = _delegate_answer(ctx, "run-1", "int-current", [{"question_id": "q-port", "free_text": "9090"}], reply_to=address)
     assert json.loads(result.text)["status"] == "delivered"
     assert len(stub.answers) == 1
+
+
+@pytest.mark.parametrize("delivery,note_key", [
+    (None, "delivered_blocking"), ("blocking", "delivered_blocking"),
+    ("async", "delivered_async"), ("some-future-kind", "delivered"),
+], ids=["legacy-row", "blocking", "async", "future-kind"])
+def test_an_addressed_delivered_says_what_its_own_row_held(setup, delivery, note_key):
+    """The address check reads the row anyway, so its receipt can be exact: a legacy row is
+    the old blocking meaning, and a kind this host does not know is claimed as neither."""
+    ctx, stub, address = setup
+    if delivery is not None:
+        stub.detail["pendingInteractions"][0]["delivery"] = delivery
+    out = json.loads(_delegate_answer(ctx, "run-1", "int-current", [{"question_id": "q-port", "free_text": "9090"}],
+                                      reply_to=address).text)
+    assert out["status"] == "delivered" and out["note"] == _ANSWER_NOTES[note_key]
+    assert ("the run resumes on it" in out["note"]) is (note_key == "delivered_blocking")
+
+
+@pytest.mark.parametrize("answered,sibling,note_key", [
+    ("blocking", "async", "delivered_blocking"), ("async", "blocking", "delivered_async"),
+], ids=["answered-held-beside-async", "answered-async-beside-held"])
+def test_a_mixed_set_receipt_speaks_for_the_answered_row_alone(setup, answered, sibling, note_key):
+    ctx, stub, address = setup
+    stub.detail["pendingInteractions"][0]["delivery"] = answered
+    stub.detail["pendingInteractions"].append({**_message_question("int-sibling", "Other?"), "delivery": sibling})
+    out = json.loads(_delegate_answer(ctx, "run-1", "int-current", [{"question_id": "q-port", "free_text": "9090"}],
+                                      reply_to=address).text)
+    assert out["note"] == _ANSWER_NOTES[note_key]
+
+
+def test_an_outcome_other_than_delivered_keeps_its_own_note_on_an_async_row(setup, monkeypatch):
+    ctx, stub, address = setup
+    stub.detail["pendingInteractions"][0]["delivery"] = "async"
+    monkeypatch.setattr(stub, "answer_interaction", lambda *_a, **_k: {"status": "already_resolved"})
+    out = json.loads(_delegate_answer(ctx, "run-1", "int-current", [{"question_id": "q-port", "free_text": "9090"}],
+                                      reply_to=address).text)
+    assert out["status"] == "already_resolved" and out["note"] == _ANSWER_NOTES["already_resolved"]
 
 
 @pytest.mark.parametrize("read_seconds", [99, 101])

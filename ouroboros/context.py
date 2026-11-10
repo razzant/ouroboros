@@ -95,7 +95,8 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     if isinstance(host_fact, dict) and host_fact.get("kind") == "call_open":
         text = "[Host fact: a live call opened; not the owner's words]\n\n" + str(text or "")
     author = metadata.get("objective_author")
-    if isinstance(author, dict) and author.get("kind") == "task":
+    # Text a task drafted, the Schedules API supplied or the host composed for a press: never my human's words.
+    if isinstance(author, dict) and author.get("kind") in {"task", "schedule_api", "ui_control"}:
         from ouroboros.owner_words import objective_author_line
 
         text = (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
@@ -1135,10 +1136,11 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
         from ouroboros.memory_floor import trace_facts
 
         ctx.memory_view_facts = trace_facts(facts)
+    from ouroboros.transcript_prefix import _running_code
     from ouroboros.utils import append_jsonl
 
     root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view",
+    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view", "code": _running_code(),
                                                      "task_id": str(task.get("id") or ""), **facts, **section_spans()}):
         log.warning("Context memory view receipt could not be written")
     return facts

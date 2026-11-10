@@ -207,6 +207,7 @@ D20 = "Presence"
 "ouroboros/colab_bootstrap.py" = "D12"
 "ouroboros/commit_admission.py" = "D06"
 "ouroboros/config.py" = "D12"
+"ouroboros/deployment_policy.py" = "D12"  # administrator constraints over effective settings
 "ouroboros/launch_roots.py" = "D12"  # the stdlib launch tuple and work-root basis config derives from
 "ouroboros/composer_cognition.py" = "D12"
 "ouroboros/confined_files.py" = "D18"
@@ -318,6 +319,7 @@ D20 = "Presence"
 "ouroboros/evolution_checkpoints.py" = "D15"
 "ouroboros/evolution_fingerprint.py" = "D15"
 "ouroboros/evolution_history.py" = "D10"  # Dashboard Evolution: tagged versions measured once per commit, behind gateway/control.py
+"ouroboros/deployment_extensions.py" = "D14"  # the extensions a deployment requires: enablement, refusals, hold
 "ouroboros/extension_companion.py" = "D14"
 "ouroboros/extension_health.py" = "D14"
 "ouroboros/extension_isolated_deps.py" = "D14"
@@ -387,6 +389,7 @@ D20 = "Presence"
 "ouroboros/gateway/state_publication.py" = "D11"  # the /api/state display publication: one producer per revision
 "ouroboros/gateway/reply_preparation.py" = "D11"
 "ouroboros/gateway/storage.py" = "D11"
+"ouroboros/gateway/kept_services.py" = "D11"  # Activity › Background: kept services and the owner's Stop of one launch
 "ouroboros/gateway/main_decisions.py" = "D11"  # addressed canonical Main questions and human recovery controls
 "ouroboros/gateway/work_status.py" = "D11"  # one work, one status: pure classification read by every surface and the mind
 "ouroboros/gateway/work_projection.py" = "D11"  # server observations for the work projection
@@ -500,6 +503,7 @@ D20 = "Presence"
 "ouroboros/nanny_pacing.py" = "D07"
 "ouroboros/net_transport.py" = "D02"
 "ouroboros/observability.py" = "D16"
+"ouroboros/redaction.py" = "D16"  # secret redaction of stored projections: rules, walk, records
 "ouroboros/finalization_timing.py" = "D16"
 "ouroboros/process_logging.py" = "D16"
 "ouroboros/source_retention.py" = "D16"
@@ -637,6 +641,7 @@ D20 = "Presence"
 "ouroboros/review_slot_cancel.py" = "D06"
 "ouroboros/review_state.py" = "D06"
 "ouroboros/review_words.py" = "D06"
+"ouroboros/result_material.py" = "D06"  # what a task produced for its result review, with exact retained copies
 "ouroboros/review_history.py" = "D06"
 "ouroboros/review_history_view.py" = "D03"
 "ouroboros/review_state_custody.py" = "D06"
@@ -723,6 +728,7 @@ D20 = "Presence"
 "ouroboros/owner_keep.py" = "D07"  # the owner's direct keep of one task's materials, read at every retirer
 "ouroboros/review_thread_retention.py" = "D07"  # a finished reviewer thread: export kept here, then engine retirement
 "ouroboros/delegate_result_taken.py" = "D07"  # a held delegated Git result: the engine told `taken` once its tree ends
+"ouroboros/historical_retirement.py" = "D07"  # one walk: old reviewer threads archived/released, minted registrations retired
 "ouroboros/copy_capture_proof.py" = "D07"  # may a finished plain copy go: unique work proven in its saved patch
 "ouroboros/workspace_copies.py" = "D07"
 "ouroboros/body_candidate.py" = "D07"  # own-body authoring candidate: one more kind of task-owned isolated copy
@@ -885,6 +891,7 @@ D20 = "Presence"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
+"ouroboros/tools/kept_service_outputs.py" = "D05"  # a kept service's declared outputs for a stop that is not its task's
 "ouroboros/tools/shell.py" = "D05"
 "ouroboros/tools/shell_audit.py" = "D05"
 "ouroboros/tools/shell_effects.py" = "D05"
@@ -939,6 +946,9 @@ D20 = "Presence"
 "ouroboros/workspace_admission.py" = "D17"
 "ouroboros/workspace_executor.py" = "D17"
 "ouroboros/workspace_executor_paths.py" = "D17"
+"ouroboros/execution_domain.py" = "D17"  # a deployment's execution domain: its pinned executor, work engine and Panic
+"ouroboros/work_domain.py" = "D17"  # file effects inside a deployment's work domain: the confined intake, never a followed link
+"ouroboros/work_skill_payloads.py" = "D17"  # a managed deployment's verified work copy of a reviewed skill payload
 "ouroboros/docker_process_observer.py" = "D17"
 "ouroboros/workspace_patch_rules.py" = "D17"
 "ouroboros/workspace_preflight.py" = "D17"
@@ -1008,7 +1018,6 @@ D20 = "Presence"
 "supervisor/consciousness_carriers.py" = "D08"
 "supervisor/queue_timeouts.py" = "D08"
 "supervisor/silence_attention.py" = "D08"
-"ouroboros/work_diagnostics.py" = "D09"
 "supervisor/task_model_wait.py" = "D08"
 "supervisor/queue_schedules.py" = "D08"
 "supervisor/schedule_lifecycle.py" = "D08"
@@ -1351,6 +1360,7 @@ lazy_only = [
   "D09->D04",
   "D09->D05",
   "D09->D07",
+  "D09->D10",
   "D09->D11",
   "D09->D12",
   "D09->D14",
@@ -1369,6 +1379,7 @@ lazy_only = [
   "D12->D15",
   "D12->D16",
   "D12->D17",
+  "D12->D19",
   "D13->D05",
   "D13->D06",
   "D13->D07",
@@ -1401,6 +1412,7 @@ lazy_only = [
   "D17->D02",
   "D17->D09",
   "D17->D13",
+  "D17->D14",
   "D17->D20",
   "D18->D01",
   "D18->D07",

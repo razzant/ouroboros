@@ -9,7 +9,7 @@ import {
     taskCostProjection,
 } from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
+import { TABLES, breakdownRowName, costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
 import {
     accountedUpperBound,
@@ -677,4 +677,74 @@ test('unknown legacy descendant rollup cannot retain a narrower own zero', () =>
     // The unreadable-ledger phrase is reserved for the status flag.
     assert.deepEqual(taskCostMeta({ cost_accounting_status: 'unavailable', cost_presentation: null }),
         ['cost unavailable']);
+});
+
+test('#2828 a closed-empty carrier is a versioned clear; closed custody without a receipt reads unknown', () => {
+    const carrier = (over = {}) => ({ scope: 'own', tracked_amount: null, has_unpriced: false, tracked_final: false,
+        accounting_open: false, has_rows: false, ...over });
+    const frame = (over = {}) => ({ cost_accounting_status: 'available', cost_final: false,
+        cost_presentation: carrier(over) });
+    // Closed with an unpriced run and no row: no amount will arrive, so unknown (never pending, never blank).
+    assert.deepEqual(costPresentationMeta(carrier({ has_unpriced: true })), ['Cost unknown']);
+    assert.deepEqual(costPresentationMeta(carrier({ has_unpriced: true, accounting_open: true })), ['Cost pending']);
+    assert.deepEqual(costPresentationMeta(carrier()), []);
+
+    const pending = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:00:00Z');
+    const clear = taskCostProjection(frame(), '2026-11-09T00:01:00Z');
+    assert.deepEqual(clear, { meta: [], cleared: true, ts: Date.parse('2026-11-09T00:01:00Z'), scope: 'own',
+        final: false, unavailable: false });
+    // Only a readable, intact closed-empty scope clears; an unreadable one still says unknown.
+    assert.equal(taskCostProjection({ cost_accounting_status: 'unavailable', cost_presentation: carrier() }, '').meta[0],
+        'cost unavailable');
+    assert.deepEqual(taskCostProjection({ ...frame(), ledger_integrity_degraded: true }, '').meta, ['Cost unknown']);
+    assert.equal(taskCostProjection({ cost_usd: 0.03 }, '2026-11-09T00:02:00Z'), null);
+    assert.equal(mergeStickyCostMeta(pending, clear), clear);
+    assert.equal(mergeStickyCostMeta(clear, pending), clear, 'an older pending replay cannot revive a clear');
+    assert.equal(mergeStickyCostMeta(clear, null), clear);
+    const retry = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:03:00Z');
+    assert.equal(mergeStickyCostMeta(clear, retry), retry, 'a newer start or retry is pending again');
+    const unavailable = taskCostProjection({ cost_accounting_status: 'unavailable' }, '2026-11-09T00:04:00Z');
+    assert.equal(mergeStickyCostMeta(clear, unavailable), clear, 'an unavailable read never replaces honest evidence');
+    const settled = taskCostProjection({ cost_final: true, cost_presentation: carrier({ has_rows: true,
+        tracked_amount: 0.4, tracked_final: true }) }, '2026-11-09T00:00:30Z');
+    assert.equal(mergeStickyCostMeta(clear, settled), settled, 'a final amount outranks the clear');
+    assert.equal(mergeStickyCostMeta(settled, clear), settled);
+    // Scope precedence comes before rank: a root_tree clear holds over an own pending, and yields to a tree reading.
+    const treeClear = taskCostProjection(frame({ scope: 'root_tree' }), '2026-11-09T00:01:00Z');
+    const ownLater = taskCostProjection(frame({ has_unpriced: true, accounting_open: true }), '2026-11-09T00:09:00Z');
+    assert.equal(mergeStickyCostMeta(treeClear, ownLater), treeClear);
+    assert.equal(mergeStickyCostMeta(clear, treeClear), treeClear);
+    const treePending = taskCostProjection(frame({ scope: 'root_tree', has_unpriced: true, accounting_open: true }),
+        '2026-11-09T00:00:10Z');
+    assert.equal(mergeStickyCostMeta(clear, treePending), treePending, 'an own clear yields to a root_tree reading');
+    // An unstamped clear never defeats a stamped value of equal rank.
+    const unstamped = taskCostProjection(frame(), '');
+    assert.equal(mergeStickyCostMeta(pending, unstamped), pending);
+    // The card draws no money line from a clear.
+    const priorDocument = globalThis.document;
+    globalThis.document = { createElement: () => ({ style: {}, setAttribute() {}, append() {} }) };
+    try {
+        const record = { metaEl: { innerHTML: '', isConnected: true }, finished: true, costMeta: clear };
+        renderLiveCardMeta(record);
+        assert.doesNotMatch(record.metaEl.innerHTML, /Cost|\$/);
+    } finally { globalThis.document = priorDocument; }
+});
+
+test('Costs tables say what they group by: provider, a model over every provider, the roles set now (Track09 A)', () => {
+    assert.deepEqual(TABLES.map(([id, title, column, key]) => [id, title, column, key]), [
+        ['cost-by-model', 'By model', 'Model', 'by_model'],
+        ['cost-by-key', 'By provider', 'Provider', 'by_api_key'],
+        ['cost-by-model-cat', 'By current role', 'Role', 'by_model_category'],
+        ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category'],
+    ]);
+    const notes = Object.fromEntries(TABLES.map(([id, , , , note]) => [id, note]));
+    assert.match(notes['cost-by-model'], /over every provider and connection/);
+    assert.match(notes['cost-by-model-cat'], /roles set in Settings now, not when each call ran/);
+    assert.equal(breakdownRowName('cost-by-key', 'openrouter'), 'OpenRouter');
+    assert.equal(breakdownRowName('cost-by-key', 'claude'), 'Claude Code');
+    assert.equal(breakdownRowName('cost-by-key', 'some-new-provider'), 'some-new-provider', 'an unknown key stays itself');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'other'), 'No current role');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'main'), 'Main');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'unattributed'), 'unattributed');
+    assert.equal(breakdownRowName('cost-by-model', 'anthropic/claude-opus-5.5'), 'anthropic/claude-opus-5.5');
 });

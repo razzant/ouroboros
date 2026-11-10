@@ -621,6 +621,34 @@ def test_registry_hits_name_their_author_and_update_time(monkeypatch):
     assert {item["owner"] for item in catalog.registry_items(row, "weather")} == {"adapter"}
 
 
+def test_a_registry_browse_is_one_page_in_its_order_with_search_shaped_items(monkeypatch, tmp_path):
+    from ouroboros.marketplace import clawhub
+
+    asked = []
+
+    def fake_search(query, **kwargs):
+        asked.append((query, kwargs))
+        return {"results": [clawhub._summary_from_record({"name": "self-improving-agent", "ownerHandle": "pskoett",
+                                                          "summary": "Learns.", "stats": {"downloads": 491927}})],
+                "next_cursor": "page-2"}
+
+    monkeypatch.setattr(clawhub, "search", fake_search)
+    row = {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}
+    page = catalog.registry_browse(row)
+    assert page["next_cursor"] == "page-2"
+    assert asked[0][0] == "" and (asked[0][1]["sort"], asked[0][1]["cursor"]) == ("popular", None)
+    assert asked[0][1]["limit"] == catalog.REGISTRY_BROWSE_PAGE
+    item = page["items"][0]
+    assert (item["id"], item["registry_slug"], item["installed"]) == ("clawhub/self-improving-agent", "self-improving-agent", None)
+    assert (item["owner"], item["registry_stats"]) == ("pskoett", {"downloads": 491927})
+    # The install path resolves exactly this id.
+    assert catalog.find_item(tmp_path, item["id"], rows=[row])[1]["registry_slug"] == "self-improving-agent"
+    catalog.registry_browse(row, sort="updated", cursor="abc")
+    assert (asked[1][1]["sort"], asked[1][1]["cursor"]) == ("updated", "abc")
+    catalog.registry_browse(row, sort="stars")
+    assert asked[2][1]["sort"] == "popular", "an order the registry cannot give falls back to its default"
+
+
 def test_the_listing_says_why_and_in_which_task_ouroboros_installed(drive, hub):
     from ouroboros.skill_loader import find_skill
 

@@ -231,9 +231,6 @@ def _pool_clause(root: Path) -> str:
              said("booting", "booting_count"), said("reaping (incl. booting)", "reaping_count"),
              said("assignable idle", "assignable_idle_workers")]
     parts.append(f"pending rows {pending}" if pending is not None else "pending rows not observed")
-    refused = document.get("dispatch_refusals")
-    if isinstance(refused, dict) and refused:
-        parts.append(f"refused by their own facts {len(refused)}")
     carriers = _count(document, "lane_carrier_total")
     lane = (f"conversation carriers {carriers}, outside the cap and memory admission" if carriers is not None
             else "conversation carriers not observed")

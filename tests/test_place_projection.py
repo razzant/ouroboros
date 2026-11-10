@@ -200,6 +200,40 @@ def test_places_endpoint_keeps_full_connector_projection(client, connector, monk
     assert row["account_candidates"] == []
 
 
+@pytest.mark.parametrize("switch", [False, True, None, "panic"])
+def test_a_place_says_it_only_hears_while_consciousness_is_off(tmp_path, monkeypatch, switch):
+    """Owner 06.11: Off left every place that was not Paused only hearing for 28 hours while each surface, the mind's
+    configure_presence included, read «active». The place's own view now says so; the switch is read once a list, and
+    a switch this read cannot know (state recovering or unreadable) is no claim, though intake stays closed on it."""
+    from ouroboros.consciousness_view import place_views
+    from supervisor.state import StateRead
+    for state in ("active", "silent", "paused"):
+        places.connect_place(tmp_path, place_id=state, connector="bridge", provider="chat", conversation_id=state,
+                             label=state, state=state)
+    checks = []
+
+    def read_state(root=None):
+        if switch is None:
+            return StateRead("unavailable", "none", {}, reason="state unreadable")
+        return StateRead("current", "primary", {"bg_consciousness_enabled": switch is not False})
+    monkeypatch.setattr("supervisor.state.read_state", read_state)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: checks.append(root) or switch == "panic")
+    monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
+    monkeypatch.setattr(projection, "place_activity", lambda _root, _place: {"unanswered": 0, "last_activity_at": ""})
+    hearing = {"active", "silent"} if switch in (False, "panic") else set()
+    listed = projection.places_view(tmp_path)["places"]
+    brief = place_views(tmp_path, {})
+    assert len(checks) == 2, "one switch read for each list, never one per place"
+    for rows in (listed, brief):
+        assert {row["place_id"] for row in rows if row.get("only_hears") is True} == hearing
+        assert all("only_hears" not in row for row in rows if row["place_id"] not in hearing), "absent, never False"
+    # A single view (a write's answer, the mind's inspect) reads the switch itself; nothing is stored.
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    inspected = json.loads(_configure_presence(ctx, "inspect", "active"))["place"]
+    assert ("only_hears" in inspected) is bool(hearing)
+    assert "only_hears" not in json.loads(places.places_path(tmp_path).read_text(encoding="utf-8"))["places"]["active"]
+
+
 def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(tmp_path, monkeypatch):
     from ouroboros import place_projection, places
 

@@ -116,14 +116,17 @@ def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: An
     from ouroboros.project_admission import project_admission_basis, project_admission_guard
     from ouroboros.project_lease import candidate_is_leasable, lane_holders, running_project_ids
     from ouroboros.workspace_admission import validate_workspace_root
+    from supervisor.conversation_lane import resumes_on_lane
 
     binding = pending_placement(drive_root, task)
     if not binding:
         return True
     if not refresh_pending_placement(drive_root, task, binding=binding):
         return False
-    if not candidate_is_leasable(task, running_project_ids(running.values()),
-                                holders=lane_holders(running.values(), pending)):
+    # My human's returned turn holds no room lease, as on its lane (``resumes_on_lane``) and as a fresh turn: neither
+    # the room's running writer nor a tree that keeps its lane holds it; pooled work still serializes on both.
+    if not resumes_on_lane(task) and not candidate_is_leasable(
+            task, running_project_ids(running.values()), holders=lane_holders(running.values(), pending)):
         return False
     # Placement changes the room's default, never a separately selected resource: an explicit
     # folder or opt-out, or the candidate of body work. The registry holds that candidate when a

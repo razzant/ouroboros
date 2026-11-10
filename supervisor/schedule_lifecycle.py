@@ -164,6 +164,35 @@ def _collapse_description_copies(record):
 # ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
 # to the template's by identity when the assignment itself changes or the write carries a verified cite.
 _PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
+# Who supplied each text field of a task template, and when: the host's record, beside the text it describes.
+TEXT_AUTHOR_KEYS = (("objective", "objective_author"), ("context", "context_author"))
+
+
+def _stamp_text_authors(current: Optional[Dict[str, Any]], incoming: Dict[str, Any],
+                        supplier: Optional[Dict[str, Any]]) -> None:
+    """Record, per text field, who supplied it: separate from the row's work kind and lifecycle writer.
+
+    A field whose text this write leaves byte-identical keeps the CURRENT row's record of its supplier,
+    or its absence (an exact repost, a time edit, an edit of the other field); a changed field takes
+    ``supplier`` with the write's time; a field with no text has no supplier. ``supplier`` None (a
+    writer that cannot say) leaves a changed field's supplier unrecorded: unknown, never the owner.
+    A note carries no task text and is left as it is.
+    """
+    if incoming.get("kind") == "notify":
+        return
+    metadata = incoming.setdefault("task", {}).setdefault("metadata", {})
+    known = ((current or {}).get("task") or {}).get("metadata") or {}
+    for field, key in TEXT_AUTHOR_KEYS:
+        text = _patch_value(incoming, field)
+        if current is not None and text == _patch_value(current, field):
+            if key in known:
+                metadata[key] = copy.deepcopy(known[key])
+            else:
+                metadata.pop(key, None)
+        elif isinstance(text, str) and text.strip() and supplier is not None:
+            metadata[key] = {**copy.deepcopy(supplier), "at": utc_now_iso()}
+        else:
+            metadata.pop(key, None)
 
 
 def _patch_value(record, key):
@@ -276,6 +305,8 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
             remember_claim_basis(current)
             _collapse_description_copies(current)
             incoming, changed_fields = _patched_definition(current, patch)
+            # A task's edit: the text it changed is the task's (``tools.followup._update_schedule``).
+            _stamp_text_authors(current, incoming, {"kind": "task", "task_id": str(task_id)} if task_id else None)
             changed = bool(changed_fields or adopted)
             reconsidered = False
             if changed:
@@ -328,7 +359,8 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
                           host_followup: dict | None = None,
                           continuation_of: Optional[Dict[str, Any]] = None,
                           new_resource_intent: Optional[Dict[str, Any]] = None,
-                          writer_kind: str = "consciousness", writer_metadata: Any = None) -> Dict[str, Any]:
+                          writer_kind: str = "consciousness", writer_metadata: Any = None,
+                          text_supplier: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Create or replace a scheduled task record.
 
     Returns the stored row plus an ``audit`` field: ``recorded`` when both audit
@@ -338,6 +370,9 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
     ``continuation_of``) are never taken from a payload: ``continuation_of`` is
     set only by the host follow-up path through its own keyword, and an authored
     change clears a wait so the next pass retries at once (#1315).
+    ``text_supplier`` is the writing door's account of who supplies the text it
+    sends (the owner's Schedules door: ``schedule_api``); without it the template's
+    host-written authors stand (``tools.followup``).
     """
     root = pathlib.Path(drive_root or _store._queue().DRIVE_ROOT)
     with schedule_transaction(root):
@@ -375,9 +410,17 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
                               started_root=relation_kind(incoming) == "independent")
         incoming["task"] = normalize_template(incoming)
         _require_template_effort(incoming["task"])  # refused before the audit intent: nothing changed
-        if incoming.get("followup_origin"):
-            incoming["task"]["metadata"]["objective_author"] = {
-                "kind": "task", "task_id": incoming["followup_origin"]["task_id"]}
+        if text_supplier is not None:
+            # The owner's door: each field's supplier from the CURRENT row, a changed field this door's;
+            # the words a run carried into the row are the row's, never a caller's copy.
+            _stamp_text_authors(existing, incoming, text_supplier)
+            kept = ((existing or {}).get("task") or {}).get("metadata") or {}
+            if "owner_corpus" in kept:
+                incoming["task"]["metadata"]["owner_corpus"] = copy.deepcopy(kept["owner_corpus"])
+        elif incoming.get("followup_origin"):
+            # A host follow-up's text is its scheduling task's (the tool stamps it; an older template gains it).
+            incoming["task"]["metadata"].setdefault("objective_author", {
+                "kind": "task", "task_id": incoming["followup_origin"]["task_id"]})
         if new_resource_intent is not None:
             # The producer may describe a NEW row. Editing an old followup cannot
             # turn absent intent into self-work; preserve its current evidence.

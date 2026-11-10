@@ -334,3 +334,78 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     _evidence("1350-dom.json", {"live_with_gap": live_snapshot, "caught_up": caught_up, "reconnected": reconnected,
                                 "reloaded": reloaded})
     assert not ui["errors"].unexpected(), ui["errors"].report()
+
+
+@pytest.mark.parametrize("empty_tail", [False, True])
+def test_later_permanent_refusal_updates_earlier_gap_without_losing_words(engine_ui, tmp_path, monkeypatch, empty_tail):
+    """The real worker→history→SPA flow renders current journal availability, not an older retry promise."""
+    from tests.test_delegated_activity import LoopbackEngine, _refusal
+
+    ui, data = engine_ui, tmp_path / "data"
+    page = ui["page"]
+    producer = Producer(data, monkeypatch)
+    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    sockets = []
+
+    def history_route(route):
+        url = route.request.url
+        response = history.get(url[url.index("/api/chat/history"):])
+        route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+
+    def socket_route(ws):
+        sockets.append(ws)
+        ws.send(json.dumps({"type": "heartbeat"}))
+
+    page.route("**/api/chat/history*", history_route)
+    page.route_web_socket("**/ws", socket_route)
+    page.goto(ui["url"])
+    page.wait_for_selector("#chat-input")
+    worker = producer.worker(ROOT, None)
+    frames = producer.say(worker, "Checking a delegated result.")
+    words = "I read the candidate before the journal was removed."
+    if empty_tail:
+        words += " Extra detail." * 1000
+        monkeypatch.setattr(delegate_activity, "_persist", lambda *_a: {})
+    engine = LoopbackEngine([_harness(1, "message", text=words)], tail=_refusal("run_event_not_found", True))
+    variant = "empty-tail" if empty_tail else "gap"
+    with engine.serving() as gateway:
+        frames += producer.observe(worker, gateway, "run-1", 1 if empty_tail else 2, after=0)
+        for frame in frames:
+            sockets[-1].send(json.dumps(frame))
+        card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first
+        card.wait_for()
+        card.locator("[data-live-disclosure]").first.click()
+        page.wait_for_function("() => document.querySelector('.chat-delegated-message')?.textContent.includes('I read the candidate')")
+        capture(page, f"track07-{variant}-before-permanent-refusal")
+        engine.journal, engine.tail = [], _refusal("run_expired_by_retention", False)
+        if empty_tail:
+            from ouroboros import delegate_progress
+            from ouroboros.gateways.claudexor_run_events import read_run_events
+
+            # The body's follow of the run's journal (``delegate_feed.Feed._beat``): the refusal arrives inside the read.
+            read = read_run_events(gateway, "run-1", after_seq=1, through_seq=None, timeout_sec=10)
+            delegate_progress.emit_stream(worker[0], "run-1", read, after_seq=1)
+            updates = producer._deliver(worker[1])
+        else:
+            updates = producer.observe(worker, gateway, "run-1", 3, after=1, drain=10)
+        for frame in updates:
+            sockets[-1].send(json.dumps(frame))
+        page.wait_for_function("() => document.querySelector('.chat-live-card')?.textContent.includes('can no longer be read')")
+    text = card.inner_text()
+    assert "I read the candidate before the journal was removed." in text
+    assert "next advance" not in text and "tries again" not in text and "reads them" not in text
+    for toggle in card.locator("[data-live-line-toggle]").all():
+        toggle.click()
+    if empty_tail:
+        card.locator(".chat-delegated-sources").first.scroll_into_view_if_needed()
+    capture(page, f"track07-{variant}-after-permanent-refusal")
+    page.reload()
+    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first
+    card.wait_for()
+    page.evaluate(EXPAND, [ROOT])
+    page.wait_for_function("() => document.querySelector('.chat-live-card')?.textContent.includes('can no longer be read')")
+    assert "I read the candidate before the journal was removed." in card.inner_text()
+    assert "next advance" not in card.inner_text() and "tries again" not in card.inner_text()
+    assert "journal holds it whole" not in card.inner_text()
+    capture(page, f"track07-{variant}-refusal-after-reload")
+    assert not ui["errors"].unexpected(), ui["errors"].report()

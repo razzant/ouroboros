@@ -325,17 +325,19 @@ def test_lost_bytes_answer_publishes_on_replay_after_the_source_is_gone(docs):
     assert len(docs.engine.of("put")) == 1 and len(docs.engine.resources) == 1
 
 
-def test_retry_of_replays_the_recorded_body_without_reimporting(docs):
+def test_retry_of_keeps_documents_without_reposting_an_unproven_admission(docs):
     docs.engine.faults = [("run", "lose")]
     unknown = _start(docs.ctx, attachment_paths=["attachments/brief.md"])
     pending = unknown["pending_invocation_id"]
     imports = len(docs.engine.of("import"))
     retried = _start(docs.ctx, retry_of=pending)
-    assert retried["status"] == "started" and retried["idempotent_recovery"] is True
-    first, second = docs.engine.of("run")
-    assert first[1] == second[1] == pending and first[2] == second[2]
-    assert second[2]["attachments"] == [{"resourceId": "res_1"}]
-    assert len(docs.engine.of("import")) == imports and "documents" not in retried
+    assert (retried["status"], retried["reason"]) == ("refused", "invocation_store_unproven")
+    first, = docs.engine.of("run")
+    assert first[1] == pending and first[2]["attachments"] == [{"resourceId": "res_1"}]
+    assert len(docs.engine.of("import")) == imports, "neither imported documents nor the unknown run are duplicated"
+    from ouroboros import delegate_custody
+    retained = delegate_custody.invocation_record(docs.ctx.drive_root, pending)
+    assert retained["state"] == "pending" and retained["request"] == first[2]
 
 
 def _parallel_starts(docs, monkeypatch, *, wait_for_lookup):

@@ -363,6 +363,19 @@ def answer_protocol_active(ctx: Any) -> bool:
     return False
 
 
+def review_answer_required(ctx: Any) -> bool:
+    """True when the running ctx's task contract carries ``review_answer`` (owner, 8 Nov 2026): the whole final
+    answer is a deliverable the task-review Required floor reviews even when no file was produced. Written by its
+    admission caller (an API body, ``start_task(review_answer=true)``, a runner) and carried by Continue; a plain
+    request in prose stays the mind's own call of review_change, never a host reading of words."""
+    for source in (getattr(ctx, "task_contract", None), getattr(ctx, "task_metadata", None)):
+        if isinstance(source, Mapping):
+            contract = source.get("task_contract") if isinstance(source.get("task_contract"), Mapping) else source
+            if normalize_bool((contract or {}).get("review_answer")):
+                return True
+    return False
+
+
 def normalize_acceptance_claims(value: Any) -> list[Dict[str, str]]:
     """Normalize LLM-readable acceptance claims.
 
@@ -707,6 +720,8 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         if "input_sources" in source:
             contract["input_sources"] = normalize_input_sources(source["input_sources"])
             break
+    if any(normalize_bool(source.get("review_answer")) for source in (merged, task, metadata)):
+        contract["review_answer"] = True  # task review Required reviews the whole final answer (``review_answer_required``)
     # The task's own direct handbook answer, from its contract alone: a legacy top-level value keeps its Max meaning.
     if isinstance(merged.get("context_requires_development"), bool):
         contract["context_requires_development"] = merged["context_requires_development"]
@@ -925,4 +940,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_engine_import_receipts", "normalize_input_sources", "normalize_resource_policy", "task_input_sources"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_engine_import_receipts", "normalize_input_sources", "normalize_resource_policy", "review_answer_required", "task_input_sources"]

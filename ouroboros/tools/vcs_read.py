@@ -59,6 +59,11 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
         "-c", f"core.hooksPath={os.devnull}",
         "-c", "log.showSignature=false",
     ]
+    from ouroboros import work_domain
+
+    if work_domain.is_work(repo):  # its config, links and objects are the work domain's: read there, flags kept
+        return _capture_work_git(repo, [*cmd, *args], host_git_env(env))
+
     # Drain both pipes concurrently, retaining only bounded prefixes. A large
     # object never first accumulates in communicate()/capture_output memory.
     def drain(stream, limit):
@@ -82,6 +87,25 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
         err, _ = stderr.result()
     completed = subprocess.CompletedProcess(cmd, process.returncode, out, err)
     completed.stdout_omitted = omitted
+    return completed
+
+
+def _capture_work_git(repo: pathlib.Path, cmd: list[str], env: dict) -> subprocess.CompletedProcess[bytes]:
+    """``_capture_read_git`` for a work repository: the same command and flags run as the work domain
+    (``work_domain.run``), streamed into service temporaries so only the same bounded prefixes are kept."""
+    import tempfile
+
+    from ouroboros import work_domain
+
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        done = work_domain.run(cmd, cwd=str(repo), env=env, stdout=out, stderr=err,
+                               timeout=GIT_READ_CAPTURE_TIMEOUT_SEC)
+        total = out.seek(0, os.SEEK_END)
+        out.seek(0)
+        err.seek(0)
+        prefix = out.read(_CAPTURE_BYTES)
+        completed = subprocess.CompletedProcess(cmd, done.returncode, prefix, err.read(65536))
+    completed.stdout_omitted = total - len(prefix)
     return completed
 
 

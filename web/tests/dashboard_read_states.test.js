@@ -15,6 +15,7 @@ const projectedWork = (id, activity = 'working', extra = {}) => ({ work_id: id, 
     controls: activity === 'paused' ? [{ action: 'resume', target: id }] : [], ...extra });
 const backgroundUrl = '/api/state';
 const schedulesUrl = '/api/schedules';
+const keptUrl = '/api/services/kept';
 const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const section = (mount, name) => mount.querySelector(`[data-activity-section="${name}"]`);
@@ -24,6 +25,7 @@ function emptyActivity(routes) {
     routes.set(queueUrl, response({ queue: { running: [], pending: [] } }));
     routes.set(backgroundUrl, response({ bg_consciousness_enabled: false, active_chat_activities: [], active_chat_activities_complete: true }));
     routes.set(schedulesUrl, response({ tasks: [] }));
+    routes.set(keptUrl, response({ services: [], complete: true, note: '' }));
 }
 
 test('Activity task list waits for migration and refreshes itself after publication', async t => {
@@ -431,7 +433,8 @@ test('Activity unites live direct turns with queue identities and preserves queu
     // Stop… is the neutral shared trigger on every row, never a danger button.
     assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
-    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl], 'reuse the existing state read');
+    // Kept services are their own read (custody, one census): the state read is still not repeated.
+    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl, keptUrl], 'reuse the existing state read');
     // A group the owner folded stays folded through the next refresh.
     paused.open = false;
     await activity.refresh();

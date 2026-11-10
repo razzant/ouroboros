@@ -49,7 +49,8 @@ log = logging.getLogger(__name__)
 
 _UNREACHABLE = "daemon_unreachable"  # the gateway's reason for a read nothing answered (``_observation_reason``)
 _ENDED = "ended"
-_KEPT = ("task_id", "invocation_id", "run_state", "waiting_on_user", "answered", "reason")  # what a record says
+_KEPT = ("task_id", "invocation_id", "run_state", "waiting_on_user", "async_questions_only", "answered",
+         "reason")  # what a record says
 
 
 def _observation_dir(root: Any) -> pathlib.Path:
@@ -154,6 +155,13 @@ def _context(root: pathlib.Path, entry: Any, target: Dict[str, Any], handed: lis
                            task_attempt=target["attempt"], emit_progress_fn=counted)
 
 
+def journal_refused(entry: Any) -> bool:
+    """The engine refused this run's journal for good (``retryable: false``, as after retention): it is not read again."""
+    from ouroboros import delegate_activity
+
+    return delegate_activity._memo(entry.task_id, entry.run_id).refused is not None
+
+
 def journal_listed(gateway: Any) -> Optional[bool]:
     """Whether this engine serves a run's own journal, from what this process already knows: no request
     (the body's observation pass reads the catalog first); ``None`` while nobody asked this engine."""
@@ -232,11 +240,13 @@ class Feed:
                 last = read_observation(self.root, entry.run_id)[0] or {}
             new = {"run_id": entry.run_id, "task_id": entry.task_id, "invocation_id": entry.invocation_id,
                    "run_state": fact["run_state"], "waiting_on_user": fact["waiting_on_user"],
+                   "async_questions_only": bool(fact.get("async_questions_only")),
                    "answered": error is None, "reason": "" if error is None else _UNREACHABLE}
             if error is None:
                 self.answered_at[entry.run_id] = now
             elif last.get("invocation_id") == entry.invocation_id:  # unanswered: its last answered state stands
-                new.update(run_state=str(last.get("run_state") or ""), waiting_on_user=bool(last.get("waiting_on_user")))
+                new.update(run_state=str(last.get("run_state") or ""), waiting_on_user=bool(last.get("waiting_on_user")),
+                           async_questions_only=bool(last.get("async_questions_only")))
             if all(new[key] == last.get(key) for key in _KEPT):
                 self.recorded[entry.run_id] = last
                 return
@@ -303,16 +313,21 @@ class Feed:
                 gateway.close()
 
     def _beat(self, runtime: Any, entry: Any, target: Dict[str, Any], cursor: _Cursor, transport: list):
-        """One journal read from the cursor, published: True spoke, False quiet, ``_ENDED``, None unread."""
+        """One journal read from the cursor, published: True spoke, False quiet, ``_ENDED``, None unread. A journal
+        the engine refused for good is not read again; what it served is shown first (``emit_stream``), the window
+        view shows the rest. Its retryable refusal is a failed read: the next beat asks again."""
         from ouroboros import delegate_activity, delegate_progress
         from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.execution_domain import run_gateway
         from ouroboros.gateways.claudexor_run_events import read_run_events
 
+        if journal_refused(entry):
+            return _ENDED
         handed: list = []
         ctx = _context(self.root, entry, target, handed)
         try:
-            if not transport:
-                transport.append(runtime._gateway())  # the run's own: a held read never waits for another's
+            if not transport:  # the run's own engine and transport: a held read never waits for another's
+                transport.append(run_gateway(entry, runtime._gateway))
             if cursor.seq is None:
                 cursor.seq = delegate_activity.shown_cursor(ctx, entry.task_id, entry.run_id)
             read = read_run_events(transport[0], entry.run_id, after_seq=cursor.seq, through_seq=None,
@@ -326,15 +341,17 @@ class Feed:
         if read.events and not handed:
             return None  # not handed over (the bus is away): the same range is read again
         cursor.seq = max(cursor.seq, read.through_seq)
-        return _ENDED if read.ended else bool(read.events)
+        return _ENDED if read.ended or journal_refused(entry) else bool(read.events)
 
     def window(self, entry: Any, gateway: Any, detail: Dict[str, Any]) -> None:
-        """An engine without the run's journal: the new timeline rows of a detail the body read are the
-        record, with the run's latest typed actor (the window view the wait published)."""
+        """An engine without the run's journal, or a journal it refused for good: the new timeline rows of a
+        detail the body read are the record, with the run's latest typed actor (the window view the wait
+        published); words an unhanded frame left go first (``delegate_activity.observations``)."""
         from ouroboros import delegate_activity, delegate_progress
 
         seq, target = detail.get("lastSeq"), self.live.get(entry.task_id)
-        if target is None or type(seq) is not int or journal_listed(gateway) is not False:
+        if (target is None or type(seq) is not int
+                or journal_listed(gateway) is not False and not journal_refused(entry)):
             return
         handed: list = []
         ctx = _context(self.root, entry, target, handed)

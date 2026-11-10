@@ -358,9 +358,8 @@ def _frozen(value: Any) -> Any:
 def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     """The published facts of one RUNNING row besides its task, as the capture writes them.
 
-    Only a dated silence episode is a diagnostic's source authority (#1376): its fact, and while it
-    stays open the progress that revokes it before the recovery lane writes the result. Ordinary
-    progress rotates nothing.
+    A dated silence episode rides the row as a fact for its readers; ordinary progress
+    rotates nothing.
     """
     facts = {key: meta.get(key) for key in _ROW_FACTS}
     facts.update(started_at=float(meta.get("started_at") or 0.0),
@@ -368,8 +367,6 @@ def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     silence = meta.get("silence_attention")
     if silence:
         facts["silence_attention"] = silence
-        if isinstance(silence, dict) and silence.get("state") == "pending_attention":
-            facts["last_progress_at"] = meta.get("last_progress_at")
     return facts
 
 
@@ -426,7 +423,9 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
             "task": _frozen({**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t), **carried_basis(t),
                              **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery', '_seed_return',
                                                         # #939: the execution budget and its carried clock offset travel with the row.
-                                                        'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}}),
+                                                        'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec',
+                                                        '_execution_owner',  # its carrier: a returned turn keeps its lane
+                                                        ) if key in t}}),
         })
     running_rows = []
     for task_id, meta in running_items:
@@ -449,16 +448,14 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
 
 def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
     """The pool's published facts, measured by ``worker_pool_lifecycle.pool_slot_counts`` (its docstring names
-    each count) from the ACTUAL pool, plus the queued rows the launch would refuse for good by their own facts
-    (``dispatch_refusals``: ``dispatch_choice.refusals``) and the last reading of the machine's memory
-    (``memory_admission``: ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
+    each count) from the ACTUAL pool, plus the last reading of the machine's memory (``memory_admission``:
+    ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
     assignable, so no reader is told of a free slot that is not. A failed measurement publishes
     ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool. The
     census hashes these facts with the reading's verdict in place of its bytes (``pool_admission.verdict``), so a
     change of verdict or reason publishes and byte noise does not."""
     try:
         from supervisor import pool_admission, workers as _workers_mod
-        from supervisor.dispatch_choice import refusals
         from supervisor.worker_pool_lifecycle import pool_slot_counts
 
         counts = pool_slot_counts(_workers_mod.WORKERS)
@@ -466,7 +463,6 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
         # Absence is counted above, not an explicit disablement.
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
-        counts["dispatch_refusals"] = refusals()
         counts["memory_admission"] = pool_admission.verdict() if census else pool_admission.facts()
         return counts
     except Exception:
@@ -478,8 +474,7 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
 #: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
 _POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_worker_count",
                     "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
-                    "assignable_idle_workers", "lane_carrier_total", "lane_carrier_idle", "dispatch_refusals",
-                    "memory_admission")
+                    "assignable_idle_workers", "lane_carrier_total", "lane_carrier_idle", "memory_admission")
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

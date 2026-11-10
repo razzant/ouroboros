@@ -2,6 +2,7 @@
 
 import { createWS } from './modules/ws.js';
 import { apiClient, apiFetch, fetchJson } from './modules/api_client.js';
+import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.js';
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
@@ -839,7 +840,9 @@ async function revealQuotedSource(address, chatId, isCurrent) {
     // A work card Main already draws is its destination without a read: it stands before its task's first
     // message gives around-history a row to find.
     if (chatId !== 1 || !address.startsWith('task:') || !mainChat.drawsSource(address)) {
-        page = await apiClient.chatHistory({ chatId, around: address });
+        // A current refusal takes the saved text and every copy painted from it, as a room's own reads do.
+        page = await apiClient.chatHistory({ chatId, around: address })
+            .catch((error) => { if (current()) previewsRefused(error); throw error; });
         if (!current()) return null;
         if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
         const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
@@ -979,8 +982,10 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
         closeProjectPanel();
     }
     // The registry's own word retires a room kept away (also one leaving now, or holding work until it ends: every read
-    // asks again); absence from this bounded list never does.
-    rooms.forget(...rows.filter(p => p.lifecycle === 'deleting').map(p => p.id));
+    // asks again) and its saved text (chat_preview.js); absence from this bounded list never does.
+    const going = rows.filter(p => p.lifecycle === 'deleting').map(p => p.id);
+    rooms.forget(...going);
+    forgetProjectPreviews(going);
     const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
         p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
@@ -1155,6 +1160,8 @@ function openProjectMenu(item, { anchor = null, point = null } = {}) {
                 if (navState.activeProjectId === change.projectId) closeProjectPanel();
                 paintProjectsNav();
             } else refreshProjectsNav();
+            // A delete the core answered is going away even if it is gone before a read shows it `deleting`.
+            if (change.authoritative && change.lifecycle === 'deleting') forgetProjectPreviews([change.projectId]);
             projectsNav.refresh();  // a row beyond the feed takes its new name or lifecycle from the registry's list
             knownProjectsJson = '';
         },
@@ -1486,7 +1493,9 @@ if (hashPage && hashPage !== state.activePage) showPage(hashPage);
         if (isStackLayout()) {
             // A pinch only magnifies: the room keeps the height it had, or it would shrink with the visual viewport.
             if (pinchMagnified()) return;
-            vvhStyle.textContent = ':root{--vvh:' + Math.max(320, Math.ceil(h)) + 'px}';
+            // Any positive height is the room's, a short one too; the composer's field caps at a quarter of it.
+            if (h > 0) vvhStyle.textContent = ':root{--vvh:' + Math.ceil(h) + 'px;--chat-viewport-input-cap:'
+                + Math.max(28, Math.min(140, Math.floor(h / 4))) + 'px}';
             if (!focusedKeyboardEditable()) {
                 applyKeyboardState(false);
                 rememberStableViewport(h);
@@ -1521,6 +1530,8 @@ if (hashPage && hashPage !== state.activePage) showPage(hashPage);
             if (revision !== focusRevision || focusedKeyboardEditable()) return;
             applyKeyboardState(false);
             focusBaselineHeight = 0;
+            // A native dismissal can restore the viewport in the focusout's own task, with no resize after it.
+            updateVvh();
         });
     });
 

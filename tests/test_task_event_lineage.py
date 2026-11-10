@@ -160,6 +160,41 @@ def test_the_conversation_carrier_endpoint_keeps_its_turn_stamps(monkeypatch, tm
     assert "root_task_id" not in captured[-1]["data"], "a turn without lineage stamps none"
 
 
+def test_a_pooled_task_publishes_its_start_phases_until_its_first_call(tmp_path):
+    """#2862: a pooled root's endpoint feeds the same start-phase producer as a carried turn (``TurnPhaseFrames``):
+    one execution, its attempt, forward only, nothing after its body ended and no direct-turn receipt."""
+    from supervisor.worker_process import run_worker_task
+
+    (tmp_path / "logs").mkdir()
+    captured, inner = _capture()
+    agent = SimpleNamespace()
+    held = {}
+
+    def handle_task(task):
+        turn = held["endpoint"] = agent._event_queue
+        tid = task["id"]
+        turn.put({"type": "log_event", "data": {"type": "context_building_started", "task_id": tid}})
+        turn.put({"type": "log_event", "data": {"type": "context_building_finished", "task_id": tid}})
+        turn.put({"type": "main_llm_call_state", "task_id": tid, "llm_call_id": "c1", "phase": "started"})
+        turn.put({"type": "main_llm_call_state", "task_id": tid, "llm_call_id": "c1", "phase": "observed",
+                  "model_activity": {"phase": "awaiting_response"}})
+        turn.put({"type": "log_event", "data": {"type": "context_building_started", "task_id": tid}})  # a later round
+        return []
+
+    agent.handle_task = handle_task
+    task = {"id": "pooled-root", "chat_id": 42, "text": "Work", "_attempt": 2,
+            "_execution_owner": {"kind": "pooled", "lane": "project"}}
+    run_worker_task(agent, task, wid=3, out_q=inner, repo_dir=str(tmp_path), drive_root=str(tmp_path))
+    held["endpoint"].put({"type": "log_event", "data": {"type": "context_building_started", "task_id": "pooled-root"}})
+    phases = [frame for frame in captured if frame.get("type") == "direct_turn_phase"]
+    # Its first frame leaves at the start (the slot's row says Preparing and is bound to this execution at once).
+    assert [frame["phase"] for frame in phases] == ["started", "context_building", "context_built", "requested",
+                                                    "dispatched"]
+    assert {(frame["task_id"], frame["task_attempt"], frame["worker_id"]) for frame in phases} == {("pooled-root", 2, 3)}
+    assert len({frame["execution_id"] for frame in phases}) == 1
+    assert not any("direct_turn" in frame for frame in captured), "a pooled execution leaves no direct-turn receipt"
+
+
 def test_the_worker_body_installs_the_endpoint_around_handle_task_and_the_sink_stamps_by_task():
     from supervisor.worker_process import run_worker_task, worker_main
 

@@ -147,19 +147,20 @@ def timeout_dispatch_candidate(
 
 
 def bound_dispatch_candidate(
-    ctx: ToolContext, name: str,
+    ctx: ToolContext, name: str, *, consume: bool = True,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
-    """Consume this call's timeout-time resolution, or resolve fresh without one.
+    """Read this call's timeout-time resolution; the dispatcher resolves fresh without one.
 
-    The binding is taken once and only for the same tool context and name. The
+    By default the dispatcher takes the binding once; a pre-dispatch observation
+    uses ``consume=False`` without spending it or resolving an absent binding. Both require the same context and name. The
     physical dispatcher still observes liveness itself, so a revocation that
     lands after the timeout was chosen refuses before the handler runs.
     """
     slot = _CALL_RESOLUTION.get()
-    bound = slot.pop("bound", None) if slot is not None else None
+    bound = (slot.pop("bound", None) if consume else slot.get("bound")) if slot is not None else None
     if bound is not None and bound[0] is ctx and bound[1] == name:
         return bound[2]
-    return _extension_dispatch_candidate(ctx, name)
+    return _extension_dispatch_candidate(ctx, name) if consume else (None, False)
 
 
 def _dispatch_mcp_tool_result(
@@ -378,6 +379,7 @@ def _dispatch_extension_tool_untagged(
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageAccountingError
     controls = (PhysicalDispatchInterrupted, OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError)
+    from ouroboros.deployment_extensions import failure_words
 
     if ext_tool.get("out_of_process"):
         try:
@@ -388,7 +390,7 @@ def _dispatch_extension_tool_untagged(
                 extension_child_was_spawned,
             )
         except Exception as exc:
-            text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
+            text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {failure_words(skill_name, exc)}"
             return _extension_result("error", "EXTENSION_ERROR", text)
         try:
             admit_tool_dispatch(ctx)
@@ -396,7 +398,7 @@ def _dispatch_extension_tool_untagged(
         except controls:
             raise
         except Exception as exc:
-            text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
+            text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {failure_words(skill_name, exc)}"
             kind = exc.failure_kind if isinstance(exc, ExtensionProcessError) else "error"
             timed_out = kind == "timeout"
             # The child refused a payload other than the bound one before any handler ran (typed, retryable).
@@ -426,7 +428,7 @@ def _dispatch_extension_tool_untagged(
             ctx=ctx,
         )
     except Exception as exc:
-        text = f"⚠️ TOOL_ERROR ({name}): model-cost disclosure failed: {type(exc).__name__}: {exc}"
+        text = f"⚠️ TOOL_ERROR ({name}): model-cost disclosure failed: {failure_words(skill_name, exc)}"
         return _extension_result("error", "EXTENSION_ERROR", text)
     try:
         # ctx calling-convention from the descriptor (decided on the RAW handler
@@ -441,7 +443,7 @@ def _dispatch_extension_tool_untagged(
         if _wants is None:
             _wants = _handler_wants_ctx(inspect.unwrap(handler))
     except Exception as exc:
-        text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {type(exc).__name__}: {exc}"
+        text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {failure_words(skill_name, exc)}"
         return _extension_result("error", "EXTENSION_ERROR", text)
     try:
         result = run_tool_handler(ctx, handler, *((ctx,) if _wants else ()), **call_args)
@@ -451,7 +453,7 @@ def _dispatch_extension_tool_untagged(
         from ouroboros.store import StoreError
         if isinstance(exc, StoreError) and handoff is not None and handoff.get("not_started") is True:
             raise  # registry snapshots the shared positive no-entry fact
-        text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {type(exc).__name__}: {exc}"
+        text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {failure_words(skill_name, exc)}"
         return _extension_result("error", "EXTENSION_ERROR", text, dispatched=True)
 
     if inspect.iscoroutine(result):
@@ -528,7 +530,7 @@ def _dispatch_extension_tool_untagged(
             exc = box["error"]
             if isinstance(exc, controls):
                 raise exc
-            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: {type(exc).__name__}: {exc}"
+            text = f"⚠️ TOOL_ERROR ({name}): extension async handler failed: {failure_words(skill_name, exc)}"
             return _extension_result("error", "EXTENSION_ERROR", text, dispatched=True)
         if "value" not in box:
             return _extension_result("error", "EXTENSION_ERROR",

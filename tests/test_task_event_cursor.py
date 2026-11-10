@@ -728,3 +728,203 @@ def test_an_unavailable_store_is_disclosed_without_an_empty_view(tmp_path, monke
     follower = _TaskEventCursorFollower(root, "root", {"v": 2, "seq": 0, "view": "", "positions": {}})
     follower.refresh_view()
     assert "child" in follower.task_filter_ids
+
+
+def _row(text, task_id="root"):
+    return (json.dumps({"task_id": task_id, "content": text}) + "\n").encode()
+
+
+class _ReadClock:
+    """The ``time`` the v2 stream reads: its monotonic clock moves only as the stream reads, ``step`` seconds per
+    bounded read (one entry into ``jsonl_chain_handles`` for a file chain, one ``probe_rows`` page for a dialogue
+    stream), so a slice or a spent budget falls at an exact read whatever the machine's speed."""
+
+    def __init__(self, step: float) -> None:
+        self.now, self.step = 1000.0, step
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture()
+def read_clock(monkeypatch):
+    """Reads that take time: three seconds per bounded read unless the test sets another ``step``."""
+    from contextlib import contextmanager
+    from ouroboros.gateway import task_events
+
+    clock = _ReadClock(3.0)
+    real_chain, real_probe = task_events.jsonl_chain_handles, ds.probe_rows
+
+    @contextmanager
+    def chain(path, **kwargs):
+        clock.now += clock.step
+        with real_chain(path, **kwargs) as handles:
+            yield handles
+
+    def probe(*args, **kwargs):
+        clock.now += clock.step
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(task_events, "time", clock)
+    monkeypatch.setattr(task_events, "jsonl_chain_handles", chain)
+    monkeypatch.setattr(ds, "probe_rows", probe)
+    return clock
+
+
+def follow(root, *, wait, between=None, limit=40):
+    """The CLI's loop over the route: each request resumes from its last frame's cursor until a terminal result."""
+    requests, cursor = [], None
+    while len(requests) < limit:
+        frames = stream(root, cursor, wait)
+        requests.append(frames)
+        cursor = frames[-1]["cursor"]
+        if frames[-1]["type"] == "task_result" and frames[-1]["data"]["status"] == "completed":
+            return requests
+        if between:
+            between(len(requests))
+    pytest.fail(f"no terminal result in {limit} requests")
+
+
+def test_a_long_scan_of_other_tasks_rows_checkpoints_each_slice_and_stops_at_its_budget(tmp_path, read_clock):
+    """#808: a finished task none of whose rows lie among megabytes of other tasks' rows. The pass sends a
+    checkpoint at a row boundary after a slice without a frame, and at its spent budget ends the request with one
+    and no result; the resumed requests reach the end, and only the one whose pass reached it says the result."""
+    root = seed(tmp_path / "data")
+    write_task_result(root, "root", "completed", result="done")
+    data = _row("x" * 1000, task_id="other") * 1500  # about two dozen bounded reads
+    (root / "logs" / "tools.jsonl").write_bytes(data)
+    requests = follow(root, wait=30)
+    first = requests[0]
+    assert [frame["type"] for frame in first] == ["cursor_checkpoint"] * 3  # two slices, then the spent budget
+    assert {frame["seq"] for frame in first} == {0} and {frame["event_id"] for frame in first} == {""}
+    frames = [frame for got in requests for frame in got]
+    positions = [frame["cursor"]["positions"][str(root)]["tools"] for frame in frames]
+    assert positions == sorted(positions) and 0 < positions[0] and positions[-1] == len(data)
+    assert all(data[:position].endswith(b"\n") for position in positions)
+    assert len(requests) >= 3
+    assert not any(frame["type"] == "task_result" for got in requests[:-1] for frame in got)
+    assert content(frames) == []
+    assert requests[-1][-1]["data"]["result"] == "done"
+
+
+def test_a_cut_pass_resumes_to_every_row_once_with_its_gap_late_row_and_escaped_identity(tmp_path, read_clock):
+    """The budget cuts the pass many times across two archives and the live file. Every row of the task arrives
+    once and in chain order: one whose identity is spelled with a JSON escape, one written after the task ended
+    while the reader was still behind (a terminal cutoff would drop it), and the malformed archive line disclosed
+    once at its coordinate. A pass without a budget and the legacy replay agree."""
+    root = seed(tmp_path / "data")
+    write_task_result(root, "root", "completed", result="done")
+    filler = _row("y" * 1000, task_id="other") * 150
+    escaped = b'{"task_id": "ro\\u006ft", "content": "escaped"}\n'  # the JSON spelling of "root"
+    (root / "archive").mkdir()
+    (root / "archive" / "tools_20260101T000001.jsonl").write_bytes(
+        filler + _row("a") + filler + b'{"torn":\n' + escaped + filler)
+    (root / "archive" / "tools_20260101T000002.jsonl").write_bytes(filler + _row("b"))
+    (root / "logs" / "tools.jsonl").write_bytes(filler + _row("c") + filler)
+
+    def late(requests_made):
+        if requests_made == 2:
+            append(root, "late", source="tools")
+
+    requests = follow(root, wait=0, between=late)
+    frames = [frame for got in requests for frame in got]
+    expected = ["a", "escaped", "b", "c", "late"]
+    assert len(requests) >= 4, "the budget cut the pass"
+    assert content(frames) == expected
+    rows = [frame for frame in frames if frame.get("data", {}).get("content")]
+    assert len({frame["event_id"] for frame in rows}) == len(rows)
+    gaps = [frame for frame in frames if frame["type"] == "history_gap"]
+    assert [gap["reason"] for gap in gaps] == ["invalid_archive_line"]
+    assert json.loads(gaps[0]["event_id"]) == [str(root), "tools", len(filler + _row("a") + filler)]
+    whole = _TaskEventCursorFollower(root, "root", {"v": 2, "seq": 0, "view": "", "positions": {}})
+    whole.refresh_view()
+    assert content(list(whole.read_events())) == expected
+    assert whole.positions == requests[-1][-1]["cursor"]["positions"]
+    assert content(iter_task_events(root, "root")) == expected
+
+
+def test_a_cut_between_dialogue_pages_resumes_after_the_page_with_its_import_gap_once(tmp_path, read_clock):
+    """A dialogue stream read in pages, every page a spent budget: each request ends after one page and the next
+    resumes after that page's last row; the rows and the line the import skipped each arrive once, in order."""
+    read_clock.step = 11.0
+    root = seed(tmp_path / "data")
+    write_task_result(root, "root", "completed", result="done")
+    (root / "archive").mkdir()
+    lines = [_row(f"r{index}") for index in range(450)]
+    lines.insert(250, b'{"torn":\n')
+    (root / "archive" / "progress_20250101T000001.jsonl").write_bytes(b"".join(lines))
+    assert dialogue_import.run_dialogue_import(root)["state"] == "done"
+    append(root, "live")
+    requests = follow(root, wait=0)
+    frames = [frame for got in requests for frame in got]
+    for index, got in enumerate(requests[:2]):  # one page each, then the spent budget's checkpoint
+        assert content(got) == [f"r{row}" for row in range(200 * index, 200 * index + 200)]
+        assert got[-1]["type"] == "cursor_checkpoint"
+    assert [frame["type"] for frame in requests[1]].count("history_gap") == 1
+    assert content(frames) == [f"r{index}" for index in range(450)] + ["live"]
+    assert [frame["reason"] for frame in frames if frame["type"] == "history_gap"] == ["invalid_archive_line"]
+    assert requests[-1][-1]["type"] == "task_result"
+
+
+def test_the_cli_follows_cut_passes_and_a_dropped_connection_over_tcp(tmp_path, read_clock, capsys):
+    """The real ``tasks watch`` against the real route table on an owned loopback port: the server's budget cuts
+    the pass, and the first response breaks off mid-stream (the server closes it before its third frame, which
+    http.client reads as the body's end). The CLI resumes from the last event it consumed and prints every row
+    once, then the terminal result; it neither ends early nor fails. Faked: the read clock and the broken
+    response; route, stores, HTTP and client are real. A read timeout or reset is the CLI tests' transport."""
+    import socket
+    import threading
+
+    import uvicorn
+    from starlette.applications import Starlette
+
+    from ouroboros import cli
+    from ouroboros.gateway.router import collect_routes
+
+    root = seed(tmp_path / "data")
+    write_task_result(root, "root", "completed", result="done")
+    filler = _row("z" * 1000, task_id="other") * 600
+    (root / "logs" / "tools.jsonl").write_bytes(_row("a") + filler + _row("b") + filler + filler + _row("c"))
+    app = Starlette(routes=collect_routes(data_dir=root))
+    app.state.drive_root = root
+    responses = []
+
+    async def network(scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].endswith("/events"):
+            return await app(scope, receive, send)
+        frames = []
+        responses.append(frames)
+
+        async def deliver(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                frames.append(message["body"])
+                if len(responses) == 1 and len(frames) > 2:
+                    raise ConnectionResetError("the test network dropped the first response")
+            await send(message)
+
+        await app(scope, receive, deliver)
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        server = uvicorn.Server(uvicorn.Config(network, lifespan="off", loop="asyncio", log_level="critical"))
+        thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+        thread.start()
+        try:
+            started = time.monotonic()
+            while not server.started and thread.is_alive() and time.monotonic() - started < 5:
+                time.sleep(0.01)
+            assert server.started
+            url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+            code = cli.main(["--url", url, "tasks", "watch", "root", "--jsonl"])
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+    assert not thread.is_alive(), "the owned server must stop"
+    printed = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0
+    assert content(printed) == ["a", "b", "c"]
+    assert printed[-1]["type"] == "task_result" and printed[-1]["data"]["status"] == "completed"
+    assert len(responses[0]) == 3 and len(responses) >= 3  # the dropped response, then the cut passes

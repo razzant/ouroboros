@@ -873,6 +873,7 @@ def _delegated_run_facts(drive_root: Path, child_id: str) -> Any:
                      "observation": {"state": "unknown", "reason": why} if seen is None else {
                          "observed_run_state": str(seen.get("run_state") or "unknown"),
                          "observed_waiting_on_user": bool(seen.get("waiting_on_user")),
+                         **({"observed_async_questions_only": True} if seen.get("async_questions_only") else {}),
                          "observation_failure": str(seen.get("reason") or ""),
                          "observed_since": str(seen.get("since") or "unknown"),
                          "last_answered_observation_at": last or "unknown",

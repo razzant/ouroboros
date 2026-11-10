@@ -84,7 +84,7 @@ def _engine(journal=None, *, details=None, routes=(WAIT_MANY, EVENTS), attention
         def operations(self, *, timeout_sec=None):
             return list(routes)
 
-        def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+        def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
             if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
                 return {"wakeReason": "timeout", "attention": [], "summaries": [{"problem": "not_found"}]}
             answer = attention.pop(0) if attention else None
@@ -285,6 +285,149 @@ def test_an_engine_without_the_run_journal_keeps_the_window_view(world):
         "an unchanged detail publishes nothing"
     observation = frames[0]["progress_meta"]["executor_observation"]
     assert (observation["run_id"], observation["harness_id"], observation["revision"]) == ("run-w", "codex", 2)
+
+
+def _engine_refusal(code, retryable):
+    """The engine's own refusal inside an open event stream (``run-events-stream.ts``)."""
+    from tests.test_delegated_activity import _refusal
+
+    return _refusal(code, retryable)
+
+
+def _reclaimed_detail(run_id, seq, texts):
+    return {"summary": {"runId": run_id, "state": "running", "effectiveAccess": "readonly"}, "lastSeq": seq,
+            "timeline": [{"type": "message", "title": text, "textKind": "message", "detail": text,
+                          "harnessId": "codex", "attemptId": "a1"} for text in texts], "pendingInteractions": []}
+
+
+@pytest.mark.parametrize(("served", "retryable"), [([(1, "hello"), (2, "world")], False), ([], True)],
+                         ids=["partial-then-reclaimed", "refused-at-once"])
+def test_a_refused_journal_shows_what_it_served_and_a_refusal_for_good_is_not_read_again(world, served, retryable):
+    """#3051 on the body's follow: the words served before the engine's refusal reach the owner, a retryable refusal
+    is a failed read asked again next beat, and a refusal for good is never read again."""
+    entry = started(world.root, "run-s", "task-s")
+    _asleep(world, "task-s")
+    code = "run_event_not_found" if retryable else "run_expired_by_retention"
+    journal = Journal({"run-s": [_frames([_speech("run-s", seq, text) for seq, text in served])
+                                 + _engine_refusal(code, retryable)]})
+    factory = _engine(journal)
+    with _body(world, factory) as (runtime, tick):
+        _knows_the_journal(runtime, factory)
+        tick()
+        if retryable:
+            assert _until(lambda: journal.opens == [("run-s", 0), ("run-s", 0)]), journal.opens
+            assert world.bus.frames() == [] and not delegate_feed.journal_refused(entry)
+            journal.release.set()
+        else:
+            assert _until(lambda: len(world.bus.frames()) == 1)
+            activity = world.bus.frames()[0]["progress_meta"]["delegated_activity"]
+            assert activity["through_seq"] == 2 and "hello" in world.bus.frames()[0]["text"]
+            assert _until(lambda: runtime.feeds["run-s"].done()) and delegate_feed.journal_refused(entry)
+            tick()  # refused for good: no second follow, no second read
+            time.sleep(0.1)
+            assert journal.opens == [("run-s", 0)]
+    assert len(world.bus.frames()) == (0 if retryable else 1)
+
+
+def test_after_a_refusal_for_good_the_window_view_shows_first_the_words_a_failed_frame_left(world, monkeypatch):
+    """#3051: the frame of the words read just before the refusal could not be handed over. The journal is not read
+    again; the body's detail read shows those words first (its window view), then the range it cannot show."""
+    entry = started(world.root, "run-s", "task-s")
+    _asleep(world, "task-s")
+    journal = Journal({"run-s": [_frames([_speech("run-s", 1, "hello"), _speech("run-s", 2, "world")])
+                                 + _engine_refusal("run_expired_by_retention", False)]})
+    factory = _engine(journal, details={"run-s": [_reclaimed_detail("run-s", 5, ["later words"])]})
+    real_put, failed = world.bus.put, []
+
+    def put_after_a_failure(event):
+        if not failed:
+            failed.append(event)
+            raise RuntimeError("progress channel closed")
+        real_put(event)
+
+    monkeypatch.setattr(world.bus, "put", put_after_a_failure)
+    with _body(world, factory) as (runtime, tick):
+        _knows_the_journal(runtime, factory)
+        tick()
+        assert _until(lambda: failed and runtime.feeds["run-s"].done()) and delegate_feed.journal_refused(entry)
+        assert world.bus.frames() == [] and journal.opens == [("run-s", 0)]
+        runtime._observe(current.run(world.root, "run-s"))
+    shown = [frame["progress_meta"]["delegated_activity"] for frame in world.bus.frames()]
+    assert [part["text"] for part in shown[0]["parts"]] == ["hello", "world"], "the undelivered words come first"
+    assert shown[1]["source"]["kind"] == "timeline_window" and shown[1]["source"]["retryable"] is False
+    assert shown[1]["gaps"][0]["reason"] == "stream_error:run_expired_by_retention"
+    assert shown[1]["gaps"][0]["retryable"] is False
+    assert journal.opens == [("run-s", 0)], "a journal refused for good is not read again"
+
+
+def test_a_refusal_with_nothing_new_publishes_the_shown_ranges_availability_once(world, monkeypatch):
+    """#3051: an earlier range was shown but its full source could not be kept here; the engine then refuses the
+    journal for good with no new event. Live readers learn the range is not recoverable from a reread, once."""
+    from ouroboros.subagent_messages import delegated_activity_meta
+
+    started(world.root, "run-s", "task-s")
+    _asleep(world, "task-s")
+    monkeypatch.setattr(delegate_activity, "_persist", lambda *_a: {})
+    journal = Journal({"run-s": [_frames([_speech("run-s", 1, "earlier words " * 200)]),
+                                 _engine_refusal("run_expired_by_retention", False)]})
+    factory = _engine(journal)
+    with _body(world, factory) as (runtime, tick):
+        _knows_the_journal(runtime, factory)
+        tick()
+        assert _until(lambda: len(world.bus.frames()) == 2 and runtime.feeds["run-s"].done())
+    first, second = [frame["progress_meta"]["delegated_activity"] for frame in world.bus.frames()]
+    assert first["source"].get("retained") is False
+    assert (second["after_seq"], second["through_seq"]) == (0, 1) and not second["parts"] and not second.get("gaps")
+    assert second["source"]["kind"] == "timeline_window" and second["source"]["retryable"] is False
+    assert delegated_activity_meta(second, task_id="task-s") == second
+    assert journal.opens == [("run-s", 0), ("run-s", 1)]
+
+
+def test_a_run_on_a_work_engine_is_followed_through_that_engine(world, monkeypatch):
+    """#3054: a run started on a work engine is read through that engine; the owned engine's transport never reads it."""
+    from ouroboros import execution_domain
+
+    _asleep(world, "task-w")
+    bound = {"descriptor": "/work/descriptor", "store": "work-store"}
+    entry = type("Bound", (), {"run_id": "run-w", "task_id": "task-w", "engine_ref": bound})()
+    journal = Journal({"run-w": [_frames([_speech("run-w", 1, "from the work engine")])]})
+    made: list = []
+    owned = _engine(None, routes=())  # the owned engine has no journal route and must not be asked
+    work = _engine(journal, made=made)
+    seen: list = []
+
+    def run_gateway(record, default, **_kw):
+        seen.append(record.run_id)
+        return work()
+
+    monkeypatch.setattr(execution_domain, "run_gateway", run_gateway)
+    feed = delegate_feed.Feed(world.root)
+    feed.live = {"task-w": {"chat_id": 7, "meta": {}, "attempt": 1, "direct": False}}
+    runtime = type("Runtime", (), {"_gateway": staticmethod(owned)})()
+    cursor, transport = delegate_feed._Cursor(), []
+    assert feed._beat(runtime, entry, feed.live["task-w"], cursor, transport) is True
+    assert seen == ["run-w"] and journal.opens == [("run-w", 0)] and cursor.seq == 1
+    assert "from the work engine" in world.bus.frames()[0]["text"] and transport == made
+    for gateway in transport:
+        gateway.close()
+
+
+def test_the_body_records_an_async_questions_whole_set_fact_for_its_parent(world):
+    """#3066: the parent's view of a run never reads a question that holds nothing as a blocked agent."""
+    from ouroboros.tools.control_task_results import _delegated_run_facts
+
+    entry = started(world.root, "run-q", "task-q")
+    feed = delegate_feed.Feed(world.root)
+    fact = {"run_state": "running", "waiting_on_user": True, "async_questions_only": True, "answered": True}
+    feed.record(entry, fact)
+    record, why = delegate_feed.read_observation(world.root, "run-q")
+    assert not why and (record["waiting_on_user"], record["async_questions_only"]) == (True, True)
+    [row] = _delegated_run_facts(world.root, "task-q")
+    assert row["observation"]["observed_waiting_on_user"] is True
+    assert row["observation"]["observed_async_questions_only"] is True
+    feed.record(entry, {**fact, "async_questions_only": False})  # a blocking question arrived: the fact changes
+    [row] = _delegated_run_facts(world.root, "task-q")
+    assert row["observation"]["observed_waiting_on_user"] is True and "observed_async_questions_only" not in row["observation"]
 
 
 def test_the_body_holds_every_observed_run_to_its_recorded_grant(world, monkeypatch):

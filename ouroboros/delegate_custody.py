@@ -8,9 +8,11 @@ answers, never two: OWNED, FOREIGN (another task started it) and UNKNOWN (no dur
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import uuid
 from contextlib import contextmanager
@@ -144,7 +146,9 @@ class RunCustody:
     # Idempotency-Key only for an exact transport retry; deliberately new work
     # gets a fresh id. ``idempotency_key`` above only finds pending work.
     invocation_id: str = ""
-    daemon_store_id: str = ""  # immutable engine store UUID; empty legacy authority stays unknown
+    daemon_store_id: str = ""  # the engine store that admitted the run; "" = unbound (older engine or receipt)
+    # The work-engine locator is bound before POST; it is not admission-store proof.
+    engine_ref: Dict[str, Any] = field(default_factory=dict)
     # Configured-actor binding. Empty on historical/root-legacy delegate starts.
     selected_subagent_id: str = ""
     config_fingerprint: str = ""
@@ -313,22 +317,43 @@ def emit(drive_root: Any, kind: str, payload: Dict[str, Any], *, propagate_conte
 def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustody] = None) -> bool:
     """A run's 404 proves absence in its owning store; project cleanup uses raw HTTP.
 
-    A run bound to a store (handshake ``storeId``) is absent only for that store. An unbound
-    run (started before engines named their store, or never read) keeps the earlier contract:
-    the one managed daemon's 404 closes it.
+    A run bound to a store is absent only when the 404 itself names that store (the
+    ``context.storeId`` of ``GET /v2/runs/:id``): another store, or none (a control, answer or
+    event-stream 404 names none), leaves it unknown. An unbound run (an older engine or a
+    receipt without identity) keeps the earlier contract: the one managed daemon's 404 closes
+    it. Either way that store keeps no record of the run; no executor, effect or new start is
+    proven or licensed by it.
     """
-    return int(getattr(exc, "status_code", 0) or 0) == 404 and (run is None or _absence_provable(run, gateway))
+    return int(getattr(exc, "status_code", 0) or 0) == 404 and (run is None or _absence_provable(run, exc, gateway))
 
 
-def _absence_provable(run: RunCustody, gateway: Any) -> bool:
-    return not run.terminal_source and (not run.daemon_store_id
-                                        or run.daemon_store_id == getattr(gateway, "store_identity", ""))
+def _absence_provable(run: RunCustody, absence: Any, gateway: Any = None) -> bool:
+    from ouroboros.execution_domain import same_engine
+
+    return not run.terminal_source and same_engine(gateway, run) and (
+        not run.daemon_store_id or run.daemon_store_id == _answering_store(absence))
+
+
+def _answering_store(exc: Any) -> str:
+    problem = getattr(exc, "problem", None)
+    context = problem.get("context") if isinstance(problem, dict) else None
+    named = context.get("storeId") if isinstance(context, dict) else None
+    return named if isinstance(named, str) else ""
+
+
+def admitted_store_id(receipt: Any) -> str:
+    """The store that admitted a start, as its own receipt names it (the opt-in ``storeId``);
+    "" when it names none, so the run stays unbound instead of bound to a cached identity."""
+    named = receipt.get("storeId") if isinstance(receipt, dict) else None
+    return named if isinstance(named, str) else ""
 
 
 def bind_daemon_store(drive_root: Any, gateway: Any, entry: RunCustody) -> None:
-    """Bind a successful exact run read, never infer identity from a 404 or PID."""
+    """Bind a row its admission left unbound after a successful exact read; never from a 404 or PID."""
+    from ouroboros.execution_domain import same_engine
+
     identity = getattr(gateway, "store_identity", "")
-    if isinstance(identity, str) and identity and not entry.daemon_store_id:
+    if isinstance(identity, str) and identity and not entry.daemon_store_id and same_engine(gateway, entry):
         if emit(drive_root, STORE_BOUND, {"run_id": entry.run_id, "task_id": entry.task_id,
                 "invocation_id": entry.invocation_id, "daemon_store_id": identity}):
             entry.daemon_store_id = identity
@@ -383,6 +408,22 @@ def custody_chain_unreadable(drive_root: Any) -> bool:
     return False
 
 
+class ActorDecisionLockUnavailable(TimeoutError):
+    """The actor decision lock was not taken. ``reason`` and ``errno`` are the platform
+    acquisition's own outcome, kept verbatim: a full disk at the lock file's creation is no
+    contention, and contention names no OS cause. The decision that needed the lock, and what
+    its refusal leaves unchanged, are the caller's to say."""
+
+    def __init__(self, outcome: Dict[str, Any], timeout_sec: float) -> None:
+        reason, code = str(outcome.get("reason") or "unknown"), outcome.get("errno")
+        if isinstance(code, int):
+            detail = f", errno {code} {errno.errorcode.get(code, '')} ({os.strerror(code)})"
+        else:
+            detail = f" (still held when its {timeout_sec:g}s bound ended)" if reason == "contention" else ""
+        super().__init__(f"actor decision lock is unavailable: platform outcome {reason}{detail}")
+        self.reason, self.errno = reason, code if isinstance(code, int) else None
+
+
 @contextmanager
 def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     """Serialize one actor's mutually exclusive zero-run/start decisions.
@@ -390,7 +431,8 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     The custody log and the verification-receipt store are separate append-only
     authorities.  This short critical section joins only their decision edge:
     re-read authority before a zero-run receipt, START_REQUESTED or absent-run
-    closure. Network operations stay outside it.
+    closure. Network operations stay outside it. A lock that was not taken raises
+    ``ActorDecisionLockUnavailable`` (a ``TimeoutError``) with the platform's cause.
     """
 
     from ouroboros.platform_layer import (
@@ -404,9 +446,10 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     lock_path = pathlib.Path(drive_root) / "state" / "delegate_actor_claims" / f"{digest}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, stale_sec=120.0)
+    outcome: Dict[str, Any] = {}
+    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, stale_sec=120.0, outcome=outcome)
     if fd is None:
-        raise TimeoutError("actor decision lock is unavailable")
+        raise ActorDecisionLockUnavailable(outcome, 20.0)
     try:
         yield
     finally:
@@ -559,6 +602,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         entry = RunCustody(
             run_id=run_id,
             daemon_store_id=str(row.get("daemon_store_id") or ""),
+            engine_ref=copy.deepcopy(row["engine_ref"]) if isinstance(row.get("engine_ref"), dict) else {},
             project_owned=bool(row.get("project_owned")),
             project_persistent=bool(row.get("project_persistent")),
             delegated=row.get("delegated") is True,
@@ -939,6 +983,7 @@ from ouroboros.delegate_invocation import (  # noqa: E402, F401 -- public custod
     invocation_record,
     _request_facts,
 )
+from ouroboros.delegate_pending import replay_store_unproven  # noqa: E402, F401 -- public custody reader
 
 
 def record_start_requested(drive_root: Any, **payload: Any) -> bool:
@@ -998,6 +1043,7 @@ def record_started(drive_root: Any, custody: RunCustody,
     landed = emit(drive_root, STARTED, {
         "run_id": custody.run_id,
         "daemon_store_id": custody.daemon_store_id,
+        **({"engine_ref": copy.deepcopy(custody.engine_ref)} if custody.engine_ref else {}),
         "project_owned": custody.project_owned, "project_persistent": custody.project_persistent,
         "resource_ref": custody.resource_ref or {},
         **{key: copy.deepcopy(getattr(custody, key)) for key in _STARTED_MAPPING_FIELDS},
@@ -1110,6 +1156,9 @@ def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *
         log.warning("Retirement deferred: replay failed for %s",
                     custody.run_id, exc_info=True)
         return
+    from ouroboros.execution_domain import same_engine
+    if not same_engine(gateway, custody):
+        return  # the registration lives on the run's own engine: that engine's pass retires it
     try:
         gateway.remove_project(custody.project_id)
     except Exception as exc:
@@ -1144,8 +1193,11 @@ def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *
     _release_registration(drive_root, custody)
 
 
-def close_absent_run(drive_root: Any, gateway: Any, custody: RunCustody, reason: str) -> None:
-    """Close one owning-store absence without fabricating terminal output or money."""
+def close_absent_run(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, absence: Any) -> None:
+    """Close one owning-store absence without fabricating terminal output or money.
+
+    ``absence`` is the 404 that proved it: the locked recheck judges the current row by that
+    same answer, never by a cached handshake identity."""
     from ouroboros.delegate_custody_current import run
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
@@ -1154,11 +1206,11 @@ def close_absent_run(drive_root: Any, gateway: Any, custody: RunCustody, reason:
         if current.settled:
             custody.settled = True
             return
-        if not _absence_provable(current, gateway):
+        if not _absence_provable(current, absence, gateway):
             raise ClaudexorUnavailable("daemon_store_identity_unproven", "Run absence is unproven in its owning store")
         custody.settled = emit(drive_root, CLOSED_ABSENT, {
-            "run_id": custody.run_id, "task_id": custody.task_id,
-            "route": custody.route_id, "project_id": custody.project_id, "reason": reason,
+            "run_id": custody.run_id, "task_id": custody.task_id, "route": custody.route_id,
+            "project_id": custody.project_id, "reason": reason, "daemon_store_id": _answering_store(absence),
         })
     # Network retirement is independent of the closed fact, outside the actor lock.
     retire_project(drive_root, gateway, custody)
@@ -1339,19 +1391,14 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
         accepted = bool((receipt or {}).get("accepted"))
         control_status = str((receipt or {}).get("status") or "")
     except ClaudexorUnavailable as exc:
-        if daemon_says_absent(exc, gateway=gateway, run=custody):
-            close_absent_run(drive_root, gateway, custody, "cancel_run_absent")
-            return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=False,
-                                  control_status="", state="absent")
-        # A refused control is not a verdict on the RUN. The read below is what decides
-        # whether anything is still mutating; declaring the fault here — with the read
-        # sitting three lines away, unused — faulted runs that had already stopped.
+        # A refused control is not a verdict on the RUN, and the control route's 404 names no
+        # store: the read below decides both absence and whether anything is still mutating.
         control_error = f"{exc.code}: {exc}"
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
         if daemon_says_absent(exc, gateway=gateway, run=custody):
-            close_absent_run(drive_root, gateway, custody, "get_run_absent")
+            close_absent_run(drive_root, gateway, custody, "get_run_absent", absence=exc)
             return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=accepted,
                                   control_status=control_status, state="absent")
         return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=accepted,
@@ -1446,6 +1493,7 @@ def retire_settled_registrations(drive_root: Any, gateway: Any, *, live_task_ids
 
 
 __all__ = [
+    "ActorDecisionLockUnavailable",
     "CANCEL_CONFIRMED",
     "CANCEL_CONTAINMENT_FAULT",
     "CANCEL_FAILED",
@@ -1458,6 +1506,7 @@ __all__ = [
     "TERMINAL_STATES",
     "UNKNOWN",
     "actor_decision_lock",
+    "admitted_store_id",
     "cancel_and_verify",
     "capture_key",
     "close_absent_run",
@@ -1481,6 +1530,7 @@ __all__ = [
     "output_disposition",
     "pending_invocations",
     "reconcile_orphaned_runs",
+    "replay_store_unproven",
     "record_containment_fault",
     "record_output_consumed",
     "record_patch_apply_resolved",

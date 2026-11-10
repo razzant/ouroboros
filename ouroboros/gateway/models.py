@@ -522,6 +522,12 @@ async def api_local_model_start(request: Request) -> JSONResponse:
 
         if not source:
             return JSONResponse({"error": "source is required"}, status_code=400)
+        from ouroboros.deployment_policy import local_launch_refusal
+        from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+        # The deployment judges the launch before any probe, download or start; Stop stays free.
+        if refusal := local_launch_refusal(source=source, filename=filename, port=port, chat_format=chat_format):
+            return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
 
         from ouroboros.local_model import get_manager, _get_runtime_hint
         mgr = get_manager()
@@ -950,7 +956,13 @@ async def api_local_model_install_runtime(request: Request) -> JSONResponse:
     - ``"install_error"``— install failed; ``runtime_install_log`` has details
     """
     try:
+        from ouroboros.deployment_policy import body_replacement_refusal
+        from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
         from ouroboros.local_model import get_manager
+
+        # pip writes into the interpreter this server runs: a managed deployment's administrator provisions it.
+        if refusal := body_replacement_refusal():
+            return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
         mgr = get_manager()
 
         current = mgr._runtime_status

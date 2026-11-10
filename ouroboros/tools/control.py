@@ -253,10 +253,10 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; for a finish with pending_review=finish (required there) or over reviewers' findings, why you accept it now. The owner reads it on the task row."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
-                "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
+                "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait", "description": "While your result's review still runs: wait (default) for its verdict, or, where offered, finish now with a rationale saying why; the result then shows Done with warnings and the reviewers' late verdict is kept for you."},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
                 "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
@@ -296,6 +296,7 @@ def get_tools() -> List[ToolEntry]:
                     "workspace": {"type": "string", "description": "'none' opts out of the Project's default folder; empty otherwise.", "default": ""},
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
+                    "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
@@ -398,14 +399,14 @@ def get_tools() -> List[ToolEntry]:
         }, _update_scratchpad),
         ToolEntry("send_user_message", {
             "name": "send_user_message",
-            "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question the work does not wait on, an invitation to "
-                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
-                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
-                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
-                           "and leaves the work running; work news goes on update_focus, later progress stays in the "
-                           "card. For Presence-bound work that room is local, not the place conversation: a connector "
-                           "tool reaches that, and your final answer only where your context names that route.",
+            "description": "Reach the owner while work continues: an opening that says what I will check and why, "
+                           "a substantial interim result they need now, a non-blocking question or an invitation to "
+                           "collaborate. Do not pre-send a duplicate of the final answer: it already reaches this work's "
+                           "answer room. A needed owner decision uses escalate: its card shows options, stays listed "
+                           "as waiting and brings the answer here. This tool sends a normal reply in this work's room, "
+                           "calls the owner back and leaves work running; routine news goes on update_focus, later "
+                           "progress stays in the card. For Presence work that room is local, not the place conversation: "
+                           "a connector reaches that, and the final answer only where context names that route.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},

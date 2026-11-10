@@ -1071,8 +1071,8 @@ Used by `review_change(subject="result")`: the mind asks for it, and under task 
 asks for it at a root delivery whose result carries produced work; task review Off refuses it. You review
 the RESULT of one task, not a code change. The host builds the subject, frozen at the call, in four parts:
 what was asked (the task, its owner's words and the claims it was held to, the latest accepted plan's
-`done_when` among them), the reply the task gives, what the task produced (files and effects, named by path
-and content hash) and the host-attested verification receipts.
+`done_when` among them), the reply the task gives, what the task produced (files and effects, named by path,
+content hash and exact retained copy, with text excerpts inline) and the host-attested verification receipts.
 
 **One question: does this result do what was asked?**
 - Judge the result, not the method — unless the owner's own words or explicit choice in what was asked
@@ -1081,7 +1081,8 @@ and content hash) and the host-attested verification receipts.
   failure. A method that only an account names (the objective, the plan) is not fixed by the owner.
 - A partial result that says plainly what it did not do is honest, not a defect. A result that silently
   narrows what was asked, claims what it did not do, or contradicts its own material is a defect.
-- Read the produced files you can reach; a claim about a file must match its content.
+- Read the exact copies of the produced files that the subject names; a claim about a file must match its content.
+  A file you could not read is a gap you name with what it leaves unverified; a gap alone is not a failure.
 - When what was produced is something a person will look at, look at it (the frames the subject carries,
   at the viewer's size) and say first what a person sees there and whether it does its job; its geometry
   and its code come after. For each phrase a person reads there first (when the subject carries "Words to

@@ -283,8 +283,6 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         # conversation lane's carriers are apart. A snapshot's max_workers is its writer's cap (null: none).
         fact["recorded_max_workers" if key == "max_workers" else key] = (
             snapshot.get(key) if observed == "observed" else None)
-    refused = snapshot.get("dispatch_refusals")  # queued rows the launch would refuse by their own facts, with why
-    fact["dispatch_refusals"] = dict(refused) if isinstance(refused, dict) and observed == "observed" else {}
     assignable = snapshot.get("assignable_idle_workers")
     if observed != "observed":
         fact["free_worker_slots"] = None
@@ -305,8 +303,7 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "was built and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
         "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so "
-        "explicitly, dispatch_refusals names rows the launch refuses by their own facts, and other rows record no "
-        "wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
+        "explicitly, and other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
         "(a warm sleep, an owner wait or an in-slot wait) and is not counted against the owner's cap, which counts "
         "acting tasks only (recorded_max_workers; null: no number, the machine's memory is the limit). "
         "free_worker_slots is assignable idle existing capacity, not headroom; booting and reaping overlap for "
@@ -492,7 +489,9 @@ _ROUTES_SHOWN = 4  # failing routes rendered in the line; the row keeps every ro
 _CAUSE_CHARS = 80  # of a top cause's message in the line; the row keeps the engine's whole first line
 _STORE_FILES = ("state/current.sqlite", "state/dialog.sqlite", "state/usage.sqlite")
 _JOURNAL_MODES: Dict[str, str] = {}  # per process: each store file's header, read once
-VITALS_READER = "query_data(kind='supervisor_log', op='jsonl')"  # the minimal working call: the kind requires op='jsonl'
+# The minimal working call: the kind requires op='jsonl', and these rows are the installation's journal,
+# which a forked drive does not keep (plane='canonical' reads it from any focus).
+VITALS_READER = "query_data(kind='supervisor_log', op='jsonl', plane='canonical')"
 VITALS_NOTE = f"No verdict here, the weighing is mine; clocks UTC; rows: {VITALS_READER}"
 WAL_GATE = ("WAL needs a SQLite with the WAL-reset fix (3.51.3+, or 3.50.7+ / 3.44.6+ within those series),"
             " enforced kernel locks and a local filesystem; an Update keeps this interpreter")
@@ -836,10 +835,14 @@ def admission_observation(data_root: Any, *, observed_at: str) -> str:
 
 
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
-    """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
-    site, ``context.build_runtime_section``."""
+    """The Runtime section's ``storage``, ``vitals`` and ``kept_services`` keys, each present only with its fact: one
+    call site, ``context.build_runtime_section``. ``kept_services`` is what custody says runs now, never a task's
+    ``services_kept`` history (``launch_custody.kept_services_fact``)."""
+    from ouroboros.launch_custody import kept_services_fact
+
     facts = {"storage": storage_fact(data_root, observed_at=observed_at),
-             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
+             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at),
+             "kept_services": kept_services_fact(data_root)}
     return {key: value for key, value in facts.items() if value is not None}
 
 

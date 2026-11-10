@@ -32,25 +32,10 @@ from ouroboros.headless_status import (  # noqa: F401
     ARTIFACT_TERMINAL_STATUSES, _ARTIFACT_LIFECYCLE_FIELDS, _FINAL_STATUSES, _LOCAL_READONLY_SUBAGENT_MODE,
 )
 from ouroboros.workspace_patch_capture import (  # noqa: F401
-    SCRATCH_MANIFEST_NAME,
-    _GIT_UNBORN_HEAD,
-    _acting_constraint_from_task,
-    _append_git_output,
-    _empty_patch_manifest,
-    _git_bytes,
-    _git_empty_tree_oid,
-    _git_path_list,
-    _git_stdout,
-    _head_reflog_exists,
-    _looks_like_git_oid,
-    _preflight_head_from_task,
-    _preflight_head_present,
-    _untracked_blob_exclude_reason,
-    _workspace_patch_base,
-    _write_patch_separator,
-    build_workspace_patch,
-    pem_private_key_reason,
-    untracked_capture_veto_reason,
+    SCRATCH_MANIFEST_NAME, _GIT_UNBORN_HEAD, _acting_constraint_from_task, _append_git_output, _empty_patch_manifest,
+    _git_bytes, _git_empty_tree_oid, _git_path_list, _git_stdout, _head_reflog_exists, _looks_like_git_oid,
+    _preflight_head_from_task, _preflight_head_present, _untracked_blob_exclude_reason, _workspace_patch_base,
+    _write_patch_separator, build_workspace_patch, pem_private_key_reason, untracked_capture_veto_reason,
     write_workspace_patch_artifacts,
 )
 
@@ -316,6 +301,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     from ouroboros.store import StoreBusy, StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     days = _resolve_retention_days(retention_days)
     cutoff = age_cutoff(days, now)
@@ -347,6 +333,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     if names is None:
         forget_departed(verdicts(), base.name, _drive_names(base))
     attempts, busy, youngest = 0, False, (None if names is None else rest.get("youngest"))
+    owed = owed_declarations(parent)  # one read of the kept-output debts for this whole pass
     for task_id, status, retention_at, inside_wait, fact in drive_candidates(base, parent, cutoff, stop, after=after,
                                                                                names=names):
         if chosen is not None and task_id not in chosen:
@@ -394,7 +381,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             attempts += 1
             report["cursor"] = task_id
             if (outcome := settle_child_drive(parent, task_id, drive_of(task_dir), live=live, guard=guard, stop=stop,
-                                              report=report))["status"] == "removed":
+                                              report=report, owed=owed))["status"] == "removed":
                 report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
             record_rest(verdicts(), base.name, parent, task_id, task_dir, drive_of(task_dir), outcome)
             if progress is not None:
@@ -749,11 +736,12 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
             current = copy_child_task_result(root, {**task, "id": task_id}) or current
         if str(current.get("status") or "") not in _FINAL_STATUSES:
             raise ValueError("terminal task result is missing or not settled")
-        # Workspace capture and a workspace-free child's memory export share the
-        # existing finalizer. Inline turns have no workspace capture obligation.
+        # Workspace capture and a workspace-free child's memory export share the existing finalizer; inline
+        # turns owe no capture, and recorded native capture debt (native_capture_pending) is still owed here.
         memory_export = child is not None and _workspace_root_from_task(task) is None and not task_is_readonly_subagent(task)
         if (not cancelled and (task_requires_workspace_capture(task) or memory_export)
-                and str(current.get("artifact_status") or "").strip().lower() not in ARTIFACT_TERMINAL_STATUSES):
+                and str(current.get("artifact_status") or "").strip().lower()
+                not in ARTIFACT_TERMINAL_STATUSES):
             finalize_task_artifacts(root, {**task, "id": task_id})
         report["result"] = load_task_result(root, task_id, strict=True)
         from ouroboros.obligations import drive_finished
@@ -1190,9 +1178,10 @@ def native_capture_custody(root, entry):
 
 
 def _native_capture_gap(root, task_id, pending, reason):
-    """Artifact-only failure BEFORE mutation; settled task lifecycle and old bytes stand."""
+    """Artifact-only gap BEFORE mutation; lifecycle and old bytes stand; settled owner: failed, live owner: owed (pending)."""
     from ouroboros.outcomes import artifact_bundle_from_result
     row = load_task_result(root, task_id, strict=True) or {}
+    status = ARTIFACT_STATUS_FAILED if row.get("status") in _FINAL_STATUSES else ARTIFACT_STATUS_PENDING
     base = task_artifacts_dir(root, task_id)
     folder = _capture_version_dir(base, row)
     manifest = _empty_patch_manifest(_workspace_root_from_task(row), status=ARTIFACT_STATUS_FAILED,
@@ -1209,14 +1198,14 @@ def _native_capture_gap(root, task_id, pending, reason):
         reason += f" Capture manifest unavailable: {type(exc).__name__}: {exc}"
         artifacts = [{"kind": "workspace_patch_manifest", "name": path.name, "path": str(path),
                       "status": "missing", "measured": False, "errors": [reason]}]
-    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": ARTIFACT_STATUS_FAILED,
+    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": status,
               "artifact_error": reason, "native_capture_pending": sources}
     provisional = {**row, **fields}
     provisional.pop("artifact_bundle", None)
     fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
     if row.get("outcome_axes"):
         fields["outcome_axes"] = {**row["outcome_axes"], "artifacts": {
-            **row["outcome_axes"].get("artifacts", {}), "status": ARTIFACT_STATUS_FAILED}}
+            **row["outcome_axes"].get("artifacts", {}), "status": status}}
     write_task_result(root, task_id, row["status"], **fields)
     if failure is not None:
         raise failure

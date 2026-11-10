@@ -473,7 +473,9 @@ def _postimage(before: str, patch: str) -> str:
 
 
 def words_for_diff(repo_dir, diff: str) -> ReviewWords:
-    """Read the diff's blob identities, never HEAD or a possibly changed checkout."""
+    """Read the diff's blob identities, never HEAD or a possibly changed checkout (a work folder's by its own Git)."""
+    from ouroboros import work_domain
+
     sources, gaps = [], []
     for block in re.split(r"(?m)(?=^diff --git )", diff):
         path_match = re.search(r"(?m)^\+\+\+ (.+)$", block)
@@ -505,8 +507,8 @@ def words_for_diff(repo_dir, diff: str) -> ReviewWords:
             if set(index[1]) == {"0"}:
                 before = ""
             else:
-                before = subprocess.run(["git", "cat-file", "blob", index[1]], cwd=repo_dir, check=True,
-                                        capture_output=True, timeout=10).stdout.decode("utf-8")
+                before = work_domain.run(["git", "cat-file", "blob", index[1]], cwd=repo_dir, check=True,
+                                         capture_output=True, timeout=10).stdout.decode("utf-8")
             sources.append((path, before, _postimage(before, block)))
         except (SyntaxError, ValueError, OSError, subprocess.SubprocessError) as exc:
             gaps.append(f"{path} ({type(exc).__name__})")

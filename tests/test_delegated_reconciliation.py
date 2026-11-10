@@ -260,7 +260,8 @@ def test_what_the_daemon_says_is_absent_is_closed_not_faulted_forever(tmp_path):
 
     class _NoSuchRun(_LiveRunStub):
         def get_run(self, rid, **_kw):
-            raise cx.ClaudexorUnavailable("run_not_found", "no such run", status_code=404)
+            from tests._shared import run_absent_in
+            raise run_absent_in("store-a")  # the owning store answers that it keeps no such run
 
     class _NoSuchProject(_LiveRunStub):
         def get_run(self, rid, **_kw):

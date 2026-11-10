@@ -559,31 +559,44 @@ class BackgroundConsciousness:
             self._stopped = True
             was_enabled, self._enabled = self._enabled, False
         wake = self.live_wake()
-        from supervisor.consciousness_carriers import autonomous_tasks
+        from supervisor.consciousness_carriers import autonomous_tasks, live_task_rows
         from ouroboros.conversation_lease import live_authors
         from supervisor.active_activity import get_direct_activity_registry
         from supervisor.workers import direct_chat_turn
-        direct = []
+        direct, turns = [], {}
         for entry in get_direct_activity_registry().actors():
             task_id = str(entry.activity_id)
-            metadata = (direct_chat_turn(task_id) or {}).get("metadata") or {}
+            turn = direct_chat_turn(task_id) or {}
+            metadata = turn.get("metadata") or {}
+            if turn:  # its title and metadata name it if the switch ends it
+                turns[task_id] = {"title": str(turn.get("title") or turn.get("suggested_name") or ""), "metadata": metadata}
             if is_consciousness_origin(metadata) and metadata.get("work_kind") != "owner":
                 direct.append(task_id)
         # Its own wake by identity too: bound before delivery, a direct turn is no chat turn yet.
-        wakes = list(dict.fromkeys(([wake] if wake else []) + direct + autonomous_tasks()
-                                   + live_authors(drive_root=self._drive_root)))
+        authors = live_authors(drive_root=self._drive_root)
+        wakes = list(dict.fromkeys(([wake] if wake else []) + direct + autonomous_tasks() + authors))
         # Work started on my human's cited words is theirs: the switch leaves it running and says so, quote and all,
         # in the same Main row every surface shows (owner 06.11, 3A); they cancel it from its card if the cite was wrong.
         from supervisor.consciousness_carriers import cited_owner_roots, cited_owner_schedules
         kept = "".join(f"\nKept running on your words (task {task_id}): «{quote}»" for task_id, quote in cited_owner_roots())
         kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
                         for sid, quote in cited_owner_schedules(self._drive_root))
-        if wakes:
-            for task_id in wakes:
-                threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
-            return (f"Background consciousness disabled; wake-up {wake} ends at its next step." if wake
-                    else "Background consciousness disabled; autonomous work ends at its next step.") + kept
-        return ("Background consciousness disabled." if was_enabled else "Background consciousness is already disabled.") + kept
+        if not wakes and not was_enabled:
+            return "Background consciousness is already disabled." + kept
+        for task_id in wakes:
+            threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
+        # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
+        # way: the place count is one read that never holds or fails them; what it ends is named from memory.
+        from ouroboros.consciousness_view import off_sentence, stopping_words
+        try:
+            from ouroboros.places import load_places
+            places = load_places(self._drive_root)
+        except Exception:
+            log.debug("consciousness: places unreadable for the stop sentence", exc_info=True)
+            places = None
+        ending = stopping_words(wakes, wake=wake, rows={**live_task_rows(wakes), **turns}, authors=set(authors),
+                                places=places) if wakes else ""
+        return " ".join(part for part in (off_sentence(places), ending) if part) + kept
 
     @staticmethod
     def _stop_live_wake(task_id: str) -> None:

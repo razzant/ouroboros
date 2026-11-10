@@ -13,7 +13,7 @@ it dates each entry by the newest fetched commit touching its release (``updated
 an immutable ``checkout_at_commit`` of the snapshot's commit, fetched locally from the shared clone so a
 later refresh cannot change a folder already handed to a reader.
 The built-in source is the bundled ``skills/`` folder with ``skills/builtin.json``; a local folder is
-scanned in place; a registry (ClawHub) answers searches only.
+scanned in place; a registry (ClawHub) has no list here: it answers a search, or one page when named alone.
 
 The release digest of a tree is ``skill_identity.payload_digest`` (``tree_release_digest`` reads the
 manifest once for it); an installed skill's digest is the loader's own content hash. Installed state,
@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 SNAPSHOT_FILENAME = "catalog.json"
 SNAPSHOT_SCHEMA_VERSION = 1
 REFRESH_AFTER_SEC = 600  # a cache older than this is refreshed in the background when a catalog is shown
+REGISTRY_BROWSE_PAGE = 24  # one Browse page of a registry
 _MAX_ABOUT_CHARS = 20_000
 _SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".ouroboros_env", ".github"})
 _MEMO_LOCK = threading.Lock()
@@ -496,12 +497,9 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
     return out
 
 
-def registry_items(row: Dict[str, Any], query: str, *, limit: int = 16) -> List[Dict[str, Any]]:
-    """ClawHub search hits as items (network; called on an explicit search only)."""
-    from ouroboros.marketplace.clawhub import search
+def _registry_page_items(row: Dict[str, Any], page: Dict[str, Any]) -> List[Dict[str, Any]]:
     from ouroboros.skill_loader import _sanitize_skill_name
 
-    page = search(query, limit=limit, registry_url=row.get("url") or None, include_metadata=True, timeout_sec=15)
     out = []
     for summary in page.get("results") or []:
         if summary.is_plugin:
@@ -516,6 +514,25 @@ def registry_items(row: Dict[str, Any], query: str, *, limit: int = 16) -> List[
             "registry_stats": dict(summary.stats or {}), **summary.catalog_facts(),
         })
     return out
+
+
+def registry_items(row: Dict[str, Any], query: str, *, limit: int = 16) -> List[Dict[str, Any]]:
+    """ClawHub search hits as items (network; called on an explicit search only)."""
+    from ouroboros.marketplace.clawhub import search
+
+    return _registry_page_items(row, search(query, limit=limit, registry_url=row.get("url") or None,
+                                            include_metadata=True, timeout_sec=15))
+
+
+def registry_browse(row: Dict[str, Any], *, sort: str = "popular", cursor: str = "",
+                    limit: int = REGISTRY_BROWSE_PAGE) -> Dict[str, Any]:
+    """``{items, next_cursor}``: one page of a registry in its own order (network; only for a registry named
+    explicitly with nothing to search). ``popular`` (most downloaded) is the default and an unknown order's."""
+    from ouroboros.marketplace.clawhub import BROWSE_SORTS, search
+
+    page = search("", limit=limit, sort=sort if sort in BROWSE_SORTS else "popular", cursor=cursor or None,
+                  registry_url=row.get("url") or None, include_metadata=True, timeout_sec=15)
+    return {"items": _registry_page_items(row, page), "next_cursor": str(page.get("next_cursor") or "")}
 
 
 # --- installed state ---------------------------------------------------------------------------------
@@ -853,6 +870,6 @@ __all__ = [
     "entry_payload_dir", "find_item", "install_listing", "installed_index", "installed_release_digest",
     "listing_install_fields", "listing_snapshots",
     "item_detail", "items_for", "parse_hub_tree", "parse_plain_tree", "probe_source", "read_manifest", "read_snapshot",
-    "record_matches_row", "refresh_source", "registry_items", "row_for_record", "snapshot_for", "tree_release_digest",
+    "record_matches_row", "refresh_source", "registry_browse", "registry_items", "row_for_record", "snapshot_for", "tree_release_digest",
     "update_state",
 ]

@@ -646,12 +646,13 @@ def _attach_only():
     return attach_only_gateway
 
 
-def _run_probe_error(run_id: str) -> str:
+def _run_probe_error(run: Any) -> str:
     gateway = None
-    try:
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
-        gateway = ensure_owned_gateway()
-        gateway.get_run(run_id)
+    try:  # the run's own engine (``execution_domain``): another engine's answer proves nothing about it
+        from ouroboros import claudexor_daemon
+        from ouroboros.execution_domain import run_gateway
+        gateway = run_gateway(run, claudexor_daemon.ensure_owned_gateway)
+        gateway.get_run(run.run_id)
         return ""
     except Exception as exc:
         return type(exc).__name__
@@ -1053,7 +1054,7 @@ def pre_adopt_planned_handoffs(
             run, _, custody_error = _saved_handoff_holder(drive_root, scoped)
             error = error or custody_error
             if not error and run is not None and not run.settled and not saved:
-                error = "run_unobserved" if _run_probe_error(run.run_id) else ""
+                error = "run_unobserved" if _run_probe_error(run) else ""
             if error:
                 holder.update(status="deferred" if error in {"custody_unreadable", "run_unobserved"} else "refused",
                               deferred_reason=error)
@@ -1191,7 +1192,7 @@ def _adopt_holder(ctx: Any, task: Mapping[str, Any], row: dict, holder: dict, *,
                     "status": "refused" if fate.get("state") == "failed_definite" else "deferred",
                     "reason": "pending_recovery_definitely_refused" if fate.get("state") == "failed_definite" else "pending_recovery_deferred",
                     "detail": parsed}
-    if run is not None and not run.settled and not saved and _run_probe_error(run.run_id):
+    if run is not None and not run.settled and not saved and _run_probe_error(run):
         return {**identity, "run_id": run.run_id, "status": "deferred", "reason": "run_unobserved"}
     run_id = run.run_id if run is not None else ""
     if run_id:

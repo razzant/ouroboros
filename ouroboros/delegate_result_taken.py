@@ -115,16 +115,30 @@ def _decision(engine: Any, run_id: str) -> Dict[str, Any]:
     return {}
 
 
-def _unavailable(run: Any) -> str:
-    """This pass's one capability read: an unsupported or unreadable catalog keeps the duty waiting."""
-    if not hasattr(run, "_taken_unavailable"):
-        engine = run.engine()
+def _unavailable(run: Any, entry: Any = None) -> str:
+    """This pass's capability read of the engine holding ``entry``'s run (the owned engine when it names none), asked
+    once per engine: an unsupported or unreadable catalog keeps that engine's duties waiting, never another's."""
+    from ouroboros.execution_domain import engine_key
+
+    known = run.__dict__.setdefault("_taken_unavailable", {})
+    key = engine_key(entry) if entry is not None else None
+    if key not in known:
+        engine = run.work.reach(entry) if key is not None else run.engine()
         try:
-            run._taken_unavailable = ("result_engine_unavailable" if engine is None else
-                                      "" if engine.run_result_taken_supported() else "result_taken_unsupported")
+            known[key] = ("result_engine_unavailable" if engine is None else
+                          "" if engine.run_result_taken_supported() else "result_taken_unsupported")
         except Exception:
-            run._taken_unavailable = "result_engine_unavailable"
-    return run._taken_unavailable
+            known[key] = "result_engine_unavailable"
+    return known[key]
+
+
+def _work_takes(run: Any) -> bool:
+    """Whether this deployment's work engine (``execution_domain``) can take results now, whatever the owned one can."""
+    from ouroboros.execution_domain import WORK_ENGINE, current
+
+    domain = current()
+    return bool(domain and domain.engine_descriptor) and not _unavailable(
+        run, {"kind": WORK_ENGINE, "descriptor": domain.engine_descriptor})
 
 
 def tell_engine(run: Any, task_id: str) -> str:
@@ -159,19 +173,23 @@ def _tell(run: Any, task_id: str, *, walk: bool = False) -> Tuple[str, Dict[str,
     take = sorted(rid for rid, state in states.items() if state == "take")
     if not take:
         return DONE, recorded, False
-    why = _unavailable(run)
-    if why:
-        run.hold(why)
+    whys = {rid: _unavailable(run, tree_runs.get(rid)) for rid in take}  # each run's own engine (``execution_domain``)
+    if all(whys.values()):  # no engine holding these results can be told now
+        run.hold(whys[take[0]])
         return WAIT, recorded, False
-    engine = run.engine()
     answers: Dict[str, Dict[str, Any]] = {}
     verdict, done, unsettled = DONE, 0, False
     for rid in take:
         if done and run.stop():  # the rest waits for the next pass
             run.stopped, verdict = True, WAIT
             break
+        if whys[rid]:  # its engine cannot be told now: this run waits, the others' engines are told
+            run.hold(whys[rid])
+            verdict = WAIT
+            continue
         done += 1
-        record = _decision(engine, rid)
+        entry = tree_runs.get(rid)
+        record = _decision(run.work.reach(entry) if getattr(entry, "engine_ref", None) else run.engine(), rid)
         if "state" not in record:
             run.hold("result_taken_unanswered")
             verdict, unsettled = WAIT, True
@@ -269,7 +287,7 @@ def _walk(run: Any, visited: Set[str], record: Dict[str, Any]) -> Tuple[List[str
     if run.stopped or run.stop():
         run.stopped = True
         return handed, {}, 0
-    if run.census() is None or _unavailable(run):  # no tree can be proven over, or nobody can be told: later
+    if run.census() is None or (_unavailable(run) and not _work_takes(run)):  # no proof, or nobody to tell: later
         return handed, {}, 0
     owing: Dict[str, List[str]] = {}
     for rid, entry in runs(run.root).items():

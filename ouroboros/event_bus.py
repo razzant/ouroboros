@@ -169,8 +169,11 @@ class EventBus:
                         asyncio.run_coroutine_threadsafe(result, self._loop)
                     else:
                         log.debug("Dropping async event handler without running event loop for %s", topic)
-            except Exception:
-                log.debug("Event subscriber %s failed for topic %s", sub.id, topic, exc_info=True)
+            except Exception as exc:
+                from ouroboros.deployment_extensions import discloses_failure, failure_words
+
+                log.debug("Event subscriber %s failed for topic %s: %s", sub.id, topic,
+                          failure_words(sub.skill_name, exc), exc_info=discloses_failure(sub.skill_name))
 
     def snapshot(self) -> Dict[str, Dict[str, str]]:
         with self._lock:

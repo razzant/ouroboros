@@ -304,9 +304,9 @@ def _pre_start_leaf(
 
     try:
         prior = initial_receipt(ctx, actor_bootstrap)
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError) as exc:  # the cause stays (an actor lock keeps its platform errno)
         return json.dumps({"status": "configured_session_recovery_wake", "recovery": {
-            "status": "recovery_required", "reason": "initial_invocation_unknown"}})
+            "status": "recovery_required", "reason": "initial_invocation_unknown", "cause": f"{type(exc).__name__}: {exc}"}})
     if prior:
         _ground_restored_activity(ctx, task)
         return json.dumps({"status": "configured_session_continuation", "startup": prior})

@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.6
+version: 1.4.8
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -155,12 +155,17 @@ the host's compact cause projection retain their original reason text when On.
 
 The Mini App exposes the Ouroboros SPA through the owner-authenticated sidecar
 and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
-without private exception text; its 8 MiB message limit is unchanged. It is enabled
-by default after owner binding and can be turned off without stopping the text bridge. Disabling the skill destroys process-memory Mini App
-sessions, stops public exposure, and best-effort restores the prior Telegram
-menu button. While the skill is on, a token saved, replaced or cleared applies within
-seconds, without Disable/Enable: nothing new goes out with the old token, a long send stops
-after the parts already taken, and the Mini App restarts once the old process has died. No
+without private exception text, within its 8 MiB message limit. Requests wait
+for an upstream socket with no pool timeout (32 connections, 8 kept alive). An
+upstream response closes however delivery ends; a stream stops
+once its phone leaves, which uvicorn tells only `receive()`. A request whose phone
+left while waiting still reaches the core when a socket frees, and reading its body ends
+it; closing the HTTP client alone cancels no queued wait. It is on
+by default after owner binding; turning it off keeps the text bridge. Disabling it destroys process-memory Mini App
+sessions, stops public exposure and best-effort restores Telegram's prior
+menu button. While it is on, a token saved, replaced or cleared applies within
+seconds without Disable/Enable: nothing new goes out with the old token, a long send stops
+after the parts already taken, and the Mini App restarts once the old process dies. No
 token is a quiet wait, never a crash; unreadable settings keep the last token.
 
 Delegated task cards lead with the executor's latest words (marked earlier
@@ -289,5 +294,6 @@ fallback. A nonempty machine value takes precedence over the interpreter build;
 macOS and Linux use only the machine value.
 
 The Mini App is Beta. Its best-effort Cloudflare Quick Tunnel has no SLA and
-does not support Server-Sent Events (SSE). It targets native Telegram clients;
-Telegram WebA/WebK are not supported.
+lacks Server-Sent Events (SSE). Each run is a new origin: an earlier one's saved text
+preview stays in Telegram's storage after a later sign-out. It targets native clients;
+Telegram WebA/WebK are unsupported.

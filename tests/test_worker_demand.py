@@ -869,7 +869,7 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
             document["pending_count"]) == (40, 4, 1, 1, 0, 3, 0, 5)
     memory = document["memory_admission"]  # the one reading that admitted the three, dated
     assert memory["read_at"] and (memory["starts_admitted"], memory["reason"]) == (39, "memory_room")
-    assert "project_demand" not in document and document["dispatch_refusals"] == {}
+    assert "project_demand" not in document and "dispatch_refusals" not in document
     seen, pending = dispatch_choice.counts(), [dict(row) for row in workers.PENDING]
     # Every reader takes the recorded counts: none chooses, reads the store for a row or touches one.
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
@@ -879,7 +879,7 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
     assert all("admitted_dispatch" not in row for row in workers.PENDING)
     assert (fact["recorded_max_workers"], fact["worker_total"], fact["busy_worker_count"], fact["acting_worker_count"],
             fact["pending_count"], fact["pending_paused_or_held_count"], fact["pending_sleeping_count"],
-            fact["free_worker_slots"], fact["dispatch_refusals"]) == (40, 4, 1, 1, 5, 2, 0, 0, {})
+            fact["free_worker_slots"]) == (40, 4, 1, 1, 5, 2, 0, 0)
     assert "project_demand" not in fact
     assert ("owner cap on acting tasks 40, total 4, with a task 1, acting 1, waiting on their process 0, booting 3, "
             "reaping (incl. booting) 3, assignable idle 0, pending rows 5; "

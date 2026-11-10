@@ -422,7 +422,8 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
         def __init__(self): self.removals, self.remove_fails = [], True
         def handshake(self, **_kw): return {}
         def get_run(self, rid, **_kw):
-            raise ClaudexorUnavailable("not_found", "no such run", status_code=404)
+            from tests._shared import run_absent_in
+            raise run_absent_in("store-a")
         def remove_project(self, pid):
             self.removals.append(pid)
             if self.remove_fails:

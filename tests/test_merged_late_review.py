@@ -168,7 +168,7 @@ def test_late_fail_names_the_merge_in_mail_and_the_frozen_room_mark(author, monk
     assert receptive._late_marks(a.data) == [mark]
     assert read_actor_source_bytes(a.data, receptive.TASK, mark["target_ref"]) == frozen
     assert chat_rows(room) == before_room and chat_rows(1) == before_main, "the late review adds no chat row"
-    assert len(ctx.pending_events) == 1 and len([c for c in fake.calls if c[:2] == ["pr", "merge"]]) == 1
+    assert len(ctx.pending_events) == 1 and len([c for c in fake.calls if merges.sent(c)]) == 1
 
 
 def test_failed_publication_replays_the_frozen_source_and_room_before_reading_new_merge_facts(world, monkeypatch):

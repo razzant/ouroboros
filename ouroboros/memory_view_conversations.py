@@ -17,7 +17,8 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
 
 A writer's terminal rows its page links below it (``memory_sealing.linked_rows``) are that page's, never open
 here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
-recorded speaker, or by none, with the same connector facts) is one line naming the earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
+recorded speaker, or by none, with the same connector facts), and one row several rooms hold by membership beyond the one keeping it whole
+(``_once``), is one line naming that earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
 to my newest act there (my own words, a quiet finish, a note: ``memory_room_activity``); the floor
 (``memory_floor``) folds them in that order -- retold, considered, then the words nobody considered, oldest
 first within each (``F6w``); then a group to its line (``F6g``); my human's words last of all, other
@@ -32,6 +33,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ouroboros import chat_chain, memory_inventory
+from ouroboros.context_timing import timed_section
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
                                            warm_lineage)
@@ -93,6 +95,7 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
             "pos": first[2], "last_pos": last[2], "chars": sum(int(e[1].get("text_chars") or 0) for e, _c in group)}
 
 
+@timed_section("memory_view.conversations")
 def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room: Mapping[str, List[Entry]],
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
             sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:
@@ -195,17 +198,43 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     for group in groups.values():
         group["running"] = [f"get_task_result(task_id='{task}')" + (f": {focus[task]}" if task in focus else "")
                             for task in group["running"]]
+        group["rooms"].sort(key=lambda room: (room["first"] if room["first"] >= 0 else 1 << 62, room["room_id"]))
+    shown = _once(shown, [room for key in sorted(groups) for room in groups[key]["rooms"]])
     texts = mv._row_texts(root, [entry for _item, entry, _author, earlier in shown if earlier is None])
     for item, entry, author, earlier in shown:
         word = mv._spoken(entry, author, texts)
         if earlier is not None:  # the earlier copy's words: one line naming it, this row's text never read
-            first = chat_chain.format_address(earlier)
-            word["line"] = (f"{word['head']} delivered again: the same words as {first}; "
-                            f"memory_read(room_id='{item['room_id']}', rows=true, from='{first}', to='{first}')")
+            first, where = chat_chain.format_address(earlier[0]), earlier[1] or item["room_id"]
+            same = "the same words as" if earlier[1] is None else f"the same row as in room {where}:"
+            word.update(again=first, line=f"{word['head']} delivered again: {same} {first}; "
+                        f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
-    for group in groups.values():
-        group["rooms"].sort(key=lambda room: (room["first"] if room["first"] >= 0 else 1 << 62, room["room_id"]))
     return [groups[key] for key in sorted(groups)]
+
+
+def _once(shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]],
+          order: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]]:
+    """Each canonical row (its ``row_sha256``) whole once in the block: a row several of my rooms hold by membership
+    (``memory_inventory.rooms_of_row``: where it was written, the Projects its binding names) keeps its words in the
+    room it was written in when that room shows it, else in the first room shown; every other room keeps its entry
+    as one line naming that room and the row's reader (``(address, room)``). Membership, attribution and counts stay;
+    only the same row, never equal words of another row (``_repeats``) or similar words."""
+    rank = {id(item): n for n, item in enumerate(order)}
+    holder: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
+    for item, entry, _author, earlier in shown:
+        if earlier is None:
+            key = (0 if item["room_id"] == str(chat_chain._row_chat_id(entry[1])) else 1, rank.get(id(item), 1 << 30))
+            held = holder.get(entry[0]["row_sha256"])
+            if held is None or key < held[0]:
+                holder[entry[0]["row_sha256"]] = (key, item)
+    marked = []
+    for item, entry, author, earlier in shown:
+        if earlier is not None:  # a later copy of words this room already holds (``_repeats``)
+            earlier = (earlier, None)
+        elif holder[entry[0]["row_sha256"]][1] is not item:
+            earlier = (entry[0], holder[entry[0]["row_sha256"]][1]["room_id"])
+        marked.append((item, entry, author, earlier))
+    return marked
 
 
 def conversation_label(label: Callable[..., str], place: Mapping[str, Any], rows: List[Mapping[str, Any]]) -> str:
@@ -302,11 +331,11 @@ def floor_steps(groups: Iterable[Mapping[str, Any]]) -> Dict[str, List[Tuple[str
 
     groups = list(groups)
     words = [(word, group) for group in groups for room in group["rooms"] for word in room["words"]]
-    others = sorted((pair for pair in words if not pair[0]["owner_side"]), key=lambda p: (p[0]["rank"], p[0]["pos"]))
-    owner = sorted((pair for pair in words if pair[0]["owner_side"]), key=lambda p: p[0]["pos"])
+    others = sorted((pair for pair in words if not _whole_owner(pair[0])), key=lambda p: (p[0]["rank"], p[0]["pos"]))
+    owner = sorted((pair for pair in words if _whole_owner(pair[0])), key=lambda p: p[0]["pos"])
     lines = []
     for group in groups:
-        theirs = {word["id"] for room in group["rooms"] for word in room["words"] if not word["owner_side"]}
+        theirs = {word["id"] for room in group["rooms"] for word in room["words"] if not _whole_owner(word)}
         lines.append((group["key"], render_group(group, theirs, set(), False), render_group(group, theirs, set(), True)))
     return {"F6w": [(word["id"], word["line"], "") for word, _group in others],
             "F6g": lines, "F7": [(word["id"], word["line"], _row_pointer(word, "words")) for word, _group in owner],
@@ -343,7 +372,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     either form my human's words in ``owners_gone`` are their own addresses, so F6g's saving adds to F7's."""
     from ouroboros.memory_view import _facts_text, _note_lines, _row_pointer
 
-    owner = [word for room in group["rooms"] for word in room["words"] if word["owner_side"]]
+    owner = [word for room in group["rooms"] for word in room["words"] if _whole_owner(word)]
     held = [_row_pointer(word, "words") if word["id"] in owners_gone else word["line"] for word in owner]
     if as_line:
         return "\n".join([identity_line(group), *held])
@@ -373,31 +402,39 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     return "\n".join(lines)
 
 
-def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> str:
-    """``## Other conversations`` at a floor level: the authority sentence first, then every group in its form; at the
-    last rung (F6a) my human's words of the counted groups stay, whole or by the address F7 folded them to."""
+def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
+            piece: Callable[[Any, Callable[[], str]], Any]) -> List[Any]:
+    """``## Other conversations`` at a floor level, each local form through ``piece`` (its price from ``snapshot.piece``
+    or its text): the authority sentence first, then every group in its form; at the last rung (F6a) my human's words
+    of the counted groups stay, whole or by the address F7 folded them to. The pieces are joined by a blank line."""
     from ouroboros.memory_view import _rooms_line, _row_pointer
 
-    groups = list(groups)
-    if not groups:
-        return ""
     words, owners, lined = set(gone.get("F6w", ())), set(gone.get("F7", ())), set(gone.get("F6g", ()))
     counted = [group for group in groups if group["key"] in lined] if gone.get("F6a") else []
-    lines = ["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]
+    parts = [piece(("conversations", "head"), lambda: "\n".join(["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]))]
     if counted:
-        rooms = [room for group in counted for room in group["rooms"]]
-        lines += ["", f"{len(counted)} conversations by count (the window's last rung): " + _rooms_line(rooms)]
-        lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"] for group in counted
-                  for room in group["rooms"] for word in room["words"] if word["owner_side"]]
-    keys = {group["key"] for group in counted}
+        counted_owners = [word for group in counted for room in group["rooms"] for word in room["words"] if _whole_owner(word)]
+        parts.append(piece(("conversations", "counted", tuple(group["key"] for group in counted),
+                            frozenset(word["id"] for word in counted_owners if word["id"] in owners)),
+                           lambda: "\n".join([f"{len(counted)} conversations by count (the window's last rung): " + _rooms_line(
+                               [room for group in counted for room in group["rooms"]]),
+                               *(_row_pointer(word, "words") if word["id"] in owners else word["line"] for word in counted_owners)])))
+    shown = {group["key"] for group in counted}
     for group in groups:
-        if group["key"] in keys:
+        if group["key"] in shown:
             continue
-        lines += ["", render_group(group, words, owners, group["key"] in lined)]
-    kinds = Counter("engaged" if room["engaged"] else "silent" for group in groups for room in group["rooms"])
-    lines += ["", f"{len(groups)} other conversations, {kinds['engaged']} rooms where my human or I spoke, "
-                  f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room."]
-    return "\n".join(lines)
+        as_line, spoken = group["key"] in lined, [word["id"] for room in group["rooms"] for word in room["words"]]
+        parts.append(piece(("conversations", "group", group["key"], as_line,
+                            frozenset() if as_line else frozenset(word for word in spoken if word in words),
+                            frozenset(word for word in spoken if word in owners)),
+                           lambda group=group, as_line=as_line: render_group(group, words, owners, as_line)))
+
+    def foot() -> str:
+        kinds = Counter("engaged" if room["engaged"] else "silent" for group in groups for room in group["rooms"])
+        return (f"{len(groups)} other conversations, {kinds['engaged']} rooms where my human or I spoke, "
+                f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room.")
+    parts.append(piece(("conversations", "foot"), foot))
+    return parts
 
 
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -425,4 +462,10 @@ def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterabl
 
 def owner_items(groups: Iterable[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
     """My human's words in the block by floor id (``room:address``): the floor's ``F7`` elements beside this room's."""
-    return {word["id"]: word for group in groups for room in group["rooms"] for word in room["words"] if word["owner_side"]}
+    return {word["id"]: word for group in groups for room in group["rooms"] for word in room["words"] if _whole_owner(word)}
+
+
+def _whole_owner(word: Mapping[str, Any]) -> bool:
+    """My human's words whole in this block: the one instance ``_once`` keeps, which F6 never takes and only F7
+    turns into its address; a line naming where the same row stands (``again``) folds as any other word (F6w)."""
+    return bool(word["owner_side"]) and not word.get("again")

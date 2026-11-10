@@ -12,6 +12,7 @@ import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
 import {
     continuableReview, fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
     renderInstalledSkillCard,
+    renderRequirementNotice,
 } from './skill_card_renderer.js';
 import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
@@ -64,6 +65,7 @@ function skillsPageTemplate() {
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
+                    <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
                     <p id="skills-filter-empty" class="skills-empty" hidden>${FILTER_EMPTY}</p>
                     <div id="skills-empty" class="skills-empty" hidden>
@@ -186,6 +188,7 @@ export function updateAllCandidates(skills, sources = null) {
     return skills.filter((skill) => {
         const install = skill.install;
         if (!install?.update_available?.digest || install.modified || install.base_known === false || install.withdrawn || skill.lifecycle_pending) return false;
+        if (!installedSkillModel(skill).update) return false;  // the same change eligibility as its individual card
         if (install.basis !== 'trusted') return false;
         const rowTrust = trust.get(install.source?.id);
         return rowTrust === undefined || rowTrust === 'trusted';
@@ -276,7 +279,7 @@ async function postWithFeedback(url, body) {
 async function fetchSkills() {
     const extResp = await apiClient.extensions();
     if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
-    return { skills: extResp.skills, live: extResp.live || {} };
+    return { skills: extResp.skills, live: extResp.live || {}, deployment: extResp.deployment || null };
 }
 
 export function initSkills(ctx = {}) {
@@ -287,6 +290,7 @@ export function initSkills(ctx = {}) {
     const root = document.getElementById('page-skills');
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
+    const requirementsEl = document.getElementById('skills-org-requirements');
     const emptyEl = document.getElementById('skills-empty');
     const filterEmpty = document.getElementById('skills-filter-empty');
     const filtersEl = document.getElementById('skills-installed-filters');
@@ -437,6 +441,9 @@ export function initSkills(ctx = {}) {
             }
         }
         emptyEl.hidden = skills.length > 0;
+        const notice = renderRequirementNotice(snapshot.deployment);  // a missing required package has no card
+        if (requirementsEl.innerHTML !== notice) requirementsEl.innerHTML = notice;
+        requirementsEl.hidden = !notice;
         paintChrome();
         applyInstalledFilter();
         if (replacementFocus && !replacementFocus.hidden) {
@@ -481,6 +488,7 @@ export function initSkills(ctx = {}) {
             if (!current()) return;
             next.rawSkills = primary.skills;
             next.live = primary.live;
+            next.deployment = primary.deployment;
             lastListingRead = Date.now();
         } catch (err) {
             if (!current()) return;
@@ -656,6 +664,8 @@ export function initSkills(ctx = {}) {
                 cmd: buildHealPrompt(skill),
                 task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
                 visible_task_id: `skill_repair_${name}`,
+                // The press is my human's request; the prompt above is the host's words, not theirs (#2778).
+                ui_control: { name: 'skill_repair' },
             });
             showToast(`${name}: Ouroboros is on it — see chat`, 'ok');
             emitSkillLifecycle('repair', name);

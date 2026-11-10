@@ -155,6 +155,7 @@
  * @typedef {Object} SkillCatalogSearchResponse
  * @property {SkillCatalogItem[]} items
  * @property {string=} registry_error
+ * @property {string=} next_cursor
  */
 
 /**

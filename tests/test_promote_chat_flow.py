@@ -2551,14 +2551,14 @@ def test_promote_emission_row_carries_the_owner_message_id(tmp_path, monkeypatch
 
 
 def _steer_refusal(tmp_path, monkeypatch, *, running: dict, chat_id: int = 1):
-    """Drive one refused steer and return (receipt kwargs, owner messages)."""
+    """Drive one refused steer and return (receipt kwargs, owner messages); no bridge: the row is the carrier."""
     import supervisor.events as events_mod
     from supervisor.steering import _handle_steer_task
 
     receipts: list = []
     sent: list = []
     monkeypatch.setattr(events_mod, "_emit_routing_receipt",
-                        lambda ctx, evt, **kwargs: receipts.append(kwargs) or {})
+                        lambda ctx, evt, **kwargs: receipts.append(kwargs) or {"routing_notice_carrier": "system"})
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path, RUNNING=running, PENDING=[],
         get_chat_agent=lambda: None,

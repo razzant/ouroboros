@@ -29,6 +29,7 @@
  * @property {Object=} client_surface
  * @property {"command"} type
  * @property {string} cmd
+ * @property {Object=} ui_control
  */
 /**
  * Emergency request accepted on this connection; does not prove process exit.
@@ -83,6 +84,7 @@
  * @property {string} note
  * @property {string} settingsInputId
  * @property {string} settingsToggleId
+ * @property {boolean} managed  // a deployment policy fixes it: shown, never edited or written
  */
 
 /**
@@ -199,6 +201,7 @@
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
  * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
+ * @property {?SettingsDeploymentPolicy} deployment  // Settings' `_meta.policy_state.deployment`; null unmanaged
  */
 
 /**
@@ -212,6 +215,66 @@
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
  * @property {import('./api_types.js').SettingsMeta=} _meta
+ */
+
+/**
+ * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * deployment's policy file fixes.
+ * @typedef {Object} SettingsPolicyState
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
+ * @property {boolean} running_task_snapshot
+ * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
+ */
+
+/**
+ * The organization's Safety Supervisor route; no connection value or secret.
+ * @typedef {Object} SettingsDeploymentChecker
+ * @property {string} model
+ * @property {string} account
+ * @property {string[]} fallbacks
+ * @property {string[]} connections  // the connections its routes use, by picker id (`kind` or `kind@name`)
+ * @property {string[]} fields  // the flat settings its built-in routes read now (a compatible lane's pair included)
+ * @property {boolean} local  // a route answers from the local model server
+ */
+
+/**
+ * One extension the policy requires: its pin and the custom settings it fixes, by name only; Settings and Skills
+ * add how the observing process sees it.
+ * @typedef {Object} SettingsDeploymentRequirement
+ * @property {string} name
+ * @property {string} path
+ * @property {string} content_hash
+ * @property {string[]} settings
+ * @property {"met"|"unmet"=} state
+ * @property {string=} reason  // running, missing, collision, elsewhere, changed, review, grants, load_error, ...
+ * @property {string=} detail  // the owner's sentence, with no fixed value in it
+ * @property {string=} observed_hash  // the digest of other bytes found at the path
+ * @property {Object=} process  // role, pid, started (birth token) and observed_at of the observer
+ */
+
+/**
+ * The policy's required extensions and what ordinary work does while one is not running ('' when none is); with an
+ * execution domain, `trusted` lists the only packages whose code the service runs.
+ * @typedef {Object} SettingsDeploymentExtensions
+ * @property {"hold"|"warn"|""} when_unmet
+ * @property {SettingsDeploymentRequirement[]} required
+ * @property {{name: string, path: string, content_hash: string}[]=} trusted
+ */
+
+/**
+ * What a managed deployment's policy file fixes.
+ * @typedef {Object} SettingsDeploymentPolicy
+ * @property {"deployment_policy"} source
+ * @property {number} version
+ * @property {string} digest  // the first 16 hex digits of the file's SHA-256 this server generation read
+ * @property {?string} access_max
+ * @property {?string} min_coverage
+ * @property {?SettingsDeploymentChecker} checker
+ * @property {string[]} allowed_exits  // agent repeat, human release after DANGEROUS, human unchecked release
+ * @property {boolean} organization_rules
+ * @property {?SettingsDeploymentExtensions} extensions
  */
 
 /**
@@ -408,6 +471,7 @@
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
  * @property {Object=} historical_terminal
+ * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group
@@ -595,6 +659,7 @@
  * @property {?number} chat_id
  * @property {'own'|'focus'} cause
  * @property {string} place_label
+ * @property {string=} place_id
  * @property {string} conversation
  * @property {?string} started_at
  * @property {?string=} first_reply_at

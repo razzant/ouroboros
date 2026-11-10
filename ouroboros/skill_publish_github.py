@@ -181,13 +181,49 @@ def fetch_upstream_file(ctx: ToolContext, owner: str, repo: str, sha: str, path:
         ) from exc
 
 
-def fetch_tree_paths(ctx: ToolContext, owner: str, repo: str, sha: str, folder: str) -> List[str]:
-    """File paths under ``folder`` (relative to it) at an exact commit of the destination."""
-    tree = _json_object(ctx, "GET", f"/repos/{owner}/{repo}/git/trees/{sha}?recursive=1",
-                        reason_code="upstream_read_failed", operation="git/trees", repository=f"{owner}/{repo}")
+def fetch_tree_blobs(ctx: ToolContext, owner: str, repo: str, sha: str, folder: str, *,
+                     missing_ok: bool = False) -> Dict[str, str] | None:
+    """``{file path relative to folder: blob id}`` at an exact commit of the destination. A listing GitHub
+    truncated is refused: a path missing from it would read as absent. ``missing_ok``: ``None`` when the
+    repository has no such commit (404/422), for a recorded commit that may be gone."""
+    try:
+        tree = _json_object(ctx, "GET", f"/repos/{owner}/{repo}/git/trees/{sha}?recursive=1",
+                            reason_code="upstream_read_failed", operation="git/trees", repository=f"{owner}/{repo}")
+    except SkillPublishGitHubError as exc:
+        if missing_ok and exc.http_status in (404, 422):
+            return None
+        raise
+    if tree.get("truncated"):
+        raise SkillPublishGitHubError(
+            "upstream_read_failed", f"GitHub listed {owner}/{repo} at {sha} only in part, so this publication "
+            "cannot see what it would replace there.", status="blocked", operation="git/trees")
     prefix = folder.strip("/") + "/" if folder.strip("/") else ""
-    return sorted(str(item.get("path"))[len(prefix):] for item in tree.get("tree") or []
-                  if isinstance(item, dict) and item.get("type") == "blob" and str(item.get("path") or "").startswith(prefix))
+    blobs: Dict[str, str] = {}
+    for item in tree.get("tree") or []:
+        if not isinstance(item, dict) or item.get("type") != "blob":
+            continue
+        path = str(item.get("path") or "")
+        if not path.startswith(prefix):
+            continue
+        oid = str(item.get("sha") or "")
+        if not _HEX_OID_RE.fullmatch(oid):
+            raise SkillPublishGitHubError("upstream_read_failed", "Inspect the destination repository, then retry.",
+                                          detail=json.dumps(item)[:600], operation="git/trees")
+        blobs[path[len(prefix):]] = oid.lower()
+    return blobs
+
+
+def fetch_blob(ctx: ToolContext, owner: str, repo: str, oid: str) -> bytes:
+    """The bytes of one blob of the destination, by its id."""
+    data = _json_object(ctx, "GET", f"/repos/{owner}/{repo}/git/blobs/{oid}", reason_code="upstream_read_failed",
+                        operation="git/blobs", repository=f"{owner}/{repo}")
+    try:
+        if data.get("encoding") != "base64":
+            raise ValueError(f"encoding {data.get('encoding')!r}")
+        return base64.b64decode(str(data.get("content") or ""))
+    except ValueError as exc:
+        raise SkillPublishGitHubError("upstream_read_failed", "Inspect the destination repository, then retry.",
+                                      detail=f"blob {oid}: {exc}", operation="git/blobs") from exc
 
 
 def fetch_upstream_catalog(ctx: ToolContext, owner: str, repo: str, base_branch: str) -> Tuple[Dict[str, Any], str]:
@@ -510,9 +546,10 @@ __all__ = [
     "commit_payload",
     "create_pr_receipt",
     "ensure_branch",
+    "fetch_blob",
     "fetch_branch_head",
     "fetch_repository",
-    "fetch_tree_paths",
+    "fetch_tree_blobs",
     "fetch_upstream_catalog",
     "fetch_upstream_file",
     "github_login",

@@ -31,7 +31,7 @@ const BUDGET_NOTE_FALLBACK = 'Budget limits use known spend: Total Budget applie
 // Runtime mode is one axis of the owner policy contract. Keep the Settings
 // presentation in the same vocabulary as the onboarding setup contract; the
 // saved value is still handled by settings.js and the owner endpoint.
-const RUNTIME_MODE_OPTIONS = [
+export const RUNTIME_MODE_OPTIONS = [
     { value: 'light', label: 'Light' },
     { value: 'advanced', label: 'Advanced' },
     { value: 'pro', label: 'Pro' },
@@ -141,6 +141,7 @@ function accountsPanel() {
                 <div class="form-field ui-field">
                     <label for="s-openai-base-url">Legacy OpenAI Base URL</label>
                     <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint" class="ui-control" name="s-openai-base-url" type="text">
+                    <div class="settings-inline-note" data-legacy-base-url-fixed hidden></div>
                 </div>
             </div>`,
         })}
@@ -200,7 +201,7 @@ function behaviorPanel() {
         ${settingsSection({
             title: 'Task Result Review',
             lead: 'When a finished task gets a second look.',
-            details: 'Auto reviews a result when Ouroboros requests it. Required also reviews material actually produced or observed effects. Off starts no new task-result review, including manual or historical requests; already running reviews can still return feedback. Waiting works in every access mode; Cyber feedback remains advisory.',
+            details: 'Auto reviews a result when Ouroboros requests it. Required also reviews what a task actually produced, and an answer its task requires checked. With Advisory, Ouroboros decides after a review whether a revised result needs another; with Blocking, a reviewed result that did not pass is held until a review passes it. Off starts no new task-result review, including manual or historical requests; already running reviews can still return feedback. Waiting works in every access mode; Cyber feedback remains advisory.',
             body: choice({ id: 's-task-review-mode', value: 'auto', options: [
                 { value: 'off', label: 'Off' },
                 { value: 'auto', label: 'Auto' },
@@ -211,7 +212,7 @@ function behaviorPanel() {
         ${settingsSection({
             title: 'Max Review Cycles',
             lead: 'How many paid review rounds one change may take.',
-            details: 'Limits paid review waves, including dispatched technical failures: plan and task review per task, commit review per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval outside Cyber Pro. <strong>&infin;</strong> removes the count cap, while deadlines, budgets and lifecycle limits still apply.',
+            details: 'Limits paid review waves, including dispatched technical failures: result review and commit review per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval outside Cyber Pro. <strong>&infin;</strong> removes the count cap, while deadlines, budgets and lifecycle limits still apply.',
             body: choice({ id: 's-review-max-cycles', value: '2', modifier: 'data-review-cycles-group', options: [
                 { value: '1', label: '1' },
                 { value: '2', label: '2' },
@@ -359,7 +360,7 @@ function behaviorPanel() {
                 { value: 'stable', label: 'Stable' },
                 { value: 'qa', label: 'QA' },
                 { value: 'development', label: 'Development' },
-            ] }),
+            ] }) + '<div class="settings-inline-note" data-update-channel-fixed hidden>Set by your organization: its administrator updates this installation.</div>',
         })}
 
         <!-- Last on the tab: set once, and on a browser or Docker host it only explains
@@ -603,6 +604,7 @@ function advancedPanel() {
                     <input id="s-local-chat-format" placeholder="auto-detect" class="ui-control" name="s-local-chat-format" type="text">
                 </div>
             </div>
+            <div class="settings-inline-note" data-local-model-fixed hidden>Your organization’s Safety Supervisor answers from this model: its source, filename, port and chat format are set by your organization. Start and Stop stay yours.</div>
             <div class="settings-toolbar">
                 <button class="btn btn-primary" id="btn-local-start">Start</button>
                 <button class="btn btn-default" id="btn-local-stop">Stop</button>

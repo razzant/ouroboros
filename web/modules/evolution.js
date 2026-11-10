@@ -130,8 +130,9 @@ export async function promptCampaignObjective({ dialogImpl = openConfirmDialog, 
         input: true,
         confirmLabel: 'Start campaign',
     });
-    if (!answer?.confirmed) return { confirmed: false, objective: '' };
-    return { confirmed: true, objective: String(answer.value || '').trim() };
+    if (!answer?.confirmed) return { confirmed: false, objective: '', entered: '' };
+    // `entered` keeps the owner's words byte for byte; `objective` is the command's trimmed form.
+    return { confirmed: true, objective: String(answer.value || '').trim(), entered: String(answer.value || '') };
 }
 
 // ---- The history: measures, words and numbers ----------------------------------------------------------------------
@@ -676,7 +677,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     // One command at a time: Start and Pause stay disabled until the gateway answers
     // (the objective dialog is modal, so it needs no extra gate). The command's own
     // outcome arrives in chat: a refusal here means only that it was never sent.
-    async function sendCommand(cmd, button) {
+    async function sendCommand(cmd, button, control) {
         commandPending = true;
         paintCampaign();
         const start = cmd.startsWith('/evolve on');
@@ -685,7 +686,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             const resp = await apiFetch('/api/command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cmd }),
+                body: JSON.stringify({ cmd, ui_control: control }),
             });
             if (!resp.ok) {
                 refused = true;
@@ -719,10 +720,12 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         // old `prompt() || ''` started a paid campaign even on Cancel/null).
         // A running campaign asked for nothing new keeps its objective: nothing to send.
         if (!asked.confirmed || commandPending || (running && !asked.objective)) return;
-        await sendCommand(`/evolve on${asked.objective ? ` ${asked.objective}` : ''}`, startBtn);
+        // The press composes the command; only the objective my human typed is theirs (#2778).
+        await sendCommand(`/evolve on${asked.objective ? ` ${asked.objective}` : ''}`, startBtn,
+            { name: 'evolution_start', ...(asked.objective ? { owner_text: asked.entered } : {}) });
     });
     stopBtn.addEventListener('click', () => {
-        if (!commandPending) sendCommand('/evolve off', stopBtn);
+        if (!commandPending) sendCommand('/evolve off', stopBtn, { name: 'evolution_stop' });
     });
     reviewBtn.addEventListener('click', () => chooseAndSendReview({ openConfirmDialog: dialog, ws }));
 

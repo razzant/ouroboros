@@ -6,11 +6,14 @@
  * gate, `call(target, method, minVersion, ...args)`: method presence and `isVersionAtLeast`, never a version
  * number in a screen. Binding is idempotent and `dispose()` releases every listener.
  *
- * What it does, once: `ready()`, `expand()`, `disableVerticalSwipes()` (7.7, owner Q5=A: nested scrollers on every
- * screen would otherwise minimise the app on a drag at the top); Telegram's BackButton is visible while the layer
- * stack is non-empty and its click pops one layer; the header, background and bottom bar take the room colour
- * (again on every theme change); the safe-area insets are mirrored to `--tg-safe-area-inset-*` and
- * `--tg-content-safe-area-inset-*` (ui.css combines them with `env()` into `--inset-top/bottom`); Telegram's
+ * What it does, once: `ready()`, `expand()`, then `requestFullscreen()` (8.0) unless already fullscreen: a request is
+ * not success, so `html[data-telegram-fullscreen]` says `active` or `expanded` from the SDK's own `isFullscreen`
+ * (`fullscreenChanged`, `fullscreenFailed`), and an exit the owner makes is never undone; `disableVerticalSwipes()`
+ * (7.7, owner Q5=A: nested scrollers on every screen would otherwise minimise the app on a drag at the top);
+ * Telegram's BackButton is visible while the layer stack is non-empty and its click pops one layer; the header,
+ * background and bottom bar take the room colour (again on every theme change); the four safe-area edges are
+ * mirrored to `--tg-safe-area-inset-*` and `--tg-content-safe-area-inset-*` (ui.css combines them with `env()` into
+ * `--inset-*`); Telegram's
  * `colorScheme` is the "System" appearance source through theme.js's one hook; and when the visual viewport
  * collapses under ~100px while a field is focused (Telegram-iOS #2235) the field is blurred and `hideKeyboard()`
  * (9.1) asked for. NOT `viewportStableHeight → --vvh`: that rewrites the keyboard path and needs a device. */
@@ -19,7 +22,7 @@ export const KEYBOARD_COLLAPSE_PX = 100;
 const SDK_SCRIPT = 'script[src*="telegram-web-app.js"]';
 const LATE_POLL_MS = 250;
 const LATE_POLL_LIMIT_MS = 10000;
-const SIDES = ['top', 'bottom'];  // the shell reads vertical insets (ui.css --inset-top/bottom)
+const SIDES = ['top', 'bottom', 'left', 'right'];
 
 /** Inside Telegram: the host stamp, or launch data the SDK only carries there. */
 export function isTelegramHost({ win = globalThis.window, doc = globalThis.document } = {}) {
@@ -86,10 +89,16 @@ export function createTelegramHost({
         if (!root?.style?.setProperty) return;
         for (const [prefix, inset] of [['--tg-safe-area-inset-', app?.safeAreaInset], ['--tg-content-safe-area-inset-', app?.contentSafeAreaInset]]) {
             for (const side of SIDES) {
-                const px = Math.max(0, Number(inset?.[side]) || 0);
-                root.style.setProperty(`${prefix}${side}`, `${px}px`);
+                const value = Number(inset?.[side]);
+                root.style.setProperty(`${prefix}${side}`, `${Number.isFinite(value) ? Math.max(0, value) : 0}px`);
             }
         }
+    }
+
+    // ---- fullscreen as Telegram reports it: dispatching the request proves nothing
+    function syncFullscreen() {
+        if (doc?.documentElement?.dataset) doc.documentElement.dataset.telegramFullscreen = app?.isFullscreen === true ? 'active' : 'expanded';
+        mirrorInsets();
     }
 
     // ---- the host's Back control follows the layer stack and closes one layer
@@ -131,7 +140,10 @@ export function createTelegramHost({
         call('ready');
         call('expand');
         call('disableVerticalSwipes', '7.7');
-        mirrorInsets();
+        on('fullscreenChanged', syncFullscreen);
+        on('fullscreenFailed', syncFullscreen);  // UNSUPPORTED keeps expanded; ALREADY_FULLSCREEN has set isFullscreen
+        syncFullscreen();
+        if (app.isFullscreen !== true) call('requestFullscreen', '8.0');
         on('safeAreaChanged', mirrorInsets);
         on('contentSafeAreaChanged', mirrorInsets);
         paintChrome();
@@ -161,14 +173,14 @@ export function createTelegramHost({
         // The async tag may still be loading: bind on its load, and poll in case it loaded before we looked.
         const script = doc?.querySelector?.(SDK_SCRIPT);
         if (script?.addEventListener) {
-            const onLoad = () => attach();
+            const onLoad = () => { if (isTelegramHost({ win, doc })) attach(); };
             script.addEventListener('load', onLoad, { once: true });
             disposers.push(() => script.removeEventListener('load', onLoad));
         }
         pollSince = Date.now();
         const poll = () => {
             pollTimer = 0;
-            if (disposed || attach()) return;
+            if (disposed || (isTelegramHost({ win, doc }) && attach())) return;
             if (Date.now() - pollSince < LATE_POLL_LIMIT_MS) pollTimer = win.setTimeout(poll, LATE_POLL_MS);
         };
         pollTimer = win.setTimeout(poll, LATE_POLL_MS);
@@ -177,7 +189,12 @@ export function createTelegramHost({
     /** Bind once; outside Telegram this is a no-op that reports `false`. */
     function bind() {
         if (disposed) return false;
-        if (!isTelegramHost({ win, doc })) return false;
+        if (!isTelegramHost({ win, doc })) {
+            // A selected interface without the proxy's stamp loads the SDK in any browser: wait for its late tag, but
+            // bind only on Telegram's launch data, never on the script alone.
+            if (!webApp() && !pollTimer && doc?.querySelector?.(SDK_SCRIPT)) waitForSdk();
+            return false;
+        }
         if (attach()) return true;
         if (!pollTimer) waitForSdk();
         return false;
@@ -189,6 +206,7 @@ export function createTelegramHost({
         stopWaiting();
         while (disposers.length) { try { disposers.pop()(); } catch { /* already gone */ } }
         bound = false;
+        if (doc?.documentElement?.dataset) delete doc.documentElement.dataset.telegramFullscreen;
     }
 
     return { bind, dispose, bound: () => bound, active: () => isTelegramHost({ win, doc }), recoverKeyboard, paintChrome, mirrorInsets };

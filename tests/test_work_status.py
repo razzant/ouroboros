@@ -51,10 +51,11 @@ def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, te
     assert state["reasons"] == [{"code": f"turn_{turn_phase}", "text": text}]
 
 
-@pytest.mark.parametrize("kind", ["direct_chat", "presence"])
+@pytest.mark.parametrize("kind", ["direct_chat", "presence", "managed_task"])
 def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
     # A conversation-lane row reads `working` once a carrier holds it (conversation_lane.lane_turn_rows); its
-    # frame-fed start step is still a start step (lost on that path with #2654, 02.11).
+    # frame-fed start step is still a start step (lost on that path with #2654, 02.11). A pooled root a worker runs
+    # says the same (`carrier` from gateway.state, #2862); one no worker is said to hold stays Working below.
     def carried(**extra):
         return row("d", "working", kind=kind, carrier="worker", **extra)
 
@@ -70,6 +71,8 @@ def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
         assert state["reasons"] == [] and state["call"] in {"working", "sending"}, done
     awaiting = ws.classify_member(row("d", "preparing", kind=kind, carrier="awaiting"))
     assert (awaiting["call"], awaiting["reasons"]) == ("preparing", [])
+    unheld = ws.classify_member(row("d", "working", kind=kind, turn_phase="context_building"))
+    assert (unheld["call"], unheld["reasons"]) == ("working", [])
 
 
 def test_a_start_step_speaks_only_while_preparing_and_a_started_call_reads_the_census_move():
@@ -775,3 +778,85 @@ def test_the_works_turn_and_mains_attention_share_one_rule():
         waits, resume = owner_actions(item)
         owner_turns = [turn for turn in ws.classify_member(item)["turn"] if turn["kind"] == "action"]
         assert bool(owner_turns) is bool(waits or resume), item["activity_id"]
+
+
+def test_a_silent_working_member_says_since_when_until_its_own_progress():
+    """The dated silence fact (owner 09.11, Q2 A) leads a working member's reasons; it is gone once the work moved,
+    and a member that is not working never borrows it."""
+    silent = {"silence_attention": {"state": "pending_attention", "last_progress_at": 1794190200.0, "episode_id": "e"}}
+    state = ws.classify_member(row("t", "working"), {"running": True, **silent})
+    assert state["reasons"][0] == {"code": "no_progress", "text": "No recorded progress", "since": 1794190200.0}
+    assert state["activity"] == "working" and state["live"] is True
+    # The owner's recorded Stop leads the line; the silence fact stays right behind it.
+    stopped = ws.classify_member(row("t", "working"), {"running": True, "cancel_pending": True, **silent})["reasons"]
+    assert [r["code"] for r in stopped[:2]] == ["stop_requested", "no_progress"]
+    # ...also over the step its turn stands at, which follows both.
+    building = row("t", "preparing", turn_phase="context_building")
+    assert [r["code"] for r in ws.classify_member(building, {"running": True, "cancel_pending": True, **silent})["reasons"]] == [
+        "stop_requested", "no_progress", "turn_context_building"]
+    assert ws.classify_member(building, {"running": True})["reasons"][0]["code"] == "turn_context_building"
+    moved = {"silence_attention": {**silent["silence_attention"], "state": "progress_observed"}}
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True, **moved})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("t", "working"), {"running": True})["reasons"])
+    assert all(r["code"] != "no_progress" for r in ws.classify_member(row("q", "queued"), {**silent})["reasons"])
+
+
+@pytest.mark.parametrize("carrier", ["managed", "lane_turn"])
+def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_path, monkeypatch, carrier):
+    """The fact lives on the RUNNING row (``silence_attention.observe``), never on its task: the census carries it to
+    the work projection, so the line says since when while the episode is open and drops it at the source's progress.
+    An owner turn the conversation lane carries is listed as its own direct row first; its silence joins that row."""
+    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from ouroboros.gateway.work_projection import works_snapshot
+    from ouroboros.task_results import write_task_result
+    from supervisor import silence_attention
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "quiet", "running", chat_id=7)
+    meta = {"task": {"id": "quiet", "type": "task", "chat_id": 7, "root_task_id": "quiet"}, "attempt": 1,
+            "started_at": 1794190000.0, "last_progress_at": 1794190200.0}
+    if carrier == "lane_turn":
+        from supervisor.conversation_lane import LANE_CONVERSATION
+        meta["task"].update(chat_id=1, _is_direct_chat=True)
+        meta.update(lane=LANE_CONVERSATION, worker_id=3)
+    workers.RUNNING["quiet"] = meta
+
+    def reasons():
+        raw, owners = {}, []
+        _chat_activities_snapshot_safe(tmp_path, work_facts=raw, decision_owners=owners)
+        [work] = works_snapshot(tmp_path, owners, raw)["works"]
+        return [(reason["code"], reason.get("since")) for reason in work["because"]]
+
+    assert all(code != "no_progress" for code, _since in reasons())
+    silence_attention.observe(queue, "quiet", meta, 1794193800.0, 600.0)
+    assert reasons()[0] == ("no_progress", 1794190200.0)
+    meta["last_progress_at"] = 1794193900.0
+    silence_attention.recovered(queue, "quiet", meta, 1794193900.0)
+    assert all(code != "no_progress" for code, _since in reasons())
+
+
+# #2801: the word beside Finalizing… is a settled lifecycle's. A split-drive root's census row stays its canonical
+# hot row (`running`) until copy-back; its settled word is the effective result's, the one its card reads.
+_AUTHOR_STOP_AXES = {"schema_version": 1, "lifecycle": {"status": "completed"},
+                     "execution": {"status": "ok", "task_completion": {"action": "stop", "source": "finish_task"}},
+                     "objective": {"status": "fail", "source": "task_completion", "review_status": "skipped",
+                                   "reason": "author_stop"}}
+
+
+@pytest.mark.parametrize("child_status, expected", [("completed", "cancelled"), ("running", None)])
+def test_a_finalizing_split_root_says_its_effective_outcome_not_its_hot_row(tmp_path, child_status, expected):
+    from ouroboros.task_results import write_task_result
+
+    data, child = tmp_path / "data", tmp_path / "child"
+    data.mkdir()
+    child.mkdir()
+    write_task_result(child, "fr", child_status, **({"outcome_axes": _AUTHOR_STOP_AXES, "result": "partial"}
+                                                      if child_status == "completed" else {}))
+    write_task_result(data, "fr", "running", child_drive_root=str(child),
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    row = {"activity_id": "fr", "phase": "finalizing", "status": "running", "kind": "managed_task", "chat_id": 1,
+           "task_attempt": 1, "started_at": 100.0}
+    work = next(w for w in wp.works_snapshot(data, [row], {"fr": {"running": True}})["works"] if w["work_id"] == "fr")
+    assert work["transition"] == "finalizing"
+    assert work.get("outcome") == expected

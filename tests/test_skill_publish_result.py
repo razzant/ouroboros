@@ -796,3 +796,56 @@ def test_pipeline_uses_leaf_veto_and_stays_below_hard_module_ceiling(monkeypatch
     )
     assert outcome["outcome_axes"]["objective"]["status"] == "fail"
     assert len(pathlib.Path(pipeline.__file__).read_text(encoding="utf-8").splitlines()) < 1600
+
+
+def test_destination_comparison_is_typed_bounded_and_reaches_the_attempt_record():
+    """Rows beyond the envelope's share are counted, never silently dropped; a malformed comparison is
+    refused; the trace keeps the state, the decision value and the mind's rationale."""
+    rows = [{"path": f"skills/demo/f{index}.py", "effect": "replaced", "upstream": "changed_since_base"}
+            for index in range(25)]
+    comparison = {"state": "decision_required", "destination_state": "D" * 64, "head_commit": "1" * 40,
+                  "base_commit": "", "base_reason": "no_install_record", "base_version": "",
+                  "metadata_path": "entries/demo.json", "paths": rows,
+                  "fields": [{"field": "description", "change": "replaced", "upstream": "unknown"}],
+                  "artifact": {"root": "artifact_store", "path": "skill-publish-comparison-demo.md",
+                               "sha256": "e" * 64, "bytes": 10}}
+    envelope = json.loads(serialize_skill_publish_result(
+        ok=False, status="blocked", reason_code="destination_decision_required", skill="demo",
+        destination_comparison=comparison, extra_fields={"replacement_rationale": "why"}))
+    shown = envelope["destination_comparison"]
+    assert (len(shown["paths"]), shown["omitted_paths"], shown["omitted_fields"]) == (20, 5, 0)
+    assert shown["destination_state"] == "d" * 64 and shown["artifact"]["path"] == "skill-publish-comparison-demo.md"
+    attempt = extract_skill_publish_result_metadata(json.dumps(envelope))["skill_publish_attempt"]
+    assert (attempt["destination_comparison"], attempt["destination_state"], attempt["replacement_rationale"]) == (
+        "decision_required", "d" * 64, "why")
+    for broken in ({**comparison, "state": "maybe"}, {**comparison, "head_commit": "HEAD"},
+                   {**comparison, "paths": [{"path": "x", "effect": "moved", "upstream": "unknown"}]},
+                   {**comparison, "artifact": {"root": "user_files", "path": "x", "sha256": "e" * 64, "bytes": 1}}):
+        with pytest.raises(ValueError):
+            serialize_skill_publish_result(ok=False, status="blocked", reason_code="x", skill="demo",
+                                           destination_comparison=broken)
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_comparison_shares_the_envelope_budget_without_losing_the_receipt(success):
+    rows = [{"path": f"skills/demo/{i:03d}" + "x" * 210, "effect": "replaced", "upstream": "changed_since_base"}
+            for i in range(25)]
+    comparison = {"state": "decided", "destination_state": "d" * 64, "head_commit": "1" * 40,
+                  "base_commit": "2" * 40, "base_reason": "install_record", "base_version": "1.0.0",
+                  "metadata_path": "entries/demo.json", "paths": rows, "fields": [],
+                  "artifact": {"root": "artifact_store", "path": "comparison.md", "sha256": "e" * 64, "bytes": 10000}}
+    kwargs = dict(ok=success, status="pr_opened" if success else "partial", reason_code="" if success else "write_failed",
+                  skill="demo", snapshot_hash=SNAPSHOT_HASH, scanner={"ruleset_sha256": RULESET_SHA256},
+                  completed_stage="pr_opened" if success else "commit_created", destination_comparison=comparison,
+                  extra_fields={"author_rationale": "r" * 7900, "scanner_errors": "e" * 1000})
+    if success:
+        kwargs.update(receipt=_receipt(), expected_repository=REPOSITORY)
+    encoded = serialize_skill_publish_result(**kwargs)
+    assert len(encoded) < tool_result_limit("submit_skill_to_hub")
+    result = json.loads(encoded)
+    shown = result["destination_comparison"]
+    assert len(shown["paths"]) < 20
+    assert len(shown["paths"]) + shown["omitted_paths"] == len(rows)
+    assert shown["destination_state"] == comparison["destination_state"] and shown["artifact"] == comparison["artifact"]
+    if success:
+        assert extract_skill_publish_result_metadata(encoded)["skill_publish_receipt"] == _receipt()

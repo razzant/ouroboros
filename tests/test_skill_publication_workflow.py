@@ -14,7 +14,13 @@ from ouroboros.skill_publish_snapshot import CapturedSkillFile
 from ouroboros.tools import skill_publish
 from tests.test_marketplace_api import _BodyRequest, _stub_marketplace_roots
 from tests.test_marketplace_publication_record import _published
-from tests.test_skill_publish_transaction import BASE_SHA, _install_transaction_fakes, _snapshot, _submit
+from tests.test_skill_publish_transaction import (
+    BASE_SHA,
+    _install_transaction_fakes,
+    _installed_from_destination,
+    _snapshot,
+    _submit,
+)
 
 
 def test_clear_only_displayed_publication_preserves_sibling_state_and_republish(tmp_path):
@@ -104,6 +110,7 @@ def test_publish_discloses_both_opaque_versions_in_result_and_host_pr_body(tmp_p
     ctx, _, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=snapshot, model_body=model_body)
     catalog = {'skills': [{'slug': 'demo', 'version': before, 'files': []}]}
     monkeypatch.setattr(skill_publish, 'fetch_upstream_catalog', lambda *a: (copy.deepcopy(catalog), BASE_SHA))
+    _installed_from_destination(tmp_path)  # that row is this copy's release: the version change is local
     result = _submit(ctx)
     assert result['ok'] and result['catalog_version'] == before and result['proposed_version'] == after
     assert f'Catalog version: {json.dumps(before)}' in captured['pr_body']

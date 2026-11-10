@@ -34,6 +34,8 @@ from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
+from ouroboros.context_timing import timed
+from ouroboros.llm_observability import host_step
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -428,12 +430,12 @@ class _ModelInvocation:
                 if remaining <= 0:
                     raise last_error or ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
                 try:
-                    self.gateway = model_gateway(lambda: ensure_owned_gateway(
+                    self.gateway = timed("daemon.gateway", model_gateway, lambda: ensure_owned_gateway(
                         admission_wait_sec=remaining, startup_wait_sec=remaining))
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
-                    operations = self.gateway.operations(timeout_sec=remaining)
+                    operations = timed("daemon.operations", self.gateway.operations, timeout_sec=remaining)
                     break
                 except ClaudexorUnavailable as error:
                     # No model create has been attempted. Wait on this call's
@@ -449,14 +451,15 @@ class _ModelInvocation:
             self.capture_failure_evidence = model_failure_evidence_supported(operations)
             self.capture_effort_evidence = operation_query_supported(operations, method="POST",
                 path="/v2/model-operations", name="captureEffortEvidence", value="true")
-            self.request_ref = self.gateway.upload_model_request(canonical_bytes, sha256=sha256, size_bytes=size_bytes,
-                                                                 idempotency_key=self.invocation_id)
+            self.request_ref = timed("daemon.upload", self.gateway.upload_model_request, canonical_bytes, sha256=sha256,
+                                     size_bytes=size_bytes, idempotency_key=self.invocation_id)
             self.request_manifest_ref = persist_call(self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
                          call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
                          manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
                                    "model_role": self.role,
                                    "capture_failure_evidence": self.capture_failure_evidence,
                                    "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
+            host_step("daemon_upload")
         except ClaudexorUnavailable as error:
             raise ClaudexorModelNotDispatched({"code": error.code, "message": str(error)}, model_role=self.role) from None
 
@@ -524,10 +527,12 @@ class _ModelInvocation:
                 if not self.operation_id:
                     self.observe_operation()
                     self.check_control(starting=True)
-                    detail = self.gateway.create_model_operation(self.request_ref, idempotency_key=self.invocation_id,
+                    detail = timed("daemon.create", self.gateway.create_model_operation, self.request_ref,
+                        idempotency_key=self.invocation_id,
                         **({"capture_failure_evidence": True} if self.capture_failure_evidence else {}),
                         **({"capture_effort_evidence": True} if self.capture_effort_evidence else {}))
                     self.operation_id = detail["id"]
+                    host_step("create_operation")
                     self.detail = detail
                     self.observe_operation(accepted=True)
                 else:

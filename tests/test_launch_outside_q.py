@@ -515,3 +515,63 @@ def test_a_launch_on_the_lane_counts_against_its_roots_cap_in_the_same_pass(env,
     launched = [task["id"] for task in delivered if "id" in task]  # worker commands carry no task id
     assert launched == ["launch-child"] and env.pending_ids() == ["launch-second"]
     assert env.row("launch-second").get("admitted_dispatch") != "possible"  # no durable marks for the excess
+
+
+def returned_owner_turn(env, tid="lane-return"):
+    """My human's Main turn as a return leaves it queued: the direct origin on the conversation lane, the owner door's
+    ingress, its accepted receipt (queue admission attests it unscoped)."""
+    write_task_result(env.data, tid, STATUS_SCHEDULED, chat_id=1, root_task_id=tid, result="Task accepted and scheduled.")
+    task = {"id": tid, "type": "task", "chat_id": 1, "text": "keep working", "_is_direct_chat": True, "root_task_id": tid,
+            "budget_drive_root": str(env.data),
+            "_execution_owner": {"kind": "direct", "lane": "conversation", "executor": "worker", "task_attempt": 0},
+            "metadata": {"client_message_id": "cm-return",
+                         "origin_message_ref": {"chat_id": 1, "client_message_id": "cm-return"}}}
+    with queue._queue_lock:
+        admitted = queue.enqueue_task(task)
+    assert not admitted.get("_admission_blocked"), admitted
+    return admitted
+
+
+@pytest.mark.parametrize("control", ["none", "stop", "pause"])
+def test_a_returned_owner_turns_lane_launch_keeps_the_reservation_marks_and_revalidation(env, monkeypatch, control):
+    """A conversation carrier takes a returned owner turn through queued work's own reservation, marks on the admission
+    lane and revalidation under Q: a Stop or Pause landing between the marks and the put wins and frees the carrier;
+    with neither, the carrier (never the idle project slot) gets it as a lane row."""
+    from supervisor.conversation_lane import conversation_row
+    from supervisor.events_budget import _set_root_budget_pause_locked
+
+    project, _project_delivered = install_worker(env, monkeypatch)
+    delivered = []
+    carrier = affirm_ready(SimpleNamespace(wid=5, busy_task_id=None, lane="conversation",
+                                           in_q=SimpleNamespace(put=lambda task: delivered.append(dict(task)))))
+    workers.WORKERS[5] = carrier
+    row = returned_owner_turn(env)
+    committed, proceed = threading.Event(), threading.Event()
+    original = worker_assignment._commit_launch
+
+    def after_marks(queue_module, candidate, unsubmitted=None):
+        projections = original(queue_module, candidate, unsubmitted)
+        if candidate.get("id") == "lane-return" and projections:
+            committed.set()  # the marks are durable; the put has not been entered
+            assert proceed.wait(_WAIT_SEC)
+        return projections
+
+    monkeypatch.setattr(worker_assignment, "_commit_launch", after_marks)
+    workers.assign_tasks()
+    assert committed.wait(_WAIT_SEC) and carrier.busy_task_id == "lane-return" and project.busy_task_id is None
+    with queue._queue_lock:
+        if control == "stop":
+            task_lifecycle.CANCELLED_ROOT_FENCES["lane-return"] = "2026-11-09T00:00:00Z"
+        elif control == "pause":
+            _set_root_budget_pause_locked("lane-return", {"cause": "owner_pause", "fence_id": "between-marks-and-put"})
+    proceed.set()
+    assert env.gen.wait_idle(_WAIT_SEC)
+    assert env.row("lane-return")["admitted_dispatch"] == "possible" and project.busy_task_id is None
+    if control == "none":
+        assert [task["id"] for task in delivered] == ["lane-return"] and carrier.busy_task_id == "lane-return"
+        meta = queue.RUNNING["lane-return"]
+        assert conversation_row(meta) and meta["worker_id"] == 5 and meta["reply_expected"] is True
+        assert meta["task"]["_execution_owner"]["kind"] == "direct" and env.pending_ids() == []
+        return
+    assert delivered == [] and "lane-return" not in queue.RUNNING
+    assert carrier.busy_task_id is None and "_launch_claim" not in row and env.pending_ids() == ["lane-return"]

@@ -33,6 +33,9 @@ _ADDED_OWNERS = {
     "OWNER_RULES_KEY": safety_config,
     "_RULES_ADDRESS": safety_config,
     "owner_rules_section": safety_config,
+    # A managed deployment's organization rules ride the same section under their own provenance.
+    "organization_rules_section": safety_config,
+    "_owner_rules": safety_config,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,

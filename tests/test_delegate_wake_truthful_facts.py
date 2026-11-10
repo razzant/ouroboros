@@ -285,3 +285,65 @@ def test_an_unowned_run_reads_no_catalog(tmp_path, monkeypatch):
         AssertionError("no route, no catalog read")))
     wake = json.loads(wake_now(_ctx(tmp_path), "run-x", wait_once=_settled("run-x")).text)
     assert wake["leaf_live_input"] == "unknown"
+
+
+# -- questions that hold nothing (claudexor #628) -----------------------------------------------
+
+
+def _quiet_question_tick(**extra):
+    pending = [{"interaction_id": "i1", "timeout_at": None, "delivery": "async"}]
+    return pending, {"status": "no_progress", "run_id": "run-a", "state": "running", "last_seq": 1,
+                     "waited_sec": 3, "waiting_on_user": True, "pending_interactions": pending,
+                     "answered": True, **extra}
+
+
+@pytest.mark.parametrize("whole_set_async", [True, False], ids=["whole-set-async", "fitted-rows-only"])
+def test_a_quiet_wake_keeps_the_whole_sets_meaning_never_its_fitted_rows(tmp_path, monkeypatch, whole_set_async):
+    """The payload's ``async_questions_only`` (judged before any preview) decides the note, and a run's recorded
+    work (``run_activity``) reads the body's same fact; rows that merely look async in a fitted preview never
+    re-decide it."""
+    from ouroboros.delegate_progress import paused_note
+
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
+    pending, tick = _quiet_question_tick(**({"async_questions_only": True} if whole_set_async else {}))
+    ctx = _ctx(tmp_path, f"t-{whole_set_async}")
+    wake = json.loads(wake_now(ctx, "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
+    assert wake["note"] == paused_note(pending, async_only=whole_set_async)
+    assert ("PAUSED" in wake["note"]) is not whole_set_async
+    assert supervision.run_activity({"answered": True, "run_state": "running", "waiting_on_user": True,
+                                     "async_questions_only": whole_set_async}) is whole_set_async
+
+
+@pytest.mark.parametrize("async_only", [True, False])
+def test_a_compact_question_wake_does_not_invent_a_null_expiry(tmp_path, monkeypatch, async_only):
+    """A compact observation retains attention but has no rows from which to claim expiry."""
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
+    _pending, tick = _quiet_question_tick(async_questions_only=async_only)
+    tick.pop("pending_interactions")
+    wake = json.loads(wake_now(_ctx(tmp_path), "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
+    assert "expiry details are unavailable" in wake["note"]
+    assert "timeout_at is null" not in wake["note"] and "NO automatic expiry" not in wake["note"]
+    assert ("PAUSED" in wake["note"]) is not async_only
+
+
+@pytest.mark.parametrize("async_only", [True, False])
+def test_expiry_absent_is_not_an_observed_null(async_only):
+    from ouroboros.delegate_progress import waiting_expiry_clause
+
+    kind = "async" if async_only else "blocking"
+    assert "unavailable" in waiting_expiry_clause([{"delivery": kind}], async_only)
+    assert "timeout_at is null" in waiting_expiry_clause([{"delivery": kind, "timeout_at": None}], async_only)
+
+
+@pytest.mark.parametrize("oversize", ["wake_events", "sleep"], ids=["fitted-envelope", "last-resort-envelope"])
+def test_both_spilled_envelopes_carry_the_question_facts(tmp_path, oversize):
+    payload = {"status": "no_progress", "run_id": "run-a", "state": "running", "last_seq": 1,
+               "waiting_on_user": True, "async_questions_only": True, "supervision_wake_id": "wake-1",
+               "continuation": "same_session"}
+    if oversize == "wake_events":
+        payload["wake_events"] = [{"type": "addressed", "msg_id": f"m{i}", "text": "x" * 4000} for i in range(12)]
+    else:
+        payload["sleep"] = {"entered_at": "t", "detail": "y" * 40_000}
+    shown = json.loads(supervision._render_wake_payload(_ctx(tmp_path, "t-spill"), payload).text)
+    assert shown["wake_delivery"]["complete"] is False
+    assert shown["waiting_on_user"] is True and shown["async_questions_only"] is True

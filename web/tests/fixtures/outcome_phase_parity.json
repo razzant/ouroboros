@@ -42,10 +42,10 @@
       "phase": "done", "headline": "Done", "acceptance_clause": "", "exact_clause": true
     },
     {
-      "name": "empty length recovery ends incomplete with saved work",
+      "name": "incomplete reply recovery ends incomplete with saved work",
       "record": {"status": "failed", "reason_code": "output_recovery_exhausted", "outcome_axes": {"execution": {"status": "infra_failed"}, "objective": {"status": "not_evaluated"}}},
       "phase": "error", "headline": "Failed",
-      "acceptance_clause": "Empty length-limited replies exhausted recovery; saved work remains available."
+      "acceptance_clause": "Incomplete model replies exhausted recovery; saved work remains available."
     },
     {
       "name": "earlier approval never replaces the execution-axis failure behind final_message",
@@ -538,11 +538,11 @@
       "acceptance_clause": "Some result files are missing or could not be preserved."
     },
     {
-      "name": "an acceptance panel that was only awaited is Done under the author's own finish",
+      "name": "an author's finish over a panel that was only awaited is Done with warnings and names its reason",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "source": "author_acceptance", "reason": "author_finish"}, "review": {"status": "awaiting", "eligibility": "review_in_flight", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "enforcement": "advisory", "author_action": "finish", "author_disposition": {"disposition": "accepted", "rationale": "Main submitted this complete response for delivery.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-20T00:00:00+00:00", "source": "author_final_response"}}}}},
-      "phase": "done",
-      "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off · Main submitted this complete response for delivery."
     },
     {
       "name": "an awaited acceptance panel with no author decision is still not a warning",
@@ -589,7 +589,7 @@
       "acceptance_clause": "Reviewers approved this answer; the supervisor did not confirm that task admission was closed."
     },
     {
-      "name": "current informed Advisory author finish preserves raw critic fail",
+      "name": "current informed Advisory author finish over a critic fail is Done with warnings with its reason",
       "record": {
         "status": "completed",
         "outcome_axes": {
@@ -620,12 +620,12 @@
           }
         }
       },
-      "phase": "done",
-      "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off · Corrected and verified the current answer."
     },
     {
-      "name": "current informed Advisory author finish preserves raw critic degraded",
+      "name": "current informed Advisory author finish over a degraded critic is Done with warnings with its reason",
       "record": {
         "status": "completed",
         "outcome_axes": {
@@ -656,9 +656,9 @@
           }
         }
       },
-      "phase": "done",
-      "headline": "Done",
-      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off."
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros delivered this answer without the reviewers' sign-off · Corrected and verified the current answer."
     },
     {
       "name": "Blocking saved plan cap remains unfinished through host normalization, and the card says why it was held (a held task never reads as work that went on)",
@@ -1124,7 +1124,7 @@
       "acceptance_clause": "A data query failed."
     },
     {
-      "name": "a failed read stays in the details: the clause names the failed command and counts no read",
+      "name": "a record written before the flags: a failed read stays in the details, the clause names the old command error and counts no read",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "read_file", "status": "argument_error", "exit_code": null, "signal": null, "result": "", "read_only": true}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command returned exit code 2."
@@ -1142,7 +1142,7 @@
       "acceptance_clause": "A file read failed, plus 2 more tool errors."
     },
     {
-      "name": "one more error reads in the singular",
+      "name": "one more error reads in the singular (records written before the flags stay loud)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": ""}, {"tool": "run_command", "status": "non_zero_exit", "exit_code": 1, "signal": null, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command returned exit code 2, plus 1 more tool error."
@@ -1154,7 +1154,7 @@
       "acceptance_clause": "A command timed out, plus more tool errors."
     },
     {
-      "name": "a command stopped by a signal names the signal",
+      "name": "a command stopped by a signal names the signal (a record written before the flags)",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": null, "signal": 9, "result": ""}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
       "acceptance_clause": "A command was stopped by signal 9."
@@ -1238,6 +1238,131 @@
       "phase": "cancelled",
       "headline": "Stopped",
       "acceptance_clause": "Ouroboros stopped with unfinished work · The answer was delivered with reviewer requests still open · Work remains."
+    },
+    {
+      "name": "a failed effect beside quiet leftovers names the effect and counts only loud errors",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}, {"tool": "edit_batch", "status": "argument_error", "exit_code": null, "signal": null, "result": "", "details_only": true}], "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 2, "signal": null, "result": "", "details_only": true}]}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "two loud effects count the second",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}, {"tool": "github_write", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed, plus 1 more tool error.",
+      "exact_clause": true
+    },
+    {
+      "name": "a send Safety stopped is loud and names the step",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_write", "status": "safety_violation", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A GitHub write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "a helper set to run as a coding session that finished without one says so in words",
+      "record": {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "incomplete"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one."
+    },
+    {
+      "name": "a helper whose coding-session run is unknown says so in words",
+      "record": {"status": "completed", "reason_code": "configured_actor_unknown", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_unknown"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "unknown"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "This helper was set to run as a coding session; whether that run succeeded is unknown."
+    },
+    {
+      "name": "a details-only leftover listed before a loud one: the clause names the loud one and counts only it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "nineteen details-only timeouts and one failed write fill the capped list: the clause names the write and claims no more",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "run_command", "status": "timeout", "exit_code": null, "signal": null, "result": "", "details_only": true}, {"tool": "write_file", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A file write failed.",
+      "exact_clause": true
+    },
+    {
+      "name": "an explicit author finish before the reviewers answered is Done with warnings, says their verdict is kept and names its reason",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {
+            "status": "ok"
+          },
+          "objective": {
+            "status": "pass",
+            "source": "author_acceptance",
+            "review_status": "awaiting",
+            "reason": "author_finish_pending"
+          },
+          "review": {
+            "status": "awaiting",
+            "source": "result_review",
+            "author_finish": "author_finish_pending",
+            "pending_review": {
+              "record_id": "rec-1",
+              "subject_sha": "s1"
+            },
+            "acceptance_decision": {
+              "status": "finalized_unaccepted",
+              "source": "result_review",
+              "reason": "author_finish_pending",
+              "enforcement": "advisory",
+              "author_disposition": {
+                "action": "finish",
+                "rationale": "The owner asked for the corrected answer before the evening call, the fix is verified by the focused tests and by reading the produced file back, and the reviewers' verdict will be read when it arrives."
+              }
+            }
+          }
+        }
+      },
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives · The owner asked for the corrected answer before the evening call, the fix is verified by the focused tests and by reading the produced file back, and the reviewers' verdict will be read when it arrives."
+    },
+    {"name": "the current outcome a late PASS of exactly the delivered answer announces (late_review_marks.current_outcome) reads Done", "record": {"task_id": "task-1", "status": "completed", "reason_code": "final_message", "_result_text_present": false, "quiet_effective": false, "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "review": {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}, "objective": {"status": "pass", "source": "result_review", "review_status": "pass"}}, "outcome_phase": "done"}, "phase": "done", "headline": "Done", "acceptance_clause": "", "exact_clause": true},
+    {"name": "the same late PASS keeps an independent receipt_absent: Done with warnings and its own sentence", "record": {"task_id": "task-1", "status": "completed", "reason_code": "final_message", "_result_text_present": false, "quiet_effective": false, "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "review": {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}, "objective": {"warnings": ["receipt_absent"], "warning": "receipt_absent", "status": "pass", "source": "result_review", "review_status": "pass"}}, "outcome_phase": "warn"}, "phase": "warn", "headline": "Done with warnings", "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran.", "exact_clause": true},
+    {
+      "name": "the author's acceptance of an earlier approved version is Done and says which version the reviewers approved",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {
+            "status": "ok"
+          },
+          "objective": {
+            "status": "pass",
+            "source": "author_acceptance",
+            "review_status": "pass",
+            "reason": "previous_revision_accepted"
+          },
+          "review": {
+            "status": "pass",
+            "source": "result_review",
+            "author_finish": "previous_revision_accepted",
+            "acceptance_decision": {
+              "status": "accepted",
+              "source": "result_review",
+              "reason": "previous_revision_accepted",
+              "enforcement": "advisory",
+              "author_disposition": {
+                "action": "finish",
+                "rationale": "Only the wording of the summary changed after the approved version."
+              }
+            }
+          }
+        }
+      },
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
     }
   ]
 }

@@ -98,7 +98,7 @@ def test_a_recorded_null_is_unknown_never_a_legacy_spare(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.config.get_max_workers", lambda: 40)
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     assert (fact["free_worker_slots"], fact["free_worker_slots_basis"]) == (None, "unknown")
-    assert fact["dispatch_refusals"] == {} and fact["acting_worker_count"] is None
+    assert fact["acting_worker_count"] is None
     line = engine_pool_line(tmp_path)
     assert "assignable idle not observed" in line and "acting not observed" in line
 
@@ -108,16 +108,14 @@ def test_a_model_wait_is_not_worker_saturation(tmp_path):
     snapshot = {**_snapshot(), "max_workers": 40, "worker_total": 2, "active_worker_count": 2, "busy_worker_count": 1,
                 "acting_worker_count": 1, "parked_worker_count": 0,
                 "assignable_idle_workers": 1, "pending_count": 0, "pool_observation_status": "observed",
-                "dispatch_refusals": {"silence-old": "cancelled"},
                 "running": [{"id": "child", "model_waits": {"w": {"state": "waiting", "task_attempt": 1}},
                              "task": {"delegation_role": "subagent", "root_task_id": "root"}}]}
     _write(tmp_path, snapshot)
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
-    assert (fact["running_count"], fact["free_worker_slots"], fact["acting_worker_count"],
-            fact["dispatch_refusals"]) == (1, 1, 1, {"silence-old": "cancelled"})
+    assert (fact["running_count"], fact["free_worker_slots"], fact["acting_worker_count"]) == (1, 1, 1)
     line = engine_pool_line(tmp_path)
     assert ("with a task 1, acting 1, waiting on their process 0, booting not observed, reaping (incl. booting) 1, "
-            "assignable idle 1, pending rows 0, refused by their own facts 1") in line
+            "assignable idle 1, pending rows 0;") in line
     assert "model" not in line.split("project worker pool", 1)[1].split(";", 1)[0]
 
 

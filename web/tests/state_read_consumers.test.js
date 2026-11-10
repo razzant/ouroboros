@@ -83,7 +83,8 @@ test('Restart: a complete census names the pausing task; confirming sends once w
     assert.equal(await confirmAndSendRestart({ openConfirmDialog: page.openConfirmDialog, ws: page.ws }), 'sent');
     assert.match(page.dialogs[0].body, /1 task is still pausing/);
     assert.doesNotMatch(page.dialogs[0].body, /could not be read/);
-    assert.deepEqual(page.sends, [{ frame: { type: 'command', cmd: '/restart' }, options: { queue: false } }]);
+    assert.deepEqual(page.sends, [{ frame: { type: 'command', cmd: '/restart', ui_control: { name: 'restart' } },
+        options: { queue: false } }]);
     const offline = restartPage({ connected: false });
     assert.equal(await confirmAndSendRestart({ openConfirmDialog: offline.openConfirmDialog, ws: offline.ws }), 'not_connected');
     assert.deepEqual(offline.sends.map((send) => send.options), [{ queue: false }]);

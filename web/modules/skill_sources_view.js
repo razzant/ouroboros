@@ -20,7 +20,7 @@ import {
  */
 export function sourceHealthHtml(source, health) {
     if (source.kind === 'builtin') return '';  // it ships with the app: nothing is read
-    if (!health?.state) return source.kind === 'registry' ? statusHtml('searched when you search', 'muted') : statusHtml('not read yet', 'muted');
+    if (!health?.state) return source.kind === 'registry' ? statusHtml('read when chosen or searched', 'muted') : statusHtml('not read yet', 'muted');
     const age = relativeAge(health.last_read_at);
     if (health.state === 'reading' || (health.refreshing && health.state !== 'error')) {
         return statusHtml(age ? `reading… (list from ${escapeHtml(age)})` : 'reading…', 'muted', { work: true });
@@ -29,7 +29,7 @@ export function sourceHealthHtml(source, health) {
         const shown = health.state === 'ready' && age ? ` — showing the list from ${escapeHtml(age)}` : '';
         return `${statusHtml(`couldn’t be read: ${escapeHtml(health.error || 'no answer')}${shown}`, 'warn')} ${buttonHtml('Try again', { tone: 'ghost', attrs: `data-source-action="refresh" data-source-id="${escapeHtml(source.id)}"` })}`;
     }
-    if (source.kind === 'registry' || health.state === 'search') return statusHtml('searched when you search', 'muted');
+    if (source.kind === 'registry' || health.state === 'search') return statusHtml('read when chosen or searched', 'muted');
     return statusHtml(age ? `read ${escapeHtml(age)}` : 'read', 'muted');
 }
 

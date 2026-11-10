@@ -1,4 +1,5 @@
 import './api_types.js';
+import { clearChatPreviews } from './chat_preview.js';
 
 /**
  * Single browser-side gateway client. Keep backend calls here so UI modules
@@ -84,7 +85,8 @@ export function readStateJson(init = {}) {
  * separately hosted interface never passes through the gate's login page at load,
  * and a page whose session expired keeps showing until such a read is refused.
  * Every other failure keeps its own presentation, and nothing the page had queued
- * or failed to save is resent after signing in — the return is a fresh load.
+ * or failed to save is resent after signing in — the return is a fresh load. A
+ * refused session takes this browser's saved conversation text with it (chat_preview.js).
  */
 export function signInUrl(href = window.location.href) {
     const here = new URL(href);
@@ -94,6 +96,7 @@ export function signInUrl(href = window.location.href) {
 }
 
 export function openSignIn() {
+    clearChatPreviews();
     window.location.replace(signInUrl());
 }
 
@@ -465,7 +468,7 @@ export const skillSourcesApi = {
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
     catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
-    search: ({ q = '', source = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}) })}`, { cache: 'no-store', ...init }),
+    search: ({ q = '', source = '', sort = '', cursor = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}), ...(sort ? { sort } : {}), ...(cursor ? { cursor } : {}) })}`, { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**

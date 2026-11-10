@@ -124,7 +124,7 @@ def _body(size: int, tag: str) -> str:
 def _write_segment(root: pathlib.Path, prefix: str, moment: datetime.datetime, rows: List[dict]) -> pathlib.Path:
     path = root / "archive" / f"{prefix}_{_stamp(moment)}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:  # LF on every OS, as append_jsonl writes these logs
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     return path

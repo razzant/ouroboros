@@ -251,15 +251,27 @@ def bounded_poll(
         raise
 
 
-def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]]) -> str:
+def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
     """The honest expiry clause for a waiting note, keyed on the rows' own
     ``timeout_at`` (R2-7e). The engine benign-declines an unanswered question
     only when the row carries a ``timeout_at``; a null one means NO automatic
     expiry, and a note promising a benign decline there teaches the nanny to
     wait for a timeout that never comes. Claimed only when EVERY visible row
     carries one; rows absent entirely (a bare ``waitingOnUser`` flag) prove no
-    expiry either."""
+    expiry either. ``async_only`` is the caller's whole-set fact: such a question
+    closes at its timeout with nothing sent and resumes nothing, since nothing
+    was held. Otherwise only the rows that may hold the run speak for the run."""
     rows = [row for row in (pending or []) if isinstance(row, dict)]
+    if not async_only:
+        rows = [row for row in rows if row.get("delivery") != "async"]
+    if not rows or any("timeout_at" not in row for row in rows):
+        return "expiry details are unavailable in this observation; no deadline or absence of one is established"
+    if async_only:
+        if rows and all(str(row.get("timeout_at") or "").strip() for row in rows):
+            return ("at each row's timeout_at an unanswered async question closes and nothing "
+                    "is sent; the agent keeps working without an answer")
+        return ("timeout_at is null here, so the question stays open while the agent keeps "
+                "working; silence answers nothing")
     if rows and all(str(row.get("timeout_at") or "").strip() for row in rows):
         return ("the engine timeout benign-declines it (each row's timeout_at; "
                 "the run then continues on stated assumptions)")
@@ -299,7 +311,10 @@ def _fitted_pending(payload: Dict[str, Any], pending: List[Dict[str, Any]],
     payload["interactions_omitted"] = len(pending)
     payload["interactions_note"] = (
         "the pending question set could not fit this payload even one row at a "
-        "time; the run is still PAUSED on it — the full set was delivered by the "
+        + ("time; the questions are still pending and the run keeps working"
+           if payload.get("async_questions_only") is True else
+           "time; the run is still PAUSED on it")
+        + " — the full set was delivered by the "
         "immediate waiting_on_user return (staged to the task drive when it "
         "spilled), or re-read it with delegate_wait"
     )
@@ -427,11 +442,11 @@ def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
     progress surface, each frame committed once handed over; a broken channel never aborts
     the read."""
     fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
     from ouroboros import delegate_activity
     try:
         for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
+            if not callable(fn):
+                return  # retained, not delivered; the detail/terminal path can retry the pending frame
             fn(delegate_activity.progress_text(activity), delegated_activity=activity)
             commit()
     except Exception:
@@ -452,10 +467,19 @@ def emit_retained(ctx: Any, run_id: str) -> None:
         log.debug("retained delegated progress emit failed", exc_info=True)
 
 
-def paused_note(pending_interactions: Optional[List[Dict[str, Any]]]) -> str:
+def paused_note(pending_interactions: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
     """The note of a run PAUSED on its own question(s): never "stuck" (owner 7=A /
     F13). Shared by the per-window payload and the wake, which keeps it when it
-    drops the read's own keep-watching/cancel note."""
+    drops the read's own keep-watching/cancel note. ``async_only`` (the whole set's
+    fact, judged before any preview) names a run that keeps working instead."""
+    if async_only:
+        return ("The run is alive and KEEPS WORKING; the question(s) it asked are attention "
+                "only and hold nothing (async_questions_only; see pending_interactions). "
+                "Answer with delegate_answer when an answer would help — it reaches the "
+                "agent as its next user message in this session —, escalate an "
+                "above-authority question with the escalate verb (parent-first), or keep "
+                f"waiting (call again) — {waiting_expiry_clause(pending_interactions, True)}. "
+                "Do not cancel a run merely because it asked a question.")
     return ("The run is alive and PAUSED on the question(s) it already asked "
             "(waiting_on_user; see pending_interactions). Decide: answer with "
             "delegate_answer, escalate an above-authority question with the "
@@ -511,6 +535,7 @@ def present_payload(
     detail: Dict[str, Any],
     budget: int,
     pending_interactions: Optional[List[Dict[str, Any]]] = None,
+    async_questions_only: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """A live run's present state, as the one read of a ``delegate_wait`` wake found it.
 
@@ -520,6 +545,11 @@ def present_payload(
     projection), so a nanny that escalated it is re-shown what the run is paused on. It is
     MEASURED into the payload (``_fitted_pending``): per-field bounds alone left a
     many-question set at 24k/51k chars against a 15k budget.
+
+    ``async_questions_only`` is the fact about the WHOLE pending set; omitted, it is judged on
+    the full ``detail`` (``claudexor_observation.question_attention``), never on
+    ``pending_interactions``, a bounded preview that may shed the only blocking row. Present,
+    the run keeps working: its questions hold nothing (the wake's note says so, ``paused_note``).
     """
     payload: Dict[str, Any] = {
         "status": "progress" if moved else "no_progress",
@@ -530,6 +560,12 @@ def present_payload(
         "max_seconds": max_seconds,
         "waiting_on_user": waiting_on_user,
     }
+    if async_questions_only is None:
+        from ouroboros.gateways.claudexor_observation import question_attention
+
+        async_questions_only = waiting_on_user and question_attention(detail)[1]
+    if waiting_on_user and async_questions_only:
+        payload["async_questions_only"] = True  # absent keeps the old meaning: a question holds the run
     if waiting_on_user:
         # The flat route fact of the immediate waiting payload: an answer resumes THIS session.
         from ouroboros.delegate_interactions import SAME_SESSION_CONTINUATION

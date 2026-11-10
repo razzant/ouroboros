@@ -1,5 +1,6 @@
 // Captured conversation content mounted inside the Place sheet. The sheet owns navigation and drafts.
 import { apiClient } from './api_client.js';
+import { previewsRefused } from './chat_preview.js';
 import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
@@ -72,7 +73,10 @@ export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {
 }
 
 export function placeHistoryState(place) {
-    return { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
+    // While consciousness is off a place that is not Paused only hears (the host's `only_hears`): nothing wakes it.
+    const off = place.onlyHears ? { silent: 'Silent, consciousness off: it only hears here.',
+        active: 'Active, consciousness off: it only hears here.' } : {};
+    return off[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
         paused: 'Paused now: it does not wake or act here; what the connector still reports is saved.',
         active: 'Active now: it hears, wakes, speaks and acts here.' }[place.state] || 'The current Place state is unavailable.';
 }
@@ -212,6 +216,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             if (hadRows && target === null) scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
         } catch (error) {
             if (closed || version !== generation) return;
+            previewsRefused(error);  // a current refusal takes this browser's saved conversation text (chat_preview.js)
             find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
             retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;

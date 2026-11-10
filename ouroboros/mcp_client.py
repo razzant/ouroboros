@@ -613,18 +613,34 @@ def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
 
 
 @asynccontextmanager
-async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
+async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig, launch: Any = None):
     # SDK stderr otherwise goes straight to the host console, outside masking.
     with _redacted_sdk_logs(cfg, "mcp.client.stdio"):
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+            if launch is not None:  # a managed domain's server: its container side is the executor's record first
+                try:
+                    launch.require_cli()  # the only positive proof that nothing can start: nothing adopted either
+                except OSError as missing:
+                    missing.mcp_unsent_joined = True
+                    raise
+                launch.adopt()
             try:
                 async with stdio_client(params, errlog=stderr) as streams:
                     yield streams
             finally:  # a task session's file spans its task loop: a bounded tail, never the whole file
+                # Any failure after adoption may follow the CLI's spawn (the SDK can raise attaching its pipes), so
+                # the container side is settled, never abandoned: an unconfirmed end keeps the executor's record.
+                settled = launch is None or await asyncio.to_thread(launch.settle)
                 diagnostic = _stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_TAIL_BYTES)
                 if diagnostic:
                     log.warning("MCP stdio stderr (%s): %s", cfg.id, diagnostic)
                     heard_from_server(_stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_NOTE_BYTES))
+                if not settled:
+                    from ouroboros.work_domain import WorkDomainUnsettled
+
+                    raise WorkDomainUnsettled("The MCP container process group has not been confirmed ended; its "
+                                              "executor record is kept. The call may have completed; do not retry "
+                                              "without reconciling its result.")
 
 
 @asynccontextmanager
@@ -685,8 +701,17 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
         selected = {"env": env} if env else {}
         if cfg.cwd:
             selected["cwd"] = cfg.cwd
-        params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
-        return _stdio_with_diagnostics(params, cfg)  # every server's stderr: masked, bounded, kept for a failure
+        from ouroboros.execution_domain import attached_launch
+
+        try:  # a managed domain runs the server in its pinned executor, never here
+            launch = attached_launch([cfg.command, *cfg.args], cfg.cwd or None, {**cfg.env, **(host_env or {})})
+        except (ValueError, RuntimeError) as refused:  # a path or network contract refused
+            refused.mcp_unsent_joined = True  # refused before any transport exists: a proven no-send
+            raise
+        params = (StdioServerParameters(command=launch.argv[0], args=launch.argv[1:],
+                                        env={**installation_scope_entries(), **launch.env}) if launch is not None
+                  else StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected))
+        return _stdio_with_diagnostics(params, cfg, launch)  # every server's stderr: masked, bounded, kept for a failure
     raise RuntimeError(f"Unsupported transport: {cfg.transport!r}")
 
 
@@ -761,10 +786,12 @@ async def _call_tool_async(
     from ouroboros.usage_accounting import UsageAccountingError
     from ouroboros.store import StoreError
     from ouroboros.mcp_result_images import with_returned
+    from ouroboros.work_domain import WorkDomainUnsettled
     unsent_joined = False
+    returned = None
 
     async def _do() -> ToolResult:
-        nonlocal unsent_joined
+        nonlocal unsent_joined, returned
         refusal = None
         async with _session(cfg) as session:
             try:
@@ -780,6 +807,7 @@ async def _call_tool_async(
                     refusal = exc
                 else:
                     result = await pending  # any error here may follow a send
+                    returned = with_returned(_tool_result_from_call_result(result), result)
         if refusal is not None:
             # Failed/unfinished cleanup never reaches this positive phase fact.
             unsent_joined = True
@@ -788,7 +816,7 @@ async def _call_tool_async(
                 active[2]["settled"] = True
             refusal.mcp_unsent_joined = True
             raise refusal
-        return with_returned(_tool_result_from_call_result(result), result)
+        return returned
 
     # Launch admission precedes transport entry: a stdio server starts there.
     with carrying_server_stderr():
@@ -799,6 +827,12 @@ async def _call_tool_async(
             raise
         try:
             return await asyncio.wait_for(pending, timeout=timeout_sec)
+        except WorkDomainUnsettled as exc:
+            if returned is None:
+                raise  # no result was received; the operation may have happened
+            return _replace_tool_result(returned, code="MCP_ERROR",
+                text=returned.text + "\n⚠️ The response above was received, but server cleanup is unconfirmed. "
+                "Do not repeat the completed call. " + str(exc), meta_updates={"backend_settled": False})
         except BaseException as exc:
             if unsent_joined:
                 # wait_for replaces CancelledError with TimeoutError; carry proof,

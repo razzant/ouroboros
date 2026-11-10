@@ -482,7 +482,7 @@ def test_a_retryable_503_on_the_compact_wait_is_an_observation_hole_and_a_plain_
 
 
 def _repaired_engine(tmp_path, monkeypatch, *, events, wait_many=None, catalog=None, detail=None, repaired=True,
-                     version="4.8.1"):
+                     version="4.8.1", opt_in=False):
     """One observing beat of the real wait over the real gateway against a scripted engine that
     lists both observation routes and answers the contract probe as ``repaired`` says (the
     release number it proves is the same either way); ``events``/``wait_many``/``catalog``
@@ -516,7 +516,11 @@ def _repaired_engine(tmp_path, monkeypatch, *, events, wait_many=None, catalog=N
         if path == "/v2/runs/run-x/events":
             return events(request)
         if path == "/v2/runs/wait-many":
-            if json.loads(request.content or b"{}").get("targets") == [{"runId": "capability-probe", "seen": None}]:
+            body = json.loads(request.content or b"{}")
+            if body.get("targets") == [{"runId": "capability-probe", "seen": None}]:
+                if body.get("includeBlocking") is True and not opt_in:  # a strict input that predates it
+                    return httpx.Response(400, json={"code": "invalid_request",
+                                                     "message": "Unrecognized key(s) in object: 'includeBlocking'"})
                 return (httpx.Response(200, json={"wakeReason": "timeout", "attention": [], "summaries": [
                     {"status": None, "pending": None, "token": None, "problem": "not_found"}]}) if repaired
                     else httpx.Response(400, json={"code": "invalid_request",
@@ -623,3 +627,39 @@ def test_a_delivered_refused_wake_is_acknowledged_by_the_loop_and_the_next_wait_
         executor.shutdown()
     assert observed["status"] == "terminal" and observed["state"] == "succeeded", observed
     assert handshakes == ["POST", "POST"], "the next wait observed afresh instead of replaying"
+
+
+def test_an_opted_in_engine_marks_async_questions_end_to_end_over_http(tmp_path, monkeypatch):
+    """FAKE ENGINE (scripted HTTP, no vendor or model) behind the real gateway and the wake's read
+    (claudexor #628): a new async question is fetched and returned once as a running handoff, and a
+    read of the same question is a quiet working state. The compact wait's opt-in and its quiet beat
+    are the body's own (``test_delegate_collection_attention``)."""
+    from ouroboros.gateways import claudexor_observation as obs
+    from ouroboros.gateways import claudexor_run_events as run_events
+
+    monkeypatch.setattr(obs, "_SUPPORT", {})
+    monkeypatch.setattr(run_events, "_SUPPORT", {})
+    reads, token = [], "A" * 43
+    asked = {"lastSeq": 1, "pendingInteractions": [{
+        "interactionId": "int-async", "delivery": "async", "harnessId": "codex",
+        "questions": [{"id": "q", "question": "Also check the docs?", "options": [], "multi_select": False}]}],
+        "summary": {"runId": "run-x", "state": "running", "effectiveAccess": "readonly",
+                    "waitingOnUser": True, "asyncQuestionsOnly": True}}
+
+    def wait_many(request):
+        return httpx.Response(200, json={"wakeReason": "attention", "attention": [0], "summaries": [
+            {"status": "running", "pending": True, "token": token, "problem": None, "blocking": False}]})
+
+    def detail(request):
+        reads.append(request.url.path)
+        return httpx.Response(200, json=asked)
+
+    stream = lambda _r: httpx.Response(200, headers={"content-type": "text/event-stream"}, text=": connected\n\n")  # noqa: E731
+    first, _frames = _repaired_engine(tmp_path, monkeypatch, events=stream, wait_many=wait_many, detail=detail,
+                                      version="9.9.9", opt_in=True)
+    assert first["status"] == "waiting_on_user" and first["async_questions_only"] is True, first
+    assert reads == ["/v2/runs/run-x"]
+    second, _frames = _repaired_engine(tmp_path, monkeypatch, events=stream, wait_many=wait_many, detail=detail,
+                                       version="9.9.9", opt_in=True)
+    assert second["status"] == "no_progress" and second["waiting_on_user"] is True, second
+    assert second["async_questions_only"] is True, "the question already shown stays quiet, never a second ask"

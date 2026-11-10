@@ -134,6 +134,20 @@ def test_collector_lock_is_a_quiet_join_not_an_integration_error(tmp_path, money
     assert body.collect_terminal(tmp_path, entry.run_id)["status"] == "collected"
 
 
+def test_an_unavailable_collector_lock_is_not_called_another_collection(tmp_path, monkeypatch, money):
+    import errno
+
+    from tests._shared import full_disk_at
+
+    entry = started(tmp_path)
+    body.observe_run(tmp_path, entry, terminal())
+    full_disk_at(monkeypatch, "disposition")
+    assert body.collect_terminal(tmp_path, entry.run_id) == {
+        "status": "pending", "reason": "collection_lock_unavailable",
+        "lock_outcome": {"reason": "unknown", "errno": errno.ENOSPC}}
+    assert not money and not current.run(tmp_path, entry.run_id).settled
+
+
 def test_foreground_supervision_joins_collection_without_a_model_wake(tmp_path, monkeypatch, money):
     from ouroboros import delegate_supervision
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock

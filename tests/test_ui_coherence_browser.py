@@ -1038,5 +1038,5 @@ def test_evolution_start_says_a_refused_send_and_returns_focus(subscription_ui):
     toast = page.locator('.toast', has_text='Could not send /evolve on: Complete provider setup')
     toast.wait_for()
     page.wait_for_function('() => document.activeElement === document.getElementById("evo-start")')
-    assert held[0].request.post_data_json == {'cmd': '/evolve on'}
+    assert held[0].request.post_data_json == {'cmd': '/evolve on', 'ui_control': {'name': 'evolution_start'}}
     setup_browser.capture(page, 'evolution-start-refused')

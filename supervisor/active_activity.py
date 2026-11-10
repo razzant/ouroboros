@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -80,7 +81,8 @@ class TurnExecution:
     ``origin_message_ref["ts"]``), where the owner's wait starts; ``entered_at`` is the wall-clock
     twin of the first mark, so that wait and the monotonic phases (one process only) add up.
     ``dispatch``: the first dispatch's basis (``DISPATCH_BASES``) once it happened; ``meter``:
-    the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry."""
+    the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry;
+    ``worker_id``: the pool slot of the carrier running it (None when no carrier named one)."""
 
     chat_id: int
     client_message_id: str = ""
@@ -96,6 +98,7 @@ class TurnExecution:
     dispatch: str = ""
     meter: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     census: Dict[str, Any] = field(default_factory=dict)
+    worker_id: Any = None
 
     @property
     def phase(self) -> str:
@@ -121,6 +124,15 @@ class TurnExecution:
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
         """One of the turn's own frames (``TurnEventQueue``); a start fact among them advances the phase."""
+        # Deep self-review bypasses the Main model loop, but its review lease is still
+        # a real pooled execution.  The lease is emitted after its context has been
+        # assembled, so advance the shared phase owner here instead of leaving the
+        # census at Preparing forever on that supported route.
+        if kind == "cognitive_operation" and str(data.get("phase") or "").lower() == "started":
+            if str(data.get("kind") or "").lower() == "review":
+                self.advance("context_built")
+                self.advance("requested")
+            return
         if kind == "log_event" and data.get("type") in _LOG_FACTS:
             self.advance(_LOG_FACTS[data["type"]])
         if kind != "main_llm_call_state":
@@ -156,7 +168,8 @@ class TurnExecution:
         ``accepted_at``, ``wait_before_entry_sec`` (wall clock: the routing pre-pass ran before this
         thread) and ``owner_wait_sec`` only when the canonical acceptance is known. ``dispatch``:
         ``not_observed`` while none happened; ``dispatched_at`` from the monotonic delta once it did.
-        ``meter``: the thread's own store counts so far; ``census``: the registry's count at entry."""
+        ``meter``: the thread's own store counts so far; ``census``: the registry's count at entry;
+        ``worker_id`` and ``pid``: the carrier slot and the process the turn ran in."""
         marks = list(self.marks)
         if until is None:
             until = self.ended_at if self.ended_at is not None else time.monotonic()
@@ -171,7 +184,8 @@ class TurnExecution:
         row: Dict[str, Any] = {
             "type": "direct_turn", "chat_id": self.chat_id, "task_id": self.task_id,
             "execution_id": self.execution_id, "client_message_id": self.client_message_id,
-            "thread": self.thread[1], "entered_at": _iso(self.entered_at),
+            "thread": self.thread[1], "worker_id": self.worker_id, "pid": os.getpid(),
+            "entered_at": _iso(self.entered_at),
             "handler_wait_sec": round(handler_wait, 3), "phases": phases,
             "dispatch": self.dispatch or "not_observed",
             "meter": store_timing.snapshot(self.meter), "census": dict(self.census)}
@@ -206,6 +220,10 @@ class DirectActivityEntry:
     actor: Any = field(default=None, repr=False, compare=False)
     execution: Optional[TurnExecution] = field(default=None, repr=False, compare=False)
     active_llm_call: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    # The active call's sent attempt context (``events._handle_main_llm_call_state``); kept past it. The public fact,
+    # derived from the private newest-first attempts below (``physical_attempt_context.fold_attempt``), unpublished.
+    context_attempt: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    context_attempts: Optional[List[Dict[str, Any]]] = field(default=None, repr=False, compare=False)
     parked_wait: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     parked_root: Any = field(default=None, repr=False, compare=False)
 
@@ -281,6 +299,8 @@ class DirectActivityEntry:
         active = self.active_llm_call
         if active and active.get("task_attempt") == row.get("task_attempt") and active.get("model_activity"):
             row["model_activity"] = dict(active["model_activity"])
+        if self.context_attempt and self.context_attempt.get("task_attempt") == row.get("task_attempt"):
+            row["context_attempt"] = dict(self.context_attempt)
         if wait_availability.get("complete") is False:
             row["phase"] = "unknown"
             if availability is not None:

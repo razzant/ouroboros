@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros import update_letter as letter, update_qualification as qualification
 from ouroboros.tools import github
-from tests.test_pr_merge_receipts import BASE, HEAD, _receipts, world  # noqa: F401
+from tests.test_pr_merge_receipts import BASE, HEAD, ROUTE, _receipts, sent, world  # noqa: F401
 from tests.test_update_letter import _capture_for, _commit, _git, _record, _status, history_repo  # noqa: F401
 from tests.test_update_letter_merge_range import merged_range  # noqa: F401
 
@@ -221,9 +221,9 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
     out = github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="merge", checks=checks,
                            review_verdict="AUTHOR ACCEPTED")
     assert "merge: merged" in out
-    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
-    assert call[6:] == ["--body-file", "-"]
-    body = world.gh.merge_inputs[0]
+    call = next(c for c in world.gh.calls if sent(c))
+    assert call == ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    body = world.gh.merge_inputs[0]  # the commit_message: GitHub appends it to its automatic title
     receipt = qualification.commit_qualification(body)
     assert receipt == _receipts(world)[0]["qualification"]
     assert receipt["checks"][0] == {**checks[0], "source": "author_declared"}
@@ -238,9 +238,9 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
 def test_rebase_discloses_that_it_creates_no_merge_commit(world):  # noqa: F811
     github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="rebase")
     assert _receipts(world)[0]["commit_receipt"] == "no_merge_commit_for_rebase"
-    assert next(c for c in world.gh.calls if c[:2] == ["pr", "merge"]) == [
-        "pr", "merge", "7", "--rebase", "--match-head-commit", HEAD]
-    assert world.gh.merge_inputs == [None]
+    assert next(c for c in world.gh.calls if sent(c)) == [
+        "api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    assert world.gh.merge_payloads == [{"sha": HEAD, "merge_method": "rebase"}] and world.gh.merge_inputs == [None]
 
 
 def test_check_shape_refusal_then_valid_missing_checks_still_merge(world):  # noqa: F811

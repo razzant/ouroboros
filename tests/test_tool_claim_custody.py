@@ -364,6 +364,10 @@ def test_only_a_census_of_unknown_outcomes_offers_going_on_and_every_door_carrie
     assert acceptable_unknown([unknown, receiver]) == ["op-u", "at-u"]
     assert acceptable_unknown([unknown, live]) == [] and acceptable_unknown([]) == []
     assert acceptable_unknown([unknown, {"kind": "running_member", "task_id": "c"}]) == []
+    merge = {"kind": "merge_operation", "task_id": "t", "receipt_id": "r-u", "reason": "merge_effect_unknown"}
+    assert acceptable_unknown([unknown, merge]) == ["op-u", "r-u"]
+    assert acceptable_unknown([merge, {**merge, "receipt_id": "r-q", "reason": "merge_queued"}]) == []
+    assert acceptable_unknown([{**merge, "reason": ""}]) == [], "a merge hold without its reason is never offered"
     refusal = resume_outcome({"ok": False, "error": "owner_pause_effects_unsettled", "blockers": [unknown, receiver]})
     assert refusal["acceptable_unknown"] == ["op-u", "at-u"]
     assert "unknown whether the model answer receiver of task t ended" in refusal["message"]
@@ -384,7 +388,6 @@ def test_only_a_census_of_unknown_outcomes_offers_going_on_and_every_door_carrie
         return {"ok": True}
     monkeypatch.setattr("supervisor.queue_transitions.resume_budget_paused_task", observed)
     monkeypatch.setattr("supervisor.continuation_admission.admit_continuation", observed)
-    monkeypatch.setattr("ouroboros.work_diagnostics.control_actor_reason", lambda *_a, **_k: "")
     seen.clear()
     for action in ("resume_task", "continue_task"):
         events_mind_controls._apply({"task_id": "t", "actor_task_id": "mind", "action_nonce": "n", "action": action,

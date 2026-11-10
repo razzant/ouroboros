@@ -131,11 +131,11 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the R1 platform-wait refusal: both timeout_sec descriptions say only the task's deadline or budget
     # narrows a timeout and that one this platform cannot wait on is refused. Rolled for #2916: both outputs
     # descriptions say an eligible path is captured even if this run left it unchanged, and that outside Cyber
-    # Pro a system_repo file is eligible only while it has uncommitted changes. Rolled for audit 08.11 item 12:
-    # run_command states what a stop by pid or by a name pattern reaches, and its string-array sentence left the
-    # description because the cmd parameter already states it.
+    # Pro a system_repo file is eligible only while it has uncommitted changes. Audit 08.11 item12 names what
+    # stop-by-pid/name reaches; cmd already describes argv. Result review adds capture after failure only for
+    # outputs the command created or changed. This pin covers both contributions' composed descriptions.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "5b94de0cc5bc46c986820e94741c52653d0ab7b3cdd971cf68bafcd7690ac977"
+        "5616a38354c302a9e984fa2ca29446ff44a1b224335598ff30770ee1931ead0b"
     )
     original = json.loads(schema_bytes)
     for schema in original:

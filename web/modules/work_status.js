@@ -12,7 +12,7 @@
  * status_mark.js draws the two together.
  */
 import { fmt, tr, tx } from './i18n.js';
-import { taskPresentation, taskTerminalPhase } from './log_events.js';
+import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
 import { chipWord } from './task_phase_chip.js';
 import {
@@ -167,6 +167,8 @@ export function reasonText(reason) {
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
     if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
+    // A silence dated by the host reads with its time: the date is the fact (owner 09.11).
+    if (code === 'no_progress' && clock(reason.since)) return fmt('No recorded progress since {time}', { time: clock(reason.since) });
     return tr(`work.because.${code}`, text);
 }
 
@@ -292,7 +294,8 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
         return { word: chipWord(stopping === 'finalize' ? 'finalizing' : 'cancelling'), secondary: '', tone: 'live',
             mark: 'moving', owner, outcome: '', focus: '' };
     }
-    const outcome = work.transition === 'finalizing' && work.outcome
+    // Only a settled lifecycle is worded beside Finalizing…; any other (`running`) is not known.
+    const outcome = work.transition === 'finalizing' && isTerminalTaskDetail({ status: work.outcome })
         ? taskPresentation(taskTerminalPhase({ status: work.outcome })) : null;
     const word = outcome ? outcome.headline : activityWord(work);
     const secondary = [outcome ? chipWord('finalizing') : '', workLine(work, word)].filter(Boolean).join(' · ');

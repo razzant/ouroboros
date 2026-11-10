@@ -697,6 +697,8 @@ def _format_process_output(stdout: str, stderr: str) -> str:
 
 
 def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
+    """Whether the command goes to the executor; an unmapped cwd runs on the host only without a managed
+    executor, whose dispatch then refuses it (``workspace_executor_paths.ManagedPathRefused``)."""
     executor_ref = executor_ref_from_ctx(ctx)
     if executor_ref is None:
         return False
@@ -704,7 +706,7 @@ def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
         executor_map_host_path(executor_ref, pathlib.Path(work_dir).resolve(strict=False))
         return True
     except Exception:
-        return False
+        return executor_ref.managed
 
 def _publish_finished_process_facts(ctx, res, started_ts) -> int:
     """Typed process facts (R5) for a returned child, measured structurally —

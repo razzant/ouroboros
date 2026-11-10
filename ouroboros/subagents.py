@@ -802,8 +802,8 @@ def resolve_subagent_dispatch(
         # Durable-data tolerance: the schema refused anything invalid when it was
         # asked for, so an unknown STORED lane is stale, not an argument error.
         requested_lane = "auto"
-    # A row-less child (today only the silence diagnostic, `silence_attention._admit`)
-    # has no configured route, so it runs natively and asks the daemon nothing: an
+    # A row-less child (none is minted by the host today; the silence diagnostic was
+    # retired 09.11.2026) has no configured route, so it runs natively and asks the daemon nothing: an
     # ambiguous `auto` never host-routes (owner D23), and the legacy subagent-harness
     # key is read only for migration. A stored `harness` pin has no route to honor and
     # blocks through the table, as a pin must.

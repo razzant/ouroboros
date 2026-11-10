@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import queue as stdqueue
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1270,3 +1271,768 @@ def test_a_returned_seed_at_an_exhausted_budget_is_paused_before_dispatch_not_fa
     assert not _launched(system)
     sent = _resume_and_launch(system, turn.id)
     assert [(item["id"], item["_attempt"]) for item in sent] == [(turn.id, 2)]
+
+
+# ---------------------------------------------------------------------------
+# #2870 / #2725: my human's returned turn keeps its conversation lane (owner choice of 9 November 2026: the
+# conversation path survives every permitted return; a fenced, full or leased project pool never holds it)
+# ---------------------------------------------------------------------------
+
+def _owner_turn(system, root, monkeypatch, *, chat_id=1, bound=True, text="keep working"):
+    """My human's own turn as the host admits it: the real intake (owner routing stamps its ingress), the lane's
+    admission onto an idle carrier, the carrier's real first step (``bound``: its room frame folded into the RUNNING
+    row, as the event loop does when no stop comes first) and the body's own start record."""
+    from supervisor import message_bus
+    from supervisor.conversation_lane import handle_direct_turn_bound
+    from supervisor.worker_chat_lane import prepare_conversation_task
+    from tests._main_followup import _Bridge, _say
+
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    slot, commands = _lane_carrier(system)
+    ctx = SimpleNamespace(DRIVE_ROOT=root, RUNNING=system.workers.RUNNING, PENDING=system.workers.PENDING,
+                          BUDGET_ROOT_FENCES={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},
+                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
+                          consciousness=SimpleNamespace(), handle_chat_direct=system.workers.handle_chat_direct,
+                          send_with_budget=lambda *a, **k: None)
+    before = set(system.workers.RUNNING)
+    _say(_Bridge(), ctx, text, "cm-" + text.replace(" ", "-"), chat_id=chat_id)
+    [task_id] = set(system.workers.RUNNING) - before
+    dispatched = commands.get_nowait()
+    frames: list = []
+    prepare_conversation_task(SimpleNamespace(), dispatched, root, broadcast=frames.append)
+    if bound:
+        for frame in frames:
+            handle_direct_turn_bound(frame, SimpleNamespace(RUNNING=system.workers.RUNNING))
+    _persist_running(root, dispatched)
+    return SimpleNamespace(id=task_id, slot=slot, task=dispatched, frames=frames)
+
+
+def _carried(system):
+    """What the conversation lane's carriers were handed since the last look, as (slot, task)."""
+    sent = []
+    for slot in list(system.workers.WORKERS.values()):
+        while getattr(slot, "lane", "") == "conversation" and not slot.in_q.empty():
+            sent.append((slot.wid, slot.in_q.get_nowait()))
+    return sent
+
+
+def _on_lane(system, root, turn_id, attempt):
+    """The returned turn holds a lane carrier as a lane row: its origin and carrier, its admission's client id and
+    reply fact, no fresh identity, the attempt's dispatch mark committed before the put."""
+    meta = system.workers.RUNNING[turn_id]
+    owner = meta["task"]["_execution_owner"]
+    assert (meta["lane"], meta["attempt"], meta["reply_expected"], meta["fresh_identity"]) == (
+        "conversation", attempt, True, False), meta
+    assert system.workers.WORKERS[meta["worker_id"]].lane == "conversation"
+    assert (owner["kind"], owner["lane"], owner["executor"], owner["task_attempt"]) == (
+        "direct", "conversation", "worker", attempt), owner
+    assert load_task_result(root, turn_id)["admitted_dispatch_attempt"] == attempt
+    return meta
+
+
+def test_a_returned_owner_turn_takes_the_lanes_carrier_beside_a_full_project_pool(tmp_path, monkeypatch):
+    """#2870: an acknowledged Restart returns background work and my human's Main turn; the one project slot
+    (``MAX_WORKERS`` 1) goes to the background work, the turn to the lane's carrier in the same pass."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    system.saved("bg")  # older background work holding the project slot
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    assert system.workers.RUNNING[turn.id]["task"]["metadata"]["origin_message_ref"], "the owner door stamped it"
+    returns = prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-a")
+    assert returns == {"bg", turn.id}
+    _ack(tmp_path, "tx-a")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [restored] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert restored["_execution_owner"]["lane"] == "conversation" and budget_hold_fact(restored) is None
+    system.workers.assign_tasks()
+    [(wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and sent["_working_recovery"]["from_attempt"] == 1
+    meta = _on_lane(system, tmp_path, turn.id, 2)
+    assert meta["worker_id"] == wid and meta["client_message_id"] == "cm-keep-working"
+    assert [row["id"] for row in _launched(system)] == ["bg"], "the project slot took only the background work"
+    assert sum(1 for w in system.workers.WORKERS.values() if w.lane != "conversation") == 1, "the one project slot"
+    system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system) and not system.workers.PENDING
+
+
+def _project_work(system, root, project_id, task_id="bg"):
+    """Background work in a Project room as the host runs it: admitted with the room's basis, launched on a project
+    slot (its dispatch marks), its body's start record and a saved working state: the room's lease holder."""
+    from ouroboros.projects_registry import get_project, project_scope_admission
+
+    admitted = system.queue.enqueue_task(
+        {"id": task_id, "type": "task", "chat_id": get_project(root, project_id)["chat_id"], "text": "background",
+         "root_task_id": task_id, "project_id": project_id},
+        project_admission=project_scope_admission(root, project_id=project_id))
+    assert not admitted.get("_admission_blocked") and "_project_scope_none" not in admitted, admitted
+    _project_slot(system)
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    _persist_running(root, sent)
+    _ctx, limit = _loop_ctx(root, task_id, attempt=1)
+    wc.save_round(limit, "pre_effect")
+    return sent
+
+
+def _project_slot(system, wid=40):
+    """A ready project-pool slot, its commands seen by ``_launched``."""
+    from tests.worker_pool_support import affirm_ready
+
+    proc = _Process(720000 + wid)
+    system.processes[proc.pid] = proc
+    commands = stdqueue.Queue()
+    system.launches.append(commands)
+    system.workers.WORKERS[wid] = affirm_ready(system.workers.Worker(wid, proc, commands))
+
+
+def _registered_room(root, project_id="room"):
+    from ouroboros.projects_registry import create_project, get_project
+
+    folder = root / f"{project_id}-folder"
+    folder.mkdir()
+    create_project(root, project_id, working_dir=str(folder))
+    return get_project(root, project_id)
+
+
+def test_a_returned_room_turn_takes_a_carrier_while_its_rooms_lease_is_held(tmp_path, monkeypatch):
+    """#2870: background work in the room holds the room's one-writer lease; my human's returned room turn holds
+    none and continues on its lane in the same pass, the background work on its project slot."""
+    from ouroboros.project_lease import running_project_ids
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    room = _registered_room(tmp_path)
+    turn = _owner_turn(system, tmp_path, monkeypatch, chat_id=room["chat_id"])  # first: the room's reader is no other work
+    _project_work(system, tmp_path, "room")
+    basis = system.workers.RUNNING[turn.id]["task"]["_project_admission"]
+    _save_work(tmp_path, turn)
+    assert running_project_ids(system.workers.RUNNING.values()) == {"room"}, "the lane turn holds no lease"
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-lease") == {"bg", turn.id}
+    _ack(tmp_path, "tx-lease")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"], sent["project_id"]) == (turn.id, 2, "room")
+    assert sent["_project_admission"] == basis and "_project_scope_none" not in sent
+    _on_lane(system, tmp_path, turn.id, 2)
+    assert [row["id"] for row in _launched(system)] == ["bg"]
+    assert running_project_ids(system.workers.RUNNING.values()) == {"room"}
+
+
+def test_a_fenced_project_pool_never_holds_or_fails_a_returned_owner_turn(tmp_path, monkeypatch):
+    """#2870, owner decision 1A: the readiness-exhaustion fence owns the project slots; my human's returned turn,
+    still queued when it lands, stays queued and continues on its lane while the pool stays fenced."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    system.saved("bg")
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-fence")
+    _ack(tmp_path, "tx-fence")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert {row["id"] for row in system.workers.PENDING} == {"bg", turn.id}
+    assert system.workers.kill_workers(disable_reason="worker_readiness_exhausted", terminal_status="failed",
+                                       result_reason="Worker startup attempts were exhausted.",
+                                       lanes=frozenset({"project"}))  # the fence's own door
+    assert system.workers._WORKER_POOL_DISABLED_REASON == "worker_readiness_exhausted"
+    assert [row["id"] for row in system.workers.PENDING] == [turn.id], "the fence settled only the pool's own row"
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)
+    assert system.workers._WORKER_POOL_DISABLED_REASON == "worker_readiness_exhausted"
+
+
+def _door(system, monkeypatch, root, door):
+    """One application stop and the next start: an acknowledged Restart returns the saved turn, a quit or a crash
+    keeps it for my human's Resume (a reopen later too, when queue init also hands the id over as an orphaned direct
+    root), an aborted Update returns it in this process."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    if door == "acknowledged_restart":
+        prepare_restart_returns(root, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-door")
+        _ack(root, "tx-door")
+        _boot_after_stop(system, monkeypatch, root)
+    elif door == "quit":
+        _boot_after_stop(system, monkeypatch, root)
+    elif door == "quit_reopen_later":
+        _stop(system)
+        path = system.queue.QUEUE_SNAPSHOT_PATH
+        snap = json.loads(path.read_text())
+        snap["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 60))
+        write_queue_document(path, snap)
+        _boot(system, monkeypatch, root)
+    else:
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+
+
+@pytest.mark.parametrize("door", ["acknowledged_restart", "quit", "quit_reopen_later", "aborted_update"])
+def test_a_room_turn_stopped_before_its_bound_frame_returns_on_the_basis_its_result_holds(tmp_path, monkeypatch, door):
+    """#2725: the body recorded the room basis its carrier bound, the stop landed before the frame taught the
+    RUNNING row: restore takes the basis from the same task's result of the same attempt (attempt 0 for a direct
+    first launch, 1 on the row) under exactly one queue row, and the turn continues once on its lane."""
+    system = _system(tmp_path, monkeypatch)
+    room = _registered_room(tmp_path)
+    turn = _owner_turn(system, tmp_path, monkeypatch, chat_id=room["chat_id"], bound=False)
+    stored = load_task_result(tmp_path, turn.id)
+    row = system.workers.RUNNING[turn.id]["task"]
+    assert [frame["type"] for frame in turn.frames] == ["direct_turn_bound"] and "_project_admission" not in row
+    assert (stored["task_attempt"], stored["execution_owner"]["kind"], row["project_id"]) == (0, "direct", "room")
+    _save_work(tmp_path, turn)
+    _door(system, monkeypatch, tmp_path, door)
+    [restored] = [item for item in system.workers.PENDING if item["id"] == turn.id]
+    assert restored["_project_admission"] == stored["_project_admission"], "the result's basis, not a lookup"
+    system.workers.assign_tasks()
+    sent = _carried(system)
+    if door.startswith("quit"):
+        assert not sent and budget_hold_fact(restored), "a quit keeps it for my human's Resume"
+        assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+        system.workers.assign_tasks()
+        sent = _carried(system)
+    [(_wid, task)] = sent
+    assert (task["id"], task["_attempt"], task["_project_admission"]) == (turn.id, 2, stored["_project_admission"])
+    _on_lane(system, tmp_path, turn.id, 2)
+    system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system) and not system.workers.PENDING
+
+
+def test_a_result_of_another_attempt_lends_its_basis_to_no_returned_row(tmp_path, monkeypatch):
+    """#2725 control: a basis recorded by another attempt is no evidence for this row; it stays held, never run."""
+    system = _system(tmp_path, monkeypatch)
+    room = _registered_room(tmp_path)
+    turn = _owner_turn(system, tmp_path, monkeypatch, chat_id=room["chat_id"], bound=False)
+    stored = load_task_result(tmp_path, turn.id)
+    write_task_result(tmp_path, turn.id, "running", task_attempt=3,  # constructed: a later attempt's start record
+                      execution_owner={**stored["execution_owner"], "task_attempt": 3})
+    assert load_task_result(tmp_path, turn.id)["_project_admission"] == stored["_project_admission"], "one to lend"
+    _save_work(tmp_path, turn)
+    _door(system, monkeypatch, tmp_path, "aborted_update")
+    system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system)
+    [held] = system.workers.PENDING
+    assert "_project_admission" not in held and held["_project_admission_restore_hold"]["reason"] in {
+        "project_dispatch_unconfirmed", "project_routing_fence_lookup_failed"}, held["_project_admission_restore_hold"]
+
+
+def test_a_returned_basis_fills_only_a_rooms_missing_basis_from_its_own_result(tmp_path, monkeypatch):
+    """#2725 controls through a real return (an aborted Update) over produced turns whose results each name a basis
+    the row must not take: a basis the row carries is never replaced, a Main row's attested absence takes none, a
+    basis of another room lends none (that row stays held)."""
+    system = _system(tmp_path, monkeypatch)
+    main = _owner_turn(system, tmp_path, monkeypatch, text="main turn")
+    room_a, room_b = (_registered_room(tmp_path, pid)["chat_id"] for pid in ("room-a", "room-b"))
+    bound = _owner_turn(system, tmp_path, monkeypatch, chat_id=room_a, text="bound turn")
+    unbound = _owner_turn(system, tmp_path, monkeypatch, chat_id=room_b, bound=False, text="unbound turn")
+    own = json.loads(json.dumps(system.workers.RUNNING[bound.id]["task"]["_project_admission"]))
+    room_a_basis = load_task_result(tmp_path, bound.id)["_project_admission"]
+    assert room_a_basis["project_id"] == "room-a" and system.workers.RUNNING[main.id]["task"]["_project_scope_none"]
+    # Constructed results: another basis for the bound row, a room's basis for Main and for the other room's turn.
+    write_task_result(tmp_path, bound.id, "running", _project_admission={**room_a_basis, "constructed": "replaced"})
+    for turn in (main, unbound):
+        write_task_result(tmp_path, turn.id, "running", _project_admission=room_a_basis)
+    for turn in (main, bound, unbound):
+        _save_work(tmp_path, turn)
+    _door(system, monkeypatch, tmp_path, "aborted_update")
+    rows = {row["id"]: row for row in system.workers.PENDING}
+    assert rows[bound.id]["_project_admission"] == own, "the row's own basis stays"
+    assert rows[main.id]["_project_scope_none"] is True and "_project_admission" not in rows[main.id]
+    assert "_project_admission" not in rows[unbound.id] and rows[unbound.id]["_project_admission_restore_hold"]
+
+
+def _parked_mid_run(system, root, monkeypatch, turn, rail):
+    """The running turn's own park at a round boundary, as its carrier's loop makes it, folded by the supervisor's
+    park: my human's Pause (``owner``), the global budget rail (``budget``), its own cold sleep due in ten minutes
+    (``sleep``, woken by ``_wake_due_sleep``) or the mind's ``continue_in_background`` (``detach``)."""
+    from datetime import datetime, timezone
+
+    from ouroboros import budget_pause, model_detach, model_sleep
+    from ouroboros.tools.control_mind import _continue_in_background
+    from supervisor import message_bus
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests._budget_pause_exact_helpers import _fast_hold, _mock_pause_observation, _quiet_external
+    from tests.conversation_carrier_support import park_lane_pause
+
+    monkeypatch.setattr(model_detach, "pool_available", lambda: {"available": True})
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+    monkeypatch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    ctx, limit = _loop_ctx(root, turn.id, direct=True)
+    ctx.task_attempt = turn.task.get("_attempt")
+    ctx.task_metadata = {"_execution_owner": turn.task["_execution_owner"]}
+    limit.messages.append({"role": "tool", "tool_call_id": "call_b", "content": "done b"})
+    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
+        if rail == "owner":
+            assert request_owner_pause(turn.id, request_id="pause-mid-run")["ok"]
+            budget_pause.enter_owner_pause(limit)
+        elif rail == "budget":
+            _mock_pause_observation(monkeypatch, budget_pause, [])
+            budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED, scope="global",
+                                       reason_text="money gone", root_task_id=turn.id)
+        else:
+            if rail == "detach":
+                assert json.loads(_continue_in_background(ctx, "keep working"))["status"] == "detach_armed"
+            else:
+                due = datetime.fromtimestamp(time.time() + SLEEP_DUE_SEC, timezone.utc).isoformat()
+                armed = model_sleep.request_sleep(ctx, {"wake_at": due, "senders": [], "tasks": [], "runs": [],
+                                                        "any_mail": False}, model_sleep.MODE_COLD)
+                assert armed["reason"] == "sleep_armed", armed
+            budget_pause.enter_cold_sleep(limit)
+    park_lane_pause(budget_pause.pause_event(turn.task, raised.value.pause), worker_id=turn.slot.wid)
+    budget_pause.end_dispatch_fence(turn.id)
+    [parked] = system.workers.PENDING
+    return parked
+
+
+SLEEP_DUE_SEC = 600.0  # far beyond any tick of the test: only ``_wake_due_sleep`` makes the sleep due
+
+
+def _wake_due_sleep(system, monkeypatch):
+    """The sleep's own time has come: one wake pass reads a clock past its ``wake_at`` (the real clock again after)."""
+    from datetime import datetime, timedelta, timezone
+
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    later = datetime.now(timezone.utc) + timedelta(seconds=SLEEP_DUE_SEC + 1)
+    with monkeypatch.context() as clock:
+        clock.setattr("ouroboros.deadline_utils.utc_now", lambda: later)
+        return wake_ready_sleepers(system.queue)
+
+
+@pytest.mark.parametrize("rail", ["owner", "budget", "sleep", "detach"])
+def test_a_paused_or_sleeping_owner_turn_returns_on_its_lane_and_a_detached_one_on_the_pool(tmp_path, monkeypatch,
+                                                                                             rail):
+    """Every permitted return of my human's turn keeps its lane: my human's Resume of a Pause or a budget pause, its
+    own cold sleep waking. The turn the mind sent to the background continues on the pool, as it chose."""
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    parked = _parked_mid_run(system, tmp_path, monkeypatch, turn, rail)
+    assert parked["_execution_owner"]["lane"] == "conversation" and parked["_attempt"] == 1
+    system.workers.assign_tasks()
+    if rail == "detach":  # due at once: the same pass wakes it, onto a project slot
+        assert not _carried(system) and [(row["id"], row["detached_by"]) for row in _launched(system)] == [
+            (turn.id, "mind")]
+        assert system.workers.RUNNING[turn.id]["task"]["_execution_owner"]["kind"] == "pooled"
+        return
+    assert not _carried(system) and not _launched(system), "nothing returns before its release"
+    if rail in {"owner", "budget"}:
+        assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    else:
+        assert not any(row.get("ok") for row in wake_ready_sleepers(system.queue)), "not before its time"
+        assert any(row.get("ok") for row in _wake_due_sleep(system, monkeypatch))
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 1) and sent["_budget_pause_resume"]
+    _on_lane(system, tmp_path, turn.id, 1)
+    assert not _launched(system)
+
+
+def test_a_returned_wake_is_no_owner_turn_and_keeps_its_project_slot(tmp_path, monkeypatch):
+    """A consciousness wake rides the conversation lane once admitted; returned by a stop it is queued work."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    wake = _carried_turn(system, tmp_path, wake=True, patch=monkeypatch)
+    _save_work(tmp_path, wake)
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-wake") == {wake.id}
+    _ack(tmp_path, "tx-wake")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    system.workers.assign_tasks()
+    assert not _carried(system) and [row["id"] for row in _launched(system)] == [wake.id]
+    assert system.workers.RUNNING[wake.id].get("lane") != "conversation"
+
+
+@pytest.mark.parametrize("executor, returns", [("worker", True), ("inline_degraded", True), ("inline_call", False)])
+def test_only_a_live_calls_executor_keeps_a_returned_owner_turn_off_the_lane(tmp_path, monkeypatch, executor, returns):
+    """Which carrier record a return reads (constructed executor on a produced row): the degraded executor is the
+    lane's disclosed fallback when no carrier could start, so its turn returns on a carrier; a live call
+    (``inline_call``) runs in this process for its process-local port and never resumes on the lane, as
+    ``conversation_lease.owner_conversation_key`` reads it."""
+    from ouroboros.conversation_lease import owner_conversation_key
+    from supervisor.conversation_lane import resumes_on_lane
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    row = dict(system.workers.RUNNING[turn.id]["task"])
+    row["_execution_owner"] = {**row["_execution_owner"], "executor": executor}
+    assert resumes_on_lane(row) is returns and bool(owner_conversation_key(row)) is returns
+
+
+def test_a_held_return_keeps_its_lane_through_another_stop_before_its_dispatch(tmp_path, monkeypatch):
+    """The saved queue carries the returned row's carrier facts: a quit held it, a second quit restores it from the
+    PENDING snapshot, and my human's one Resume still sends it to the lane."""
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    saved = next(row["task"] for row in json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["pending"]
+                 if row["id"] == turn.id)
+    assert saved["_execution_owner"]["lane"] == "conversation", "the published PENDING row names its carrier"
+    [held] = system.workers.PENDING
+    assert budget_hold_fact(held) and held["_attempt"] == 2
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+@pytest.mark.parametrize("record", ["own", "detached", "another_attempt"])
+def test_a_waiting_turn_the_previous_release_saved_without_its_carrier_takes_its_own_record(
+        tmp_path, monkeypatch, record):
+    """The first Update onto #2870: the previous release's PENDING serialiser dropped ``_execution_owner`` and
+    nothing else, so the Update's stop saves my human's held turn without it. The next boot takes the carrier from
+    the same task's own result of the same attempt and the turn continues on its lane after Resume. A turn the mind
+    detached, or a result of another attempt, lends nothing: the row returns as saved."""
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    if record == "detached":
+        _detach_to_pool(system, tmp_path, monkeypatch, turn)
+    else:
+        _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)  # a quit: the saved turn waits for my human's Resume
+    stored = load_task_result(tmp_path, turn.id)
+    if record == "another_attempt":
+        write_task_result(tmp_path, turn.id, "running", task_attempt=3,  # constructed: a later attempt's start record
+                          execution_owner={**stored["execution_owner"], "task_attempt": 3})
+    _stop(system)  # the Update's stop
+    path = system.queue.QUEUE_SNAPSHOT_PATH
+    snap = json.loads(path.read_text())
+    [saved] = [row["task"] for row in snap["pending"] if row["id"] == turn.id]
+    assert saved.pop("_execution_owner")["kind"] == ("pooled" if record == "detached" else "direct")
+    write_queue_document(path, snap)  # as the previous release's serialiser wrote it
+    _boot(system, monkeypatch, tmp_path)
+    [carrier] = [row.get("_execution_owner") for row in system.workers.PENDING if row["id"] == turn.id]
+    assert carrier == (stored["execution_owner"] if record == "own" else None), "its own result's record, by value"
+    resumed = system.queue.resume_budget_paused_task(turn.id)  # another attempt's record also refuses this Resume
+    system.workers.assign_tasks()
+    if record != "own":
+        assert not _carried(system)
+        return
+    assert resumed["ok"]
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+def test_a_dispatched_return_stopped_before_its_first_save_carries_its_source_on_the_lane(tmp_path, monkeypatch):
+    """The lane dispatch commits the attempt's mark before the put; a stop before that attempt saved anything
+    carries the same frozen source one attempt on (``working_checkpoint._carry_recovery``), never a replay."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-1")
+    _ack(tmp_path, "tx-1")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    system.workers.assign_tasks()
+    [(_wid, first)] = _carried(system)
+    _persist_running(tmp_path, first)  # the carrier's body started attempt 2; nothing saved yet
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [held] = system.workers.PENDING
+    assert held["_attempt"] == 3 and held["_working_recovery"]["source_ref"] == first["_working_recovery"]["source_ref"]
+    assert held["_working_recovery"]["continued_from_attempt"] == 2 and held["_execution_owner"]["lane"] == "conversation"
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [(_wid, second)] = _carried(system)
+    assert (second["id"], second["_attempt"]) == (turn.id, 3) and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 3)
+
+
+@pytest.mark.parametrize("control", ["stop", "pause"])
+def test_my_humans_stop_or_pause_after_a_return_still_holds_the_turn(tmp_path, monkeypatch, control):
+    """The lane's carrier is no bypass of the common holds: a Stop settles the returned turn unrun, a Pause keeps
+    it queued until Resume."""
+    from ouroboros.cancel_intents import request_cancel
+    from supervisor.owner_pause_control import request_owner_pause
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-ctl")
+    _ack(tmp_path, "tx-ctl")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    if control == "stop":
+        request_cancel(tmp_path, turn.id, reason="owner stop", source="owner", requested_by="owner")
+    else:
+        monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
+        assert request_owner_pause(turn.id, request_id="pause-after-return")["ok"]
+    for _ in range(2):
+        system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system) and turn.id not in system.workers.RUNNING
+    if control == "stop":
+        assert not system.workers.PENDING and load_task_result(tmp_path, turn.id)["status"] == "cancelled"
+        return
+    assert [row["id"] for row in system.workers.PENDING] == [turn.id]
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert sent["id"] == turn.id
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+def test_a_returned_main_turn_moved_to_a_room_before_its_dispatch_continues_there_on_its_lane(tmp_path, monkeypatch):
+    """Placement governs the queued row: the move readmits it into the room with the room's basis, and it is still
+    my human's turn, carried by the lane."""
+    from ouroboros.projects_registry import get_project
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-move")
+    _ack(tmp_path, "tx-move")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    pid = _move_mid_run(system, tmp_path, monkeypatch, turn.id)
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["project_id"], sent["chat_id"]) == (turn.id, pid, get_project(tmp_path, pid)["chat_id"])
+    assert sent["_project_admission"]["project_id"] == pid and "_project_scope_none" not in sent
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+@pytest.mark.parametrize("work", ["owner_turn", "detached"])
+def test_a_saved_turn_moved_into_a_busy_room_continues_there_on_its_lane_and_pooled_work_waits(
+        tmp_path, tmp_path_factory, monkeypatch, work):
+    """A move does not make my human's returned turn a room writer: held by a quit, moved into a room whose
+    background work runs (the room's one-writer lease) and Resumed, it is readmitted with the room's basis and folder
+    and continues on its lane beside that work. The turn the mind sent to the pool waits for the lease, as pooled
+    work does."""
+    from ouroboros.project_lease import running_project_ids
+    from ouroboros.projects_registry import create_project
+
+    system = _system(tmp_path, monkeypatch)
+    folder = tmp_path_factory.mktemp("busy-room-folder")  # a room folder outside the data drive
+    create_project(tmp_path, "busy-room", working_dir=str(folder))
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    if work == "detached":
+        _detach_to_pool(system, tmp_path, monkeypatch, turn)
+    else:
+        _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)  # a quit: the saved turn waits for my human's Resume
+    _project_work(system, tmp_path, "busy-room")
+    _move_mid_run(system, tmp_path, monkeypatch, turn.id, pid="busy-room")
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    assert running_project_ids(system.workers.RUNNING.values()) == {"busy-room"}, "the background work runs on"
+    if work == "detached":
+        assert not _carried(system) and not _launched(system)
+        assert [row["id"] for row in system.workers.PENDING] == [turn.id]
+        return
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["project_id"], sent["_project_admission"]["project_id"]) == (turn.id, "busy-room",
+                                                                                         "busy-room")
+    assert Path(sent["workspace_root"]).resolve() == folder.resolve() and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+class _Body:
+    """The body runtime taking a cold sleeper's delegated run (``sleep_custody._runtime``): no engine here."""
+
+    def ensure_runs(self, pairs, *, task_id=""):
+        return True
+
+    def identity(self):
+        return {"runtime_id": "body", "active": True}
+
+
+def _cold_writer(system, root, monkeypatch, project_id, task_id="bg"):
+    """The room's background work in its own cold sleep while its delegated writer keeps writing: the body accepts
+    the run (``sleep_custody.reconcile``), the park keeps the row queued with its receipt, the room's writer lane."""
+    from ouroboros import budget_pause, delegate_custody, model_sleep, sleep_custody
+    from tests._budget_pause_exact_helpers import _fast_hold
+    from tests.conversation_carrier_support import park_lane_pause
+
+    sent = _project_work(system, root, project_id, task_id)
+    wid = system.workers.RUNNING[task_id]["worker_id"]
+    assert delegate_custody.emit(root, delegate_custody.STARTED, {
+        "run_id": "run-w", "invocation_id": "invoke-w", "task_id": task_id, "root_task_id": task_id,
+        "route": "route", "source": "delegate_start", "access": "workspace_write"})
+    body = _Body()
+    monkeypatch.setattr(sleep_custody, "_runtime", lambda _root: body)
+    _fast_hold(monkeypatch, budget_pause)
+    monkeypatch.setattr(budget_pause, "_hold_control_reason",  # the host's pass, as the release waits
+                        lambda _ctx: (sleep_custody.reconcile(system.queue, runtime=body), "")[1])
+    ctx, limit = _loop_ctx(root, task_id)
+    ctx.project_id, ctx.task_metadata = project_id, {"root_task_id": task_id, "project_id": project_id}
+    limit.messages = [{"role": "user", "content": "background"}]
+    assert model_sleep.request_sleep(ctx, model_sleep.selectors(ctx, runs=["run-w"]),
+                                     model_sleep.MODE_COLD)["reason"] == "sleep_armed"
+    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
+        model_sleep.enter_cold_sleep(limit)
+    park_lane_pause(budget_pause.pause_event(sent, raised.value.pause), worker_id=wid)
+    budget_pause.end_dispatch_fence(task_id)
+    assert task_id not in system.workers.RUNNING
+
+
+@pytest.mark.parametrize("work", ["moved", "room_turn", "detached"])
+def test_a_returned_turn_continues_beside_a_cold_room_writer_and_pooled_work_waits(
+        tmp_path, tmp_path_factory, monkeypatch, work):
+    """A cold writer's kept lane binds pooled work only (owner choice of 9 November 2026: the returned conversation is
+    outside the project lease): my human's turn held by a quit, moved into that room (readmission: the room's basis
+    and folder) or already in it, continues on its lane after Resume while the writer stays parked with its receipt.
+    The turn the mind sent to the pool, moved there the same way, waits for the lane, as pooled work does."""
+    from ouroboros.project_lease import lane_holders
+    from ouroboros.projects_registry import create_project, get_project
+    from ouroboros.sleep_custody import carrier_receipt
+
+    system = _system(tmp_path, monkeypatch)
+    folder = tmp_path_factory.mktemp("cold-room-folder")  # a room folder outside the data drive
+    create_project(tmp_path, "cold-room", working_dir=str(folder))
+    turn = _owner_turn(system, tmp_path, monkeypatch,
+                       **({"chat_id": get_project(tmp_path, "cold-room")["chat_id"]} if work == "room_turn" else {}))
+    if work == "detached":
+        _detach_to_pool(system, tmp_path, monkeypatch, turn)
+    else:
+        _save_work(tmp_path, turn)
+    _boot_after_stop(system, monkeypatch, tmp_path)  # a quit: the saved turn waits for my human's Resume
+    _cold_writer(system, tmp_path, monkeypatch, "cold-room")
+    if work != "room_turn":
+        _move_mid_run(system, tmp_path, monkeypatch, turn.id, pid="cold-room")
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [writer] = [row for row in system.workers.PENDING if row["id"] == "bg"]
+    assert carrier_receipt(writer)["retains_project_lane"]
+    assert not [row for row in _launched(system) if "id" in row], "no work on a project slot (a probe is no launch)"
+    assert lane_holders(system.workers.RUNNING.values(), system.workers.PENDING) == {"cold-room": {"bg"}}, (
+        "the writer keeps its room's lane")
+    if work == "detached":
+        assert not _carried(system) and sorted(row["id"] for row in system.workers.PENDING) == sorted(["bg", turn.id])
+        return
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["project_id"], sent["_project_admission"]["project_id"]) == (turn.id, "cold-room",
+                                                                                         "cold-room")
+    if work == "moved":  # readmission binds the room's folder; a room turn's carrier binds its basis at its first step
+        assert Path(sent["workspace_root"]).resolve() == folder.resolve()
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+def test_a_returned_turn_on_its_carrier_reads_my_humans_next_words_under_a_fresh_intake(tmp_path, monkeypatch):
+    """#2996 on a return: the carrier that takes the returned attempt opens that attempt's own intake (the dead
+    attempt's fact admits nothing for it), and my human's next Main words reach the turn, not a second author."""
+    import os
+
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests._main_followup import _Bridge, _delivered, _say
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-intake")
+    _ack(tmp_path, "tx-intake")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    intake = tmp_path / "memory" / "owner_mailbox" / f"{turn.id}.intake.json"
+    assert json.loads(intake.read_text())["attempt"] == 1, "the dead attempt's fact, until a carrier takes the turn"
+    carrier = worker_chat_lane.CarrierTurn(sent, tmp_path, stdqueue.Queue())
+    assert carrier.intake == "owner:1" and json.loads(intake.read_text()) == {
+        "accepting": True, "conversation_key": "owner:1", "pid": os.getpid(), "attempt": 2}
+    bridge, before = _Bridge(), set(system.workers.RUNNING)
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=system.workers.RUNNING, PENDING=system.workers.PENDING,
+                          BUDGET_ROOT_FENCES={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},
+                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
+                          consciousness=SimpleNamespace(), handle_chat_direct=system.workers.handle_chat_direct,
+                          send_with_budget=lambda *a, **k: None)
+    _say(bridge, ctx, "and the second thing", "cm-follow-up")
+    (ack,) = _delivered(bridge, "cm-follow-up")
+    assert ack["target"] == turn.id and set(system.workers.RUNNING) == before, "no second author"
+    carrier.ended()
+    assert not intake.exists(), "the attempt's end closes its own fact"
+
+
+def test_returned_owner_turns_each_start_their_own_carrier_in_one_pass(tmp_path, monkeypatch):
+    """The lane's capacity rule for returns: one carrier per returned turn still waiting, beside the spare, so two
+    returned conversations continue together rather than one behind the other's carrier boot."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    main = _owner_turn(system, tmp_path, monkeypatch, text="main turn")
+    in_room = _owner_turn(system, tmp_path, monkeypatch, chat_id=_registered_room(tmp_path)["chat_id"], text="room turn")
+    for turn in (main, in_room):
+        _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-two")
+    _ack(tmp_path, "tx-two")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert [w.wid for w in system.workers.WORKERS.values() if w.lane == "conversation"] == [0], "the spare alone"
+    system.workers.assign_tasks()  # the harness's tick: a pass, then another once the growth it started is ready
+    sent = _carried(system)
+    assert sorted(task["id"] for _wid, task in sent) == sorted([main.id, in_room.id])
+    assert len({wid for wid, _task in sent}) == 2 and not _launched(system)
+    for turn in (main, in_room):
+        _on_lane(system, tmp_path, turn.id, 2)
+    carriers = sorted(w.wid for w in system.workers.WORKERS.values() if w.lane == "conversation")
+    system.workers.assign_tasks()  # the demand the returns counted is spent: the next tick grows nothing
+    assert sorted(w.wid for w in system.workers.WORKERS.values() if w.lane == "conversation") == carriers
+    idle = [w for w in system.workers.WORKERS.values() if w.lane == "conversation" and w.busy_task_id is None]
+    assert len(idle) == 1, "and the reserved spare again"
+
+
+def test_a_turn_given_back_before_its_first_save_restarts_from_its_input_on_its_lane(tmp_path, monkeypatch):
+    """D5 under the lane rule: a returned turn cut before its first model call starts again from its own input,
+    carried by the lane, its given-back attempt's mark committed before the put."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-seed") == {turn.id}
+    _ack(tmp_path, "tx-seed")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [row] = system.workers.PENDING
+    assert row[SEED_RETURN]["from_attempt"] == 1 and "_working_recovery" not in row
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"], sent["text"]) == (turn.id, 2, "keep working") and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)
+
+
+def test_a_returned_owner_turn_still_meets_the_money_gate_before_its_lane(tmp_path, monkeypatch):
+    """The lane's carrier buys no exception from money: at a reached limit the returned turn is held before dispatch
+    with its saved work, the budget's return alone sends nothing, my human's Resume sends it to its lane."""
+    from supervisor import worker_assignment
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _owner_turn(system, tmp_path, monkeypatch)
+    _save_work(tmp_path, turn)
+    prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING, transaction_id="tx-money")
+    _ack(tmp_path, "tx-money")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    with monkeypatch.context() as spent:
+        spent.setattr(system.state, "budget_remaining", lambda *_a, **_k: 0.0)
+        spent.setattr(worker_assignment, "needs_paid_admission", lambda _task: True)
+        system.workers.assign_tasks()
+    [row] = system.workers.PENDING
+    assert row["_budget_pause"]["continuation"] == "working" and not _carried(system) and not _launched(system)
+    system.workers.assign_tasks()  # money is back (the harness's 5.0): no Resume, no dispatch
+    assert not _carried(system) and not _launched(system)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and not _launched(system)
+    _on_lane(system, tmp_path, turn.id, 2)

@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 
 from ouroboros import store, store_timing
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
+from ouroboros.context_timing import counted, timed
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
                                       release_exclusive_file_lock)
 from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
@@ -337,10 +338,16 @@ def _tail_rows(db, terminal_only: bool) -> List[List[Any]]:
         after = last
 
 
+def _body(stored: Any) -> Dict[str, Any]:
+    """A record as a reader takes it: the index gives its stored text, a capture's snapshot its one parsed record."""
+    return json.loads(stored) if isinstance(stored, str) else stored
+
+
 class _Snapshot:
     """``_IndexLookups`` answered from one state of the index (``_SNAPSHOT_SQL``, parsed after its read
     transaction closed, and the stored tail facts its view reads, ``_tail_rows``): the same filters and order
-    and no statement. Each record handed out is parsed anew from its stored text, as the index returns it;
+    and no statement. A record's stored text is parsed once for this snapshot (``body``), every reader of it takes
+    a copy of its top level, and none of them changes what is nested inside (tests/test_chronicle_read_path.py);
     ``memo`` holds facts one capture derives once. A proposal's capture extends its ``tables``."""
     proposed = False  # a proposal's capture: it reads an unsaved record as published (``stored_state``)
 
@@ -364,21 +371,30 @@ class _Snapshot:
         self.values = dict(state)
         self.tail_rows = sorted(tail[0]) if tail else []  # [pos, seq, row_sha256, legacy, meta, terminal] by position
         self.memo: Dict[str, Any] = {"tail_scope": tail_scope, **dict(memo)}
+        self.bodies: Dict[int, Dict[str, Any]] = {}  # each record's stored text, parsed once (``body``)
+
+    def body(self, row):
+        """The record of this index row, parsed once for this snapshot."""
+        parsed = self.bodies.get(row[0])
+        if parsed is None:
+            counted("records_parsed", key=row[0])
+            parsed = self.bodies[row[0]] = json.loads(row[5])
+        return parsed
 
     def get(self, record_id):
         row = self.by_id.get(str(record_id))
-        return {**json.loads(row[5]), "sequence": row[0]} if row else None
+        return {**self.body(row), "sequence": row[0]} if row else None
 
     def targeting(self, record_id, kinds):
-        return [(row[0], json.loads(row[5])) for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
+        return [(row[0], dict(self.body(row))) for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
 
     def part_of(self, record_id):
         return self.folded.get(str(record_id))
 
     def rows(self, room=None, kinds=(), after=0, limit=-1, author_kind=None, unfolded=False):
         rows = self.records if room is None else self.by_room.get(str(room), ())
-        return [(row[0], row[5]) for row in rows if row[0] > int(after) and (not kinds or row[2] in kinds) and not (
-            unfolded and row[1] in self.folded) and (author_kind is None or _mapping(json.loads(row[5]).get("author")).get(
+        return [(row[0], self.body(row)) for row in rows if row[0] > int(after) and (not kinds or row[2] in kinds) and not (
+            unfolded and row[1] in self.folded) and (author_kind is None or _mapping(self.body(row).get("author")).get(
                 "kind") == author_kind)][:None if limit < 0 else limit]
 
     def sealed(self, room):
@@ -408,7 +424,7 @@ class _Snapshot:
 
     def members_of(self, record_id):
         row = self.by_id.get(str(record_id))
-        covers = json.loads(row[5]).get("covers") if row and row[2] == "part" else None
+        covers = self.body(row).get("covers") if row and row[2] == "part" else None
         return [str(member) for member in covers.get("member_ids") or ()] if isinstance(covers, dict) else []
 
 
@@ -439,11 +455,7 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield None if snapshot is None else snapshot.memo
         return
     if snapshot is None:
-        terminal_only = _TAIL_SCOPES[tail]
-        with store._index() as db:
-            texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
-            held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
-        snapshot = _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+        snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
@@ -455,6 +467,15 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield snapshot.memo
     finally:
         _CAPTURE.reset(token)
+
+
+def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
+    """One state of the index in one read transaction, then parsed outside it (``capture``)."""
+    terminal_only = _TAIL_SCOPES[tail]
+    with store._index() as db:
+        texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
+        held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
+    return _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
 
 
 def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:
@@ -822,7 +843,7 @@ class ChronicleStore:
         record = {"kind": "mark", "room_id": str(room_id), "target_ref": target_ref, "text": text,
                   "author": author, "scope": scope, "quote": quote, "visibility": "full"}
         if anchor is not None:
-            record["anchor"] = anchor  # an action the mark meets me at (``mark_anchors``)
+            record["anchor"] = anchor  # the action whose first result in a task carries the mark's words (``mark_anchors.anchored_note``)
         if record_id:
             record["id"] = str(record_id)
         return self.publish([record])
@@ -1385,7 +1406,7 @@ class ChronicleStore:
                 limit: Optional[int] = None, author_kind: Optional[str] = None, unfolded: bool = False) -> List[Dict[str, Any]]:
         """Stored records in order, filtered by the index (room, ``kinds``, author kind, unfolded); ``limit`` bounds the statement."""
         with self._reading() as look:
-            return [{**json.loads(body), "sequence": seq} for seq, body in look.rows(
+            return [{**_body(body), "sequence": seq} for seq, body in look.rows(
                 room_id, tuple(kinds or ()), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)]
 
     def interpret(self, records: Iterable[Mapping[str, Any]], *, revision: Optional[str] = None,
@@ -1400,7 +1421,7 @@ class ChronicleStore:
                     sources: bool = True) -> List[Dict[str, Any]]:
         """``records`` interpreted in the same one read: a listing costs one index open, never one per record."""
         with self._reading() as look:
-            return [self._interpret(look, {**json.loads(body), "sequence": seq}, sources=sources) for seq, body in look.rows(
+            return [self._interpret(look, {**_body(body), "sequence": seq}, sources=sources) for seq, body in look.rows(
                 room_id, tuple(kinds), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)]
 
     def targeting(self, record_id: Any, kinds: Iterable[str], *, after_seq: int = 0,
@@ -1445,7 +1466,7 @@ class ChronicleStore:
     def pages_of_room(self, room_id: Any) -> List[Dict[str, Any]]:
         """Effective pages and parts of a room, interpreted, in story order."""
         with self._reading() as look:
-            rows = [{**json.loads(body), "sequence": seq} for seq, body in look.rows(room_id, ("page", "part"))]
+            rows = [{**_body(body), "sequence": seq} for seq, body in look.rows(room_id, ("page", "part"))]
             cache: Dict[str, Tuple[Any, ...]] = {}
             effective = [r for r in (self._interpret(look, row) for row in rows) if r.get("status") not in ("rejected", "candidate")]
             return sorted(effective, key=lambda r: self._order_key(look, r, cache))

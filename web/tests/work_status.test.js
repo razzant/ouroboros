@@ -318,6 +318,8 @@ test('a known outcome beside Finalizing… is a dot in its tone: Done with warni
     assert.deepEqual(said('rejected_duplicate'), ['Done with warnings', 'Finalizing…', 'done', 'warn', { shape: 'dot', hue: 'ok' }]);
     assert.deepEqual(said('cancelled'), ['Stopped', 'Finalizing…', 'stopped', 'cancelled', { shape: 'dot', hue: 'neutral' }]);
     assert.deepEqual(said('failed'), ['Failed', 'Finalizing…', 'failed', 'error', { shape: 'dot', hue: 'failed' }]);
+    // #2801: a lifecycle that has not settled is no outcome: plain Finalizing…, never Done.
+    assert.deepEqual(said('running').slice(0, 4), ['Finalizing…', '', 'live', '']);
     assert.deepEqual(OUTCOME_TONES, { done: 'done', warn: 'done', cancelled: 'stopped', error: 'failed', timeout: 'failed',
         lifecycle_error: 'failed' });
 });
@@ -825,4 +827,13 @@ test('a Continue whose own start was refused after its earlier work settled says
     assert.equal(cardWorkView(held).note, `Start refused at ${REFUSED}: accounting unavailable`);
     assert.equal(workControls(held).resume, '', 'it tries again by itself: no Resume is offered');
     assert.ok(!/earlier attempt's work is confirmed finished/.test(workLine(held)), 'never the stale wait');
+});
+
+test('a silent work says since when in its line; without a date it keeps the host sentence', () => {
+    const at = Date.parse('2026-11-09T02:10:00Z') / 1000;
+    const dated = reasonText({ code: 'no_progress', text: 'No recorded progress', since: at });
+    assert.match(dated, /^No recorded progress since \S/);
+    assert.ok(!dated.includes('undefined'));
+    assert.equal(reasonText({ code: 'no_progress', text: 'No recorded progress' }), 'No recorded progress');
+    assert.equal(workLine({ activity: 'working', because: [{ code: 'no_progress', text: 'No recorded progress', since: at }] }), dated);
 });

@@ -35,9 +35,9 @@ def _fail_result_wave(monkeypatch, reviews: list) -> None:
     records: dict = {}
     asked: dict = {}
 
-    def settled(_ctx, subject_sha, rows=None):
+    def settled(_ctx, subject_sha, rows=None, *, refusal=False):
         asked["sha"] = subject_sha
-        return records.get(subject_sha)
+        return None if refusal else records.get(subject_sha)  # each wave here settles FAIL: none is a $0 refusal
 
     def wave(_ctx, *, subject, answer="", **_kwargs):
         assert subject == "result"

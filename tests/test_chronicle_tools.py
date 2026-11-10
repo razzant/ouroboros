@@ -20,7 +20,7 @@ import re
 
 import pytest
 
-from ouroboros import chat_chain, dialogue_store
+from ouroboros import chat_chain, dialogue_store, memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.chronicle import (
@@ -34,6 +34,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 LIMIT = tool_result_limit("memory_read")
 LEGACY = {"kind": "legacy_helper", "writer": "old_consolidator", "attribution": "retelling by Light, not lived"}
 LIGHT = {"kind": "helper", "route": "configured-light"}
+MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
+           "record's tokens and the pages no part or account holds yet.")
 
 
 def ctx_for(root: pathlib.Path, task_id: str = "root0001", **fields) -> ToolContext:
@@ -163,6 +165,9 @@ def test_task_page_takes_task_rows_and_bound_owner_words_and_leaves_an_interleav
     # The interleaved task's page passes: its rows were never sealed by the first page.
     second = write(ctx, kind="page", text="I drafted the release note.", covers={"task_ids": ["taskB001"]})
     assert second["ok"] and second["rows"] == 2  # promote annotation binds the owner's words
+    # A page's receipt names what it wrote and where my story's whole drawn size is measured; it re-reads no story.
+    assert second["effect"] == ("this page: 27 characters. " + MEASURE + " This task's view is not refreshed; the "
+                                "next start re-measures its Max room.")
     sealed = ChronicleStore(tmp_path).sealed_row_refs("1")
     assert sha(unbound) not in sealed and sha(ask_a) in sealed and sha(ask_b) in sealed
     # A range over rows the task pages hold is refused with their ids, never their text.
@@ -359,8 +364,8 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
                  expected_sequence=head)
     assert part["ok"] and part["room_id"] == "5"
     # The receipt measures what the fold did and names what it did not: this view and the Max room stay as they were.
-    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. Originals remain readable by address. "
-                              "This task's view is not refreshed; the next start re-measures its Max room "
+    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. " + MEASURE + " Originals remain readable by "
+                              "address. This task's view is not refreshed; the next start re-measures its Max room "
                               "and rewrites the cached story from the first changed retelling.")
     refused = json.loads(_chronicle_write(ctx, kind="part", text="again", member_ids=["legacy-b00-r5"],
                                           expected_sequence=part["room_head"]))
@@ -369,7 +374,7 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     assert account["effect"].startswith("wrote an account over 1 record: 30 -> 13 characters.")
     assert "It tells nothing in their place until a selection shows it." in account["effect"]
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
-    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters.")
+    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters. " + MEASURE)
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
     assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
@@ -966,3 +971,30 @@ def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_ow
     assert single["ok"] and single["rows"] == 1 and "rooms" not in store.get(single["node_id"])["covers"]
     assert "Rooms this page covers" not in _memory_read(ctx, node_id=single["node_id"])  # one room: as before
     assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[4])]
+
+
+def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_path, monkeypatch):
+    # A writer's receipt is an observation after the write: it re-reads no whole story (that is
+    # memory_read(story=true)'s), so a store the importer still holds cannot turn a saved choice into a failure.
+    from ouroboros import memory_inventory
+    from ouroboros.store import StoreMigrating
+
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    assert store.publish([{"id": "legacy-b00-r5", "kind": "legacy", "room_id": "5", "text": "retelling 0",
+                           "author": LEGACY, "metadata": {"legacy_type": "era", "legacy_block": 0}}]).ok
+    captures = []
+    real = mv.capture_story
+    monkeypatch.setattr(mv, "capture_story", lambda *a, **k: (captures.append(1), real(*a, **k))[1])
+    part = write(ctx, kind="part", text="I lived like this.", member_ids=["legacy-b00-r5"],
+                 expected_sequence=store.room_head("5"))
+    assert part["ok"]
+    account = write(ctx, kind="account", text="Across rooms.", sources=[part["node_id"]], room_id="5")
+
+    def migrating(*_a, **_k):
+        raise StoreMigrating("the dialogue importer runs")
+
+    monkeypatch.setattr(memory_inventory, "legacy_units", migrating)
+    shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="tells it")
+    assert shown["ok"] and shown["shown"] is True
+    assert captures == []  # no writer captured the whole story around its write
+    assert all("memory_read(story=true)" in result["effect"] for result in (part, shown))

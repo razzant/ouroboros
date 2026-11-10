@@ -20,11 +20,7 @@ from typing import Any, Optional
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.owner_mailbox import (
-    KIND_FINALIZE_NOW,
-    KIND_HURRY,
-    KIND_TASK_MESSAGE,
-    drain_owner_entries,
-    place_arrival_wake,
+    KIND_FINALIZE_NOW, KIND_HURRY, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -43,17 +39,23 @@ _OBSERVATION_CURRENT_SEC = 4 * _TICK_SEC
 _OBSERVATION_MALFORMED = "observation_malformed"
 
 
-def _loop_gateway() -> Any:
-    """One publication's transport, built WITHOUT a handshake: the addressed read
-    handshakes it once (``engine_version`` is the receipt) and classifies any refusal
-    through its own typed path. An unreadable descriptor leaves the read to its
-    per-call transport, which reports the same fact the same way."""
+def _loop_gateway(entry: Any = None) -> Any:
+    """One publication's transport to the recorded engine, built WITHOUT a handshake: a work engine proves its
+    store first, the owned engine's addressed read handshakes it once (``engine_version`` is the receipt) and
+    classifies any refusal through its own typed path. An unreadable descriptor leaves the read to its per-call
+    transport, which reports the same fact the same way."""
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 
     try:
-        return ClaudexorGateway()
+        return run_gateway(entry, ClaudexorGateway)
     except ClaudexorUnavailable:
         return None
+
+
+def _engine_transport(entry: Any) -> Any:
+    """The transport for ``entry``: the owned engine's built exactly as before, a work engine's bound to it."""
+    return _loop_gateway(entry) if getattr(entry, "engine_ref", None) else _loop_gateway()
 
 
 def _drop_gateway(gateway: Any) -> None:
@@ -62,7 +64,6 @@ def _drop_gateway(gateway: Any) -> None:
             gateway.close()
         except Exception:
             pass
-    return None
 
 
 def _attempt_key(ctx: Any) -> str:
@@ -88,8 +89,8 @@ def task_scoped_supervision(data: Any) -> dict[str, Any]:
     return checkpoints.task_facts(data)
 
 
-def _save_state(ctx: Any, state: dict[str, Any]) -> None:
-    checkpoints.save_view(_state_path(ctx), custody.custody_root(ctx), str(ctx.task_id), state)
+def _save_state(ctx: Any, state: dict[str, Any], stage: str = "") -> None:
+    checkpoints.save_view(_state_path(ctx), custody.custody_root(ctx), str(ctx.task_id), state, stage)
 
 
 def _emit(ctx: Any, kind: str, payload: dict[str, Any]) -> bool:
@@ -632,8 +633,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
     envelope: dict[str, Any] = {
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
-                    "continuation", "continuation_note", "sleep", "cache_horizon_note",
-                    "leaf_live_input")
+                    "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
+                    "sleep", "cache_horizon_note", "leaf_live_input")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -678,8 +679,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
             **({"ok": False, "host_code": str(payload.get("host_code") or "")}
                if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
-            **{key: payload[key] for key in ("continuation", "continuation_note", "sleep",
-                                             "leaf_live_input") if key in payload},
+            **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
+                                             "continuation_note", "sleep", "leaf_live_input") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1023,14 +1024,15 @@ def _control_wakes(ctx: Any) -> list[dict[str, Any]]:
 
 def run_activity(observation: Any) -> Optional[bool]:
     """What one dated observation of a run says of its work (the body observer's,
-    ``delegate_feed.current_activity``): True running, False waiting (queued for capacity,
-    paused on its question, terminal), None unanswered or unknown. A running run counts as
-    working: an engine-internal provider wait carries no typed fact."""
+    ``delegate_feed.current_activity``): True running (``async_questions_only`` questions hold
+    nothing), False waiting (queued for capacity, paused on its question, terminal), None
+    unanswered or unknown. A running run counts as working: an engine-internal provider wait
+    carries no typed fact."""
     if not isinstance(observation, dict) or observation.get("answered") is not True:
         return None
     run_state = str(observation.get("run_state") or "")
     if run_state == "running":
-        return not observation.get("waiting_on_user")
+        return not observation.get("waiting_on_user") or observation.get("async_questions_only") is True
     return False if run_state == "queued" or run_state in custody.TERMINAL_STATES else None
 
 
@@ -1050,7 +1052,7 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
         route = str(getattr(entry, "route_id", "") or "")
     except Exception:
         return "unknown"
-    reader = (gateway if gateway is not None else _loop_gateway()) if route else None
+    reader = (gateway if gateway is not None else _engine_transport(entry)) if route else None
     if reader is None:
         return "unknown"
     try:
@@ -1100,8 +1102,7 @@ def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payl
         payload.pop("quiet_for_sec", None)
         if payload.get("waiting_on_user"):
             from ouroboros.delegate_progress import paused_note
-
-            payload["note"] = paused_note(payload.get("pending_interactions"))
+            payload["note"] = paused_note(payload.get("pending_interactions"), async_only=payload.get("async_questions_only") is True)
         else:
             payload.pop("note", None)
     payload.pop("cache_horizon_note", None)
@@ -1207,7 +1208,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "") -> ToolRes
     # Exact retained bytes answer before any transport; one transport otherwise, only for a run with a route (no
     # route, no catalog read). An engine this cannot discover reads its live input as unknown.
     retained = None if _control_wakes(ctx) else retained_terminal_result(ctx, target, retry_money=True)
-    gateway = _loop_gateway() if getattr(held, "route_id", "") and retained is None else None
+    gateway = _engine_transport(held) if getattr(held, "route_id", "") and retained is None else None
     try:
         live_input = _leaf_live_input(ctx, target, gateway) if gateway is not None else "unknown"
         while True:  # a cancel or a spent deadline already there never waits behind another read
@@ -1267,7 +1268,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "") -> ToolRes
         "coordination_cursor": next_coordination_cursor,
         "created_at": utc_now_iso(),
     }
-    _save_state(ctx, state)  # another publication that landed first is the wake, rendered instead
+    _save_state(ctx, state, "wake_publication")  # another publication that landed first is the wake, rendered instead
     payload, wake_id = state["pending_wake"]["payload"], state["pending_wake"]["wake_id"]
     _emit(ctx, "delegate_supervision_wake_pending", {
         "run_id": target, "wake_id": wake_id, "payload": payload,
@@ -1521,8 +1522,14 @@ def delegate_wait_entry(
             "contract": "event_only",
         })
 
-    return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq,
-                    checkpoint_after_sec=checkpoint_after_sec, checkpoint_reason=checkpoint_reason)
+    try:
+        return run_wait(ctx, runs if runs is not None else run_id, since_seq=since_seq,
+                        checkpoint_after_sec=checkpoint_after_sec, checkpoint_reason=checkpoint_reason)
+    except OSError as exc:  # Only a save failure names supervision_stage; other errors keep their handling.
+        if not (stage := getattr(exc, "supervision_stage", "")):
+            raise
+        detail, facts = checkpoints.save_failure(exc, stage)
+        return _fail("delegate_wait", "supervision_state_unsaved", detail, **facts)
 
 
 __all__ = [

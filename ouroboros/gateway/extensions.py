@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
+from ouroboros.deployment_extensions import discloses_failure, failure_words
 from ouroboros.gateway.contributions import contribution_catalog
 from ouroboros.gateway._helpers import (
     coerce_bool,
@@ -229,6 +230,11 @@ def _build_extensions_index(drive_root, repo_path):
         for s in unique_skills
         if s.manifest.is_extension()
     }
+    from ouroboros.deployment_extensions import state_rows, trust_state
+    from ouroboros.deployment_policy import when_unmet
+
+    # What the deployment requires, as this server process observes it; a missing package is still a row.
+    requirements = {row["name"]: {**row, "when_unmet": when_unmet()} for row in state_rows(drive_root, skills=skills)}
 
     def _live_tool_count(skill_name: str) -> int:
         prefix = extension_name_prefix(skill_name)
@@ -315,6 +321,7 @@ def _build_extensions_index(drive_root, repo_path):
                 payload_root = rel_skill_dir.as_posix()
         except Exception:
             payload_root = ""
+        trust = trust_state(s)  # under an execution domain: whether the service runs this extension's code
         entry: dict[str, Any] = {
             "name": s.name,
             "type": s.manifest.type,
@@ -332,6 +339,8 @@ def _build_extensions_index(drive_root, repo_path):
             "content_hash": str(getattr(s, "content_hash", "") or ""),
             "payload_root": payload_root,
             "installed_at": _path_installed_at(s.skill_dir),
+            **({"deployment": requirements[s.name]} if s.name in requirements else {}),
+            **({"trust": trust} if trust is not None else {}),
         }
         if bool(getattr(s, "identity_collision", False)):
             stale = True
@@ -439,6 +448,8 @@ def _build_extensions_index(drive_root, repo_path):
                     })
         catalog.append(entry)
     return {"skills": catalog, "live": live_snapshot,
+            **({"deployment": {"when_unmet": when_unmet(), "required": list(requirements.values())}}
+               if requirements else {}),
             **contribution_catalog(drive_root, repo_path, skills=skills, live=live_snapshot)}
 
 
@@ -636,8 +647,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             )
             return child_result
         except Exception as exc:
-            log.exception("extension child dispatch failure: %s", mount)
-            return json_error(f"{type(exc).__name__}: {exc}", 502)
+            log.error("extension child dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+            return json_error(failure_words(skill, exc), 502)
     handler = spec.get("handler")
     if not callable(handler):
         return json_error("registered handler is not callable")
@@ -654,8 +665,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             surface=mount,
         )
     except Exception as exc:
-        log.exception("extension cost disclosure failure: %s", mount)
-        return json_error(f"model-cost disclosure failed: {type(exc).__name__}: {exc}", 502)
+        log.error("extension cost disclosure failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(f"model-cost disclosure failed: {failure_words(skill, exc)}", 502)
     try:
         if inspect.iscoroutinefunction(handler):
             result = await handler(request)
@@ -664,9 +675,13 @@ async def api_extension_dispatch(request: Request) -> Response:
         if inspect.iscoroutine(result):
             result = await result
     except Exception as exc:
-        log.exception("extension dispatch failure: %s", mount)
-        return json_error(f"{type(exc).__name__}: {exc}")
+        log.error("extension dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(failure_words(skill, exc))
     if isinstance(result, Response):
+        if not discloses_failure(skill):
+            from ouroboros.extension_route_stream import PolicyResponse
+
+            return PolicyResponse(result, skill)
         return result
     return JSONResponse(result if result is not None else {})
 

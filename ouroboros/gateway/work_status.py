@@ -54,6 +54,7 @@ REASON_TEXT = {
     "helpers_running": ("1 helper still working", "{count} helpers still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
+    "no_progress": "No recorded progress",
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
@@ -193,8 +194,9 @@ def _waits_on(sleep: Any) -> List[str]:
 def _start_step(row: Mapping[str, Any]) -> str:
     """The start step a turn stands at before its own Main call, else ''. An inline executor's row says it by
     its census phase (``preparing``); a conversation-lane row's phase says only whether a carrier holds it
-    (``conversation_lane.lane_turn_rows``), so a row its carrier holds says it by its frame-fed ``turn_phase``
-    until a call of its own is observed."""
+    (``conversation_lane.lane_turn_rows``) and a pooled root's only that a worker runs it (``carrier``, from
+    ``gateway.state``), so a row its worker holds says it by its frame-fed ``turn_phase`` until a call of its
+    own is observed."""
     step = str(row.get("turn_phase") or "")
     if step not in _TURN_STEPS:
         return ""
@@ -330,10 +332,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
-        if step := _start_step(row):
-            state["reasons"].append(reason(f"turn_{step}"))
+        # The owner's recorded Stop leads: a working work, a silent one above all, may not reach the step that ends
+        # it soon. The dated silence follows (owner 09.11, Q2 A) until the work's own progress ends the episode, a
+        # fact for whoever waits, never a stop or a mark; then where its turn started.
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))
+        silence = raw.get("silence_attention")
+        if isinstance(silence, Mapping) and silence.get("state") == "pending_attention" and silence.get("last_progress_at"):
+            state["reasons"].append(reason("no_progress", since=silence["last_progress_at"]))
+        if step := _start_step(row):
+            state["reasons"].append(reason(f"turn_{step}"))
         return state
     state["confirmed"] = False
     return state

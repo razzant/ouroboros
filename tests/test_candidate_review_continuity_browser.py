@@ -94,7 +94,7 @@ def test_actual_candidate_and_origin_review_cards(engine, width, theme, inherite
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     evidence = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR') or diagnostic_directory(
-        tmp_path / 'browser-evidence', 'candidate-review-continuity'))
+        tmp_path / 'browser-evidence', 'candidate-review-continuity', publish=True))
     evidence.mkdir(parents=True, exist_ok=True)
     prefix = f'{engine}-{width}-{theme}' + ('-inherited' if inherited else '')
     (evidence / f'{prefix}-producer-rows.json').write_text(json.dumps([done, review], ensure_ascii=False, indent=2))

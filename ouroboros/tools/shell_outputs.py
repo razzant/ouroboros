@@ -563,9 +563,12 @@ def _register_process_outputs(
     before_outputs: Dict[str, tuple[bool, int, str]] | None = None,
     binding: ResolvedResourceBinding | None = None,
     output_context: DockerOutputContext | None = None,
+    changed_only: bool = False,
 ) -> tuple[str, bool, bool]:
     """Capture declared command outputs in the task artifact store; the third value is True only
-    when this call created or repaired a canonical record (``artifact_registered``)."""
+    when this call created or repaired a canonical record (``artifact_registered``). ``changed_only``
+    is a failed command's view: only an output this run demonstrably created or changed (against its
+    pre-run baseline) is its partial result; a missing, unchanged or unbaselined one is only noted."""
 
     if not outputs:
         return "", False, False
@@ -602,11 +605,15 @@ def _register_process_outputs(
             failed = True
             continue
         if not source.exists():
-            notes.append(f"missing output: {text}")
-            failed = True
+            notes.append(f"not created by the failed command: {text}" if changed_only else f"missing output: {text}")
+            failed = failed or not changed_only
             continue
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source, resolved_output=resolved)
+        if changed_only and (str(source) not in (before_outputs or {}) or before == after):
+            notes.append(f"{'unchanged by' if str(source) in (before_outputs or {}) else 'no pre-run state for'} "
+                         f"the failed command, not registered: {text}")
+            continue
         # Present-but-unchanged is NOT a failure (a deterministic re-run, or a command that re-verifies
         # an existing artifact), and it is still a declared deliverable: only a proven current canonical
         # capture, or a directory with nothing exportable, makes it a cosmetic note; an absent, stale or

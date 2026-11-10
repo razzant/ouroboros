@@ -75,14 +75,22 @@ class InstalledSkill(TypedDict, total=False):
     # source (made here, a local folder, a built-in seed).
     install: Optional[Dict[str, Any]]
     category: List[str]  # the source's category ids for this skill, [] when it has none
+    # A deployment policy requires this name: the server's requirement row with its when_unmet (client
+    # SettingsDeploymentRequirement); the switch is the organization's and no removal, update or repair is offered.
+    deployment: Dict[str, Any]
+    # An extension under an execution domain (deployment_extensions.trust_state): {state: trusted | untrusted,
+    # reason: not_delivered | elsewhere | changed, detail, administered}; administered: its doors refuse all but Off.
+    trust: Dict[str, Any]
 
 
-class ExtensionsIndexResponse(UiContributionsResponse):
+class ExtensionsIndexResponse(UiContributionsResponse, total=False):
     """``GET /api/extensions``: every installed skill and what the extension loader has live.
-    A passive read: no network, no repair."""
+    A passive read: no network, no repair. ``deployment`` (managed, with required extensions only) is
+    ``{when_unmet, required}``: every requirement as the server observes it, a missing package included."""
 
-    skills: List[InstalledSkill]
-    live: ExtensionLiveSnapshot
+    skills: Required[List[InstalledSkill]]
+    live: Required[ExtensionLiveSnapshot]
+    deployment: Dict[str, Any]
 
 
 class ExtensionManifestResponse(TypedDict, total=False):
@@ -1088,12 +1096,15 @@ class UpdateStatusResponse(TypedDict, total=False):
     checked_at: str
     checked_target_sha: str
     from_cache: bool
+    managed_by_deployment: str  # its administrator replaces the serving program: why in-app updates refuse
 
 
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
     ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
-    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped."""
+    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
+    ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
+    message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
@@ -1101,6 +1112,7 @@ class CommandRequest(TypedDict):
     visible_text: NotRequired[str]
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
+    ui_control: NotRequired[Dict[str, Any]]
 
 
 class CommandResponse(TypedDict, total=False):

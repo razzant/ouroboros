@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.background import BackgroundTask
 
-from ouroboros import get_version
+from ouroboros import deployment_policy as _deployment_policy, get_version
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
 from ouroboros.gateway.ws import broadcast_ws_sync
 from ouroboros.gateway import update_progress
@@ -101,6 +101,7 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
         "update_progress": update_progress.snapshot(tx),
         "letter": letter,
         **status,
+        **({"managed_by_deployment": _deployment_policy.BODY_STATUS} if _body_refusal() else {}),
     }
 
 
@@ -212,6 +213,12 @@ async def api_command(request: Request) -> JSONResponse:
                 if expected != BOOT.snapshot(jobs=False)["since"]:
                     return json_error("Ouroboros restarted before this command arrived.", 409,
                                       accepted=False, reason_code="boot_changed")
+            from supervisor.message_ingress import ui_control_fact
+
+            try:  # the producer that composed this command from a control names it; typed text never does
+                control = ui_control_fact(body.get("ui_control"), pressed_at=utc_now_iso(), command=str(cmd))
+            except ValueError as exc:
+                return json_error(str(exc), 400, accepted=False)
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
@@ -232,7 +239,8 @@ async def api_command(request: Request) -> JSONResponse:
             # SPA heal/repair posts) would otherwise masquerade as ordinary web
             # frames. The honest stamp names the ENDPOINT — the host cannot know
             # the true caller here (disclosed non-goal).
-            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", "")}
+            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
+                                            **({"ui_control": control} if control else {})}
             # Publication precedes readiness. Bind the independent owner, keeping
             # this transport's metadata if the supervisor becomes ready meanwhile.
             if bridge is None or str(cmd).strip().lower() == "/restart":
@@ -302,6 +310,16 @@ async def api_git_log(_request: Request) -> JSONResponse:
 _ROLLBACK_REASONS = {"ui_rollback": "ui_rollback", "vcs_rollback": "agent_rollback_tool"}
 
 
+def _body_refusal() -> dict:
+    """A managed deployment's typed refusal of a door that would replace the serving program, before any lock,
+    fetch, writer fence or restart (``deployment_policy.body_replacement_refusal``); ``{}`` unmanaged."""
+    from ouroboros.deployment_policy import body_replacement_refusal
+    from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+    refusal = body_replacement_refusal()
+    return {"error": refusal, "code": MANAGED_BY_DEPLOYMENT} if refusal else {}
+
+
 def rollback_through_door(target: str, *, door: str, request_restart: Callable[[], bool]) -> tuple[int, dict]:
     """The one Rollback procedure (the UI button; the agent's ``vcs_rollback``, P4-S): lock,
     resolve, stop every writer (other tasks are interrupted at once), then either record the
@@ -314,6 +332,8 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
     from ouroboros.store_switch import switch_or_reset
 
     reason = _ROLLBACK_REASONS[door]
+    if managed := _body_refusal():
+        return 403, managed
     refusal = _index_lock_precondition()
     if refusal is not None:
         return refusal.status_code, json.loads(refusal.body)
@@ -377,6 +397,8 @@ async def api_git_rollback(request: Request) -> JSONResponse:
 
 async def api_git_promote(request: Request) -> JSONResponse:
     """Promote the current dev branch to the runtime's stable branch."""
+    if managed := _body_refusal():
+        return JSONResponse(managed, status_code=403)
     try:
         lock_fh, lock_error = _acquire_repo_mutation_lock()
         if lock_error is not None:
@@ -1465,6 +1487,8 @@ async def _apply_replace_recovery(
 
 async def api_update_apply(request: Request) -> JSONResponse:
     """Apply an exact managed plan; replacement is an explicit recovery only."""
+    if managed := _body_refusal():
+        return JSONResponse(managed, status_code=403)
     body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("JSON body must be an object.", 400)
