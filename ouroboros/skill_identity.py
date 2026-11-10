@@ -281,11 +281,22 @@ def payload_digest(
     ``bucket`` names the data bucket whose per-install notes are skipped; by default the
     directory's own (a staged payload names its destination). Unreadable files fail closed
     through ``SkillPayloadUnreadable`` so no verdict is ever bound to a partial runtime surface.
+    A digest of the same directory and walk is reused while every entry of its tree keeps its
+    change key (``skill_discovery_reuse.reused_digest``, the rule ``_file_sha256`` trusts per
+    file); ``manifest`` is the parsed manifest of that same directory, so it does not key it.
     """
+    from ouroboros.skill_discovery_reuse import declared_entries, reused_digest
+
     root = pathlib.Path(skill_dir).resolve()
-    pairs = _payload_file_digests(root, manifest_entry=manifest_entry, manifest_scripts=manifest_scripts,
-                                  bucket=bucket)
-    return release_digest_from_file_digests(pairs, release_declaration(root, manifest, bucket=bucket))
+    scripts = declared_entries("", manifest_scripts)
+
+    def digest() -> str:
+        pairs = _payload_file_digests(root, manifest_entry=manifest_entry, manifest_scripts=manifest_scripts,
+                                      bucket=bucket)
+        return release_digest_from_file_digests(pairs, release_declaration(root, manifest, bucket=bucket))
+
+    return reused_digest((str(root), str(manifest_entry or ""), scripts, bucket), root,
+                         declared_entries(manifest_entry, manifest_scripts), digest)
 
 
 def _legacy_reduce(file_digests: Iterable[Tuple[str, bytes]]) -> str:

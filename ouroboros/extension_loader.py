@@ -916,10 +916,13 @@ def reload_all(
     *,
     repo_path: str | None = None,
 ) -> Dict[str, Any]:
-    """Refresh all extension liveness and return ``skill: error_or_None``."""
+    """Refresh all extension liveness and return ``skill: error_or_None``; the measured window counts the
+    ``skills`` it discovered (hashes and catalog runs are counted where they happen)."""
+    from ouroboros.context_timing import counted
     from ouroboros.extension_health import fresh_code_stamp, record_health_for_runtime_state
 
     skills = discover_skills(drive_root, repo_path=repo_path)
+    counted("skills", len(skills))
     health_stamp = fresh_code_stamp()
     skill_names = {s.name for s in skills if s.manifest.is_extension()}
     with _lock:
