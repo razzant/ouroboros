@@ -156,7 +156,7 @@ def test_at_one_worker_a_parents_unnamed_wait_on_its_queued_child_frees_the_work
     sent = []
     workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id="root", reaping=False,
                                                       in_q=SimpleNamespace(put=lambda task: sent.append(dict(task)))))
-    assert workers.MAX_WORKERS == 1
+    assert list(workers.WORKERS) == [0], "one installed slot; the fixed pool never starts another"
     workers.assign_tasks()
     assert sent == [], "the running parent holds the one worker"
     ctx, limit = _loop_ctx(tmp_path, "root")
