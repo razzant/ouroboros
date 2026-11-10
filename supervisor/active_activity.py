@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -80,7 +81,8 @@ class TurnExecution:
     ``origin_message_ref["ts"]``), where the owner's wait starts; ``entered_at`` is the wall-clock
     twin of the first mark, so that wait and the monotonic phases (one process only) add up.
     ``dispatch``: the first dispatch's basis (``DISPATCH_BASES``) once it happened; ``meter``:
-    the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry."""
+    the thread's ``store_timing.metered`` scope; ``census``: the registry's count at entry;
+    ``worker_id``: the pool slot of the carrier running it (None when no carrier named one)."""
 
     chat_id: int
     client_message_id: str = ""
@@ -96,6 +98,7 @@ class TurnExecution:
     dispatch: str = ""
     meter: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     census: Dict[str, Any] = field(default_factory=dict)
+    worker_id: Any = None
 
     @property
     def phase(self) -> str:
@@ -165,7 +168,8 @@ class TurnExecution:
         ``accepted_at``, ``wait_before_entry_sec`` (wall clock: the routing pre-pass ran before this
         thread) and ``owner_wait_sec`` only when the canonical acceptance is known. ``dispatch``:
         ``not_observed`` while none happened; ``dispatched_at`` from the monotonic delta once it did.
-        ``meter``: the thread's own store counts so far; ``census``: the registry's count at entry."""
+        ``meter``: the thread's own store counts so far; ``census``: the registry's count at entry;
+        ``worker_id`` and ``pid``: the carrier slot and the process the turn ran in."""
         marks = list(self.marks)
         if until is None:
             until = self.ended_at if self.ended_at is not None else time.monotonic()
@@ -180,7 +184,8 @@ class TurnExecution:
         row: Dict[str, Any] = {
             "type": "direct_turn", "chat_id": self.chat_id, "task_id": self.task_id,
             "execution_id": self.execution_id, "client_message_id": self.client_message_id,
-            "thread": self.thread[1], "entered_at": _iso(self.entered_at),
+            "thread": self.thread[1], "worker_id": self.worker_id, "pid": os.getpid(),
+            "entered_at": _iso(self.entered_at),
             "handler_wait_sec": round(handler_wait, 3), "phases": phases,
             "dispatch": self.dispatch or "not_observed",
             "meter": store_timing.snapshot(self.meter), "census": dict(self.census)}

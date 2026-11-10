@@ -10,6 +10,7 @@ from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools.chronicle import _memory_read, page_covers
 from ouroboros.tools.registry import ToolContext
 from tests import _memory_inventory_shared as shared
+from tests._memory_view_synthetic import conversations_text
 from tests._store_shared import seed_result
 from tests.test_memory_view_room import MAIN_TASK, _addr, _install, _ts, _view
 
@@ -469,7 +470,7 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     keys = [group["key"] for group in snapshot.conversations]
     for gone in ({"F6g": ["main"]}, {"F6g": keys}, {"F6g": keys, "F6a": ["conversations"]},
                  {"F6w": list(steps["F6w"]), "F6g": keys}):  # the group holding it lined, every group, the count
-        shown = conversations.render(snapshot.conversations, gone)
+        shown = conversations_text(snapshot.conversations, gone)
         assert shown.count(f"{words}") == 1 + len(second), gone  # once, besides the other row's own copies
-    folded = conversations.render(snapshot.conversations, {"F7": [f"1:{address}"]})
+    folded = conversations_text(snapshot.conversations, {"F7": [f"1:{address}"]})
     assert folded.count(words) == len(second) and address in folded  # F7 alone turns it into its address

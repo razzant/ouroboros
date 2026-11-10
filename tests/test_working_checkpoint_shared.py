@@ -180,6 +180,31 @@ def test_private_opaque_and_foreign_elements_stay_inline(tmp_path):
     assert wc.read_working(tmp_path, "pause-task", 1)[1]["messages"][-1] == {"role": "user", "content": "again"}
 
 
+def test_the_checkpoint_and_the_request_records_share_each_parts_redaction_fact(tmp_path):
+    """A part the round's request records already worked out is not scanned again by the checkpoint (and the other
+    way round): one fact per bytes per task (``observability.task_parts``). What the checkpoint skips is exactly
+    what the request scanned; a secret-bearing message stays inline whichever met it first."""
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    def scanned(work) -> int:
+        with measured_sections():
+            work()
+            return section_spans()["work"].get("secret_scan", 0)
+
+    ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
+    limit_ctx.messages.append({"role": "tool", "tool_call_id": "call_s", "content": f"api_key={SECRET}"})
+    request = {"messages": limit_ctx.messages, "send_messages": limit_ctx.messages, "tools": limit_ctx.tool_schemas}
+    obs._TASK_PARTS.clear()
+    by_request = scanned(lambda: obs.persist_call(tmp_path, task_id="pause-task", call_id="llm_1_request",
+                                                  call_type="llm_request", payload=request))
+    after_request = scanned(lambda: wc.save_round(limit_ctx, "post_batch"))
+    obs._TASK_PARTS.clear()
+    alone = scanned(lambda: wc.save_round(limit_ctx, "post_batch"))
+    assert by_request > 0 and alone - after_request == by_request
+    inline = [row for row in json.loads(_file(tmp_path).read_bytes())["state"]["messages"] if "$shared" not in row]
+    assert [row.get("tool_call_id") for row in inline] == ["call_s"]
+
+
 def test_the_manifest_union_survives_a_resume_in_a_new_process_and_a_dropped_element_stays_listed(tmp_path):
     ctx, limit_ctx = _state_fixture(tmp_path, rounds=4)
     assert wc.save_round(limit_ctx, "post_batch") is True

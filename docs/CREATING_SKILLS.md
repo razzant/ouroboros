@@ -2896,6 +2896,11 @@ def register(api):
     # ... continue registration
 ```
 
+An out-of-process extension's `register(api)` runs again on every load on the
+server (start, reconcile, enable, reload); workers take that load's recorded
+catalog. Anything `register` reads from `state_dir` reaches new workers after
+the next load on the server, not when the file changes.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

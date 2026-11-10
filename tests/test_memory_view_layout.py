@@ -45,8 +45,8 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
     assert all(note['id'] in text for note in snap.room['notes'])
     assert '(memory_read(node_id=…))' in text
-    from ouroboros import memory_view_conversations as conversations
-    assert conversations.render(snap.conversations, {}) in text  # this room's note forms leave the other groups be
+    from tests import _memory_view_synthetic as syn
+    assert syn.conversations_text(snap.conversations, {}) in text  # this room's note forms leave the other groups be
     assert mv.render_story(snap, aggregate) == mv.render_story(snap)
 
 
@@ -435,7 +435,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
         non_memory_tokens=10_000_000, lowered_from=None if owner == "nano" else owner,  # no room: its last view
         tool_names=select_tool_schemas(schemas, context_mode="nano").chosen)
     window = (10_000_000 - roomy.projection("nano").memory_facts["floor"]["physical_allowance_tokens"]
-              + view_tokens(shortest[0]) + view_tokens(shortest[1]) + 50)
+              + view_tokens(shortest.story) + view_tokens(shortest.room) + 50)
     start = plan(window)
     from ouroboros.context_budget import context_mode_limits
     from ouroboros.context_fit import tool_schema_tokens
@@ -730,7 +730,10 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     assert discoveries == [memory.drive_root, memory.drive_root]
     plain = receipt()
     assert {"memory_view", "knowledge", "health", "runtime", "registry", "installed_skills",
-            "drive_state", "review_records", "review_context", "fit", "total"} == set(timed["sections_ms"])
+            "drive_state", "review_records", "review_context", "fit", "total"} == {
+        name for name in timed["sections_ms"] if "." not in name}  # dotted names are spans inside these
+    assert {"memory_view.chronicle", "memory_view.tail", "memory_view.conversations", "memory_view.story", "fit.frame_max",
+            "fit.projections"} <= set(timed["sections_ms"])
     assert set(timed["sections_cpu_ms"]) == set(timed["sections_ms"])
     assert timed["sections_ms"]["total"] >= max(timed["sections_ms"].values())  # the build's own time
     assert all(isinstance(ms, int) and ms >= 0 for ms in [*timed["sections_ms"].values(), *timed["sections_cpu_ms"].values()])

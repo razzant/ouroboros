@@ -21,6 +21,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
 from ouroboros.observability import timed_phase
+from ouroboros.context_timing import timed_section
 from ouroboros.loop_llm_call import _emit_live_log
 from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -964,6 +965,7 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
+@timed_section("context_facts")
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
     """Append facts for this round's current route and working view, before dispatch.
 

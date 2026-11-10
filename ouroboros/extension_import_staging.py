@@ -173,11 +173,10 @@ def release_extension_import_tree(import_root: pathlib.Path) -> None:
 
 
 def declared_catalog_inputs(skill: LoadedSkill) -> dict | None:
-    """An opt-in declaration is exhaustive; unenumerated inputs are not cached.
+    """The settings and environment keys a skill declares its registration reads, narrowing its catalog key.
 
-    Catalog settings are a fixed snapshot of the declared keys (ordinary dispatch reads
-    current settings); registration that depends on files, time, network or side effects
-    must omit the declaration.
+    Without the declaration the key holds every value the host hands the catalog child (``catalog_identity``).
+    Catalog settings are a fixed snapshot either way (ordinary dispatch reads current settings).
     """
     declaration = skill.manifest.raw_extra.get("catalog_inputs")
     if not isinstance(declaration, dict) or set(declaration) != {"settings", "environment"}:
@@ -189,14 +188,20 @@ def declared_catalog_inputs(skill: LoadedSkill) -> dict | None:
 
 
 def catalog_identity(skill: LoadedSkill, settings: dict, environ: dict, grants: dict) -> str | None:
-    from ouroboros.extension_health import code_stamp
+    """The source identity of one catalog dry run: the payload and its runtime, the executing host code, the
+    grants, and the settings and environment the child receives (all of them, or the declared ones). ``None``
+    when the host code has no identity (no executing-source baseline): such a process records and reuses nothing.
+    What a registration reads past these inputs (its own files, the clock, the network) is not in the key: a worker
+    publishes what the last load on the server produced (``catalog_extension_surfaces``)."""
+    from ouroboros.preflight_receipts import capture_executing_source_baseline
 
-    declaration = declared_catalog_inputs(skill)
-    if declaration is None:
+    host = capture_executing_source_baseline()
+    if not host:
         return None
+    declaration = declared_catalog_inputs(skill) or {"settings": list(settings), "environment": list(environ)}
     inputs = {
         "runtime": extension_import_identity(skill),
-        "host": code_stamp(),
+        "host": host,
         "settings": {k: settings[k] for k in declaration["settings"] if k in settings},
         "environment": {k: environ[k] for k in declaration["environment"] if k in environ},
         "grants": grants,
