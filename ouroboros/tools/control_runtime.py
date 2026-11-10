@@ -1162,6 +1162,9 @@ def checked_completion_request(ctx: ToolContext | None, request: dict, *, allow_
         parent_task_id=getattr(ctx, "parent_task_id", None),
     )["is_root_task"]:
         error = "pending_review is available only on root tasks"
+    elif request.get("pending_review") == "finish" and not str(request.get("rationale") or "").strip():
+        # Finishing before the reviewers answer is a root's conscious, recorded exception (owner, 8 Nov 2026).
+        error = "pending_review=finish requires a rationale: why you finish before the reviewers answer"
     if error:
         return None, error
     checked = {key: copy.deepcopy(value) for key, value in request.items() if value is not None}

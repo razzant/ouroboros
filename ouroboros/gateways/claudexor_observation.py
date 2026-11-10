@@ -28,6 +28,10 @@ acknowledges the problem (``ACKNOWLEDGED_PROBLEM``, wire ``seen: null``) and the
 again. Fallback rows carry a local token (``local:`` prefix) that is never sent to an engine.
 Kinds this adapter does not know (a future wake reason or problem kind) are attention, never
 a refusal of the whole answer: unknown is not no.
+
+Attention is not a hold: ``question_attention`` judges a run's whole question set once, a
+``delivery: async`` question leaves the agent working, and only a question that holds the
+agent ends a reviewer slot (``review_execution._poll_session_terminal``).
 """
 
 from __future__ import annotations
@@ -64,7 +68,9 @@ WAKE_REASONS = frozenset({"attention", "problems", "timeout", "aborted"})
 # The contract's answer per exact engine identity (version, build sha): an engine cannot
 # change what its route accepts without changing, so one probe per identity per process (a
 # same-build restart keeps it). The catalog itself is the event stream module's shared one.
-_SUPPORT: Dict[Tuple[str, str], bool] = {}
+# ``identity + ("blocking",)`` records, beside a supporting identity, whether the same probe
+# was answered with the ``includeBlocking`` opt-in (claudexor #628), so later calls ask for it.
+_SUPPORT: Dict[Tuple[str, ...], bool] = {}
 _SUPPORT_LOCK = threading.Lock()
 _RUN_READ = re.compile(r"/v2/runs/[^/]+")
 _ABSENT_RUN_SITES: set = set()  # the code sites seen asking for a run the engine did not know
@@ -102,18 +108,21 @@ class ClaudexorObservationGateway:
     """The compact attention wait, as the owned HTTP client speaks it (mixed into the gateway)."""
 
     def wait_run_attention(self, targets: List[Dict[str, Any]], *, wait_ms: Optional[int],
-                           timeout_sec: Optional[float]) -> Dict[str, Any]:
+                           timeout_sec: Optional[float], include_blocking: bool = False) -> Dict[str, Any]:
         """``POST /v2/runs/wait-many``: the engine's own result object, unprojected.
 
         ``wait_ms=None`` leaves the hold to the engine's default. The read bound covers the
         hold plus the caller's transport allowance: a completed pass may overrun the nominal
-        window by itself.
+        window by itself. ``include_blocking`` asks a supporting engine to add ``blocking``
+        to each row with pending questions; without it the request is byte-identical to the
+        old one.
         """
         from ouroboros.gateways.claudexor import DAEMON_BUSY_CODES, ClaudexorUnavailable
 
         hold = WAIT_MANY_MAX_WAIT_SEC if wait_ms is None else wait_ms / 1000.0
         bound = None if timeout_sec is None else float(timeout_sec) + hold
-        request = {"targets": targets, **({} if wait_ms is None else {"waitMs": int(wait_ms)})}
+        request = {"targets": targets, **({} if wait_ms is None else {"waitMs": int(wait_ms)}),
+                   **({"includeBlocking": True} if include_blocking else {})}
         try:
             body = self._request("POST", "/v2/runs/wait-many", json_body=request, timeout_sec=bound)
         except ClaudexorUnavailable as exc:
@@ -137,6 +146,10 @@ class RunAttention:
     run_id: str
     status: Optional[str] = None
     pending: Optional[bool] = None
+    # Whether a pending question may hold the agent: False only when every pending question
+    # is known async (the agent keeps working); None when unknown (an engine that does not
+    # say, a problem row), which every consumer treats as the old blocking meaning.
+    blocking: Optional[bool] = None
     token: Optional[str] = None
     problem: Optional[str] = None
     detail: Optional[Dict[str, Any]] = None  # the fallback's detail read, for the consumer's own projection
@@ -192,20 +205,47 @@ def wait_many_supported(gateway: Any, *, timeout_sec: Optional[float]) -> bool:
     with _SUPPORT_LOCK:
         if key in _SUPPORT:
             return _SUPPORT[key]
-    supported = route_listed(gateway, WAIT_MANY_OPERATION, timeout_sec=timeout_sec)
+    supported, blocking = route_listed(gateway, WAIT_MANY_OPERATION, timeout_sec=timeout_sec), False
     if supported:
+        probe = [{"runId": PROBE_RUN_ID, "seen": None}]
         try:
-            body = gateway.wait_run_attention([{"runId": PROBE_RUN_ID, "seen": None}], wait_ms=0,
-                                              timeout_sec=timeout_sec)
+            # Asked with the opt-in first. An engine whose strict input predates it refuses the
+            # whole request (400); the acknowledgement alone is then asked as before, so that
+            # refusal is about the opt-in, never about support.
+            body = gateway.wait_run_attention(probe, wait_ms=0, timeout_sec=timeout_sec, include_blocking=True)
         except ClaudexorUnavailable as exc:
-            if int(getattr(exc, "status_code", 0) or 0) not in (400, 404):
+            status = int(getattr(exc, "status_code", 0) or 0)
+            if status not in (400, 404):
                 return False  # unknown: nothing remembered, today's reads this beat, asked again next beat
-            supported = False  # received: the route rejects the acknowledgement, or is gone
+            body = None
+            if status == 400:
+                try:
+                    body = gateway.wait_run_attention(probe, wait_ms=0, timeout_sec=timeout_sec)
+                except ClaudexorUnavailable as again:
+                    if int(getattr(again, "status_code", 0) or 0) not in (400, 404):
+                        return False  # unknown, as above
+            # received: the route rejects the acknowledgement, or is gone, unless the old ask passed
+            supported = body is not None and _accepts_acknowledgement(body)
         else:
-            supported = _accepts_acknowledgement(body)
+            supported = blocking = _accepts_acknowledgement(body)
     with _SUPPORT_LOCK:
         _SUPPORT[key] = supported
+        if supported:
+            _SUPPORT[key + ("blocking",)] = blocking
     return supported
+
+
+def reports_blocking(gateway: Any) -> bool:
+    """Whether the supporting engine behind ``gateway`` answered the contract probe with the
+    ``includeBlocking`` opt-in: only then do compact calls ask for it. A read of the memo the
+    probe wrote, never a request; unknown (not yet probed, a hole) is ``False``."""
+    from ouroboros.gateways.claudexor_run_events import engine_identity
+
+    if not getattr(gateway, "engine_version", ""):
+        return False
+    key = engine_identity(gateway)
+    with _SUPPORT_LOCK:
+        return _SUPPORT.get(key) is True and _SUPPORT.get(key + ("blocking",)) is True
 
 
 def _accepts_acknowledgement(body: Any) -> bool:
@@ -243,6 +283,35 @@ def _retryable_refusal(exc: BaseException) -> bool:
             and problem.get("retryable") is True)
 
 
+def question_attention(detail: Any, pending: Optional[List[Dict[str, Any]]] = None) -> Tuple[bool, bool]:
+    """``(waiting, async_only)`` of one run detail, judged once over its COMPLETE question set.
+
+    ``waiting`` is attention: a question awaits an answer (a row, or the summary's
+    ``waitingOnUser``), never by itself the fact that the agent stopped. ``async_only`` says
+    no pending question holds the agent: every row of a complete set is ``delivery: async``
+    and the summary does not contradict it, or, with no complete rows to read, the summary's
+    own ``asyncQuestionsOnly`` is true. A legacy row (no delivery: blocking), a kind this host
+    does not know, a malformed or dropped row all keep the old blocking meaning. ``pending``
+    is the caller's normalization of this same detail when it holds one: the whole set,
+    never a bounded preview, which can shed the only blocking row."""
+    from ouroboros.delegate_custody_usage import summary_of
+    from ouroboros.gateways.claudexor import pending_interactions
+
+    if not isinstance(detail, dict):
+        return bool(pending), False
+    rows = pending_interactions(detail) if pending is None else pending
+    raw = detail.get("pendingInteractions")
+    summary = summary_of(detail)
+    if not (rows or summary.get("waitingOnUser") or (isinstance(raw, list) and raw)):
+        return False, False
+    said = summary.get("asyncQuestionsOnly")
+    if rows and any(row.get("delivery") != "async" for row in rows):
+        return True, False
+    if rows and isinstance(raw, list) and len(raw) == len(rows):
+        return True, said is not False
+    return True, said is True
+
+
 def detail_attention(run_id: str, detail: Dict[str, Any]) -> RunAttention:
     """The compact facts of one full detail, with a local token over exactly those facts."""
     from ouroboros.delegate_custody_usage import summary_of
@@ -250,11 +319,14 @@ def detail_attention(run_id: str, detail: Dict[str, Any]) -> RunAttention:
 
     summary = summary_of(detail)
     status = str(summary.get("state") or "") or None
-    ids = sorted(str(row.get("interaction_id") or "") for row in pending_interactions(detail))
+    rows = pending_interactions(detail)
+    ids = sorted(str(row.get("interaction_id") or "") for row in rows)
     pending = bool(ids) or bool(summary.get("waitingOnUser"))
     digest = hashlib.sha256(json.dumps(["ouroboros.detail-observation", 1, run_id, status, pending, ids],
                                        sort_keys=True).encode("utf-8")).hexdigest()
-    return RunAttention(run_id=run_id, status=status, pending=pending, token=_LOCAL_TOKEN + digest, detail=detail)
+    blocking = not question_attention(detail, rows)[1] if pending else None
+    return RunAttention(run_id=run_id, status=status, pending=pending, blocking=blocking,
+                        token=_LOCAL_TOKEN + digest, detail=detail)
 
 
 def wait_attention(gateway: Any, targets: Sequence[Tuple[str, Optional[str]]], *,
@@ -281,6 +353,7 @@ def wait_attention(gateway: Any, targets: Sequence[Tuple[str, Optional[str]]], *
         return AttentionWake("timeout", [], waited=False)
     if not wait_many_supported(gateway, timeout_sec=timeout_sec):
         return _detail_wake(gateway, pairs, timeout_sec)
+    opt_in = {"include_blocking": True} if reports_blocking(gateway) else {}
     wakes: List[AttentionWake] = []
     budget = wait_sec
     for start in range(0, len(pairs), WAIT_MANY_MAX_TARGETS):
@@ -289,7 +362,7 @@ def wait_attention(gateway: Any, targets: Sequence[Tuple[str, Optional[str]]], *
         began = time.monotonic()
         try:
             body = gateway.wait_run_attention([_target(run_id, seen) for run_id, seen in chunk],
-                                              wait_ms=wait_ms, timeout_sec=timeout_sec)
+                                              wait_ms=wait_ms, timeout_sec=timeout_sec, **opt_in)
         except ClaudexorUnavailable as exc:
             if int(getattr(exc, "status_code", 0) or 0) == 404:
                 forget_support(gateway)  # the ROUTE is absent on this engine; no run was named absent
@@ -362,7 +435,12 @@ def _engine_wake(pairs: List[Tuple[str, Optional[str]]], body: Dict[str, Any], *
             if not isinstance(status, str) or not isinstance(pending, bool) \
                     or not isinstance(token, str) or not _ENGINE_TOKEN.match(token):
                 raise malformed("a summary without lifecycle, pending flag or token")
-            rows.append(RunAttention(run_id=run_id, status=status, pending=pending, token=token))
+            # The opt-in's fact about this row's pending questions; absent is unknown (blocking).
+            blocking = row.get("blocking")
+            if blocking is not None and not isinstance(blocking, bool):
+                raise malformed("a blocking fact that is not a boolean")
+            rows.append(RunAttention(run_id=run_id, status=status, pending=pending,
+                                     blocking=blocking if pending else None, token=token))
         elif isinstance(problem, str) and problem:
             rows.append(RunAttention(run_id=run_id, problem=problem))
         else:

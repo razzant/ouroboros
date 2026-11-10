@@ -13,7 +13,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D03 | Context assembly, fit & compaction | 34 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
-| D06 | Review stack | 99 | 0 |
+| D06 | Review stack | 100 | 0 |
 | D07 | Delegation, subagents & Claudexor | 112 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
@@ -457,6 +457,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/preflight_qualification.py`
 - `ouroboros/preflight_receipts.py`
 - `ouroboros/preflight_runner.py`
+- `ouroboros/result_material.py`
 - `ouroboros/review.py`
 - `ouroboros/review_body_fact.py`
 - `ouroboros/review_checking.py`

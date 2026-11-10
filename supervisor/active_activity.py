@@ -124,6 +124,15 @@ class TurnExecution:
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
         """One of the turn's own frames (``TurnEventQueue``); a start fact among them advances the phase."""
+        # Deep self-review bypasses the Main model loop, but its review lease is still
+        # a real pooled execution.  The lease is emitted after its context has been
+        # assembled, so advance the shared phase owner here instead of leaving the
+        # census at Preparing forever on that supported route.
+        if kind == "cognitive_operation" and str(data.get("phase") or "").lower() == "started":
+            if str(data.get("kind") or "").lower() == "review":
+                self.advance("context_built")
+                self.advance("requested")
+            return
         if kind == "log_event" and data.get("type") in _LOG_FACTS:
             self.advance(_LOG_FACTS[data["type"]])
         if kind != "main_llm_call_state":

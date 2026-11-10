@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any, Dict, List
 
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
@@ -332,7 +333,10 @@ def _awaiting_row(task: Dict[str, Any], *, attempt: int, client_message_id: Any,
     return {"task": task, "worker_id": None, "started_at": now, "last_heartbeat_at": now, "last_progress_at": now,
             "budget_paused_sec": 0.0, "soft_sent": False, "attempt": int(attempt), "lane": LANE_CONVERSATION,
             "client_message_id": str(client_message_id or ""), "reply_expected": bool(reply_expected),
-            "fresh_identity": bool(fresh_identity)}
+            # Fence buffered frames while the row is still waiting for a carrier.  A
+            # physical handoff replaces this with another token immediately before
+            # the task copy enters the worker queue.
+            "fresh_identity": bool(fresh_identity), "phase_generation": uuid.uuid4().hex}
 
 
 def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str, Any]:
@@ -447,6 +451,14 @@ def hand_to_carrier(meta: Dict[str, Any], slot: Any) -> bool:
 
     task = meta["task"]
     dispatched = dict(task)
+    # Attempt and worker slot can both be reused by a supported Resume.  A
+    # buffered phase frame from the previous physical dispatch must not claim
+    # the fresh row, so stamp the row and the carrier copy at the handoff.
+    phase_generation = uuid.uuid4().hex
+    meta["phase_generation"] = phase_generation
+    meta.pop("turn_execution", None)
+    meta.pop("turn_phase", None)
+    dispatched["_phase_generation"] = phase_generation
     if meta.get("fresh_identity"):
         dispatched["_fresh_identity"] = True
     slot.quiescence_token = ""
@@ -630,7 +642,11 @@ def lane_turn_rows() -> List[Dict[str, Any]]:
 
 
 def handle_direct_turn_phase(evt: Dict[str, Any], ctx: Any) -> None:
-    """A carrier's start fact (``TURN_PHASES``) lands on its RUNNING row for the census."""
+    """A task's start fact (``TURN_PHASES``, ``worker_chat_lane.TurnPhaseFrames``) lands on its RUNNING row for the
+    census, in either lane. A row is fresh for each dispatch and names the slot holding it (``worker_id``): a frame
+    of another slot moves nothing, and on the slot the first execution of its attempt to report owns it
+    (``turn_execution``, a pooled task's own first frame), so a late frame of another execution (a Resume that kept
+    the attempt) moves nothing either."""
     from supervisor.active_activity import TURN_PHASES
 
     task_id, phase = str(evt.get("task_id") or ""), str(evt.get("phase") or "")
@@ -644,6 +660,19 @@ def handle_direct_turn_phase(evt: Dict[str, Any], ctx: Any) -> None:
             if int(evt.get("task_attempt") or 1) != int(meta.get("attempt") or 1):
                 return
         except (TypeError, ValueError):
+            return
+        slot = evt.get("worker_id")
+        if slot is not None and meta.get("worker_id") is not None and str(slot) != str(meta.get("worker_id")):
+            return
+        generation = str(evt.get("phase_generation") or "")
+        current_generation = str(meta.get("phase_generation") or "")
+        # A phase frame from a previous physical handoff may arrive first after Resume.
+        # Once admission stamped a generation, frames without that exact token cannot
+        # claim the fresh execution, even when attempt and worker slot are reused.
+        if current_generation and generation != current_generation:
+            return
+        execution = str(evt.get("execution_id") or "")
+        if execution and meta.setdefault("turn_execution", execution) != execution:
             return
         current = str(meta.get("turn_phase") or TURN_PHASES[0])
         if TURN_PHASES.index(phase) >= TURN_PHASES.index(current):  # facts only move forward

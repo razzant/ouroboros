@@ -125,15 +125,18 @@ def test_an_outcome_the_review_tool_returned_whole_needs_no_second_turn(tmp_path
     assert bool(run.get("informed_finish")) is (seat == CRITICAL), "over findings: Main's own decision"
 
 
-def test_blocking_still_holds_a_failed_result_the_tool_returned(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode, root", [("required", True), ("auto", True), ("auto", False)])
+def test_blocking_still_holds_a_failed_result_the_tool_returned(tmp_path, monkeypatch, mode, root):
     """Receipt changes no enforcement: under Blocking the FAIL Main already read still holds its delivery until
-    a review passes the result or Main stops."""
-    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking")
+    a review passes the result or Main stops, in Auto too (owner, 8 Nov 2026: Auto selects the call, Blocking
+    sets its strength); the stop buys no review and records why none ran. A child is never forced a review (no
+    Required floor), but the one it chose itself has the same Blocking strength."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, mode=mode, enforcement="blocking", root=root)
     _produced_answer_protocol(monkeypatch)
     sends = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
 
-    text, _trace, requests = _main(ctx, monkeypatch, [
+    text, trace, requests = _main(ctx, monkeypatch, [
         _call("review_change", {"subject": "result", "answer": ANSWER}, "review"), _finish(),
         _call("finish_task", {"action": "stop", "answer": ANSWER, "rationale": "the reviewers' finding stands"},
               "stop")])
@@ -142,6 +145,61 @@ def test_blocking_still_holds_a_failed_result_the_tool_returned(tmp_path, monkey
     assert any("not delivered until a review passes it" in notice for notice in _host_notices(requests[2]))
     assert [row[2:4] for row in _holds(ctx)] == [("result_review", "findings")]
     assert text  # the explicit stop ends the task without buying another review
+    assert trace["review_decision"]["trigger"] == "author_stop"
+
+
+def test_a_reasoned_finish_of_the_fixed_answer_after_a_received_fail_delivers_it_at_once(tmp_path, monkeypatch):
+    """Required + Advisory (owner, 8 Nov 2026): A's FAIL reached Main whole, and Main's explicit finish_task of the
+    fixed B with its reason is its decision about exactly B: B is delivered at once, buys nothing and needs no
+    identical resend. The decision stays B's: another answer, a new outcome or new words of the owner put the
+    review before the author again."""
+    from ouroboros.outcomes import _review_axis
+    from ouroboros.review_waiting import outcome_states
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
+    fixed = "FINAL ANSWER: 3"
+    text, trace, requests = _main(ctx, monkeypatch, [
+        {"content": ANSWER}, _finish(fixed, rationale="Counted again: three findings are listed now.")])
+    assert text == fixed and len(requests) == 2 and len(sends) == 3, "one wave; the fix buys none, no ritual resend"
+    assert [row[2:4] for row in _holds(ctx)] == [("result_review", "findings")]
+    [run] = trace["review_runs"]
+    assert run["earlier_revision"] is True and run["informed_finish"]["rationale"].startswith("Counted again")
+    assert run["informed_finish"]["subject_sha"] == run["binding_hash"] != run["reviewed_subject_sha"]
+    assert _review_axis(trace)["author_finish"] == "author_finish"
+
+    shown = []
+    assert ctx._completion_selected["answer"] == fixed, "the decision B's delivery consumed is still on the context"
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 4", trace, shown.append) is True, "C is not B"
+    assert "An earlier version of your result was reviewed" in shown[-1] and len(sends) == 3
+    with monkeypatch.context() as patch:  # a genuinely new outcome under A's record, since the decision
+        patch.setattr("ouroboros.review_waiting.outcome_states",
+                      lambda record, real=outcome_states: [*real(record), "a-new-outcome#complete"])
+        assert result_review_at_delivery(ctx, fixed, trace, shown.append) is True, "a new outcome reaches it first"
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Name the unit too.", "msg_id": "m-7"}]
+    assert result_review_at_delivery(ctx, fixed, trace, shown.append) is True, "new words of the owner are asked about"
+    assert "Name the unit too." in shown[-1] and "do they change what was asked?" in shown[-1] and len(sends) == 3
+
+
+def test_a_same_byte_write_through_the_real_loop_buys_no_review_and_no_nudge(tmp_path, monkeypatch):
+    """The real Main loop (8 Nov 2026 follow-up): rewriting a file with the bytes it already holds produces nothing,
+    so Required buys no review, nothing is held, and the verify-before-done nudge (the effect projection's other
+    reader) asks for nothing; the answer is delivered as written."""
+    from tests.test_result_review import _baselined
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _baselined(ctx)
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
+    answer = "app.py already says VALUE = 1; nothing needed changing."
+    text, trace, requests = _main(ctx, monkeypatch, [
+        _call("write_file", {"path": "app.py", "content": "VALUE = 1\n"}, "same"), {"content": answer}])
+    assert text == answer and len(requests) == 2 and sends == [] and _holds(ctx) == []
+    assert trace["tool_calls"][0]["tool_result_meta"]["operation_outcome"] == "completed_no_effect"
+    assert trace["review_decision"]["trigger"] == "no_production"
 
 
 # --- The delivery step -------------------------------------------------------------------------------
@@ -423,6 +481,44 @@ def test_presence_speech_and_an_explicit_pending_finish_are_never_held_for_a_pas
     assert "still running" in shown[-1]
     pending._acceptance_pending_review_choice = "finish"
     assert result_review_at_delivery(pending, ANSWER, {"tool_calls": []}, shown.append) is False
+
+
+@pytest.mark.parametrize("seat, received", [("[]", True), (CRITICAL, True), ("[]", False)])
+def test_presence_speech_revised_after_its_review_buys_no_second_panel_once_its_author_received_it(
+        tmp_path, monkeypatch, seat, received):
+    """Astra, 9 Nov 2026 (owner, 8 Nov 2026: after received feedback Advisory re-review is Ouroboros's choice): a
+    Presence turn that produced a registered file, called the result review and received it whole, then revised its
+    answer, speaks at once with that review bound as the earlier version's and its own acceptance beside it: an
+    earlier PASS reads Done with that label, a FAIL Done with warnings, and no second panel is bought. A review its
+    author never received gives no such choice, so the Required floor still reviews the revision, holding nothing."""
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.outcomes import _review_axis
+    from ouroboros.review_waiting import outcome_states
+    from ouroboros.tools.review_change import run_review_change
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
+    store_task_artifact_bytes(ctx.drive_root, ctx.task_id, "report.txt", b"The measured length is 2 units.\n")
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": seat}))
+    first = run_review_change(ctx, subject="result", answer="The report gives the length as 2.")
+    record = review_ledger.load_record(ctx.drive_root, first["record_id"])
+    receipt = {"record_id": first["record_id"], "outcome_states": outcome_states(record)}  # the tool's whole return
+    trace = {"tool_calls": [{"tool": "review_change", "tool_result_meta": {"review_delivery": receipt}}] if received else []}
+    ctx._completion_selected = {"action": "finish", "answer": "The report gives the length as 2 units.",
+                                "rationale": "Added the unit; the report and its conclusion are unchanged."}
+    shown = []
+    assert result_review_at_delivery(ctx, "The report gives the length as 2 units.", trace, shown.append) is False
+    assert shown == [] and len(sends) == (3 if received else 6), "Presence speech is never held"
+    review = _review_axis(trace)
+    if not received:
+        assert review.get("author_finish") is None, "an unreceived review is no author's acceptance"
+        return
+    [run] = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+    assert run["earlier_revision"] is True and run["reviewed_subject_sha"] == record["subject"]["diff_sha"]
+    assert run["informed_finish"]["outcomes"] == sorted(outcome_states(record))
+    assert review["author_finish"] == ("previous_revision_accepted" if seat == "[]" else "author_finish")
+    assert review["acceptance_decision"]["author_disposition"]["rationale"].startswith("Added the unit")
 
 
 # --- The catalog's whole roster: a receipt travels in a result's bounded metadata --------------------------

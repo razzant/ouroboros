@@ -180,6 +180,24 @@ def test_task_contract_preserves_protected_artifact_policy():
     ]
 
 
+def test_task_contract_review_answer_is_an_optional_additive_key():
+    """``review_answer`` (owner, 8 Nov 2026): present only when true, from any carrier the contract already reads,
+    so ordinary contracts keep their exact historical shape; it is no answer protocol and no marker instruction."""
+    from types import SimpleNamespace
+
+    from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
+
+    assert "review_answer" not in build_task_contract({}) and "review_answer" not in build_task_contract(
+        {"metadata": {"review_answer": "false"}})
+    for task in ({"review_answer": True}, {"metadata": {"review_answer": "true"}},
+                 {"task_contract": {"review_answer": True}}):
+        contract = build_task_contract(task)
+        assert contract["review_answer"] is True and contract["answer_protocol"] == ""
+        ctx = SimpleNamespace(task_contract=contract, task_metadata={})
+        assert review_answer_required(ctx) is True and answer_protocol_active(ctx) is False
+    assert review_answer_required(SimpleNamespace(task_contract={}, task_metadata={})) is False
+
+
 def test_task_contract_normalizes_observable_acceptance_claims():
     contract = build_task_contract({
         "task_contract": {

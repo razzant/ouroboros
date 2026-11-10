@@ -2,6 +2,7 @@ import { formatUsd, number } from './storage_format.js';
 import { APP_SETTINGS_ORIGIN, apiFetch, jsonPost } from './api_client.js';
 import { clearResultOnEdit, errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 import { statusMarkHtml } from './status_mark.js';
+import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 
 const COST_BUDGET_INPUTS = {
     TOTAL_BUDGET: 's-budget',
@@ -9,12 +10,19 @@ const COST_BUDGET_INPUTS = {
 };
 // A breakdown table shows its largest rows; the rest wait behind its "Show all (N)" (the list's one length control).
 const TABLE_ROWS = 8;
-const TABLES = [
-    ['cost-by-model', 'By model', 'Model', 'by_model'],
-    ['cost-by-key', 'By API key', 'Key', 'by_api_key'],
-    ['cost-by-model-cat', 'By model category', 'Category', 'by_model_category'],
-    ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category'],
+// Each table says what it groups by (owner, Track09 A, 9 Nov 2026). The ledger's `by_api_key` groups by provider; a
+// model's row is its total over every provider; the role table reads the roles in today's Settings, not the call's.
+export const TABLES = [
+    ['cost-by-model', 'By model', 'Model', 'by_model', 'Each model\u2019s total over every provider and connection.'],
+    ['cost-by-key', 'By provider', 'Provider', 'by_api_key', ''],
+    ['cost-by-model-cat', 'By current role', 'Role', 'by_model_category', 'Calls matched to the roles set in Settings now, not when each call ran.'],
+    ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category', ''],
 ];
+const ROLE_WORDS = Object.freeze({ main: 'Main', heavy: 'Heavy', light: 'Light', fallback: 'Fallback', other: 'No current role' });
+const providerWord = (key) => API_PROVIDER_LABELS[key] || (harnessPresentation(key).known ? harnessPresentation(key).label : key);
+const NAME_WORDS = Object.freeze({ 'cost-by-key': providerWord, 'cost-by-model-cat': (key) => ROLE_WORDS[key] || key });
+/** A breakdown row's name as the owner reads it: a provider's or a current role's word, else the recorded key. */
+export const breakdownRowName = (tableId, key) => (NAME_WORDS[tableId] ? NAME_WORDS[tableId](key) : key);
 
 // The setup contract is authoritative once /api/settings answers. Keep a useful
 // non-empty explanation during the request and on a failed read so aria-describedby
@@ -128,8 +136,8 @@ export function costDashboardPresentation(data) {
     };
 }
 
-const tableCardHtml = ([id, title, column]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
-        <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>
+const tableCardHtml = ([id, title, column, , note]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
+        <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>${note ? `<p class="costs-table-note">${note}</p>` : ''}
         <table class="cost-table" id="${id}"><thead><tr><th>${column}</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Cost</th></tr></thead><tbody></tbody></table>
         <button type="button" class="btn btn-ghost btn-sm ui-list-more" data-costs-more hidden></button>
     </section>`;
@@ -202,8 +210,9 @@ export function initCosts({ state, mount }) {
         const rows = Object.entries(data || {});
         for (const [name, info] of expanded.has(tableId) ? rows : rows.slice(0, TABLE_ROWS)) {
             const tr = document.createElement('tr');
-            const nameCell = cell('cost-cell-name', name);
-            nameCell.setAttribute('title', name);
+            const shown = breakdownRowName(tableId, name);
+            const nameCell = cell('cost-cell-name', shown);
+            nameCell.setAttribute('title', shown);
             const cost = costBucketPresentation(info);
             const costCell = cell('cost-cell-right', '');
             costCell.innerHTML = `${escapeHtmlAttr(cost.text)}${cost.open ? statusMarkHtml('cost-open', { shape: 'ring', hue: 'ink' }) : ''}`

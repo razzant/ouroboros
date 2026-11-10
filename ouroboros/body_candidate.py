@@ -520,7 +520,8 @@ def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *
     not prove who wrote each line. A dirty row recorded later for the same creation base is superseded (it
     stays whole in history); any other recorded row is kept, its dirt uncertain for an explicit selection,
     and joins this copy's identity when it lacks one.
-    Without a host baseline (a direct turn, a manual context) the explicit/whole-tree contract applies.
+    Without a host baseline of the body (a direct turn, whose baseline observes only its admitted folder; a
+    manual context) the explicit/whole-tree contract applies.
     """
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id or str(_metadata(ctx).get("delegation_role") or "").lower() == "subagent":
@@ -529,7 +530,7 @@ def _attribute_surface(ctx: Any, candidate: pathlib.Path, row: Dict[str, Any], *
         from ouroboros.mutation_attribution import ESTABLISHED_BASES, attribution_task_id, capture_mutation_baseline
 
         results_root, lineage = _results_root(ctx), owner_id(ctx)
-        evidence_task_id = attribution_task_id(results_root, (lineage, task_id))
+        evidence_task_id = attribution_task_id(results_root, (lineage, task_id), surface_type="system_repo")
         if not evidence_task_id:
             return {"state": "no_baseline"}
         existing = _recorded_surface(results_root, evidence_task_id, candidate)

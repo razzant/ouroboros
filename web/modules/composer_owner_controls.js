@@ -23,10 +23,11 @@ const CONTEXT_MEANINGS = Object.freeze({
 export const CHANGE_RULE = 'Applies to new steps; running work finishes.';
 const contextModeOf = (mode) => (['nano', 'low', 'max'].includes(mode) ? mode : 'max');
 const HOVER_OPEN_MS = 160;
-// After the mouse leaves, the open strip waits this long before it closes, and a margin
-// around it counts as still being there (a forgiving hover zone, like a menu's).
-const HOVER_CLOSE_MS = 1000;
-const HOVER_ZONE_PX = 32;
+// After the mouse leaves, the open strip waits this long before it closes. Still being there is the control, its hint
+// and the corridor between the two, each a few pixels wider: the way to the hint is forgiven, the message field below
+// is not (owner, Track09 #2873, 9 Nov 2026; was 1000 ms and a 32 px margin that reached into the field).
+const HOVER_CLOSE_MS = 300;
+const HOVER_ZONE_PX = 6;
 const HOVER_MEDIA = '(hover: hover) and (pointer: fine)';
 // An inline strip collapses in 0.4 s (style.css); the closed capsule's width has settled by then.
 const COLLAPSE_MS = 450;
@@ -164,15 +165,21 @@ function createCapsule({
     const stillHere = () => {
         try { return Boolean(el.matches(':hover') || (keyboardFocus && own(doc.activeElement))); } catch { return false; }
     };
-    // The open strip forgives a mouse that drifts a little: inside the zone (the control and its
-    // hint, plus a margin) it stays; outside, it closes after the delay unless the mouse comes back
-    // first. A pinned strip, a drag and keyboard focus keep it open regardless.
+    // The open strip forgives a mouse that drifts a little: inside the zone (the control, its hint
+    // and the corridor between them, plus a small margin) it stays; outside, it closes after the delay
+    // unless the mouse comes back first. A pinned strip, a drag and keyboard focus keep it open regardless.
     function inZone(point) {
-        return [el, hint?.el].some((node) => {
-            const r = point && node && !node.hidden && typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
-            return Boolean(r) && point.x >= r.left - HOVER_ZONE_PX && point.x <= r.right + HOVER_ZONE_PX
-                && point.y >= r.top - HOVER_ZONE_PX && point.y <= r.bottom + HOVER_ZONE_PX;
-        });
+        if (!point) return false;
+        const box = (node) => (node && !node.hidden && typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null);
+        const near = (r) => Boolean(r) && point.x >= r.left - HOVER_ZONE_PX && point.x <= r.right + HOVER_ZONE_PX
+            && point.y >= r.top - HOVER_ZONE_PX && point.y <= r.bottom + HOVER_ZONE_PX;
+        const own = box(el), said = box(hint?.el);
+        if (near(own) || near(said)) return true;
+        if (!own || !said) return false;
+        // The corridor: where the hint and the control overlap side to side, the gap between them.
+        const corridor = { left: Math.max(own.left, said.left), right: Math.min(own.right, said.right),
+            top: Math.min(own.bottom, said.bottom), bottom: Math.max(own.top, said.top) };
+        return corridor.left < corridor.right && near(corridor);
     }
     function closeSoon() {
         clearTimeout(leaveTimer);
@@ -306,6 +313,8 @@ function createCapsule({
     };
     const onEnter = (event) => {
         if (event.pointerType !== 'mouse') return;
+        // The mouse, not the keyboard, is here now: a focus left by Escape or Tab no longer holds a strip hover opens.
+        keyboardFocus = false;
         clearTimeout(leaveTimer);
         leaveTimer = 0;
         stopTracking();

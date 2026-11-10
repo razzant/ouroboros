@@ -82,15 +82,17 @@ _HARDENED_DIFF_FLAGS = (
 
 
 def _git_bytes(repo_dir, args: List[str]) -> Tuple[int, bytes, str]:
-    """Run git in ``repo_dir`` without GIT_DIFF_OPTS; return (rc, stdout, stderr)."""
+    """Run git in ``repo_dir`` without GIT_DIFF_OPTS; return (rc, stdout, stderr). A work folder's Git is the work
+    domain's: a refusal or an end its container did not confirm is this call's failure."""
+    from ouroboros import work_domain
     from ouroboros.git_observation import host_git_env
     env = host_git_env({k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"})
     try:
-        result = subprocess.run(
+        result = work_domain.run(
             ["git", *args], cwd=str(repo_dir),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, env=env,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return 1, b"", repr(exc)
     return result.returncode, result.stdout or b"", (
         (result.stderr or b"").decode("utf-8", "replace").strip()

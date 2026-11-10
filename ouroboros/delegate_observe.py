@@ -7,9 +7,11 @@ cheap reads instead: the journal read IS the wait (it returns as events arrive, 
 window's end, and every event it carries reaches the owner's live stream exactly as before),
 then one body-free present-state read says whether a question or a terminal is due. Only then
 is the run's detail read — the addressed read the attention earned — and the engine's token
-acknowledged as ``seen`` after it, never before. An engine without either surface keeps the
-detail beat (``tools/delegate._delegate_wait``), as do a refused journal, a problem row and a route
-that vanished mid-call, so the old path and its semantics decide everything this step does not understand.
+acknowledged as ``seen`` after it, never before. A run whose pending questions the engine
+reports as async and whose token was already fetched stays a quiet working beat. An engine
+without either surface keeps the detail beat (``tools/delegate._delegate_wait``), as do a
+refused journal, a problem row and a route that vanished mid-call, so the old path and its
+semantics decide everything this step does not understand.
 """
 from __future__ import annotations
 
@@ -97,9 +99,11 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
         return Step(detail=row.detail)  # the route vanished: this call read the detail, the old path takes it
     if row.problem is not None or row.error is not None:
         return None  # the engine could not place the run: the addressed read decides what it is
-    if wake.needs_attention(0) or read.ended or row.pending:
+    if wake.needs_attention(0) or read.ended or (row.pending and row.blocking is not False):
         # A run waiting on its person is never a quiet beat: the question's projection (the
         # pending interactions, the paused note, the continuation) comes from fresh detail.
+        # Only questions the engine itself calls async (claudexor #628), already fetched under
+        # this token, leave a working run quiet: nothing about them changed, nothing holds it.
         detail = delegate_progress.bounded_poll(gateway, run_id, read_window())
         _acknowledge(key, row.token)  # acknowledged only once the rows it stands for were fetched
         return Step(detail=detail)
@@ -107,5 +111,6 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     payload = {"status": "progress" if read.events else "no_progress", "run_id": str(run_id),
                "state": row.status or "", "last_seq": cursor, "waited_sec": int(time.monotonic() - started),
                "elapsed_seconds": elapsed_seconds, "max_seconds": max_seconds,
-               "waiting_on_user": False, "answered": True}
+               "waiting_on_user": bool(row.pending), **({"async_questions_only": True} if row.pending else {}),
+               "answered": True}
     return Step(payload=json.dumps(payload, ensure_ascii=False))

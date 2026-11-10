@@ -1367,8 +1367,10 @@ def _no_tool_final_answer(
         emit_progress("Result review outcome shown before delivery.")
         llm_trace["reasoning_notes"].append("Result review outcome shown before delivery.")
 
-    from ouroboros.tools.review_result import result_review_at_delivery
+    from ouroboros.tools.review_result import record_review_decision, result_review_at_delivery
 
+    if stopping:  # an explicit stop delivers unfinished work: no review is bought for it, and the record says why
+        record_review_decision(llm_trace, "author_stop", ctx=tools._ctx)
     if not stopping and result_review_at_delivery(tools._ctx, content or "", llm_trace, _hold_for_review):
         # The author continues freely; its next complete answer is selected explicitly.
         return held("result_review", _hold_cause(tools._ctx))

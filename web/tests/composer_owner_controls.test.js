@@ -97,7 +97,7 @@ test('without a hovering pointer the press toggles; Enter/Space open and focus t
     assert.equal(m.control.isOpen(), false, 'an outside press closes');
 });
 
-test('with a hovering pointer: opens after ~160 ms; closes 1 s after the mouse leaves a 32 px zone, unless pinned', async () => {
+test('with a hovering pointer: opens after ~160 ms; closes ~300 ms after the mouse leaves its small zone, unless pinned', async () => {
     const m = mount({ hover: true });
     assert.equal(m.control.hoverCapable, true);
     m.enter('touch');
@@ -108,21 +108,21 @@ test('with a hovering pointer: opens after ~160 ms; closes 1 s after the mouse l
     await sleep(200);
     assert.equal(m.control.isOpen(), true);
     assert.equal(m.control.isPinned(), false);
-    m.leave('mouse', { x: 120, y: 10 });   // 20 px right of the control: inside the zone
-    await sleep(1150);
+    m.leave('mouse', { x: 104, y: 10 });   // 4 px right of the control: inside the zone
+    await sleep(450);
     assert.equal(m.control.isOpen(), true, 'a mouse that drifts into the zone keeps it open');
     m.docMove(200, 10);                    // 100 px away: the zone is left, the delay starts
-    await sleep(500);
+    await sleep(150);
     assert.equal(m.control.isOpen(), true, 'not before the delay');
-    await sleep(650);
-    assert.equal(m.control.isOpen(), false, 'closed a second after leaving the zone');
+    await sleep(300);
+    assert.equal(m.control.isOpen(), false, 'closed about 300 ms after leaving the zone');
     assert.equal(m.doc.count('pointermove'), 0, 'zone tracking stops once closed');
     m.enter();
     await sleep(200);
     m.leave();
-    await sleep(300);
-    m.docMove(110, 30);                    // back into the zone before the delay ran out
-    await sleep(900);
+    await sleep(100);
+    m.docMove(104, 22);                    // back into the zone before the delay ran out
+    await sleep(450);
     assert.equal(m.control.isOpen(), true, 'coming back cancels the close');
     m.enter();
     m.headClick(1);
@@ -143,19 +143,19 @@ test('with a hovering pointer: opens after ~160 ms; closes 1 s after the mouse l
     assert.equal(m.control.isOpen(), false);
 });
 
-test('a drag that ends inside the hover zone does not close the strip a second later', async () => {
+test('a drag that ends inside the hover zone does not close the strip after the grace', async () => {
     const m = mount({ hover: true });
     m.control.syncState({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
     m.enter();
     await sleep(200);
     m.down(100);
-    m.up(110);                             // released 10 px past the control's right edge
+    m.up(104);                             // released 4 px past the control's right edge
     await m.settle();
-    m.leave('mouse', { x: 110, y: 10 });
-    await sleep(1150);
+    m.leave('mouse', { x: 104, y: 10 });
+    await sleep(450);
     assert.equal(m.control.isOpen(), true, 'the pointer is still within the zone');
     m.docMove(300, 10);
-    await sleep(1150);
+    await sleep(450);
     assert.equal(m.control.isOpen(), false, 'leaving the zone closes it');
 });
 
@@ -302,6 +302,41 @@ test('a mouse press on a level does not keep a hover-opened strip from closing; 
     await sleep(1150);
     assert.equal(m.control.isOpen(), true, 'keyboard focus inside keeps it open');
     m.escape();
+});
+
+test('a hover-opened strip closes about 300 ms after the mouse leaves, and the field below is not its zone (#2873)', async () => {
+    const m = mount({ hover: true });
+    m.control.syncState({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
+    m.enter();
+    await sleep(200);
+    assert.equal(m.control.isOpen(), true);
+    m.leave('mouse', { x: 50, y: 24 });  // 4 px under the control: still its zone
+    await sleep(450);
+    assert.equal(m.control.isOpen(), true, 'a small drift is forgiven');
+    m.docMove(50, 40);  // 20 px under it, where the message field begins
+    await sleep(180);
+    assert.equal(m.control.isOpen(), true, 'the grace has not run out yet');
+    await sleep(250);
+    assert.equal(m.control.isOpen(), false, 'closed about 300 ms after leaving the zone');
+    m.control.destroy();
+});
+
+test('after Escape, a strip the mouse opens again does not inherit keyboard focus and closes on leave (#2873)', async () => {
+    const m = mount({ hover: true });
+    m.control.syncState({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
+    m.enter();
+    await sleep(200);
+    m.escape();
+    assert.equal(m.control.isOpen(), false);
+    assert.equal(m.doc.activeElement, m.head, 'Escape returns focus to the head');
+    m.leave('mouse', { x: 600, y: 10 });
+    m.enter();
+    await sleep(200);
+    assert.equal(m.control.isOpen(), true, 'hover opens it again');
+    m.leave('mouse', { x: 600, y: 10 });
+    await sleep(450);
+    assert.equal(m.control.isOpen(), false, 'the focus Escape left does not hold a hover-opened strip');
+    m.control.destroy();
 });
 
 test('fit: beside the other controls when the strip fits there, alone when it does not, its name giving way, scrolling last', () => {

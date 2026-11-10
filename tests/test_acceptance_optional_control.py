@@ -59,8 +59,8 @@ def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkey
     else:
         selected = ({"answer": revised} if answer == "replace"
                     else {"answer_sha256": candidate.content_sha256})
-        if answer == "finish":
-            selected["pending_review"] = "finish"
+        if answer == "finish":  # a reasoned exception: finish_task refuses it without a rationale
+            selected.update(pending_review="finish", rationale="The owner needs this answer before the reviewers end.")
         assert _select(registry, ctx, trace, **selected)
         assert registry._ctx._delivery_candidate.full_text == (revised if answer == "replace" else ANSWER)
     choice = getattr(registry._ctx, "_acceptance_pending_review_choice", "") or "wait"

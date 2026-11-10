@@ -51,10 +51,11 @@ def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, te
     assert state["reasons"] == [{"code": f"turn_{turn_phase}", "text": text}]
 
 
-@pytest.mark.parametrize("kind", ["direct_chat", "presence"])
+@pytest.mark.parametrize("kind", ["direct_chat", "presence", "managed_task"])
 def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
     # A conversation-lane row reads `working` once a carrier holds it (conversation_lane.lane_turn_rows); its
-    # frame-fed start step is still a start step (lost on that path with #2654, 02.11).
+    # frame-fed start step is still a start step (lost on that path with #2654, 02.11). A pooled root a worker runs
+    # says the same (`carrier` from gateway.state, #2862); one no worker is said to hold stays Working below.
     def carried(**extra):
         return row("d", "working", kind=kind, carrier="worker", **extra)
 
@@ -70,6 +71,8 @@ def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
         assert state["reasons"] == [] and state["call"] in {"working", "sending"}, done
     awaiting = ws.classify_member(row("d", "preparing", kind=kind, carrier="awaiting"))
     assert (awaiting["call"], awaiting["reasons"]) == ("preparing", [])
+    unheld = ws.classify_member(row("d", "working", kind=kind, turn_phase="context_building"))
+    assert (unheld["call"], unheld["reasons"]) == ("working", [])
 
 
 def test_a_start_step_speaks_only_while_preparing_and_a_started_call_reads_the_census_move():
@@ -831,3 +834,29 @@ def test_the_live_silence_fact_reaches_the_work_line_from_the_running_row(tmp_pa
     meta["last_progress_at"] = 1794193900.0
     silence_attention.recovered(queue, "quiet", meta, 1794193900.0)
     assert all(code != "no_progress" for code, _since in reasons())
+
+
+# #2801: the word beside Finalizing… is a settled lifecycle's. A split-drive root's census row stays its canonical
+# hot row (`running`) until copy-back; its settled word is the effective result's, the one its card reads.
+_AUTHOR_STOP_AXES = {"schema_version": 1, "lifecycle": {"status": "completed"},
+                     "execution": {"status": "ok", "task_completion": {"action": "stop", "source": "finish_task"}},
+                     "objective": {"status": "fail", "source": "task_completion", "review_status": "skipped",
+                                   "reason": "author_stop"}}
+
+
+@pytest.mark.parametrize("child_status, expected", [("completed", "cancelled"), ("running", None)])
+def test_a_finalizing_split_root_says_its_effective_outcome_not_its_hot_row(tmp_path, child_status, expected):
+    from ouroboros.task_results import write_task_result
+
+    data, child = tmp_path / "data", tmp_path / "child"
+    data.mkdir()
+    child.mkdir()
+    write_task_result(child, "fr", child_status, **({"outcome_axes": _AUTHOR_STOP_AXES, "result": "partial"}
+                                                      if child_status == "completed" else {}))
+    write_task_result(data, "fr", "running", child_drive_root=str(child),
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    row = {"activity_id": "fr", "phase": "finalizing", "status": "running", "kind": "managed_task", "chat_id": 1,
+           "task_attempt": 1, "started_at": 100.0}
+    work = next(w for w in wp.works_snapshot(data, [row], {"fr": {"running": True}})["works"] if w["work_id"] == "fr")
+    assert work["transition"] == "finalizing"
+    assert work.get("outcome") == expected

@@ -523,8 +523,10 @@ growing, a swipe begun in a card's frame and the app's own jump (the waiting pil
 to a question) move nothing (`web/modules/composer_fold.js`; owner 19.10).
 
 **Hover is an accelerator; the press always works.** With a hovering fine pointer a
-capsule opens ~160 ms after arrival (not while the other is open) and closes a
-second after it leaves a 32 px zone unless a press pinned it; the press unpins.
+capsule opens ~160 ms after arrival (not while the other is open) and closes
+~300 ms after it leaves its zone (the capsule, its hint and the corridor between,
+a few px wider; never the message field) unless a press pinned it; the press unpins;
+a mouse arriving after Escape opens it as hover, not keyboard.
 Touch and keyboard use the press: Enter or Space opens onto the recommended handle
 or the chosen mode; arrows step a handle (PageUp/PageDown too) or choose the next
 mode, Home/End reach the ends; Esc closes and returns focus to the head; an outside
@@ -702,14 +704,15 @@ keeps a neutral owner anchor visible but hides task status and typing until a
 real task status or activity arrives; review presence alone never means
 `Working`, `Done`, or owner attention.
 
-A review only awaited when its task ended is not a warning: reviewers that had
-simply not answered yet leave the task `Done`. For a plan review the task result
-keeps the host's typed disclosure that the review was still open (the
-`terminal_host_notice` field, read by the CLI and by parents), the card states
-the same fact as its cause sentence, and no second chat bubble carries it; a
-card that reads `Done with warnings` or `Failed` for another reason keeps that
-reason, with the open review stated beside it when the result records it. For a result review the card's
-cause sentence already says when a delivered answer lacks the reviewers' sign-off. A real
+A plan review only awaited when its task ended is not a warning: the task stays
+`Done`, its result keeps the host's typed disclosure that the review was still
+open (`terminal_host_notice`, read by the CLI and by parents), the card states it
+as its cause sentence, and no second chat bubble carries it; a card that reads
+`Done with warnings` or `Failed` for another reason keeps that reason, with the
+open review stated beside it when the result records it. A result Ouroboros
+accepted without its reviewers' approval (failed, degraded or still running)
+always reads `Done with warnings`, its reason in the cause sentence (owner,
+8 Nov 2026); an accepted revision of a version they passed reads `Done`. A real
 outcome keeps its word: no reviewer quorum, a failed, refused or unresolved
 slot, a collected blocking finding, a reviewer verdict nobody closed, a rail or
 a blocking exit still read `Done with warnings` or `Failed`.
@@ -728,8 +731,11 @@ exact applied record as a download once the host stored it, and a cut of the
 whole row names that record only then, never a guessed link. Slot ids, verdict
 tokens and omission markers stay in that record and the model's mailbox. The row
 lands inside the finished card (its Reviews group carries the note, the timeline
-keeps the row) without changing the card's chip, title or meta; a standalone row
-appears only when the task has no card record in the page. Saving and showing
+keeps the row); a standalone row appears only when the task has no card here.
+A late PASS of exactly an answer delivered before its reviewers answered clears
+only that wait's warning. The existing late-review event carries the current
+outcome to the finished card; history reads the same outcome beside the original
+ending row. Newer card facts win over older outcomes. Title and meta stay. Saving and showing
 late criticism does not replace passing it to Ouroboros: the host owns sources
 and fact delivery; Ouroboros judges the evidence, explains it and chooses any
 further work on an admissible turn. The untyped terminal host notice and the
@@ -2361,11 +2367,12 @@ draws no chrome or status from it. A block that existed only for open attention 
 closes: a wait-only block when its wait resolves, and the resolved
 episode's no-reopen ledger stays with the record, so a stale revision cannot
 revive it. A host wait (accounting access, control storage: the typed
-`usage_lock_wait`/`control_store_wait` episodes) is how the host ran, not the
+`usage_lock_wait`/`control_store_wait`/`safety_check_wait` episodes) is how the host ran, not the
 turn's work: a block's episodes of one kind are one receipt row, live while one
 is open, then their count and the longest measured one, so a wait never makes or
 keeps a block, live or on reload; Logs keep every phase, and the model's progress
-window folds them the same way (`checkpoint_waits`).
+window folds them the same way (`checkpoint_waits`); an open Safety check also shows a quiet still-mark line under a
+closed card's current action.
 
 An addressing call (`start_task`, `move_to_project`, `tell_task`: the
 routing-verb family `ouroboros/tool_capabilities.py::ROUTING_VERBS` owns) is

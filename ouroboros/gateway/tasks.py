@@ -179,6 +179,8 @@ def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], 
     answer_protocol = normalize_answer_protocol(body.get("answer_protocol") or raw_metadata.get("answer_protocol"))
     if answer_protocol:
         metadata["answer_protocol"] = answer_protocol
+    if normalize_bool(body.get("review_answer") or raw_metadata.get("review_answer")):
+        metadata["review_answer"] = True  # task_contract.review_answer: Required reviews the whole final answer
     service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
     if service_teardown:
         if service_teardown not in {"stop", "keep"}:

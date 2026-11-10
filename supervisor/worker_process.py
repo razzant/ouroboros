@@ -597,17 +597,23 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
         )
         runner.owner_wait_callback = agent.owner_wait_callback
     # A conversation turn's execution facts: its receipt, its endpoint hooks (the Stop
-    # marker, the namer, the phase observer) and this thread's store meter.
+    # marker, the namer, the phase observer) and this thread's store meter. Any other
+    # task's endpoint observes only its start phases (#2862), through the same producer.
     carrier_turn = None
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import CarrierTurn
 
-        carrier_turn = CarrierTurn(task, task_drive_root, out_q, wid)
+        carrier_turn = CarrierTurn(task, task_drive_root, out_q, worker_id=wid)
+        hooks = carrier_turn.hooks()
+    else:
+        from supervisor.worker_chat_lane import pooled_turn_phases
+
+        hooks = {"on_frame": pooled_turn_phases(task, out_q, worker_id=wid).observe}
     # The task's own endpoint (the direct lane's TurnEventQueue shape): every
     # telemetry frame this task emits — live, or from a callback that
     # outlives it — carries its chat and lineage by value, so the
     # supervisor can handle it after task_done without a RUNNING row.
-    task_queue = task_event_queue(out_q, task, **(carrier_turn.hooks() if carrier_turn else {}))
+    task_queue = task_event_queue(out_q, task, **hooks)
     pool_queue = getattr(runner, "_event_queue", None)
     runner._event_queue = task_queue
     try:
