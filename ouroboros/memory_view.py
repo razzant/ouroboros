@@ -973,11 +973,10 @@ def _page_label(entry: Mapping[str, Any]) -> str:
     return _page_pointer(entry) + attribution + "\n" + _indented(sentence)
 
 
-def _told_lines(account_id: str, told: List[Dict[str, Any]]) -> List[str]:
-    """One count and period over the selected records, nested selections included; exact IDs stay in the reader."""
-    children: Dict[str, List[Dict[str, Any]]] = {}
-    for item in told:
-        children.setdefault(item["told_by"], []).append(item)
+def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -> List[str]:
+    """One count and period over the selected records, nested selections included; exact IDs stay in the reader.
+
+    ``children``: the told records by their teller, indexed once per render (``render_story``)."""
     records, pending = [], [account_id]
     while pending:
         for item in children.get(pending.pop(), ()):
@@ -1142,7 +1141,10 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
         return (f"## My story — unavailable now ({snapshot.store_status.get('reason')})\n\n"
                 f"The old memory files are untouched: read_file(root='runtime_data', path='{LEGACY_FILE}').")
     gone = dict(level.addressed)
-    told = [entry for entry in snapshot.story if entry.get("told_by")]
+    told: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in snapshot.story:
+        if entry.get("told_by"):
+            told.setdefault(entry["told_by"], []).append(entry)
     pointers = [entry for entry in snapshot.story if entry.get("kind") == "legacy" and not entry.get("told_by")]
     accounts = [entry for entry in snapshot.story if entry.get("kind") == "account" and not entry.get("told_by")]
     pages = [entry for entry in snapshot.story if entry.get("kind") not in ("legacy", "account") and not entry.get("told_by")]
