@@ -234,10 +234,10 @@ def resolve_pending_result_review(drive_root: Any, task_id: str, record_id: str)
             **_objective_axis(resolved), **{key: value for key, value in objective.items()
                                              if key in _REVIEW_DERIVED_OBJECTIVE and value != derived.get(key)}}}}
 
-    written = write_task_result(drive_root, task_id, str(row["status"]), _field_projector=resolve)
+    write_task_result(drive_root, task_id, str(row["status"]), _field_projector=resolve)
     if changed:
         try:
-            announce_current_outcome(drive_root, task_id, record_id, subject, written)
+            announce_current_outcome(drive_root, task_id, record_id, subject)
         except Exception:  # the stored outcome stands; an open card reads it at its next history read
             log.warning("late result review %s of task %s: its current outcome was not announced", record_id, task_id,
                         exc_info=True)
@@ -289,7 +289,7 @@ def current_outcome(row: Mapping[str, Any], delivery: Optional[Mapping[str, Any]
 def late_current_outcome(drive_root: Any, row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     """The current outcome of an ended task a late review revised (``late_verdict``), with its answer's delivery
     as it stands (``terminal_projection._delivery_disposition``), else ``None``: the card's and a reload's one
-    reading (``announce_current_outcome``; ``history_paging.replay_evidence_rows``)."""
+    reading (``announce_current_outcome``; history's task carriers and replay evidence)."""
     review = ((row or {}).get("outcome_axes") or {}).get("review") if isinstance((row or {}).get("outcome_axes"), dict) else None
     if not isinstance(review, dict) or not isinstance(review.get("late_verdict"), dict):
         return None
@@ -302,15 +302,19 @@ def late_current_outcome(drive_root: Any, row: Optional[Mapping[str, Any]]) -> O
     return current_outcome(row, delivery)
 
 
-def announce_current_outcome(drive_root: Any, task_id: str, record_id: str, subject: str,
-                             row: Mapping[str, Any]) -> Dict[str, Any]:
+def announce_current_outcome(drive_root: Any, task_id: str, record_id: str, subject: str) -> Dict[str, Any]:
     """The existing late-review event (``review_late_result``) with the task's current outcome after a late PASS
     resolved it, bound to the exact task, record and subject, so an open finished card repaints what a reload of the
-    stored row reads. The durable append lands first; the one live frame is pushed where a bridge exists (the
+    stored row reads. That outcome is the row as the store holds it now, read here, never the resolver's earlier copy:
+    a write that landed after the resolution (a custody warning) is what the card repaints. Its ``revision`` is that
+    row's, and the card orders it by that revision, never by this event's later ``ts`` (``log_events.js``
+    ``lateOutcomeIsCurrent``). An unreadable row raises: nothing is announced, and the card reads the stored outcome
+    at its next history read. The durable append lands first; the one live frame is pushed where a bridge exists (the
     server process, as ``post_task_checkpoint`` pushes a finalized cost; the log sink's copy of this type is
     suppressed). Never a chat row, a task summary or a notification."""
     from ouroboros.utils import append_jsonl, utc_now_iso
 
+    row = ended_task_row(drive_root, task_id, strict=True) or {}
     event = {"ts": utc_now_iso(), "type": "review_late_result", "task_id": str(task_id), "surface": "result",
              "record_id": str(record_id), "subject_sha": str(subject), "status": "settled", "aggregate": "PASS",
              # Its audience by value, as a worker's recorded row is stamped: the task left RUNNING long ago.

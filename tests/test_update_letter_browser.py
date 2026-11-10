@@ -32,7 +32,7 @@ dashboard.activateTab('updates');
 
 @pytest.mark.parametrize(("engine", "width"), [("chromium", 1360), ("webkit", 390)])
 def test_check_keeps_text_and_install_action_then_shows_exact_failed_range(engine, width, tmp_path):
-    output = diagnostic_directory(tmp_path, "update-letter")
+    output = diagnostic_directory(tmp_path, "update-letter", publish=True)
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1")
     playwright = pytest.importorskip("playwright.sync_api")

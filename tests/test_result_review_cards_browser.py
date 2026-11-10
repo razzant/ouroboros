@@ -10,6 +10,7 @@ check runs at the owner's 1100x750 desktop size in both engines: live in the lig
 light and in dark; Settings › Behavior says the same rules in both themes. Screenshots go to
 ``OUROBOROS_BROWSER_EVIDENCE_OUT``.
 """
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -165,7 +166,8 @@ LATE = {
     "late-pass": ("", "PASS", "Done", BEFORE),
     "late-pass-receipt": ("receipt_absent", "PASS", "Done with warnings", BEFORE),
     "late-fail": ("", "FAIL", "Done with warnings", RECEIPT),
-    # A newer state (a custody debt recorded after the late PASS) is shown first; the late frame arrives delayed.
+    # A newer state (a custody debt recorded after the late PASS) is shown first; the late frame, published after it,
+    # still carries the older revision.
     "late-stale": ("", "PASS", "Done with warnings", BEFORE),
 }
 
@@ -195,8 +197,9 @@ def test_a_late_pass_repaints_the_open_card_and_its_reload_reads_the_same(direct
     (``address_task_event``; the route itself: tests/test_log_forwarding.py). The open card repaints only on a PASS of
     exactly the delivered answer and drops only the warning that wait caused: an independent ``receipt_absent`` stays,
     a late FAIL keeps its warning, a replay changes nothing, a seat's result without an outcome touches no card, a task
-    with no card here gets none, and a late frame older than a newer state the card shows never paints over it (the
-    card's clock). A reload reads the same outcome and line from the stored row; the ending row stays as written."""
+    with no card here gets none, and a late outcome older than a newer state the card shows never paints over it, even
+    published after it: its revision orders it, not its later ``ts`` (the card's clock; Astra, 10 Nov 2026). A reload
+    reads the same outcome and line from the stored row; the ending row stays as written."""
     import datetime
     import json
     import time
@@ -304,10 +307,16 @@ def test_a_late_pass_repaints_the_open_card_and_its_reload_reads_the_same(direct
                     assert newer_row["outcome_phase"] == "warn" and newer_row["delegated_runs_unreconciled"] == ["run-x"]
                     _emit_ws_frame(page, {**newer_row, "type": "chat", "role": "system", "system_type": "task_summary",
                                          "content": newer_row["text"]})
+                    # Its late frame is published after that newer state reached the card, still carrying the older
+                    # revision it read: the revision orders it, never this later ts.
+                    published = (datetime.datetime.fromisoformat(later) + datetime.timedelta(minutes=1)).isoformat()
+                    stale = {**events["card-late-stale"], "ts": published}
+                    assert stale["current_outcome"]["revision"] < newer["updated_at"] < later < published
                     seat = {"type": "review_late_result", "task_id": "card-late-fail", "surface": "result",
                             "slot_id": "s1", "status": "complete", "operation_state": "complete"}
                     ghost = {**events["card-late-pass"], "task_id": "card-ghost", "record_id": "rec-ghost"}
-                    for event in (*events.values(), events["card-late-pass"], seat, ghost):  # PASS twice: a replay
+                    for event in (*{**events, "card-late-stale": stale}.values(), events["card-late-pass"], seat,
+                                  ghost):  # PASS twice: a replay
                         log_frame(page, event)
                     visits = ("light-live", "light-reloaded")
                 else:
@@ -319,6 +328,9 @@ def test_a_late_pass_repaints_the_open_card_and_its_reload_reads_the_same(direct
                         line = look(page, name, headline, step)
                         assert never not in line, (step, name, line)
                         lines.setdefault(name, {})[step] = line
+                    if step.endswith("reloaded"):
+                        log_frame(page, stale)  # a delayed snapshot must also lose to the revision history just showed
+                        assert look(page, "late-stale", "Done with warnings", step + "-delayed") == lines["late-stale"][step]
                     assert page.locator('.chat-live-card[data-task-id="card-ghost"]').count() == 0, step
                     page.screenshot(path=str(evidence / f"{engine}-{step}.png"), animations="disabled")
                 assert not errors.unexpected(), errors
@@ -480,6 +492,226 @@ def test_a_late_pass_repaints_a_finished_child_card_through_its_own_terminal_pat
                 context.close()
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize("engine", ["webkit", "chromium"])
+def test_a_late_outcome_keeps_its_microsecond_order_on_root_and_child_cards(direct_server_with_data, tmp_path, monkeypatch,
+                                                                           engine):
+    """Astra, 10 Nov 2026 (C1): a stored revision carries microseconds, and a custody warning can land inside the
+    millisecond of the late PASS before it. Read to the millisecond, the delayed older PASS repainted Done over it. On a
+    finished root and a finished child, an outcome older by 688 µs changes nothing on the open card whose clock took the
+    newer frame, and after a reload whose clock is the stored row's revision, on roots and children alike. The same
+    revision again repaints the same outcome; a truly later outcome inside that millisecond paints Done, and the older
+    warning cannot return. The stored rows and announcements are production; only the writer's clock is set, to make
+    the millisecond exact."""
+    import datetime
+    import json
+    import time
+
+    from playwright.sync_api import expect, sync_playwright
+    from ouroboros import dialogue_store, late_review_marks as late, review_ledger, task_results
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.terminal_projection import _project_row, terminal_projection_owed
+    from supervisor.log_addressing import address_task_event
+    from supervisor.message_bus import log_chat
+    from tests.ui_chat_viewport_smoke import (
+        _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
+    )
+
+    root = direct_server_with_data["data_dir"]
+    evidence = producer_evidence_dir(tmp_path / "screenshots", "result-review-microseconds",
+                                     env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    evidence.mkdir(parents=True, exist_ok=True)
+    root_id, child_id = "card-us-root", "card-us-child"
+    tasks = (root_id, child_id)
+    report = f"Report from {child_id}"
+    warned = {root_id: "Some delegated work was never reconciled.", child_id: report}
+    cleared = {root_id: "", child_id: report}
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "current"}, "verdict": {"aggregate": "PASS"},
+        "ts": "2026-11-10T00:00:00+00:00"})
+    now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()  # noqa: E731
+
+    def stored(row, frame):  # a progress row as ``message_bus`` keeps it, and the frame its live socket carried
+        dialogue_store.append(root, "progress", row)
+        return {**row, **frame}
+
+    def log_frame(page, event):  # what bridge.push_log broadcasts for one addressed event
+        addressed = address_task_event(None, root, dict(event))
+        _emit_ws_frame(page, {"type": "log", "data": addressed, "chat_id": int(addressed.get("chat_id") or 0)})
+
+    def card(page, task_id):
+        return page.locator(f'.chat-live-card[data-task-id="{task_id}"]').first
+
+    def view(page, task_id):  # everything a frame the card rejects must leave as it was, and where the card stands
+        return card(page, task_id).evaluate("""el => ({
+            phase: el.querySelector('[data-live-phase]').textContent,
+            activity: el.querySelector('[data-live-activity]').textContent,
+            finished: el.dataset.finished || '',
+            timeline: [...el.querySelector('[data-live-timeline]').children].map(row => row.textContent),
+            place: [...el.parentNode.children].indexOf(el)})""")
+
+    def picture(page, step):
+        for task_id in tasks:
+            card(page, task_id).evaluate("el => el.scrollIntoView({block: 'center'})")
+            card(page, task_id).screenshot(path=str(evidence / f"{engine}-{step}-{task_id}.png"), animations="disabled")
+
+    reads = {"open": 0, "at": 0.0}
+
+    def note_history(request, step):  # a card that first finishes schedules its own history read
+        if "/api/chat/history" in request.url:
+            reads.update(open=reads["open"] + step, at=time.monotonic())
+
+    def settle(page):  # the server's own ending rows and those reads land before the late frames, never between
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and (any(terminal_projection_owed(tid, load_task_result(root, tid) or {})
+                                                   for tid in tasks) or reads["open"]
+                                               or time.monotonic() - reads["at"] < 1.5):
+            page.wait_for_timeout(250)
+        assert not reads["open"], "a history read stayed open"
+
+    def stamped(moment, write, *args, **kwargs):  # the production writer, at an exact moment of its own clock
+        with monkeypatch.context() as patch:
+            patch.setattr(task_results, "utc_now_iso", lambda: moment)
+            return write(*args, **kwargs)
+
+    frames, kept, painted, changes = {}, {}, {}, {}
+
+    def facts(state):  # what a repaint of the same outcome must keep; the outcome row's time is the revision it took
+        return {**state, "timeline": [re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", "", row) for row in state["timeline"]]}
+
+    def keeps(page, task_id, frame, step, replay=False):  # recorded per case: the first red case must not hide the others
+        before = view(page, task_id)
+        log_frame(page, frame)
+        after = view(page, task_id)
+        kept[(task_id, step)] = (facts(after) == facts(before)) if replay else after == before
+        if not kept[(task_id, step)]:
+            changes[f"{task_id} / {step}"] = {"before": before, "after": after}
+
+    def paints(page, task_id, frame, headline, line, step):
+        log_frame(page, frame)
+        expect(card(page, task_id).locator('[data-live-phase]').first).to_have_text(headline, timeout=30000)
+        painted[(task_id, step)] = card(page, task_id).locator('[data-live-activity]').first.inner_text() == line
+
+    def reloaded(page, headline):
+        page.reload(wait_until="domcontentloaded")
+        _wait_socket_open_quiescent(page)
+        for task_id in tasks:
+            expect(card(page, task_id).locator('[data-live-phase]').first).to_have_text(headline, timeout=30000)
+        settle(page)
+
+    def parent(page):
+        return card(page, "card-parent").evaluate(
+            "el => [el.querySelector('[data-live-phase]')?.textContent, el.dataset.finished || '']")
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            context = browser.new_context(viewport={"width": 1100, "height": 750}, reduced_motion="reduce")
+            page = context.new_page()
+            errors = PageErrors(page, engine)
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})(); ({_OBSERVE_STATE_READS})();")
+            page.on("request", lambda request: note_history(request, 1))
+            page.on("requestfinished", lambda request: note_history(request, -1))
+            page.on("requestfailed", lambda request: note_history(request, -1))
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            _wait_socket_open_quiescent(page)
+            answer = "The report whose order is checked."
+            ended = write_task_result(root, root_id, "completed", chat_id=1, root_task_id=root_id, delegation_role="root",
+                                      result=answer, terminal_origin="model_final", reason_code="final_message",
+                                      outcome_axes=_pending_axes(root_id, ""))
+            summary = _project_row(root_id, ended, {}, {"chat_id": 1})
+            _emit_ws_frame(page, stored({"task_id": root_id, "chat_id": 1, "content": "Checking the order",
+                                         "ts": summary["ts"], "narration": True},
+                                        {"type": "chat", "role": "assistant", "is_progress": True}))
+            log_chat("out", 1, 1, answer, task_id=root_id, drive_root=root)
+            _emit_ws_frame(page, {"type": "chat", "role": "assistant", "chat_id": 1, "task_id": root_id, "content": answer})
+            dialogue_store.append(root, "chat", summary)
+            _emit_ws_frame(page, {**summary, "type": "chat", "role": "system", "system_type": "task_summary",
+                                  "content": summary["text"]})
+            write_task_result(root, "card-parent", "running", chat_id=1, root_task_id="card-parent", delegation_role="root")
+            _emit_ws_frame(page, stored({"task_id": "card-parent", "chat_id": 1, "ts": now(), "is_progress": True,
+                                         "content": "Parent gathers its helpers' reports", "narration": True},
+                                        {"type": "chat", "role": "assistant"}))
+            axes = _pending_axes(child_id, "")
+            write_task_result(root, child_id, "completed", chat_id=1, result=report, terminal_origin="model_final",
+                              reason_code="final_message", outcome_axes=axes,
+                              **{k: v for k, v in CHILD.items() if k != "subagent_role"})
+            lineage = {"subagent_task_id": child_id, **CHILD}
+            _emit_ws_frame(page, stored({"task_id": child_id, "chat_id": 1, "ts": now(), "is_progress": True,
+                                         "content": "Checking the order", "narration": True, "status": "running",
+                                         "subagent_event": "running", **lineage},
+                                        {"type": "chat", "role": "assistant"}))
+            finished = now()
+            _emit_ws_frame(page, stored({"task_id": child_id, "chat_id": 1, "ts": finished, "is_progress": True,
+                                         "role": "system", "system_type": "subagent_terminal_notice",
+                                         "content": f"Subagent {child_id} completed (researcher).",
+                                         "subagent_event": "completed", "status": "completed", "result": report,
+                                         "outcome_axes": axes, "reason_code": "final_message", **lineage},
+                                        {"type": "chat"}))
+            log_frame(page, {"type": "task_done", "task_id": child_id, "chat_id": 1, "status": "completed",
+                             "outcome_axes": axes, "reason_code": "final_message", "ts": finished,
+                             **{k: CHILD[k] for k in ("parent_task_id", "root_task_id")}})
+            settle(page)
+            for task_id in tasks:
+                expect(card(page, task_id).locator('[data-live-phase]').first).to_have_text("Done with warnings", timeout=30000)
+            parent_before = parent(page)
+
+            # One millisecond, later than anything these cards have shown: the PASS, the custody warning 688 µs after
+            # it (the reproduction's real interval), and a clean state 112 µs after that.
+            base = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=2)).replace(microsecond=147169)
+            older, newer, latest = (base + datetime.timedelta(microseconds=by) for by in (0, 688, 800))
+            assert older.isoformat()[:23] == latest.isoformat()[:23]
+            for task_id in tasks:
+                assert stamped(older.isoformat(), late.resolve_pending_result_review, root, task_id, f"rec-{task_id}")
+                stale = next(row for row in map(json.loads, (root / "logs" / "events.jsonl").read_text(encoding="utf-8")
+                                                .splitlines()) if row.get("task_id") == task_id)
+                row = stamped(newer.isoformat(), write_task_result, root, task_id, "completed",
+                              delegated_runs_unreconciled=["run-x"])
+                warning = {**stale, "current_outcome": late.late_current_outcome(root, row)}
+                assert [frame["current_outcome"]["outcome_phase"] for frame in (stale, warning)] == ["done", "warn"]
+                assert [frame["current_outcome"]["revision"] for frame in (stale, warning)] == [older.isoformat(),
+                                                                                                newer.isoformat()]
+                frames[task_id] = {"stale": stale, "warning": warning}
+
+                # The open card first takes the newer outcome, then the delayed older one arrives.
+                paints(page, task_id, warning, "Done with warnings", warned[task_id], "live: the newer warning")
+                keeps(page, task_id, warning, "live: the same revision again", replay=True)
+                keeps(page, task_id, stale, "live: older by 688 microseconds")
+                keeps(page, task_id, {**stale, "current_outcome": {**stale["current_outcome"], "revision": (
+                    older - datetime.timedelta(milliseconds=2)).isoformat()}}, "live: older by 2 milliseconds")
+            assert parent(page) == parent_before, "the parent card is not the child's"
+            picture(page, "live-after-stale")
+
+            # A reload's clock is the stored row's revision; the delayed older outcome must lose to it too.
+            reloaded(page, "Done with warnings")
+            for task_id in tasks:
+                keeps(page, task_id, frames[task_id]["stale"], "reloaded: older by 688 microseconds")
+                keeps(page, task_id, frames[task_id]["warning"], "reloaded: the same revision again", replay=True)
+            picture(page, "reloaded-after-stale")
+
+            # A later state of the row inside that millisecond is current, and an older warning cannot return over it.
+            for task_id in tasks:
+                row = stamped(latest.isoformat(), write_task_result, root, task_id, "completed",
+                              delegated_runs_unreconciled=[])
+                clean = {**frames[task_id]["stale"], "current_outcome": late.late_current_outcome(root, row)}
+                assert clean["current_outcome"]["outcome_phase"] == "done" and clean["current_outcome"]["revision"] == latest.isoformat()
+                paints(page, task_id, clean, "Done", cleared[task_id], "later: inside the same millisecond")
+                keeps(page, task_id, frames[task_id]["warning"], "later: the older warning arrives after it")
+            picture(page, "later-pass")
+            reloaded(page, "Done")
+            picture(page, "later-pass-reloaded")
+            assert not errors.unexpected(), errors
+            context.close()
+        finally:
+            browser.close()
+    (evidence / f"{engine}-cases.json").write_text(json.dumps(
+        {"kept": {" / ".join(key): value for key, value in kept.items()},
+         "painted": {" / ".join(key): value for key, value in painted.items()}, "changes": changes}, indent=1),
+        encoding="utf-8")
+    assert all(kept.values()) and all(painted.values()), json.dumps(
+        {"kept": {" / ".join(key): value for key, value in kept.items() if not value},
+         "painted": {" / ".join(key): value for key, value in painted.items() if not value}, "changes": changes})
 
 
 # Settings › Behavior says the same rules: the answer a task requires checked, Advisory's re-review choice after a

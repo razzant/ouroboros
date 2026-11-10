@@ -477,7 +477,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
-    const result = ws?.send?.({ type: 'command', cmd: '/restart' }, { queue: false });
+    const result = ws?.send?.({ type: 'command', cmd: '/restart', ui_control: { name: 'restart' } }, { queue: false });
     return result?.status === 'sent' ? 'sent' : 'not_connected';
 }
 

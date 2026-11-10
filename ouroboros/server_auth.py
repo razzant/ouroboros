@@ -253,6 +253,12 @@ def _appearance_meta(served_ui: ServedUI | None, request: Request) -> str:
     return served_ui.appearance_meta(request.headers) if served_ui is not None else ""
 
 
+# Every sign-out (GET or POST /auth/logout) and every ended or refused session reaches the builtin form before the
+# interface can run again: it takes this browser's saved conversation text (web/modules/chat_preview.js PREVIEW_KEY)
+# and nothing else the browser keeps. A selected interface's own sign-in page owns its storage.
+_END_OF_SESSION_SCRIPT = 'try{localStorage.removeItem("ouroboros.chat-preview.v1")}catch(e){}'
+
+
 def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = None, head: str = "") -> str:
     """The builtin form. It answers before any asset behind the gate may load, so it inlines the builtin
     appearance owner and tokens: this browser's saved Light / Dark / System choice, else the device's."""
@@ -267,7 +273,8 @@ def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = N
     <input id="password" class="ui-control" name="password" type="password" autofocus required>
   </div>
   <button type="submit" class="btn btn-primary">Unlock</button>{error_html}
-</form>"""
+</form>
+<script>{_END_OF_SESSION_SCRIPT}</script>"""
     return themed_page(web_dir or _builtin_web_dir(None), "Ouroboros Login", form, _LOGIN_CSS, head)
 
 

@@ -1,5 +1,6 @@
 // Captured conversation content mounted inside the Place sheet. The sheet owns navigation and drafts.
 import { apiClient } from './api_client.js';
+import { previewsRefused } from './chat_preview.js';
 import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
@@ -215,6 +216,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             if (hadRows && target === null) scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
         } catch (error) {
             if (closed || version !== generation) return;
+            previewsRefused(error);  // a current refusal takes this browser's saved conversation text (chat_preview.js)
             find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
             retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;

@@ -269,14 +269,13 @@ ask), because it would let a task author its own request
 ### The owner corpus archives inputs; the owner door's stamp is the only authority
 
 A task-authored objective copies only its retained owner corpus, never the draft. Other
-runs record their first user turn for the owner corpus and Safety, labelled by
-what the host knows: `initial_user` when owner routing stamped the run
-(`metadata.origin_message_ref` or `origin_suppressed`, inherited by value by a promoted
-root), `initial_text` otherwise. `dialogue_provenance.run_origin` mints that fact once
-from typed fields (`owner_ingress`): an owner turn is a direct turn the door stamped,
-never a lane, a client id or an inherited stamp, and the stamp is reserved on
-`/api/tasks` and schedule templates. Neither label decides what work was accepted; the
-task contract and the owner's recorded answers do.
+runs record their first user turn for the corpus and Safety, labelled by what the host
+knows: `initial_user` when owner routing stamped the run (`metadata.origin_message_ref`
+or `origin_suppressed`, by value in a promoted root) and no control (`ui_control`) wrote
+it, else `initial_text`; schedule text is `schedule_text`. `dialogue_provenance.run_origin`
+mints the stamp once from typed fields (`owner_ingress`): a turn the door stamped, never
+a lane, a client id or an inherited stamp; it is reserved on `/api/tasks` and schedule
+templates. No label decides what work was accepted; the contract and the owner's answers do.
 
 ### Anti-pattern: a chat id tested for truth
 

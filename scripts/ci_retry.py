@@ -25,7 +25,8 @@ others: a file none of whose tests has an attempt yet (the unrun rest of a stopp
 session) by its path when the lane has no test of it elsewhere, every other test by
 its node id (`round_arguments`); it
 writes its projection to DIR/retry-<k>, its JUnit to a `retry-<k>`
-directory beside the command's own, and leaves out the options that prove a whole
+directory beside the command's own, its launcher's raw evidence (scripts/safe_test.py
+`--evidence-dir`) beneath that parent's own `retry-<k>`, and leaves out the options that prove a whole
 lane, which no subset can (the lane is proven by the first session's projection and
 this verdict, `tests/ci_evidence.py reconcile-shards`). A test runs at most twice.
 Rounds stop when nothing is left, or when a round runs none of its tests.
@@ -105,7 +106,8 @@ def retry_command(command: list[str], *, argsfile: Path, direct: list[str], roun
     the first of them stood, or at the end without one. `--ci-evidence-dir` names
     round_dir (and is added when missing), the JUnit file moves into a directory named
     like round_dir beside its own (it stays private: raw JUnit is never public
-    evidence), and the whole-lane options are dropped, with their values.
+    evidence), a launcher's `--evidence-dir` into its child named like round_dir (only
+    when given), and the whole-lane options are dropped, with their values.
     """
     out, placed, evidence, index = [], False, False, 0
     while index < len(command):
@@ -122,6 +124,9 @@ def retry_command(command: list[str], *, argsfile: Path, direct: list[str], roun
         elif option and name in _JUNIT:
             original = Path(value if attached else following)
             moved = str(original.parent / round_dir.name / original.name)
+            out += [f"{name}={moved}"] if attached else [name, moved]
+        elif option and name == "--evidence-dir":
+            moved = str(Path(value if attached else following) / round_dir.name)
             out += [f"{name}={moved}"] if attached else [name, moved]
         elif valued:
             out += command[index:index + 2]

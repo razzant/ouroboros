@@ -638,6 +638,11 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         metadata = task_metadata if isinstance(task_metadata, dict) else {}
         if isinstance(metadata.get("client_surface"), dict):
             event["client_surface"] = dict(metadata["client_surface"])
+        if isinstance(metadata.get("ui_control"), dict):
+            # My human pressed a control and the host wrote this request: the press rides the task as its
+            # own fact (enable authority for this repair, ``skill_lifecycle_actions``), the words as the host's.
+            event["ui_control"] = dict(metadata["ui_control"])
+            event["objective_author"] = {"kind": "ui_control", "control": str(metadata["ui_control"].get("name") or "")}
         if isinstance(metadata.get("presence"), dict) and metadata["presence"]:
             event["presence"] = dict(metadata["presence"])
             event["task_contract"] = dict(metadata.get("task_contract") or {})
@@ -704,6 +709,9 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # A suppressed (never-logged) message has a DESIGNED absence of origin;
         # downstream binders must not classify it as a producer bug.
         task_metadata = {**(task_metadata or {}), "origin_suppressed": True}
+    if isinstance(task_metadata.get("ui_control"), dict):
+        # A press composed these words: the act stamped the turn, the words stay the host's (never initial_user).
+        task_metadata["objective_author"] = {"kind": "ui_control", "control": str(task_metadata["ui_control"].get("name") or "")}
     # Owner Surface Fact channel fallback: a non-web ingress (telegram/skill
     # transports) carries no browser observables, but its channel IS the
     # surface fact, with the common ingress receipt stamp (``received_at``,

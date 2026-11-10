@@ -138,3 +138,29 @@ def target_write_refusal(target: Path, refusal: str) -> str:
     detail = refusal.removeprefix("⚠️ ").removeprefix("INTEGRATE_TARGET_FORBIDDEN: ")
     return (f"⚠️ INTEGRATE_TARGET_FORBIDDEN: current write authority at the recorded target "
             f"{target} does not admit this apply: {detail}")
+
+
+def protected_apply_refusal(*, path: str, runtime_mode: str, action: str, grant_ok: bool) -> str:
+    """The protected-path refusal of both integration doors, naming the cause that holds.
+
+    A door admits a protected body path when the mode allows protected writes AND an acting caller
+    holds its own ``protected_paths_grant``: the grant of the task applying the patch, never of its
+    author. A mode refusal keeps the policy's own words; a missing grant is named, since no mode
+    switch supplies it, and the captured result stays for the caller's parent to decide.
+    """
+    from ouroboros.runtime_mode_policy import (
+        mode_allows_protected_write, normalize_repo_path, protected_path_category, protected_write_block_message,
+    )
+
+    if grant_ok:
+        return protected_write_block_message(path=path, runtime_mode=runtime_mode, action=action)
+    norm = normalize_repo_path(path)
+    lead, effect = ((f"runtime_mode={runtime_mode!r} already allows protected writes, but this acting subagent lacks",
+                     "a mode switch would not help") if mode_allows_protected_write(runtime_mode) else
+                    (f"runtime_mode={runtime_mode!r} refuses protected writes, and this acting subagent also lacks",
+                     "'pro' alone would not admit it"))
+    return (f"⚠️ CORE_PROTECTION_BLOCKED: this task may not {action} protected "
+            f"{protected_path_category(norm) or 'core'} path: {norm}. {lead} its own protected_paths_grant (the "
+            f"grant of the task applying a patch; its author's does not carry over), so {effect}. The captured "
+            "result is kept unapplied: report it to your parent, which decides with its own authority and may "
+            "schedule the work with protected_paths_grant.")

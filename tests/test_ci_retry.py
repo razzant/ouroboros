@@ -55,15 +55,33 @@ def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, t
 
 def test_the_ui_lane_form_drops_its_lane_guard_and_keeps_its_junit_private(ci_retry, tmp_path):
     evidence, private = tmp_path / "ci-evidence" / "ui" / "host", tmp_path / "ci-private" / "ui"
+    raw = tmp_path / "ci-raw" / "ui" / "host"
     round_dir, argsfile = _round(evidence, 2)
-    command = ["python", "-I", "-S", "scripts/safe_test.py", "--", "python", "-m", "pytest", "tests/",
-               "-m", "ui_browser", "--require-ui-browser", "-vv", "--tb=short", "--timeout=900",
+    command = ["python", "-I", "-S", "scripts/safe_test.py", "--evidence-dir", str(raw), "--", "python", "-m",
+               "pytest", "tests/", "-m", "ui_browser", "--require-ui-browser", "-vv", "--tb=short", "--timeout=900",
                "--ui-browser-shard=5/8", "--session-timeout=4500", f"--junitxml={private / 'host.xml'}",
                f"--ci-evidence-dir={evidence}"]
     assert ci_retry.retry_command(command, argsfile=argsfile, direct=[], round_dir=round_dir) == [
-        "python", "-I", "-S", "scripts/safe_test.py", "--", "python", "-m", "pytest", f"@{argsfile}",
-        "-m", "ui_browser", "-vv", "--tb=short", "--timeout=900",
+        "python", "-I", "-S", "scripts/safe_test.py", "--evidence-dir", str(raw / "retry-2"), "--", "python", "-m",
+        "pytest", f"@{argsfile}", "-m", "ui_browser", "-vv", "--tb=short", "--timeout=900",
         f"--junitxml={private / 'retry-2' / 'host.xml'}", f"--ci-evidence-dir={round_dir}"]
+
+
+@pytest.mark.parametrize("attached", [False, True], ids=["separate", "attached"])
+def test_a_launchers_raw_evidence_parent_moves_into_its_own_round_child(ci_retry, tmp_path, attached):
+    """scripts/safe_test.py keeps each invocation's run directory beneath --evidence-dir. A round's go beneath that
+    parent's retry-<k>, as its projection goes beneath DIR/retry-<k>: the relation is the relative path itself."""
+    evidence, raw = tmp_path / "ci-evidence" / "ui" / "tools", tmp_path / "ci-raw" / "ui" / "tools"
+    round_dir, argsfile = _round(evidence, 3)
+
+    def spelled(path):
+        return [f"--evidence-dir={path}"] if attached else ["--evidence-dir", str(path)]
+
+    command = ["python", "-I", "-S", "scripts/safe_test.py", *spelled(raw), "--", "python", "-m", "pytest",
+               "tests/test_browser_tools_smoke.py", f"--ci-evidence-dir={evidence}"]
+    assert ci_retry.retry_command(command, argsfile=argsfile, direct=[], round_dir=round_dir) == [
+        "python", "-I", "-S", "scripts/safe_test.py", *spelled(raw / "retry-3"), "--", "python", "-m", "pytest",
+        f"@{argsfile}", f"--ci-evidence-dir={round_dir}"]
 
 
 def test_separate_option_values_move_or_go_with_their_option(ci_retry, tmp_path):
@@ -611,6 +629,103 @@ def test_a_real_session_retries_its_failure_once(tmp_path, always):
     else:
         assert verdict["flaky"] == [{"nodeid": node, "first": {"phase": "call", "error_type": "AssertionError"}}]
         assert f"FLAKY {node} (first: call, AssertionError)" in result.stdout
+
+
+_UI_ATTEMPTS = '''
+import json, os, time
+from pathlib import Path
+import pytest
+from ouroboros.test_evidence import diagnostic_directory, keep_startup_log
+
+
+def attempt(name):
+    seen = Path(@SEEN@) / (name + ".seen")
+    first = not seen.exists()
+    seen.write_text("", encoding="utf-8")
+    return "first" if first else "retry"
+
+
+def test_receipt_frames(tmp_path):
+    label = attempt("frames")
+    frames = Path(os.environ["OUROBOROS_UI_EVIDENCE_DIR"]) / "late-input-heads"
+    frames.mkdir(parents=True, exist_ok=True)
+    (frames / "receipt.png").write_bytes(f"receipt seen by the {label} attempt".encode())
+    (frames / "results.json").write_text(json.dumps({"receipt_width": 1 if label == "first" else 2}), encoding="utf-8")
+    (diagnostic_directory(tmp_path, "receipt-facts", publish=True) / "facts.json").write_text(json.dumps({"attempt": label}))
+    (diagnostic_directory(tmp_path / "drive", "receipt-facts") / "drive.json").write_text("a retained neighbour")
+    assert label == "retry", "the receipt is narrower than its title"
+
+
+@pytest.mark.timeout(3, method="signal", func_only=True)
+def test_server_readiness(tmp_path):
+    label = attempt("readiness")
+    (tmp_path / "data" / "logs").mkdir(parents=True)
+    (tmp_path / "server-stdio.log").write_text(f"server of the {label} attempt\\n", encoding="utf-8")
+    (tmp_path / "data" / "logs" / "supervisor.jsonl").write_text('{"event": "boot"}\\n', encoding="utf-8")
+    with keep_startup_log(tmp_path, "server-stdio.log"):
+        if label == "first":
+            time.sleep(60)  # never ready: pytest-timeout's SIGALRM ends the wait
+'''
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"), reason="pytest-timeout's signal method needs SIGALRM")
+def test_each_rounds_raw_run_keeps_its_diagnostics_apart_from_the_proof(tmp_path):
+    """#2716/#2763 as the UI lane runs: ci_retry -> safe_test --evidence-dir -> pytest. A first session that fails (a
+    custom frame assertion; a readiness wait stopped by a real SIGALRM) and a round that passes stay FLAKY. Each
+    invocation's run, a round's beneath retry-<k>, keeps its frames, facts and startup log past its released scratch,
+    under one name with each attempt's own bytes; the export takes exactly those, at the run's relative path, and
+    never their family's retained neighbour."""
+    from ouroboros.test_environment import DIAGNOSTIC_OUTPUT_KEYS
+    from ouroboros.test_evidence import EVIDENCE_RUN_MARKER
+
+    suite = tmp_path / "suite"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "tests" / "test_specimen.py").write_text(_UI_ATTEMPTS.replace("@SEEN@", repr(str(tmp_path))),
+                                                      encoding="utf-8")
+    evidence, raw, out = tmp_path / "ci-evidence" / "host", tmp_path / "ci-raw" / "host", tmp_path / "ci-diagnostics"
+    command = _command(tmp_path, suite, f"--ci-evidence-dir={evidence}")
+    command[command.index("--"):command.index("--")] = ["--evidence-dir", str(raw)]
+    # As on the runner: no step-level UI destination, so each invocation's falls in its own run.
+    env = {key: value for key, value in os.environ.items() if key not in DIAGNOSTIC_OUTPUT_KEYS}
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(REPO / "scripts/ci_retry.py"), "--evidence-dir", str(evidence), "--", *command],
+        env={**env, "GITHUB_SHA": SHA, "GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "1"},
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    frames, readiness = "tests/test_specimen.py::test_receipt_frames", "tests/test_specimen.py::test_server_readiness"
+    verdict = _json(evidence / "verdict.json")
+    assert verdict["verdict"] == "flaky" and [row["dir"] for row in verdict["rounds"]] == [".", "retry-1"]
+    assert verdict["flaky"] == [{"nodeid": frames, "first": {"phase": "call", "error_type": "AssertionError"}},
+                                {"nodeid": readiness, "first": {"phase": "call", "error_type": "Failed"}}]
+    assert "Timeout (>3.0s) from pytest-timeout" in output
+    ends = [line.split(" ", 1) for line in result.stderr.splitlines()
+            if line.startswith(("SAFE_TEST_RELEASED ", "SAFE_TEST_RETAINED "))]
+    assert [(end, Path(root).exists()) for end, root in ends] == [("SAFE_TEST_RELEASED", False)] * 2, output
+    runs = {label: [marker.parent for marker in raw.glob(pattern + "/" + EVIDENCE_RUN_MARKER)]
+            for label, pattern in (("first", "run-*"), ("retry", "retry-1/run-*"))}
+    assert [len(found) for found in runs.values()] == [1, 1], runs
+
+    exported = subprocess.run([sys.executable, "-m", "ouroboros.test_evidence", "export-diagnostics", str(raw), str(out)],
+                              cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    assert exported.returncode == 0 and "CI_DIAGNOSTICS_EXPORTED 8 file(s)" in exported.stdout, exported.stdout
+    for label, (run,) in runs.items():
+        mine = out / run.relative_to(raw)
+        files = {path.relative_to(mine).as_posix().split("/", 2)[0] + "/" + path.name: path
+                 for path in mine.rglob("*") if path.is_file()}
+        assert set(files) == {"receipt-facts/facts.json", "ui/receipt.png", "ui/results.json"} | (
+            {"server-startup/server-stdio.log", "server-startup/supervisor.jsonl"} if label == "first" else set())
+        assert files["ui/receipt.png"].read_bytes() == f"receipt seen by the {label} attempt".encode()
+        assert _json(files["receipt-facts/facts.json"]) == {"attempt": label}
+        if label == "first":  # the timed-out wait's own log, beside the data logs it had
+            assert files["server-startup/server-stdio.log"].read_text(encoding="utf-8") == "server of the first attempt\n"
+        assert [path.read_text(encoding="utf-8") for path in run.glob("receipt-facts/*/drive.json")] == [
+            "a retained neighbour"], "it stays with its run"
+    # The lane's proof holds its projections only. Read as proof, the custom results.json would be a gap that turns
+    # the lane RED: why the diagnostics travel in their own artifact, which no proof download selects.
+    assert not [path for path in evidence.rglob("*") if path.name in ("receipt.png", "facts.json", "server-stdio.log")]
+    gaps, _ = reconcile_shards(tmp_path / "no-manifest", out, count=1, sha=SHA, run_id=RUN)
+    assert any("ui/late-input-heads/results.json: invalid result projection" in gap for gap in gaps), gaps
 
 
 def _reconciled(tmp_path, suite, expression, lane_key):

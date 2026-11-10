@@ -26,7 +26,7 @@ def answer_projects(route, rows):
 
 
 def producer_evidence_dir(fallback, name, *, env=()):
-    """Where one test producer's own diagnostics go: one destination per invocation.
+    """Where one test producer's published diagnostics (frames, DOM, JSON) go: one destination per invocation.
 
     A destination the operator exported explicitly for this family wins unchanged. Otherwise
     the shared channel decides: ``diagnostic_directory`` redirects to the launcher's
@@ -44,7 +44,7 @@ def producer_evidence_dir(fallback, name, *, env=()):
             path = pathlib.Path(explicit)
             path.mkdir(parents=True, exist_ok=True)
             return path
-    return diagnostic_directory(fallback, name)
+    return diagnostic_directory(fallback, name, publish=True)
 
 
 def retire_synthetic_retention(directory, *reasons, release=None) -> bool:
@@ -466,3 +466,26 @@ def current_python_env(env_root) -> None:
     base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
     version = ".".join(map(str, sys.version_info[:3]))
     (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion = {version}\n", encoding="utf-8")
+
+
+def full_disk_at(monkeypatch, part):
+    """ENOSPC exactly where the platform lock creates its ``.lock`` file (``O_CREAT|O_EXCL``) under ``part``."""
+    import errno
+
+    real = os.open
+
+    def create(path, flags, *args, **kwargs):
+        if part in str(path) and str(path).endswith(".lock") and flags & os.O_CREAT and flags & os.O_EXCL:
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", create)
+
+
+def run_absent_in(store_id):
+    """Claudexor's run-detail 404 (``run-detail-route.ts``): it names the store it read in ``context.storeId``."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    error = ClaudexorUnavailable("http_404", "no such run", status_code=404)
+    error.problem = {"error": "no such run", "context": {"storeId": store_id}}
+    return error

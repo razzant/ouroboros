@@ -1631,6 +1631,13 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     text-align: center;
     max-width: 460px;
 }
+/* This browser's saved text before the room's first read (chat_preview.js): plain bubbles under one note. */
+.chat-saved-preview {
+    display: flex;
+    flex-direction: column;
+    gap: inherit;
+}
+.chat-saved-preview > .chat-load-older-note { align-self: center; }
 .chat-history-status {
     grid-column: 1 / -1;
     flex: 0 0 100%;
@@ -6293,7 +6300,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 }
 
 .toast-stack {
-    --toast-top: calc(76px + env(safe-area-inset-top));
+    --toast-top: calc(76px + var(--inset-top));
     position: fixed;
     right: 18px;
     top: var(--toast-top);
@@ -6821,11 +6828,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 
 .marketplace-modal-backdrop {
     align-items: flex-start;
-    padding: 4vh 16px;
+    padding: calc(4vh + var(--inset-top)) 16px 4vh;
 }
 
 .marketplace-modal {
-    max-height: calc(var(--vvh) - 8vh);
+    max-height: calc(var(--vvh) - 8vh - var(--inset-top));
     min-height: 0;
     border-color: transparent;
     border-radius: var(--radius-object);
@@ -7689,7 +7696,7 @@ html[data-layout="stack"] .chat-input-wrap[data-fold] .chat-toolbar-row {
 }
 html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-toolbar-row {
     max-height: 0;
-    margin-bottom: calc(-1 * var(--space-2));
+    margin-bottom: calc(-1 * var(--composer-wrap-gap, var(--space-2)));
 }
 html[data-layout="stack"] .chat-input-wrap[data-fold] .chat-toolbar-row > .composer-menu {
     transition: transform 300ms var(--ease-sheet);
@@ -7739,7 +7746,26 @@ html[data-layout="stack"] #chat-messages::after {
     flex-basis: calc(var(--chat-input-reserve, 108px) + var(--inset-bottom) - 8px);
 }
 
-/* Keyboard-open layout: only #chat-messages scrolls within visual viewport. */
+/* Keyboard-open layout: the room is one column within the visual viewport (app.js --vvh): its bar (with Main's note or a
+   Project's status bar), #chat-messages, the only part that scrolls, and the composer. The message field takes what the
+   room leaves after its measured chrome (chat.js --chat-keyboard-chrome; until it is read, the quarter alone) and
+   60px of feed (a message's last line and its foot), at most a quarter of the viewport (app.js), never under one line
+   (1.45em + 10px: its line-height and padding). A room whose height under the top inset cannot hold its bar, the
+   composer with that line and those 60px at their usual air (220px; Telegram's fullscreen band takes 93px of it on a
+   phone) is short: its bar and composer drop their air, the capsule row folds (composer_fold.js reads the step; owner
+   9.11), the field keeps one line and the feed takes the rest. --keyboard-short is that step, a registered length:
+   0px, or 1px in a short room (×1000 crosses it within a pixel), so each air below reads
+   `max(short, usual - short × 1000)`. */
+@property --keyboard-short { syntax: '<length>'; inherits: true; initial-value: 0px; }
+body.keyboard-open {
+    --keyboard-short: clamp(0px, calc((220px + var(--inset-top) - var(--vvh)) * 1000), 1px);
+}
+body.keyboard-open :is(#chat-input-area, .chat-input-area) {
+    --message-field-max-height: clamp(calc(1.45em + 10px),
+        calc(var(--vvh) - var(--chat-keyboard-chrome, 0px) - 60px - var(--keyboard-short) * 100000),
+        var(--chat-viewport-input-cap, 140px));
+}
+
 html.keyboard-open,
 body.keyboard-open {
     position: fixed;
@@ -7783,6 +7809,17 @@ body.keyboard-open .project-panel .project-panel-bar {
     position: relative;
     top: auto;
 }
+/* A short room's bar stands right under the top inset (Telegram's band keeps its own air around its controls). Every
+   keyboard room's bar stands a step above the composer (both --z-page-header) on its room's own ground: an open
+   capsule's hint rising to it passes under it, so Panic and a Project's × stay in reach. */
+body.keyboard-open #page-chat.active .chat-page-header,
+body.keyboard-open .project-panel .project-panel-bar {
+    padding-top: calc(max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000) + var(--inset-top));
+    padding-bottom: max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000);
+    z-index: calc(var(--z-page-header) + 1);
+    background: var(--bg-primary);
+}
+body.keyboard-open .project-panel .project-panel-bar { background: rgb(var(--shell-rgb)); }
 
 body.keyboard-open #page-chat.active #chat-messages,
 body.keyboard-open .chat-instance-panel .chat-messages {
@@ -7809,8 +7846,17 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     flex-shrink: 0;
     position: relative;
     bottom: auto;
-    padding-top: 8px;
-    padding-bottom: 8px;
+    padding-top: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+    padding-bottom: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+}
+/* A short room's composer keeps --space-1 between its rows (a folded row takes it along) and inside the field (one
+   line there: its corner stays a capsule's, the sheet radius clamped to half its height). */
+body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-input-wrap {
+    --composer-wrap-gap: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
+    gap: var(--composer-wrap-gap);
+}
+body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
+    padding-block: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
 }
 
 /* ===========================================================================
@@ -8584,9 +8630,9 @@ html[data-layout="stack"] .project-panel.open {
     transform: translateY(0);
 }
 
-/* With the keyboard up a Project room shrinks to the visible viewport, as Main does (body.keyboard-open #page-chat):
-   its composer, with the room's ☰, stays above the keyboard instead of behind it. */
-body.keyboard-open .project-panel {
+/* A stack Project room is as tall as the visible viewport, as Main is (#app): with the keyboard up its composer, with
+   the room's ☰, stays above the keyboard, also while a dismissed keyboard is still going down. */
+html[data-layout="stack"] .project-panel {
     height: var(--vvh);
     max-height: var(--vvh);
 }
@@ -9467,9 +9513,11 @@ body.keyboard-open .project-panel {
 .document-reader {
     width: min(var(--document-reader-size), calc(100vw - 2 * var(--space-5)));
     max-width: none;
-    /* `vh` first for an engine without `dvh`. */
-    height: min(var(--document-reader-size), calc(100vh - 2 * var(--space-5)));
-    height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5)));
+    /* Centred below the screen's top inset (ui.css --inset-top: Telegram's controls in fullscreen, else env()).
+       `vh` first for an engine without `dvh`. */
+    inset-block-start: var(--inset-top);
+    height: min(var(--document-reader-size), calc(100vh - 2 * var(--space-5) - var(--inset-top)));
+    height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5) - var(--inset-top)));
     max-height: none;
     overflow: hidden;
     /* Opaque: the conversation must not show through the text being read. */
@@ -9718,6 +9766,7 @@ body.keyboard-open .project-panel {
 /* A phone reads the document on a full sheet; Close returns to the same place in the chat. */
 @media (max-width: 620px) {
     .document-reader {
+        inset-block-start: 0;
         width: 100vw;
         height: 100vh;
         height: 100dvh;
@@ -9729,7 +9778,7 @@ body.keyboard-open .project-panel {
     .document-reader-head {
         grid-template-areas: "identity close" "actions actions";
         grid-template-columns: minmax(0, 1fr) auto;
-        padding: calc(var(--space-2) + env(safe-area-inset-top, 0px)) var(--space-3) var(--space-2);
+        padding: calc(var(--space-2) + var(--inset-top)) var(--space-3) var(--space-2);
     }
 
     /* The reader's own head keeps reading first: the whole name beside Close, then every action in sight across the
@@ -9742,13 +9791,11 @@ body.keyboard-open .project-panel {
     .document-reader-notice { padding-inline: var(--space-3); }
 
     .document-reader-body {
-        padding: var(--space-4) var(--space-3) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+        padding: var(--space-4) var(--space-3) calc(var(--space-5) + var(--inset-bottom));
     }
 
     .document-reader.is-image-scene .document-reader-body.is-image {
-        padding: calc(var(--space-3) + env(safe-area-inset-top, 0px))
-            var(--space-3)
-            calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+        padding: calc(var(--space-3) + var(--inset-top)) var(--space-3) calc(var(--space-4) + var(--inset-bottom));
     }
 }
 
@@ -10700,3 +10747,40 @@ body.keyboard-open .project-panel {
 :root[data-theme="light"] .md-code-block .hljs-class .hljs-title { color: var(--status-warn-fg); }
 :root[data-theme="light"] .status-badge.online { color: var(--status-ok-fg); }
 :root[data-theme="light"] .status-badge.error { color: var(--status-error-fg); }
+
+/* Telegram's edges (host_telegram.js: html[data-telegram-fullscreen] is `active` or `expanded` while bound). The screen's
+   sides are the shell's: the grid keeps clear of them, and the stack layout's fixed layers (the drawer, its scrim, a
+   Project, the keyboard's room) take the same edges, never twice. A docked shell has no stack header's clearance: its
+   bars add the top inset to their own padding (0 while merely expanded), the sidebar inside its sticky head, whose
+   border box layout.js measures (measurePinnedBars). */
+html[data-telegram-fullscreen] #app {
+    margin-left: var(--inset-left);
+    margin-right: var(--inset-right);
+}
+html[data-telegram-fullscreen][data-layout="stack"] #primary-sidebar { left: var(--inset-left); }
+/* Closed, the drawer rests 16% to the left under the room: the slice an inset room no longer covers stays unseen. The
+   clip waits until the close has run (app.js then puts the scrim, the drawer's previous sibling, away), so a drawer
+   going away keeps its ×, icons and version line. */
+html[data-telegram-fullscreen][data-layout="stack"] .nav-drawer-backdrop[hidden] + #primary-sidebar:not(.open):not(.dragging) {
+    clip-path: inset(0 0 0 16%);
+}
+html[data-telegram-fullscreen][data-layout="stack"] .nav-drawer-backdrop { left: calc(var(--inset-left) + var(--drawer-w)); }
+/* No shadow falls into that inset: the docked panel's at its left edge (the open drawer's card shadow still applies). */
+html[data-telegram-fullscreen][data-layout="stack"] .project-panel,
+html[data-telegram-fullscreen] body.keyboard-open :is(#content, #page-chat.active) {
+    left: var(--inset-left);
+    right: var(--inset-right);
+    width: auto;
+    box-shadow: none;
+}
+/* The page's notices keep their 18 px from the right inset, and a notice as wide as it may be as much from the left. */
+html[data-telegram-fullscreen] #toast-stack { padding-right: calc(18px + var(--inset-right)); }
+html[data-telegram-fullscreen] #toast-stack .toast {
+    max-width: min(420px, calc(100vw - 112px - var(--inset-left) - var(--inset-right)));
+}
+html[data-telegram-fullscreen][data-layout="docked"] .app-page-header {
+    padding-top: calc(var(--page-header-padding-y) + var(--inset-top));
+}
+html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead] { padding-top: var(--inset-top); }
+html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
+html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }

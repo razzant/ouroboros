@@ -93,7 +93,8 @@ test('the Start is sent once, only after this server opened its chat queue, and 
     assert.deepEqual(phases, ['waiting', 'sending', 'confirming']);
     assert.deepEqual(api.calls.map((call) => call.url), ['/api/health', '/api/health', '/api/health', '/api/command',
         '/api/state', '/api/state', '/api/state']);
-    assert.deepEqual(api.posts().map((call) => [call.method, JSON.parse(call.body)]), [['POST', { cmd: '/bg start', if_boot: 'S1' }]]);
+    assert.deepEqual(api.posts().map((call) => [call.method, JSON.parse(call.body)]),
+        [['POST', { cmd: '/bg start', if_boot: 'S1', ui_control: { name: 'setup_consciousness' } }]]);
 });
 
 test('HTTP 200 is only queue acceptance: a Start the state never shows stays unconfirmed', async () => {

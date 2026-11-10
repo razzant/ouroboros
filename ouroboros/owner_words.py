@@ -57,6 +57,17 @@ OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer",
 # only (outside ``OWNER_SOURCES``): whom they are for, and whether they ask me for work, is my reading; an order exists
 # only where I cite them and the host verifies the bytes.
 PLACE_CONFIRMED = "place_confirmed"
+# A schedule's text, beside my human's words and never theirs: each field of it (its objective, its context) under the
+# supplier the host recorded for that field and when (``objective_author``/``context_author``, written only by the
+# schedule writers in ``supervisor/schedule_lifecycle.py``). Text that came through the Schedules API
+# (``POST /api/schedules``: the owner's CLI, or any program holding that access) is the work's assignment and its
+# conditions, not my human's personal word, and gives no permission only they can give. Corpus items carry it by value
+# (outside ``OWNER_SOURCES``) and ``SCHEDULE_FIELD`` hands the run's items to every helper it schedules.
+SCHEDULE_TEXT = "schedule_text"
+SCHEDULE_FIELD = "governing_schedule_text"
+# A schedule item's typed ids, each a string when present (``scheduled_text_items``).
+SCHEDULE_ITEM_IDS = ("schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")
+_TEXT_AUTHOR_KEYS = (("objective", "objective_author"), ("context", "context_author"))
 CITED = "cited"
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
 # A session task's record alone: the rows ``_live_words`` read at its scheduling (the bound room's rows, the
@@ -210,6 +221,13 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
         return f"drafted by task {author.get('task_id')}, not spoken by my human"
     if kind == "continuation":
         return f"the host's Continue work order for task {author.get('predecessor_task_id')}"
+    if kind == "schedule_api":
+        when = f" at {author['at']}" if author.get("at") else ""
+        return (f"supplied through the Schedules API{when} (the owner's CLI, or any program with that access): "
+                "the assignment and its conditions, not my human's words")
+    if kind == "ui_control":
+        return (f"the host's prompt for my human's press of {author.get('control') or 'a control'}: "
+                "the press is theirs, these words are not")
     if kind:
         return f"its author is recorded by the host as kind={kind}"
     if origin.get("initiator") == "consciousness":
@@ -230,6 +248,70 @@ def objective_author_text(ctx: Any) -> str:
     from ouroboros.dialogue_provenance import run_origin
 
     return objective_author_line(run_origin({"type": getattr(ctx, "current_task_type", None), "metadata": dict(_ctx_metadata(ctx))}))
+
+
+def scheduled_text_items(metadata: Any, contract: Any) -> List[Dict[str, Any]]:
+    """A schedule's run's own corpus items for its schedule's text (``SCHEDULE_TEXT``): each field its contract holds
+    (the objective and the context, as the contract keeps them) with the schedule, the field and the supplier the
+    host recorded for it (``supplier``: the author's kind; ``supplier_task_id``; ``supplied_at``), each absent when
+    the host recorded none: an unknown supplier is never my human. A run no schedule admitted has none."""
+    metadata, contract = _mapping(metadata), _mapping(contract)
+    schedule_id = str(metadata.get("schedule_id") or "")
+    items: List[Dict[str, Any]] = []
+    for field, key in _TEXT_AUTHOR_KEYS if schedule_id else ():
+        text, author = contract.get(field), _mapping(metadata.get(key))
+        if isinstance(text, str) and text.strip():
+            items.append({"source": SCHEDULE_TEXT, "content": text, "schedule_id": schedule_id, "field": field,
+                          **{name: str(author[value]) for name, value in (("supplier", "kind"), ("supplier_task_id", "task_id"),
+                                                                           ("supplied_at", "at")) if author.get(value)}})
+    return items
+
+
+def schedule_items(ctx: Any) -> List[Dict[str, Any]]:
+    """The schedule text this run holds: its own schedule's and its tree's (``_initialize_owner_directives`` records
+    both into the corpus), as items."""
+    return [{key: row[key] for key in ("source", "content", *SCHEDULE_ITEM_IDS) if row.get(key)}
+            for row in getattr(ctx, "_owner_directives", None) or []
+            if isinstance(row, dict) and row.get("source") == SCHEDULE_TEXT and str(row.get("content") or "").strip()]
+
+
+def task_schedule_items(task: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """The schedule text a helper was scheduled with (``SCHEDULE_FIELD``), at the top level or under ``metadata``."""
+    source = _mapping(task)
+    raw = source[SCHEDULE_FIELD] if SCHEDULE_FIELD in source else _mapping(source.get("metadata")).get(SCHEDULE_FIELD)
+    return [dict(item) for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, Mapping) and item.get("source") == SCHEDULE_TEXT and str(item.get("content") or "").strip()]
+
+
+def _schedule_rows(items: Any, task_id: str = "") -> List[Dict[str, Any]]:
+    """Items as rows of a section: the words, the supplier's label (``author``) and when, under ``schedule <id> <field>``."""
+    rows = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, Mapping) and item.get("source") == SCHEDULE_TEXT:
+            kind = str(item.get("supplier") or "")
+            label = {"schedule_api": "the Schedules API",
+                     "task": f"task {item.get('supplier_task_id') or '(id not recorded)'}"}.get(kind, kind and f"kind={kind}")
+            rows.append(_row(item.get("content"), source=SCHEDULE_TEXT, carrier="schedule", task_id=task_id,
+                             ts=item.get("supplied_at"), ref=f"schedule {item.get('schedule_id')} {item.get('field')}",
+                             author=label or "a supplier the host did not record"))
+    return _deduped(rows)
+
+
+_SCHEDULE_HEADING = "The schedule's text for this work (verbatim, with the supplier the host recorded)"
+_SCHEDULE_FRAME = ("It is the work's assignment and its conditions, not my human's words: text supplied through the Schedules "
+                   "API (the owner's CLI, or any program with that access) gives no permission only my human can give.")
+
+
+def render_schedule_text(items: Any, *, audience: str, indent: str = "") -> str:
+    """The schedule text section for the audiences of ``render_owner_words``; ``""`` when there is none."""
+    if audience not in _HEADINGS:
+        raise ValueError(f"unknown owner-words audience {audience!r}; expected one of {sorted(_HEADINGS)}")
+    rows = _schedule_rows(items)
+    if not rows:
+        return ""
+    heading = (_SCHEDULE_HEADING.upper() if audience == "session"
+               else f"{'###' if audience == 'root' else '##'} {_SCHEDULE_HEADING}")
+    return f"{heading}\n{_SCHEDULE_FRAME}\n" + "\n\n".join(words_block(row, indent) for row in rows)
 
 
 def _item_time(item: Mapping[str, Any]) -> str:
@@ -332,6 +414,7 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     names, the door's own record of it, first, standing for the run's own door row with that row's reply target and
     message id. Without one, a suppressed (never-logged) origin's words live only in the run's first row and ride
     only under the door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
+    The schedule text the run holds (``schedule_items``) rides after them under its own label, never as theirs.
     """
     from ouroboros.review_evidence_sections import _owner_content_projection
 
@@ -350,7 +433,7 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     else:
         rows = [*([door] if door is not None and not source_text else []), *rest]
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
-    return [row for row in rows if row["content"].strip()]
+    return [row for row in rows if row["content"].strip()] + schedule_items(ctx)
 
 
 def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
@@ -722,9 +805,12 @@ def governing_words_for_schedule(ctx: Any, *, session: bool = False) -> Dict[str
     ``session`` (the helper compiles an external work order): the rows ``_live_words`` reads at this handoff (the
     bound room's rows, the Project's origin rows and the marked rows) ride beside them under ``ROOM_FIELD``, by
     value (an empty list when none), so that work order stays a function of the helper's record; a store that
-    cannot be read gives the rows that could be, and its gap is logged."""
+    cannot be read gives the rows that could be, and its gap is logged. The schedule text the run holds rides beside
+    them under ``SCHEDULE_FIELD``, by value: the helper's assignment never drops its tree's conditions."""
     rows = _tree_words(ctx)[0]
     facts: Dict[str, Any] = {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
+    if schedule := schedule_items(ctx):
+        facts[SCHEDULE_FIELD] = schedule
     if session:
         root, metadata, task_id = _data_root(ctx), _ctx_metadata(ctx), str(getattr(ctx, "task_id", "") or "")
         facts[ROOM_FIELD] = [] if root is None else _live_words(root, _room_of(
@@ -1050,6 +1136,9 @@ def words_stamp(row: Mapping[str, Any]) -> str:
     if source == REPLY_TARGET:  # context beside the words, under its own author: never my human's words
         stamp = [f"{row.get('author') or 'author not recorded'}: the message my human replied to, "
                  "not my human's words", ref]
+    elif source == SCHEDULE_TEXT:  # the work's assignment under its recorded supplier: never my human's words
+        stamp = [str(row.get("ts") or ""), ref, f"supplied by {row.get('author') or 'a supplier the host did not record'}",
+                 "not my human's words"]
     else:
         stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source,
                  carrier if carrier.startswith("went to ") else "", ref]
@@ -1057,10 +1146,13 @@ def words_stamp(row: Mapping[str, Any]) -> str:
 
 
 def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
-    """``render_owner_words`` over this run's set at this handoff (``work_words``)."""
+    """``render_owner_words`` over this run's set at this handoff (``work_words``), then the schedule text the run
+    holds (``render_schedule_text``)."""
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
-    return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+    words = render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+    schedule = render_schedule_text(schedule_items(ctx), audience=audience)
+    return "\n\n".join(part for part in (words, schedule) if part)
 
 
 def reviewer_words_material() -> list:

@@ -395,6 +395,111 @@ def test_a_late_pass_rewrites_only_the_review_derived_outcome_of_the_current_row
     assert len(announced()) == 1 and len(pushed) == 1, "a replay announces nothing again"
 
 
+def test_a_warning_written_after_the_late_pass_is_in_what_its_card_repaints(tmp_path, monkeypatch):
+    """Astra, 10 Nov 2026: a custody warning (``delegated_runs_unreconciled``) that lands after the late PASS resolved
+    the row and before the event is published is in the announced outcome, because the event reads the stored row when
+    it publishes: the card repaints Done with warnings, as a reload does, never the resolver's earlier Done. Its
+    card orders a late outcome by the revision it read (``lateOutcomeIsCurrent``): an older snapshot published later
+    never repaints the newer state, and the same frame again still paints."""
+    import pathlib
+    import subprocess
+
+    from ouroboros import late_review_marks as late, review_ledger
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.preflight_node import resolve_node
+    from ouroboros.project_dialogue import outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message", outcome_axes={
+        "execution": {"status": "ok", "reason_code": "final_message"}, "review": review,
+        "objective": _objective_axis(review)})
+    ended_at = load_task_result(tmp_path, "task-1")["updated_at"]
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    resolved, announce = [], late.announce_current_outcome
+
+    def custody_lands_first(*args, **kwargs):  # the custody writer lands between the resolution and the event
+        resolved.append(load_task_result(tmp_path, "task-1"))
+        write_task_result(tmp_path, "task-1", "completed", delegated_runs_unreconciled=["run-x"])
+        return announce(*args, **kwargs)
+
+    monkeypatch.setattr(late, "announce_current_outcome", custody_lands_first)
+    pushed = []
+    monkeypatch.setattr("supervisor.message_bus.try_get_bridge", lambda: SimpleNamespace(push_log=pushed.append))
+    assert late.resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    stored = load_task_result(tmp_path, "task-1")
+    assert stored["outcome_axes"]["review"]["status"] == "pass" and stored["delegated_runs_unreconciled"] == ["run-x"]
+    assert outcome_phase(resolved[0], {}) == "done" and resolved[0]["updated_at"] < stored["updated_at"], \
+        "the resolver's own copy reads Done and is older than the warning"
+    [event] = [row for row in map(json.loads, (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8")
+                                  .splitlines()) if row.get("type") == "review_late_result"]
+    current = event["current_outcome"]
+    assert current["outcome_phase"] == outcome_phase(stored, {}) == "warn", "the custody warning stays"
+    assert current["delegated_runs_unreconciled"] == ["run-x"] and current["revision"] == stored["updated_at"]
+    assert [frame["current_outcome"] for frame in pushed] == [current], "the live frame carries the same outcome"
+
+    stale = {**event, "current_outcome": late.current_outcome(resolved[0])}  # the resolver's copy, published later
+    assert stale["current_outcome"]["outcome_phase"] == "done" and stale["ts"] >= current["revision"]
+    node = resolve_node()
+    assert node, "the card's ordering of a late outcome requires Node"
+    script = """import {lateOutcomeIsCurrent, summarizeChatLiveEvent} from './web/modules/log_events.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const [current, stale, endedAt] = JSON.parse(text), card = {finished: true, latestSourceTs: endedAt};
+const taken = lateOutcomeIsCurrent(card, current), view = summarizeChatLiveEvent(current);
+card.latestSourceTs = current.current_outcome.revision;  // the clock chat.js sets when it takes the frame
+console.log(JSON.stringify([taken, view.phase, view.headline, lateOutcomeIsCurrent(card, stale),
+  lateOutcomeIsCurrent(card, current)]));"""
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+                             input=json.dumps([event, stale, ended_at]), cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert json.loads(checked.stdout) == [True, "warn", "Done with warnings", False, True], checked.stdout
+
+
+def test_a_stale_late_outcome_loses_to_a_newer_row_written_inside_its_millisecond(tmp_path, monkeypatch):
+    """Astra, 10 Nov 2026 (C1): a stored row's ``updated_at`` carries microseconds and two writes of one task can land
+    inside one millisecond. The revisions the real writer and ``current_outcome`` produce keep their order in the card's
+    own guard (``lateOutcomeIsCurrent``): the older PASS never clears the newer custody warning, the same revision again
+    is a replay, a truly later outcome inside that millisecond paints, and the older warning cannot return over it."""
+    import pathlib
+    import subprocess
+
+    from ouroboros import late_review_marks as late, task_results
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.preflight_node import resolve_node
+    from ouroboros.project_dialogue import outcome_phase
+
+    clock = {"now": ""}
+    monkeypatch.setattr(task_results, "utc_now_iso", lambda: clock["now"])
+
+    def written(micros, **fields):  # a real store write at an exact moment of one millisecond
+        clock["now"] = f"2026-11-10T05:06:26.{micros:06d}+00:00"
+        return task_results.write_task_result(tmp_path, "task-1", "completed", **fields)
+
+    review = {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}
+    older = written(147169, reason_code="final_message", terminal_origin="model_final", result="The answer", outcome_axes={
+        "execution": {"status": "ok", "reason_code": "final_message"}, "review": review,
+        "objective": _objective_axis(review)})
+    newer = written(147857, delegated_runs_unreconciled=["run-x"])
+    later = written(147969, delegated_runs_unreconciled=[])
+    assert [outcome_phase(dict(row), {}) for row in (older, newer, later)] == ["done", "warn", "done"]
+    assert [row["updated_at"][:23] for row in (older, newer)] == ["2026-11-10T05:06:26.147"] * 2, "one millisecond"
+    node = resolve_node()
+    assert node, "the card's ordering of a late outcome requires Node"
+    script = """import {lateOutcomeIsCurrent} from './web/modules/log_events.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const [older, newer, later] = JSON.parse(text).map((current_outcome) => ({ts: '', current_outcome}));
+const card = (frame) => ({finished: true, latestSourceTs: frame.current_outcome.revision});
+console.log(JSON.stringify([lateOutcomeIsCurrent(card(newer), older), lateOutcomeIsCurrent(card(newer), newer),
+  lateOutcomeIsCurrent(card(newer), later), lateOutcomeIsCurrent(card(later), newer)]));"""
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+                             input=json.dumps([late.current_outcome(row) for row in (older, newer, later)]),
+                             cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert json.loads(checked.stdout) == [False, True, True, False], checked.stdout
+
+
 def test_an_ordinary_ended_task_is_never_resolved_or_announced_by_a_late_pass(tmp_path, monkeypatch):
     """A task that finished without a pending review keeps its stored outcome and its warning whatever late PASS names
     it: nothing is resolved and nothing is announced."""

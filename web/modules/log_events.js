@@ -1,4 +1,4 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
@@ -1565,8 +1565,8 @@ export function getLogTaskGroupId(evt) {
     return '';
 }
 
-// A late review's current outcome repaints only a shown, finished card, never over a newer frame (its clock, chat.js).
-export const lateOutcomeIsCurrent = (record, evt) => Boolean(record?.finished) && !(Date.parse(evt?.ts) < Date.parse(record.latestSourceTs));
+// A late review's current outcome is as old as the row it read (its revision), not its later publication; it repaints only a shown, finished card, never over a newer frame of it (the card clock, chat.js, read to the microsecond).
+export const lateOutcomeIsCurrent = (record, evt) => Boolean(record?.finished) && !(isoMicros(evt?.current_outcome?.revision || evt?.ts) < isoMicros(record.latestSourceTs));
 
 export function isGroupedTaskEvent(evt) {
     const groupId = getLogTaskGroupId(evt);

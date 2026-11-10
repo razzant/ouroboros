@@ -42,7 +42,7 @@ from ouroboros._usage_rows import (
     REVIEW_ATTRIBUTION_KEYS, BindingIndex, Bucket, row_ts_epoch, summary_delta,
 )
 from ouroboros.usage_origin import bind_root_attribution
-from ouroboros import store as _core
+from ouroboros import store as _core, store_timing
 from ouroboros.store import (
     TIER_ENFORCED, TIER_NAME, busy as _busy, file_identity as _identity, fsync_directory as _fsync_directory,
     process_lock as _process_lock,
@@ -389,16 +389,21 @@ class Txn:
         and abandoned settlements that keep their late-receipt right."""
         return decode_attempts(self.open_attempt_rows(root_task_id=root_task_id))
 
-    def open_attempt_rows(self, *, root_task_id: Optional[str] = None,
-                          root_task_ids: Optional[Iterable[str]] = None) -> Captured:
-        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed;
-        ``root_task_ids`` names several roots in the one step."""
-        if root_task_ids is not None:
-            return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id IN (SELECT value FROM json_each(?))",
-                                     (_json(sorted(map(str, root_task_ids))),))
+    def open_attempt_rows(self, *, root_task_id: Optional[str] = None) -> Captured:
+        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed."""
         if root_task_id is None:
             return self.attempt_rows(_OPEN_PREDICATE)
         return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id=?", (str(root_task_id),))
+
+    def handoff_attempt_rows(self, root_task_ids: Iterable[str]) -> Captured:
+        """The open set's sent, unanswered rows (dispatched, unresolved) of several roots in ONE step, for
+        ``decode_attempts`` after the read closed: the model handoffs a display names. The open-set index
+        addresses them, its predicate repeated verbatim (``INDEXED BY`` refuses a plan that walks the roots'
+        history); reserved rows and abandoned settlements stay with ``open_attempt_rows``."""
+        return capture(self.conn, f"SELECT {', '.join(_ATTEMPT_CAPTURE)} FROM attempts INDEXED BY attempts_open "
+                       f"WHERE {_OPEN_PREDICATE} AND state IN ('dispatched','unresolved') "
+                       "AND root_task_id IN (SELECT value FROM json_each(?))",
+                       (_json(sorted(map(str, root_task_ids))),), _ATTEMPT_CAPTURE)
 
     def summary_rows(self, reads: Sequence[Tuple[str, str, str]]) -> Captured:
         """The summary rows ``reads`` names, in ONE step, for ``SummaryRows`` after the read closed: ``(scope,
@@ -709,10 +714,8 @@ def _commit(conn: sqlite3.Connection) -> None:
     try:
         _core.commit(conn)
     except sqlite3.OperationalError as exc:
-        if _busy(exc):
-            error = UsageLockUnavailable(f"usage store commit did not complete: {exc}", reason="contention")
-            error.rollback_confirmed = getattr(exc, "rollback_confirmed", False)
-            raise error from exc
+        if _busy(exc):  # contention, typed with the COMMIT's phase, wait and budget (``store_timing.ended``)
+            raise _typed(exc) from exc
         raise UsageAccountingError(f"usage store commit failed: {exc}") from exc
 
 
@@ -842,7 +845,7 @@ def _typed(exc: sqlite3.Error) -> UsageAccountingError:
     (the waits' business), a damaged file is ``UsageLedgerCorrupt`` (unknown,
     never zero), anything else an ``UsageAccountingError``."""
     if isinstance(exc, sqlite3.OperationalError) and _busy(exc):
-        error = UsageLockUnavailable(f"usage store busy: {exc}", reason="contention")
+        error = UsageLockUnavailable(f"usage store busy: {exc}{store_timing.busy_note(exc)}", reason="contention")
         if hasattr(exc, "rollback_confirmed"):
             error.rollback_confirmed = exc.rollback_confirmed
         return error

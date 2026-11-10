@@ -596,6 +596,16 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         **({"chat_attachments": refs} if refs else {})}
         if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
             metadata["reply_to"] = payload["reply_to"]
+        from supervisor.message_ingress import ui_control_fact
+
+        try:  # a skill's control (an inline button) composed this text: the press is the owner's, not the words
+            control = ui_control_fact(payload.get("ui_control"), pressed_at=utc_now_iso(), owner_text=False)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
+        if control and client_message_id:  # a correlated operation is its accepted owner row; a press writes none
+            return _json_error("ui_control cannot name a client_message_id: a press is not an owner message", 400)
+        if control:
+            metadata["ui_control"] = control
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}

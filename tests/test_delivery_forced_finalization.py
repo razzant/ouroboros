@@ -1226,8 +1226,8 @@ def test_forced_owner_refresh_does_not_resend_unknown_provider_outcome(tmp_path,
 
 
 def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_replacement(tmp_path, monkeypatch):
-    """Delivery evidence that moves after the delivery's result review step (a child finishes
-    while the answer is being delivered) holds the retained answer: a complete replacement is
+    """Delivery evidence that moves while the delivery's result review runs (a child finishes
+    during that wait) holds the retained answer: a complete replacement is
     required ("after the answer was retained"), and its exact bytes are reviewed at delivery in
     turn before they are delivered."""
     import ouroboros.loop as loop
@@ -1238,22 +1238,13 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
     registry._ctx.is_direct_chat = False
     reviewed = []
 
-    def review_then_deliver(_ctx, content, _llm_trace, _hold):
-        reviewed.append(content)
-        return False
-
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
-    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
-
-    original_project = loop._project_child_result_dispositions
     race = {"mutated": False}
 
-    def project_then_finish_child(round_ctx, llm_trace):
-        original_project(round_ctx, llm_trace)
-        if reviewed and not race["mutated"]:
+    def review_then_deliver(_ctx, content, _llm_trace, _hold):
+        reviewed.append(content)
+        if not race["mutated"]:
+            # The child finishes while the review runs. No shared child read of the finalization
+            # (``finalization_child_scope``) spans that wait, so the pass after it reads again.
             race["mutated"] = True
             write_task_result(
                 tmp_path,
@@ -1271,8 +1262,13 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
                     "sha256": "b" * 64,
                 }],
             )
+        return False
 
-    monkeypatch.setattr(loop, "_project_child_result_dispositions", project_then_finish_child)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
+    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
+    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
+    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
+    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
 
     first = loop._no_tool_final_answer("Answer based on child result v1.", ctx, trace, registry,
                                        queue.Queue(), set(), lambda _text: None)

@@ -1363,6 +1363,7 @@
  * @typedef {Object} ScheduleUpsertResponse
  * @property {boolean} ok  // follows schedule.audit: an incomplete audit is not ok
  * @property {Object} schedule
+ * @property {string[]=} ignored_fields  // host facts the request carried, set aside (task.metadata.<key>)
  */
 /**
  * @typedef {Object} ScheduleActionResponse

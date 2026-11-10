@@ -153,3 +153,57 @@ test('a late outcome repaints only a shown finished card, never over a newer fra
     assert.equal(lateOutcomeIsCurrent(card(true, '2026-11-09T00:20:00+00:00'), evt), false,
         'a delayed late frame never paints over a newer state, its warnings included');
 });
+
+test('a late outcome is as old as the stored row it read, not the moment it was published (Astra, 10 Nov 2026)', () => {
+    // The row was read at 00:10 and the snapshot published at 00:15; the card already shows a state of 00:12.
+    const stale = { ts: '2026-11-09T00:15:00+00:00', current_outcome: { revision: '2026-11-09T00:10:00+00:00' } };
+    const card = (latestSourceTs) => ({ finished: true, latestSourceTs });
+    assert.equal(lateOutcomeIsCurrent(card('2026-11-09T00:12:00+00:00'), stale), false,
+        'an older snapshot published later never repaints the newer state, its warning included');
+    assert.equal(lateOutcomeIsCurrent(card('2026-11-09T00:05:00+00:00'), stale), true, 'over an older state it is current');
+    assert.equal(lateOutcomeIsCurrent(card(stale.current_outcome.revision), stale), true,
+        'chat.js sets the card clock to the revision it took, so the same frame again still paints');
+    assert.equal(lateOutcomeIsCurrent(card('2026-11-09T00:12:00+00:00'), { ts: stale.ts }), true,
+        'a frame without a revision keeps its own time');
+});
+
+test('a late outcome keeps its microseconds: two writes inside one millisecond stay ordered (Astra, 10 Nov 2026)', () => {
+    // The writer's real isoformat() values from the reproduction: 688µs apart, one millisecond to Date.parse.
+    const older = '2026-11-10T05:06:26.147169+00:00', newer = '2026-11-10T05:06:26.147857+00:00';
+    const late = (revision) => ({ ts: '2026-11-10T05:06:40.000000+00:00', current_outcome: { revision } });
+    const card = (latestSourceTs) => ({ finished: true, latestSourceTs });
+    assert.equal(lateOutcomeIsCurrent(card(newer), late(older)), false, 'the older PASS never clears the newer warning');
+    assert.equal(lateOutcomeIsCurrent(card(older), late(newer)), true, 'a truly later outcome inside the millisecond paints');
+    assert.equal(lateOutcomeIsCurrent(card(newer), late(newer)), true, 'the same revision again is a replay');
+    assert.equal(lateOutcomeIsCurrent(card(newer), { ts: older }), false, 'a frame without a revision orders by its own time');
+    assert.equal(lateOutcomeIsCurrent(card('2026-11-10T05:06:26.146000+00:00'), late(older)), true, 'a distinct older millisecond still loses to it');
+});
+
+test('every instant spelling the host and the page write orders by the same microseconds', () => {
+    const verdict = (clock, revision) => lateOutcomeIsCurrent({ finished: true, latestSourceTs: clock }, { ts: '', current_outcome: { revision } });
+    for (const [clock, revision, current, why] of [
+        ['2026-11-10T05:06:26.000001+00:00', '2026-11-10T05:06:26+00:00', false, 'isoformat() drops a zero fraction: the whole second is older than .000001'],
+        ['2026-11-10T05:06:26+00:00', '2026-11-10T05:06:26.000001+00:00', true, 'and .000001 is later than the whole second'],
+        ['2026-11-10T05:06:26+00:00', '2026-11-10T05:06:26.000000+00:00', true, 'a zero fraction is the same instant as none'],
+        ['2026-11-10T05:06:26.147857Z', '2026-11-10T05:06:26.147169+00:00', false, 'Z and +00:00 name one zone'],
+        ['2026-11-10T05:06:26.147169Z', '2026-11-10T05:06:26.147169+00:00', true, 'one instant in two spellings is a replay'],
+        ['2026-11-10T05:06:26.147Z', '2026-11-10T05:06:26.147169+00:00', true, 'a page stamp has milliseconds: .147169 is not older than .147'],
+        ['2026-11-10T05:06:26.147Z', '2026-11-10T05:06:26.146999+00:00', false, 'and .146999 is'],
+        ['2026-11-10T05:06:26.5Z', '2026-11-10T05:06:26.499999Z', false, 'one fraction digit is tenths, never microseconds'],
+        ['2026-11-10T05:06:26.148000+00:00', '2026-11-10T05:06:26.147999+00:00', false, 'no rounding across a millisecond'],
+        ['2026-11-10T05:06:27+00:00', '2026-11-10T05:06:26.999999+00:00', false, 'no rounding across a second'],
+        ['2026-11-10T05:06:26.147857+00:00', '2026-11-10T08:06:26.147169+03:00', false, 'another offset is the same clock'],
+        ['2026-11-10T05:06:26.147169+00:00', '2026-11-10T08:06:26.147169+03:00', true, 'the same instant from another offset is a replay'],
+    ]) assert.equal(verdict(clock, revision), current, why);
+});
+
+test('a moment the guard cannot read still never rejects a late outcome', () => {
+    const time = '2026-11-10T05:06:26.147169+00:00';
+    const card = (latestSourceTs) => ({ finished: true, latestSourceTs });
+    for (const clock of ['', undefined, null, 'not a time']) {
+        assert.equal(lateOutcomeIsCurrent(card(clock), { current_outcome: { revision: time } }), true, String(clock));
+    }
+    for (const evt of [{ current_outcome: {} }, { current_outcome: { revision: 'not a time' } }, { ts: '' }, {}]) {
+        assert.equal(lateOutcomeIsCurrent(card(time), evt), true, JSON.stringify(evt));
+    }
+});

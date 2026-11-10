@@ -28,7 +28,7 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from ouroboros import room_messages, shared_values, store, store_empty
+from ouroboros import room_messages, shared_values, store, store_empty, store_timing
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.utils import utc_now_iso
 
@@ -149,7 +149,7 @@ def decode(body: str) -> Dict[str, Any]:
 
 def _typed(exc: sqlite3.Error) -> StoreError:
     if isinstance(exc, sqlite3.OperationalError) and store.busy(exc):
-        error = StoreBusy(f"dialogue store busy: {exc}", reason="contention")
+        error = StoreBusy(f"dialogue store busy: {exc}{store_timing.busy_note(exc)}", reason="contention")
         if hasattr(exc, "rollback_confirmed"):
             error.rollback_confirmed = exc.rollback_confirmed
         return error

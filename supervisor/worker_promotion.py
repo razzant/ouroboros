@@ -452,6 +452,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
+    if isinstance(evt.get("ui_control"), dict) and evt.get("ui_control"):
+        task.setdefault("metadata", {})["ui_control"] = dict(evt["ui_control"])  # the press that started it
     pid = str(evt.get("project_id") or "").strip()
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:

@@ -359,8 +359,9 @@ def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
     return repaired
 
 
+# ``merge_effect_unknown``: a settled merge request (``merge_receipts.UNKNOWN_EFFECT``), whose receipt stays.
 ACCEPTABLE_UNKNOWN = frozenset({"local_completion_unknown", "owner_ended_effect_unknown",
-                                "returned_effect_unconfirmed"})
+                                "returned_effect_unconfirmed", "merge_effect_unknown"})
 
 
 def receiver_reason(attempt: Dict[str, Any]) -> str:
@@ -387,7 +388,9 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
     Only what the census words as unknown is accepted: a tool call
     (``tool_custody.tool_handoff_reason``) or a model answer receiver
     (``receiver_reason``) in a worker that cannot be proven live or ended, or a
-    local call that is over while its outside effect is unconfirmed. A call in a
+    local call that is over while its outside effect is unconfirmed, or a settled
+    merge request of unknown outcome (``merge_receipts.accept_unknown``, judged and
+    recorded beside its unchanged receipt under the receipt lock). A call in a
     live worker is refused, so no second writer starts beside it. The accepted
     tool row leaves ``launch_handoffs`` and stays in ``retired_tool_invocations``
     as observed, with ``effect_outcome="unknown_accepted"``,
@@ -396,6 +399,7 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
     same record. Nothing is re-run and the outside effect is declared neither
     done nor failed; a late return of an accepted call writes nothing.
     """
+    from ouroboros import merge_receipts
     from ouroboros.model_wait import retire_model_consumers
     from ouroboros.owner_pause import tree_model_requests
     from ouroboros.task_results import load_task_result, require_writable_task_result_schema, stamp_task_result_schema
@@ -413,9 +417,10 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
         return reason in ACCEPTABLE_UNKNOWN
     for holder in sorted({str(task_id) for task_id in members if task_id}):
         try:  # the reasons are probed before the write: no process probe holds the store
-            claims = (load_task_result(pathlib.Path(root), holder, strict=True) or {}).get("launch_handoffs") or {}
+            record = load_task_result(pathlib.Path(root), holder, strict=True) or {}
         except Exception:
             continue  # unreadable authority: nothing is accepted on a guess
+        claims = record.get("launch_handoffs") or {}
         reasons = {op: tool_handoff_reason(claim)["reason"] for op, claim in claims.items()
                    if op in wanted and isinstance(claim, dict)}
         decided = {op: (claims[op].get("state"), why) for op, why in reasons.items() if judged(op, holder, why)}
@@ -440,6 +445,17 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
             except Exception:
                 log.warning("Named decision on %s not recorded; its calls stay held", holder, exc_info=True)
                 refused.extend({"id": op, "task_id": holder, "reason": "unwritten"} for op in decided)
+        receipts = wanted & {str(r.get("receipt_id") or "") for r in record.get("merge_receipts") or []
+                             if isinstance(r, dict)}
+        if receipts:  # after the calls above: a request whose call was just accepted is judged without it
+            try:
+                accepted.extend(receipt_id for receipt_id, why in merge_receipts.accept_unknown(
+                    pathlib.Path(root), holder, receipts, by=by).items() if judged(receipt_id, holder, why))
+            except Exception:
+                log.warning("Named decision on %s's merge requests not recorded; they stay held", holder,
+                            exc_info=True)
+                refused.extend({"id": receipt_id, "task_id": holder, "reason": "unwritten"}
+                               for receipt_id in sorted(receipts))
     try:
         attempts = [row for row in tree_model_requests(pathlib.Path(root), root_task_id)  # the census's own read
                     if str(row.get("attempt_id") or "") in wanted]

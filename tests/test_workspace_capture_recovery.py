@@ -80,6 +80,27 @@ def _consumers(root, task_id, expected):
                       "list_status": listed["status"], "detail_status": detail.json()["status"]}))
 
 
+@pytest.mark.parametrize("kind", ["custody", "mail"])
+def test_publication_lock_preserves_os_failure_without_claiming_contention(tmp_path, monkeypatch, kind):
+    import errno
+    from ouroboros import task_custody
+    from tests._shared import full_disk_at
+
+    write_task_result(tmp_path, "lock-owner", "running", result="untouched")
+    before = result_signature(tmp_path, "lock-owner")
+    lock = getattr(task_custody, f"task_{kind}_lock")
+    with monkeypatch.context() as failure:
+        full_disk_at(failure, f".{kind}.lock")
+        with pytest.raises(task_custody.CustodyBusy) as caught:
+            with lock(tmp_path, "lock-owner", timeout_sec=0):
+                pytest.fail("the lock was not taken")
+        assert caught.value.errno == errno.ENOSPC and "lock-owner" in str(caught.value)
+        assert "contention" not in str(caught.value)
+    assert result_signature(tmp_path, "lock-owner") == before
+    with lock(tmp_path, "lock-owner", timeout_sec=0) as acquired:
+        assert acquired
+
+
 @pytest.fixture
 def promoted(worker, file_recovery, tmp_path_factory, monkeypatch):  # noqa: F811
     from ouroboros.agent import OuroborosAgent

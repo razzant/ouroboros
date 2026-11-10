@@ -1227,11 +1227,18 @@ def _write(ctx, path, content):
     return str(registry.execute("write_file", {"path": path, "content": content}))
 
 
-def _observed_write(ctx, path, root="active_workspace"):
-    """The loop's own record of a successful native write (what ``reviewable_effect_projection`` reads)."""
+def _observed_write(ctx, path, root="active_workspace", *, receipt=True):
+    """The loop's own record of a successful native write (what ``reviewable_effect_projection`` reads), with the typed
+    receipt its writer publishes of the target its binding resolved (``git_repo_edit._with_path_facts``);
+    ``receipt=False`` is a record without it."""
+    import pathlib
+
+    meta = {"resolved_root": str(pathlib.Path(ctx.active_repo_dir() if root == "active_workspace" else ctx.repo_dir)
+                                 .resolve()), "changed_paths": [path]} if receipt else {}
     trace = ctx._execution_trace = getattr(ctx, "_execution_trace", None) or {"tool_calls": []}
     trace.setdefault("tool_calls", []).append({"tool": "write_file", "args": {"path": path, "root": root},
-                                               "is_error": False, "status": "ok", "result": "Written 1 file"})
+                                               "is_error": False, "status": "ok", "result": "Written 1 file",
+                                               "tool_result_meta": meta})
     return trace
 
 
@@ -1435,7 +1442,9 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
 
     changed = _loop_call(ctx, "write_file", {"files": [{"path": "app.py", "content": "VALUE = 2\n"},
                                                       {"path": "lib.py", "content": "LIB = 'base'\n"}]})
-    assert changed["tool_result_meta"] == {"unchanged_paths": ["lib.py"]} and not changed["is_error"]
+    assert changed["tool_result_meta"] == {"resolved_root": str(ctx.workspace_root.resolve()),
+                                           "changed_paths": ["app.py"], "unchanged_paths": ["lib.py"]}
+    assert not changed["is_error"]
     assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in produced_material(ctx)["files"]] == [
         ("workspace change", "app.py")], "the batch's unchanged member is no produced material"
     assert required_material(ctx, trace, "VALUE is 2.") == "observed_production"
@@ -1462,8 +1471,9 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
 
 @pytest.mark.parametrize("letter", ["a", "я"])
 def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_changes(tmp_path, monkeypatch, letter):
-    """The typed metadata limit measures serialized bytes. An incomplete unchanged-path list cannot turn its
-    omitted members into produced files; known Git changes remain available with the trace coverage gap."""
+    """The typed receipt's limit measures serialized bytes. A cut unchanged-path list leaves the changed list whole,
+    so nothing unchanged becomes produced; a cut changed-path list names its gap and never guesses the rest, which
+    the folder's own attribution still lists."""
     from ouroboros.tools.review_result import produced_material, required_material
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
@@ -1476,12 +1486,135 @@ def test_large_mixed_write_reports_incomplete_path_facts_without_inventing_chang
     row = _loop_call(ctx, "write_file", {"files": [{"path": "app.py", "content": "VALUE = 2\n"}]
                     + [{"path": name, "content": "kept\n"} for name in names]})
     assert row["is_error"] is False, row
-    assert row["tool_result_meta"]["unchanged_paths_omitted"] > 0
+    meta = row["tool_result_meta"]
+    assert meta["changed_paths"] == ["app.py"] and meta["unchanged_paths_omitted"] > 0
+    assert "changed_paths_omitted" not in meta
     material = produced_material(ctx)
     assert [(item["kind"], item["path"].rsplit("/", 1)[-1]) for item in material["files"]] == [
         ("workspace change", "app.py")]
-    assert any("unchanged-path list is incomplete" in gap for gap in material["issues"])
+    assert not [gap for gap in material["issues"] if "typed receipt" in gap], material["issues"]
     assert required_material(ctx, ctx._execution_trace, "Changed.") == "observed_production"
+
+    many = _loop_call(ctx, "write_file", {"files": [{"path": name, "content": "changed\n"} for name in names]})
+    assert many["is_error"] is False, many
+    cut = many["tool_result_meta"]
+    assert cut["changed_paths_omitted"] > 0 and len(cut["changed_paths"]) + cut["changed_paths_omitted"] == len(names)
+    material = produced_material(ctx)
+    assert any("more path(s) than its typed receipt could name" in gap for gap in material["issues"]), material["issues"]
+    assert sorted(item["path"].rsplit("/", 1)[-1] for item in material["files"]) == sorted(["app.py", *names]), \
+        "the folder's attribution lists every change; the receipt's cut invents none"
+
+
+@pytest.mark.parametrize("folder_kind", ["git", "plain"])
+@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+def test_a_write_through_a_link_lists_the_target_it_wrote_never_the_one_the_link_names_later(
+        tmp_path, monkeypatch, tool, folder_kind):
+    """Astra, 10 Nov 2026: each native editor writes through ``alias.txt -> written.txt`` to the target its binding
+    resolved when it wrote, and its typed receipt names that target. Retargeting the link afterwards to an owner file
+    the call never touched never lists that file, its path or its bytes, in the material or in the reviewed subject,
+    in an admitted Git folder or an ordinary one; a call record without the receipt names a gap, its arguments are
+    never resolved again."""
+    import pathlib
+
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_result import produced_material, result_subject
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    if folder_kind == "plain":
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        ctx = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.repo_dir, drive_root=ctx.drive_root,
+                          workspace_root=plain, workspace_mode="external", task_id="task-plain")
+    folder = pathlib.Path(ctx.workspace_root)
+    (folder / "written.txt").write_text("before\n", encoding="utf-8")
+    (folder / "untouched.txt").write_text("OWNER BYTES THE CALL NEVER TOUCHED\n", encoding="utf-8")
+    (folder / "alias.txt").symlink_to("written.txt")
+    if folder_kind == "git":
+        shared.git(folder, "add", ".")
+        shared.git(folder, "commit", "-qm", "fixture inputs")
+        _baselined(ctx)
+    args = {"write_file": {"path": "alias.txt", "content": "after\n"},
+            "edit_text": {"path": "alias.txt", "old_str": "before", "new_str": "after"},
+            "apply_patch": {"patch": "*** Update File: alias.txt\n-before\n+after\n"},
+            "edit_batch": {"edits": [{"path": "alias.txt", "old_str": "before", "new_str": "after"}]}}[tool]
+    row = _loop_call(ctx, tool, args)
+    assert row["is_error"] is False, row
+    assert (folder / "written.txt").read_text(encoding="utf-8") == "after\n" and (folder / "alias.txt").is_symlink()
+    (folder / "alias.txt").unlink()
+    (folder / "alias.txt").symlink_to("untouched.txt")  # retargeted after the write
+
+    def never_the_owner_file(material, subject_text):
+        assert not [item for item in material["files"] if pathlib.Path(item["path"]).name == "untouched.txt"], material
+        assert "OWNER BYTES" not in json.dumps(material) and "OWNER BYTES" not in subject_text
+
+    material = produced_material(ctx)
+    never_the_owner_file(material, result_subject(ctx, SimpleNamespace(answer=""), governance_root=ctx.repo_dir,
+                                                  answer="Written.").diff_text)
+    assert "written.txt" in {pathlib.Path(item["path"]).name for item in material["files"]}, material
+    assert row["tool_result_meta"]["changed_paths"] == ["written.txt"], row["tool_result_meta"]
+    assert row["tool_result_meta"]["resolved_root"] == str(folder.resolve())
+    _observed_write(ctx, "alias.txt", receipt=False)  # a record without its writer's receipt
+    material = produced_material(ctx)
+    assert any("carries no receipt of the targets it resolved" in gap for gap in material["issues"]), material
+    never_the_owner_file(material, "")
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+def test_partial_native_write_remains_production_when_its_capture_failed(tmp_path, monkeypatch, tool):
+    """A disk/capture failure does not erase the writer's known landed paths or make the call successful."""
+    from ouroboros import artifacts
+    from ouroboros.tools import edit_ops, git
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_result import produced_material, required_material, result_review_at_delivery
+
+    original = _floor_ctx(tmp_path, monkeypatch)
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    ctx = ToolContext(repo_dir=original.repo_dir, system_repo_dir=original.repo_dir,
+                      drive_root=original.drive_root, workspace_root=folder, workspace_mode="external",
+                      task_id="partial-native")
+    for name in ("first.txt", "second.txt"):
+        (folder / name).write_text("before\n", encoding="utf-8")
+    copy = artifacts.copy_file_to_task_artifacts
+
+    def capture_unavailable(*args, **kwargs):
+        if kwargs.get("kind") == "user_file":
+            raise OSError("fixture: artifact disk unavailable")
+        return copy(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "copy_file_to_task_artifacts", capture_unavailable)
+    if tool == "write_file":
+        (folder / "second.txt").unlink()
+        (folder / "second.txt").mkdir()  # actual second-destination failure, after the first write
+    else:
+        writer = git if tool == "edit_text" else edit_ops
+        write = writer.write_text
+
+        def interrupted_write(path, content):
+            if path.name == "second.txt":
+                raise OSError("fixture: disk write failed")
+            write(path, content)
+            if tool == "edit_text":
+                raise OSError("fixture: write landed before I/O failure")
+
+        monkeypatch.setattr(writer, "write_text", interrupted_write)
+    args = {"write_file": {"files": [{"path": name, "content": "after\n"}
+                                     for name in ("first.txt", "second.txt")]},
+            "edit_text": {"path": "first.txt", "old_str": "before", "new_str": "after"},
+            "apply_patch": {"patch": "*** Update File: first.txt\n-before\n+after\n"
+                                      "*** Update File: second.txt\n-before\n+after\n"},
+            "edit_batch": {"edits": [{"path": name, "old_str": "before", "new_str": "after"}
+                                      for name in ("first.txt", "second.txt")]}}[tool]
+    row = _loop_call(ctx, tool, args)
+    assert row["is_error"] is True and not row.get("artifact_registered"), row
+    assert (folder / "first.txt").read_text(encoding="utf-8") == "after\n"
+    material = produced_material(ctx)
+    assert material["observed"] and any(item["path"].endswith("first.txt") for item in material["files"]), material
+    assert required_material(ctx, ctx._execution_trace, "Partial write retained.") == "observed_production"
+    sends = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    assert result_review_at_delivery(ctx, "Partial write retained.", ctx._execution_trace, lambda _text: None)
+    assert len(sends) == 3
 
 
 def test_an_answer_its_contract_requires_reviewed_is_reviewed_without_any_file(tmp_path, monkeypatch):

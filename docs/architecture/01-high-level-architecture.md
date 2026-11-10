@@ -16,7 +16,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     i18n.js, settings_language.js, ui_i18n_types.js — interface language: a DOM overlay over rendered chrome from the translation memory, translated at the producer; chat prose, logs, code and owner names are never walked (§3 Settings)
     page_header.js, ui_interactions.js, scroll_fade.js — header/tab strip and the segmented-choice generator; dialog, menu and popup binders; scroll-edge fade (§3 Navigation)
     chat_decision.js, question_presentation.js, secret_hitl.js, main_waiting.js, chat_render_batch.js, task_phase_chip.js, task_activity_types.js — decision cards, Project questions/Main mirrors, keyed timeline patches, status/motion and census schema (§3 Chat and Projects)
-    chat_history.js, chat_history_reveal.js, chat_history_replay.js, chat_reading_position.js, layout_batch.js, chat_row_sleep.js, chat_row_placement.js — bounded pages, landing, replay, reading intent, batched reads, row sleep, child words vs notices (§3 Timeline ownership)
+    chat_history.js, chat_history_reveal.js, chat_history_replay.js, chat_preview.js, chat_reading_position.js, layout_batch.js, chat_row_sleep.js, chat_row_placement.js — bounded pages, landing, replay, saved preview, reading intent, batched reads, row sleep, child words vs notices (§3 Timeline ownership)
     delegated_activity.js — executor activity with preview gaps (§3); verification_presentation.js — recorded failed-check rows, live and replayed (§6 Tool capability and execution)
     welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; known host sentences without the leading pictograph (DESIGN "Chat authorship and System rows")
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
@@ -51,7 +51,7 @@ supervisor/ — background thread inside server.py (§5)
   conversation_lane.py, inline_carrier.py — the lane's slots, admission, spare and census; the two inline executors (§5 Conversation lane)
   state.py, state_initialization.py — `state/state.json` updates with typed read quality; init witness
   queue.py — task queue (PENDING/RUNNING) with activity-based timeouts; the one task-state authority (§5); loop_load.py measures it
-  queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported through `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
+  queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported by `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
   queue_publication.py — marks under Q; the tick publishes outside Q by revision (§5)
   cognitive_operations.py — operation leases and typed wait marks (`wait_for_tasks` picks a responsible parent) for silence attention and reply preparation; no durable ledger (§6)
   silence_attention.py — silence episodes and their mail to the source and one waiting ancestor (§5)
@@ -225,7 +225,7 @@ ouroboros/ — agent core and shared runtime (§6)
   project_handoff.py — the Main transfer receipt owed through the terminal outbox after a durable bind (§3 Project handoff receipts)
   project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
   room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
-  owner_words.py — the owner's words for a work: one set, by value, verbatim and dated, for roots, helpers, sessions and reviewers
+  owner_words.py — a work's owner words, one dated verbatim set; schedule text as provenance; by value for roots, helpers, sessions, reviewers
   project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
   context_input_selection.py — declared inputs, historical author views (not criteria), first-build overflow rescue (§6 Selected first-input sources; Context fitting)
@@ -328,7 +328,7 @@ ouroboros/ — agent core and shared runtime (§6)
   runtime_mode_policy.py — Protected-path policy (§6 Safety and runtime mode)
   schedule_contract.py — Schedule id, 5-field cron and IANA timezone validation SSOT
   post_task_evolution.py — Worker's durable promotion signal for the supervisor idle tick (§6 Background consciousness and Evolution)
-  repo_remotes.py — Role-based remotes: `managed` is the read/update-only official source, `origin` the personal target from the GitHub token
+  repo_remotes.py — Fetch URLs as Git resolves them; `managed` is the read/update-only official source, `origin` the token's personal target
   review_evidence.py — Same-execution commit-review evidence (§6 Commit review evidence) and the durable commit/advisory review record of a task or checkout; execution facts are visibility only
   review_status_projection.py — Commit-review status projection over `review_state` records; re-exported by review_evidence.py
   semantic_dedup.py — LLM-first semantic dedup, fail-open None; consumed by review_state
@@ -569,7 +569,7 @@ ouroboros/ — agent core and shared runtime (§6)
     project_journal.py — journal/workpad read and write, `update_focus`, journal_tail_digest; foreign project reads for roots, foreign writes refused; `mirror_tree_coordination_to_journal`
     presence.py — configure_presence (the place verb: list, inspect, state, wakes, notes, circles, folder, model, owner accounts) and presence_cancel_work
     task_tree.py — tree_note/tree_read (storage SSOT: task_tree_ledger.py)
-    followup.py — the agent's two schedule tools over `state/scheduled_tasks.json`: `manage_schedules` (list/get; root-only audited update/disable/delete/restore) and `schedule_followup` (`notify=true` leaves a note)
+    followup.py — the agent's schedule tools over `state/scheduled_tasks.json`: `manage_schedules` (list/get; root-only audited update/disable/delete/restore), `schedule_followup` (`notify=true` leaves a note)
     join_ledger.py — direct children's tree-note dispositions, peek_task, discard_child_result (§6)
     delegate.py — Delegation facade verbs `delegate_start` (with `retry_of`), `delegate_wait`, `delegate_cancel`, `delegate_answer`, `delegate_message`; the host pre-start rides the same wrapper (§6 Delegated subagents)
     delegate_integration.py — Delegated mutation authority, snapshots and terminal capture; skill-payload CAS apply with extension reconciliation (§6 Snapshots, capture and disposition)

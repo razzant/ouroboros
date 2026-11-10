@@ -17,6 +17,7 @@ import hashlib
 from typing import Any, Dict
 from urllib.parse import quote, urlencode
 
+from ouroboros.gateways.claudexor_metadata import STORE_IDENTITY
 from ouroboros.runtime_limits import CLAUDEXOR_WHOLE_BYTES_READ_SEC
 
 THREAD_RETIRE_OPERATION = ("POST", "/v2/threads/:id/retire")
@@ -53,11 +54,11 @@ class ClaudexorThreadGateway:
         return body
 
     def start_thread_turn(self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
-        """Append one turn through the public v3 thread pipeline."""
+        """Append one turn through the public v3 thread pipeline; its receipt names the admitting store."""
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
         body = self._request("POST", _thread_path(thread_id, "turns"), json_body=dict(request),
-                             headers={"Idempotency-Key": str(idempotency_key)})
+                             headers={"Idempotency-Key": str(idempotency_key), **STORE_IDENTITY})
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
         return body

@@ -711,8 +711,15 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     facts = copy.deepcopy(source.get("work_order_source_request") or {})
     facts.pop("original_prompt_sha256", None)
     (facts.get("turn_sources") or {}).pop("prompt", None)
+    # The successor continues its stopped run (or that run's thread) where that run was admitted: the start is for that
+    # store, and its first send or exact replay goes nowhere else (``replay_store_unproven``). A predecessor bound to
+    # no store (an older engine or receipt) leaves "" and the earlier replay rule; never the cached handshake.
+    from ouroboros.delegate_custody_current import run as custody_run
+
+    stopped = custody_run(custody, str(decision.get("continues_run") or "")) if decision.get("continues_run") else None
     written = custody_module.record_start_requested(
         custody, run_id="", task_id=task_id, idempotency_key=token, invocation_id=token,
+        daemon_store_id=str(getattr(stopped, "daemon_store_id", "") or ""),
         operation_id=decision["operation_id"], max_seconds=int(body.get("maxSeconds") or 0), request=body,
         continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
         surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),

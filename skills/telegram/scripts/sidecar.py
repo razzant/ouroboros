@@ -30,7 +30,7 @@ from urllib.parse import parse_qsl, urlsplit
 import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import HTMLResponse, Response
 from starlette.websockets import WebSocket
 
@@ -220,21 +220,33 @@ class _ProxyStreamResponse:
         self.body = body
         self.close = close
 
-    async def __call__(self, _scope: dict[str, Any], _receive: Any, send: Any) -> None:
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self.headers,
-            }
-        )
+    async def __call__(self, _scope: dict[str, Any], receive: Any, send: Any) -> None:
+        # The upstream response closes however delivery ends. uvicorn (ASGI 2.3) reports a client gone only to
+        # receive(), its send() then returning quietly, so delivery races that report as Starlette's StreamingResponse
+        # does: an abandoned stream (a stream widget's EventSource) lets its upstream socket go.
+        delivery = asyncio.ensure_future(self._deliver(send))
+        gone = asyncio.ensure_future(self._client_gone(receive))
         try:
-            async for chunk in self.body:
-                if chunk:
-                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await asyncio.wait((delivery, gone), return_when=asyncio.FIRST_COMPLETED)
         finally:
+            for task in (delivery, gone):
+                task.cancel()
+            await asyncio.gather(delivery, gone, return_exceptions=True)
             await self.close()
+        if not delivery.cancelled() and delivery.exception() is not None:
+            raise delivery.exception()
+
+    async def _deliver(self, send: Any) -> None:
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.headers})
+        async for chunk in self.body:
+            if chunk:
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    @staticmethod
+    async def _client_gone(receive: Any) -> None:
+        while (await receive())["type"] != "http.disconnect":
+            pass
 
 
 def _data_check_string(items: Iterable[tuple[str, str]]) -> str:
@@ -743,7 +755,10 @@ class TelegramProxySidecar:
             self._http_client = httpx.AsyncClient(
                 follow_redirects=False,
                 trust_env=False,
-                timeout=httpx.Timeout(connect=3.0, read=None, write=None, pool=3.0),
+                # A phone importing the SPA's module graph holds response slots for a while: a finite burst
+                # past the 32 connections waits its turn instead of becoming a 502 after three seconds. The
+                # limit bounds open sockets, not the wait: a request waits until a slot frees or it is cancelled.
+                timeout=httpx.Timeout(connect=3.0, read=None, write=None, pool=None),
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
             )
         return self._http_client
@@ -873,6 +888,10 @@ class TelegramProxySidecar:
         try:
             upstream = await client.send(upstream_request, stream=True)
         except (httpx.HTTPError, OSError):
+            return _plain_response(502, "Ouroboros is unavailable.")
+        except ClientDisconnect:
+            # The phone left while this request waited for a socket: once one freed, its head reached the core and
+            # reading its body met the disconnect, which ended the upstream exchange. Nobody receives this answer.
             return _plain_response(502, "Ouroboros is unavailable.")
 
         public_target = self._public_target()

@@ -714,11 +714,11 @@ def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
     to the live progress surface, each frame committed once handed over; a broken channel
     never aborts the wait."""
     fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
     from ouroboros import delegate_activity
     try:
         for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
+            if not callable(fn):
+                return  # retained, not delivered; the detail/terminal path can retry the pending frame
             fn(delegate_activity.progress_text(activity), delegated_activity=activity)
             commit()
     except Exception:

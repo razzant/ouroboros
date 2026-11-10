@@ -423,7 +423,9 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
             "task": _frozen({**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t), **carried_basis(t),
                              **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery', '_seed_return',
                                                         # #939: the execution budget and its carried clock offset travel with the row.
-                                                        'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}}),
+                                                        'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec',
+                                                        '_execution_owner',  # its carrier: a returned turn keeps its lane
+                                                        ) if key in t}}),
         })
     running_rows = []
     for task_id, meta in running_items:

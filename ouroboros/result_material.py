@@ -6,8 +6,9 @@ when its material cannot be captured; the gap is then named, never filled in. Ad
 but never created, input copies, checkpoints and the expected result a task was given are intent, not
 production. The view reads producers that already exist — the task's registered artifacts, its changes in
 the admitted folder against that folder's own baseline and the commits its attributed epochs record
-(``mutation_attribution``), the native writes the loop trace observed (``outcomes.reviewable_effect_projection``)
-and extension effect receipts (``observed_effect``) — and adds no watcher, ledger or classifier: a shell
+(``mutation_attribution``), the native writes the loop trace observed (``outcomes.reviewable_effect_projection``), at
+the targets each writer's typed receipt says its binding resolved when it wrote, and extension effect receipts
+(``observed_effect``) — and adds no watcher, ledger or classifier: a shell
 effect nothing observed stays unknown. Every listed file's exact bytes stay readable at a named copy (an
 immutable registered artifact, else one copy by digest in the task's source store), so a reviewer reads the
 version the subject names, not a live path that may have changed since; a packet seat reads bounded
@@ -94,15 +95,27 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
 
 
 def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) -> Tuple[List[pathlib.Path], str]:
-    """The exact paths one observed native write named (its retained arguments), or why they are not listed."""
+    """The files one observed native write changed, exactly as its writer's binding resolved them when it wrote (its
+    typed receipt: ``changed_paths`` under ``resolved_root``, ``git_repo_edit._with_path_facts``), or why they are not
+    listed. Its arguments are never resolved again here: a link retargeted since the write would name a file the call
+    never touched (Astra, 10 Nov 2026); a target its writer found already holding those bytes is not in the receipt."""
     from ouroboros.outcomes import _ROOT_WRITE_TOOLS
 
     tool = str(effect.get("tool") or "")
     if tool not in _ROOT_WRITE_TOOLS:
         return [], ""  # a commit, an integration or a registered output: read by attribution and the artifacts
     args = effect.get("args") if isinstance(effect.get("args"), dict) else {}
+    where = str(args.get("root") or "active_workspace")
+    if where in _CAPTURED_ROOTS:
+        return [], ""
     calls = (getattr(ctx, "_execution_trace", None) or {}).get("tool_calls") or []
     call = calls[effect["index"]] if 0 <= int(effect.get("index", -1)) < len(calls) else {}
+    meta = call.get("tool_result_meta") if isinstance(call, dict) and isinstance(call.get("tool_result_meta"), dict) else {}
+    if where in _WRITE_ROOTS and isinstance(meta.get("changed_paths"), list) and meta.get("resolved_root"):
+        omitted = meta.get("changed_paths_omitted")
+        return [pathlib.Path(str(meta["resolved_root"])) / str(rel) for rel in dict.fromkeys(meta["changed_paths"])], (
+            f"{tool} changed {omitted} more path(s) than its typed receipt could name; those are not listed here. "
+            "Registered captures and attributed Git changes are listed separately." if omitted else "")
     if isinstance(call, dict) and call:
         from ouroboros.artifacts import materialize_tool_args_source
 
@@ -116,23 +129,11 @@ def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) ->
         from ouroboros.tools.edit_ops import normalize_patch_paths
 
         normalize_patch_paths(args["patch"], lambda path: named.append(path) or path)
-    where = str(args.get("root") or "active_workspace")
-    if where in _CAPTURED_ROOTS:
-        return [], ""
-    if where not in _WRITE_ROOTS or not named:
-        return [], (f"{tool} wrote {', '.join(named) or 'paths its retained arguments do not name'} under {where}; "
-                    "those bytes are not listed here")
-    from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
-
-    base = pathlib.Path(active_repo_dir_for(ctx) if where == "active_workspace" else system_repo_dir_for(ctx))
-    # A target its writer found already holding exactly those bytes was not rewritten: not production (the typed
-    # ``unchanged_paths`` of ``git_repo_edit._with_unchanged``).
-    meta = call.get("tool_result_meta") if isinstance(call, dict) and isinstance(call.get("tool_result_meta"), dict) else {}
-    if meta.get("unchanged_paths_omitted"):
-        return [], (f"{tool}'s unchanged-path list is incomplete; trace arguments cannot distinguish the remaining "
-                    "changed paths. Registered captures and attributed Git changes are listed separately.")
-    same = {(base / str(rel)).resolve(strict=False) for rel in meta.get("unchanged_paths") or []}
-    return [path for path in ((base / name).resolve(strict=False) for name in dict.fromkeys(named)) if path not in same], ""
+    named_text = ", ".join(dict.fromkeys(named)) or "paths its retained arguments do not name"
+    if where in _WRITE_ROOTS:  # a record without its writer's receipt: what it resolved then is unknown now
+        return [], (f"{tool} wrote {named_text} under {where}, but its call record carries no receipt of the targets "
+                    "it resolved; its arguments are not resolved again now, so those bytes are not listed here")
+    return [], f"{tool} wrote {named_text} under {where}; those bytes are not listed here"
 
 
 def _basis_note(ctx: Any, snapshot: Dict[str, Any]) -> str:
