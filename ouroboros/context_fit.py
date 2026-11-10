@@ -711,17 +711,25 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     held = (kept or {}).get(start or preferred) or FULL_VIEW
     story_before, room_before = (render_story(snapshot, held), render_room(snapshot, held)) if snapshot else ("", "")
 
-    shapes = {}  # one serialization per request shape: a memory text adds only its own characters (json_chars)
+    # One serialization per request shape; a host section's shorter form and a memory text then add or take only
+    # their own characters (JSON escapes per character, and these texts are embedded verbatim).
+    shapes, text_chars = {}, {}
+    def escaped(text):
+        if text not in text_chars:
+            text_chars[text] = floor.json_chars(text)
+        return text_chars[text]
     def measure(selected, sent, addressed, story="", room=""):
-        key = (selected, sent.chosen, tuple(sorted(addressed.items())), bool(story), bool(room))
-        counted("request_forms", key=("frame", selected, sent.chosen, bool(story), bool(room)))
+        key = (selected, sent.chosen, bool(story), bool(room))
+        counted("request_forms", key=("frame", *key))
         if key not in shapes:
             whole = _request_tokens(_system_blocks(core, governance[form[selected]], story, room, mode=selected,
-                addressed=addressed), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
+                addressed={}), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
                 current_messages=current_messages, chars=True)
             shapes[key] = whole - floor.json_chars(story) - floor.json_chars(room), tool_schema_tokens(list(sent.schemas))
         base, schemas = shapes[key]
-        return max(1, (base + floor.json_chars(story) + floor.json_chars(room) + 3) // 4) + schemas + envelope_overhead_tokens
+        full = {part.section_id: part.full_text for part in sections[selected]}
+        forms = sum(escaped(short) - escaped(full[name]) for name, short in addressed.items())
+        return max(1, (base + forms + floor.json_chars(story) + floor.json_chars(room) + 3) // 4) + schemas + envelope_overhead_tokens
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
     original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
         schema_names=names), section_views(sections[start or preferred], previous))

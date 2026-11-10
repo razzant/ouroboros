@@ -44,11 +44,6 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "host steps' measure and the Max frame's abandoned view all draw it. Remover: K1 (price by pieces; only the "
         "delivered view is drawn).", {"view_renders": 110}),
     ("L7b", "T:mainw"): ("The same 80 renders for 2 delivered texts; the same remover.", {"view_renders": 110}),
-    ("L7c", "T:main"): (
-        "The whole request is serialized 44 times for its 8 forms (k=1 and k=30): each probe of the floor walk and of "
-        "the host steps serializes the whole request again. Remover: K1 (the measured price of a request form, then "
-        "host steps by arithmetic).", {"request_serializations": 60}),
-    ("L7c", "T:mainw"): ("The same 44 serializations for 8 forms; the same remover.", {"request_serializations": 60}),
     ("L7d", "T:main"): (
         "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
         "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "
