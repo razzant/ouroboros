@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 from copy import deepcopy
 
 import pytest
@@ -61,7 +62,7 @@ def engine(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_: pytest.fail("Claudexor must not fetch API pricing"))
     observability._TASK_PARTS.clear()
-    gateway = Gateway(results=[_answer("Round one answer."), _answer("Round two answer.")])
+    gateway = Gateway(results=[_answer(f"Answer {index}.") for index in (1, 2, 3)])
     monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **_kw: gateway)
     yield root
     observability._TASK_PARTS.clear()
@@ -124,3 +125,41 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
     assert [{verb: n for verb, n in work.items() if verb.startswith("probe")} for work in seen] == [{"probe": 1}] * 2, seen
     assert seen[1].get("new_parts", 0) > 0, seen
     assert section_spans() == {}
+
+
+STEPS = ("model_call", "request_record", "physical_candidate", "daemon_upload", "create_operation")
+RECORDS = ("llm_request", "physical_llm_candidate", "llm_claudexor_request")
+
+
+def test_the_round_receipt_names_each_preparation_step_and_what_the_request_records_spent(engine):
+    """``host_steps`` (S11): wall and thread CPU of each step from the call's start to the engine's operation, the
+    request records' own sections (secret scanning, blobs, the publication lock's wait, the manifest's write), the
+    engine calls and event-bus puts, and the process's context switches, faults and block writes over the window.
+    Only facts: a call outside any window carries none of it."""
+    _first, second = _rounds(engine, "task-steps", _history(2))
+    steps = second["host_steps"]
+    assert tuple(steps["steps_ms"]) == STEPS and set(steps["steps_cpu_ms"]) == set(STEPS)
+    sections = set(steps["sections_ms"])
+    assert {f"{record}.{part}" for record in RECORDS for part in ("redact", "blobs", "lock_wait", "manifest_write")} <= sections
+    assert {"daemon.gateway", "daemon.operations", "daemon.upload", "daemon.create", "event_put", "total"} <= sections
+    assert all(isinstance(value, int) and value >= 0 for value in (*steps["steps_ms"].values(), *steps["sections_ms"].values()))
+    if sys.platform != "win32":
+        assert set(steps["rusage"]) == {"nvcsw", "nivcsw", "majflt", "oublock"} and min(steps["rusage"].values()) >= 0
+    usage: dict = {}
+    with ua.usage_scope(ua.UsageScope(drive_root=engine, task_id="task-steps", root_task_id="task-steps")):
+        call_llm_with_retry(LLMClient(), _history(2), MODEL, TOOLS, "high", 1, engine / "logs", "task-steps", 3, None,
+                            usage, "task")
+    unwatched = [json.loads(line) for line in (engine / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    unwatched = [row for row in unwatched if row.get("type") == "llm_round" and row.get("round") == 3]
+    assert unwatched and "host_steps" not in unwatched[0] and "work" not in unwatched[0]
+
+
+def test_a_platform_without_rusage_counters_leaves_them_out(monkeypatch):
+    """Windows has no ``resource``: the receipt keeps its steps and sections and only omits ``rusage``."""
+    from ouroboros import llm_observability
+
+    monkeypatch.setitem(sys.modules, "resource", None)  # the import fails as it does on Windows
+    with round_window():
+        llm_observability.host_step("model_call")
+        receipt = llm_observability.round_receipt()
+    assert "rusage" not in receipt["host_steps"] and set(receipt["host_steps"]["steps_ms"]) == {"model_call"}

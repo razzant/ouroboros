@@ -16,7 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros import model_concurrency, working_checkpoint
-from ouroboros.llm_observability import persist_observed_call, round_receipt, emit_main_call_state as _emit_main_llm_call_state
+from ouroboros.llm_observability import persist_observed_call, host_step, round_receipt, emit_main_call_state as _emit_main_llm_call_state
+from ouroboros.context_timing import timed
 from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
     owner_deadline_exhausted,
@@ -497,8 +498,8 @@ class LlmErrorClassification:
 
 def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) -> None:
     """Thin wrapper around the SSOT helper — keeps the call-site signature stable."""
-    emit_log_event(
-        event_queue,
+    timed(
+        "event_put", emit_log_event, event_queue,
         {"ts": utc_now_iso(), **payload},
         log_label="LLM live",
     )
@@ -1312,9 +1313,9 @@ def _emit_llm_operation(
     event_queue: Optional[queue.Queue], task_id: str, operation_id: str,
     phase: str, task_attempt: Any, execution_id: str, round_id: str,
 ) -> None:
-    emit_cognitive_operation_event(
-        event_queue, task_id=task_id, operation_id=operation_id, phase=phase,
-        kind="llm", task_attempt=task_attempt, execution_id=execution_id,
+    timed(
+        "event_put", emit_cognitive_operation_event, event_queue, task_id=task_id, operation_id=operation_id,
+        phase=phase, kind="llm", task_attempt=task_attempt, execution_id=execution_id,
         round_id=round_id,
     )
 
@@ -1407,6 +1408,7 @@ def call_llm_with_retry(
                 "use_local": use_local,
                 "timeout": _main_transport_timeout(model, deadline_ts, reserve_sec=transport_reserve_sec),
             }
+            host_step("model_call")  # the round's own facts, fit and send copy, before its first record
             request_ref = persist_observed_call(
                 drive_root, task_id=task_id, call_id=f"{llm_call_id}_request", call_type="llm_request",
                 payload={
@@ -1430,6 +1432,7 @@ def call_llm_with_retry(
                 },
                 writer=persist_call,
             )
+            host_step("request_record")
             if _deadline_not_dispatched(
                 deadline_ts, accumulated_usage, drive_logs,
                 task_id=task_id, model=model, round_idx=round_idx,

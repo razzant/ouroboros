@@ -23,7 +23,7 @@ from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
-from ouroboros.llm_observability import round_window
+from ouroboros.llm_observability import host_step, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
@@ -730,6 +730,7 @@ def run_llm_loop(
                         active_use_local=active_use_local, active_context_mode=active_context_mode,
                         drive_root=drive_root, emit_progress=emit_progress)
                     accumulated_usage[TRANSPORT_WAIT_REDIAL_KEY] = transport_wait is not None  # an open episode paces it
+                    host_step("round_top")  # the batch's end (or the start) to this call: the loop's own steps
                     with receiver_abandonable(), working_checkpoint.model_call_scope(limit_ctx):
                         msg, cost, active_context_mode = _call_round_model(model_call)
                     round_prep.close()  # its llm_round carried the receipt

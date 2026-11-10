@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import contextvars
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import gzip
 import hashlib
 import logging
@@ -941,8 +941,10 @@ def write_call_manifest(
     call_id: str,
     manifest: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Write the small per-call manifest with refs into the private ledger."""
+    """Write the small per-call manifest with refs into the private ledger. In a measured window the wait for the
+    publication lock and the write under it are the sections ``<call type>.lock_wait`` and ``.manifest_write``."""
     from ouroboros import evidence_packs, store
+    from ouroboros.context_timing import timed
 
     path = call_manifest_path(drive_root, task_id, call_id or new_call_id("call"))
     safe_call = path.stem
@@ -959,10 +961,12 @@ def write_call_manifest(
     }
     # The packer's deletion sections and other manifests hold this lock briefly; a model call
     # waits for them rather than failing its task (issue #1754).
-    with store.name_lock(pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME,
-                         timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC):
-        evidence_packs.note_manifest_publication(drive_root, payload)
-        atomic_write_json(path, payload, trailing_newline=True)
+    kind = str(payload.get("call_type") or "manifest")
+    with ExitStack() as held:
+        timed(f"{kind}.lock_wait", held.enter_context, store.name_lock(
+            pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC))
+        timed(f"{kind}.manifest_write", lambda: (evidence_packs.note_manifest_publication(drive_root, payload),
+                                                 atomic_write_json(path, payload, trailing_newline=True)))
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1021,10 +1025,12 @@ def persist_call(
     """
 
     from ouroboros.anthropic_native_custody import observability_custody_projection
+    from ouroboros.context_timing import timed
 
     shared = call_type in SHARED_ELEMENT_CALL_TYPES
     listed, facts = task_parts(drive_root, task_id)
-    redacted = redact_projection(observability_custody_projection(payload), facts=facts if shared else None)
+    redacted = timed(f"{call_type}.redact", lambda: redact_projection(observability_custody_projection(payload),
+                                                                      facts=facts if shared else None))
     effective_keep_raw = keep_raw
     if effective_keep_raw is None:
         effective_keep_raw = (
@@ -1036,7 +1042,8 @@ def persist_call(
     parts: Dict[str, Dict[str, Any]] = {}
 
     def store(value: Any) -> Dict[str, Any]:
-        return write_shared_blob(drive_root, value, parts) if shared else write_blob(drive_root, value, kind="json")
+        return timed(f"{call_type}.blobs", write_shared_blob, drive_root, value, parts) if shared else timed(
+            f"{call_type}.blobs", write_blob, drive_root, value, kind="json")
 
     if effective_keep_raw:
         full_ref = store(payload)

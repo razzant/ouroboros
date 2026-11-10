@@ -8,12 +8,14 @@ round's ``llm_round`` also carries what the host did to prepare it (``round_wind
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import pathlib
 import logging
 import queue
+import time
 from typing import Any, Dict, Iterator, Optional, Tuple
 
-from ouroboros.context_timing import measured_sections, section_spans
+from ouroboros.context_timing import measured_sections, section_spans, timed
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
 from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
@@ -27,13 +29,13 @@ def emit_main_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any
     Event delivery failure cannot change the provider loop's send or retry decision."""
     task_id, task_attempt, llm_call_id, execution_id, round_id, call_attempt = identity
     if phase in {"finished", "failed"}:
-        emit_cognitive_operation_event(event_queue, task_id=task_id, operation_id=llm_call_id, phase=phase,
-                                       kind="llm", task_attempt=task_attempt, execution_id=execution_id, round_id=round_id)
+        timed("event_put", emit_cognitive_operation_event, event_queue, task_id=task_id, operation_id=llm_call_id,
+              phase=phase, kind="llm", task_attempt=task_attempt, execution_id=execution_id, round_id=round_id)
     fact = attempt_fact(capture, str(round_id or ""))  # ``dispatched``: the ledger's own dispatch, while it waits
     if event_queue is None or (phase == "observed" and not isinstance(activity, dict)) or (phase == "dispatched" and not fact):
         return
     try:
-        event_queue.put({
+        timed("event_put", event_queue.put, {
             "type": "main_llm_call_state", "task_id": str(task_id or ""), "task_attempt": task_attempt,
             "llm_call_id": str(llm_call_id or ""), "execution_id": str(execution_id or ""),
             "round_id": str(round_id or ""), "call_attempt": int(call_attempt), "phase": phase,
@@ -44,19 +46,59 @@ def emit_main_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any
         logging.getLogger(__name__).debug("Failed to emit main LLM call state event", exc_info=True)
 
 
+_STEPS: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar("round_host_steps", default=None)
+_RUSAGE = ("ru_nvcsw", "ru_nivcsw", "ru_majflt", "ru_oublock")
+
+
+def _rusage() -> Dict[str, int]:
+    """The process's voluntary and involuntary context switches, major page faults and block writes so far: waiting,
+    being preempted, paging, writing. Nothing where the platform keeps no such counters (Windows has no ``resource``)."""
+    try:
+        import resource
+    except ImportError:
+        return {}
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return {name[3:]: int(getattr(usage, name)) for name in _RUSAGE}
+
+
 @contextlib.contextmanager
 def round_window() -> Iterator[None]:
     """One round's preparation receipt (a ``context_timing`` window): from the end of a tool batch, or the loop's
-    start, to the round's ``llm_round``, which carries the host work counted in it (``round_receipt``). Facts for
-    the log only: nothing reads them to decide."""
+    start, to the round's ``llm_round``, which carries what the host did in it (``round_receipt``): the counted work,
+    each marked section's time, the time of each step between ``host_step`` marks and the process's ``_rusage`` over
+    the window. Facts for the log only: nothing reads them to decide."""
     with measured_sections():
-        yield
+        token = _STEPS.set({"steps": {}, "mark": (time.perf_counter(), time.thread_time()), "rusage": _rusage()})
+        try:
+            yield
+        finally:
+            _STEPS.reset(token)
+
+
+def host_step(name: str) -> None:
+    """The round's step ``name`` ends here: its wall and thread CPU time since the previous mark, or since the window
+    opened, add to its span (nothing outside a window)."""
+    state = _STEPS.get()
+    if state is None:
+        return
+    now = (time.perf_counter(), time.thread_time())
+    span = state["steps"].setdefault(name, [0.0, 0.0])
+    span[0], span[1] = span[0] + now[0] - state["mark"][0], span[1] + now[1] - state["mark"][1]
+    state["mark"] = now
 
 
 def round_receipt() -> Dict[str, Any]:
-    """The open round window's counted ``work`` for its ``llm_round``, or nothing outside one."""
-    spans = section_spans()
-    return {"work": spans["work"]} if spans else {}
+    """``work`` and ``host_steps`` of the open round window for its ``llm_round``, or nothing outside one."""
+    spans, state = section_spans(), _STEPS.get()
+    if not spans or state is None:
+        return {}
+    rusage = _rusage()
+    return {"work": spans["work"], "host_steps": {
+        "steps_ms": {name: round(span[0] * 1000) for name, span in state["steps"].items()},
+        "steps_cpu_ms": {name: round(span[1] * 1000) for name, span in state["steps"].items()},
+        "sections_ms": spans["sections_ms"], "sections_cpu_ms": spans["sections_cpu_ms"],
+        **({"rusage": {name: count - state["rusage"].get(name, count) for name, count in rusage.items()}}
+           if rusage else {})}}
 
 
 def retain_cancelled_response(request, response, capture, *, control_reason: str = "caller_cancelled") -> dict:
