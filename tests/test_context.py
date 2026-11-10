@@ -100,6 +100,18 @@ class TestSentHistoryHealth:
         finally:
             transcript_prefix._running_code.cache_clear()
 
+    def test_the_running_code_is_read_once_per_process(self, monkeypatch):
+        from ouroboros import transcript_prefix, utils
+
+        reads = []
+        monkeypatch.setattr(utils, "get_git_info", lambda _root: (reads.append(1), ("branch", "shasha"))[1])
+        transcript_prefix._running_code.cache_clear()
+        try:
+            assert transcript_prefix._running_code() == transcript_prefix._running_code()
+            assert len(reads) == 1
+        finally:
+            transcript_prefix._running_code.cache_clear()
+
     def test_the_task_list_is_capped_and_says_so(self, tmp_path):
         from ouroboros import transcript_prefix
 
