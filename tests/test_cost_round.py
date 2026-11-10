@@ -28,7 +28,7 @@ from ouroboros.llm import LLMClient
 from ouroboros.llm_observability import round_window
 from ouroboros.loop_llm_call import call_llm_with_retry
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
-from tests._turn_law import hold_turn_law, turn_gap
+from tests._turn_law import hold_work_equal, turn_gap
 from tests.test_llm_claudexor import MODEL, Gateway, result
 
 TOOLS = [{"type": "function", "function": {"name": f"tool_{i}", "description": "Reads one part of the project. " * 8,
@@ -93,9 +93,8 @@ def test_r1_round_two_scans_only_the_bytes_it_adds(engine, turns):
     first, second = _rounds(engine, f"task-{turns}", _history(turns))
     assert first["work"]["secret_scan"] > 0 and second["work"]["new_parts"] > 0, (first["work"], second["work"])
     work = second["work"]
-    excess = {"secret_scan": work.get("secret_scan", 0) - work["new_parts"],
-              "secret_scan_again": work.get("secret_scan_again", 0)}
-    hold_turn_law("R1", "round:2", excess, dict.fromkeys(excess, 0), f"round 2 of {turns} turns: {work}")
+    hold_work_equal("R1", "round:2", {"secret_scan": (work.get("secret_scan", 0), work["new_parts"]),
+                                      "secret_scan_again": (work.get("secret_scan_again", 0), 0)})
 
 
 def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
