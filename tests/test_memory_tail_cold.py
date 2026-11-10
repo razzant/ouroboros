@@ -510,6 +510,11 @@ def test_case4_a_rejection_after_the_marks_are_read_reopens_the_row_in_that_same
         assert item[2] in _open_in(tmp_path, 1)
     monkeypatch.setattr(cold, "gate", real)
     _same(monkeypatch, tmp_path, rooms)
+    entered, compared, index, stands = [], [], ChronicleStore._index, cold.stands
+    monkeypatch.setattr(ChronicleStore, "_index", lambda self: entered.append(1) or index(self))
+    monkeypatch.setattr(cold, "stands", lambda db, gate_: compared.append(len(entered)) or stands(db, gate_))
+    with cs.capture(tmp_path, tail="all"):
+        assert entered == [1] and compared == [1]  # one read transaction: the marks, the seals and the rows
 
 
 # --- each hot rule ------------------------------------------------------------------------------------------
@@ -752,10 +757,13 @@ def test_two_rows_of_one_task_with_different_lineage_fields_get_their_own_answer
 
 
 def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_path):
-    rooms, _row = _sealed_main_row(tmp_path)
+    rooms, row = _sealed_main_row(tmp_path)
     create_project(tmp_path, "gamma", name="Gamma")
     whole = _work(tmp_path, rooms)
     acting = _work(tmp_path, rooms)
     assert whole.get("tail_whole") == 1 and "rows_cold" not in whole, whole
     assert acting.get("tail_whole", 0) == 0 and acting.get("rows_cold", 0) > 0, acting
     assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"]
+    ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")  # the stored facts wait for the fill
+    live = _work(tmp_path, rooms)
+    assert live.get("tail_whole") == 1 and "rows_cold" not in live, live  # every row was read live: no set acted
