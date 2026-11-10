@@ -505,10 +505,12 @@ def test_a_schema_in_another_key_order_keeps_the_whole_walk_s_records(names):
     assert reused.value == whole.value and reused.manifest() == whole.manifest()
 
 
-def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk():
-    """A part whose keys have no sorted form is not plain JSON for the CAS; the redaction by parts never serializes it
-    sorted and answers what the whole walk answers, with no exception."""
-    payload = {"messages": [{"role": "user", "content": "plain", 1: "mixed", "token": "sk-" + "a" * 40}]}
+@pytest.mark.parametrize("odd", ["mixed", object()], ids=["json_value", "no_json_form"])
+def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk(tmp_path, odd):
+    """A part whose keys have no sorted form, even with a value that has no JSON form at all, is walked as the whole
+    is: the redaction by parts never serializes it to count, and writing its request record raises nothing."""
+    payload = {"messages": [{"role": "user", "content": "plain", 1: odd, "token": "sk-" + "a" * 40}], "tools": []}
     facts: dict = {}
     assert obs.redact_projection(payload, facts=facts).manifest() == obs.redact_projection(payload).manifest()
     assert obs.redact_projection(payload, facts=facts).value == obs.redact_projection(payload).value
+    assert obs.persist_call(tmp_path, task_id="odd", call_id="c", call_type="llm_request", payload=payload)
