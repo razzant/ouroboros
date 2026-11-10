@@ -218,9 +218,11 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         ("anthropic_direct", "anthropic::claude-sonnet-5"),
         ("minimax_direct", "minimax::MiniMax-M3"),
         ("deepseek_direct", "deepseek::deepseek-v4-flash"),
-        ("cloudru_direct", "cloudru::zai-org/GLM-4.7"),
+        ("cloudru_direct", "cloudru::zai-org/GLM-5.3"),
         ("gigachat_direct", "gigachat::GigaChat-2-Max"),
     ]
+    assert [(row.canary_id, row.reasoning_effort) for row in matrix if row.expected_provider == "cloudru"] == [
+        ("cloudru_direct", "low")]
     medium_ids = {row.canary_id for row in matrix if row.reasoning_effort == "medium"}
     assert medium_ids == {
         "openrouter_gemini",
