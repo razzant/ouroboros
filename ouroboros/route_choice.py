@@ -49,7 +49,8 @@ from ouroboros.settings_defaults import SETTINGS_DEFAULTS, settings_env_keys
 from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV, runtime_setting
 
 #: Why an acting route is the task's own: the record names the chooser, never a model string.
-ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", "room", "owner", "owner_words")
+OWNER_LEAD_SOURCES = ("room", "owner", "owner_words")
+ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", *OWNER_LEAD_SOURCES)
 LEAD_KEY = "lead"  # host-minted primary, including a recorded follow
 LEAD_ROLE = "lead"  # no settings slot or role options
 ROLE_LABELS = {"main": "Main", "light": "Light", "safety": "Supervisor", "vision": "Vision",
@@ -273,7 +274,7 @@ def lead_snapshot(value: Any) -> Optional[dict]:
     source = value.get("source")
     if source == "main":
         return {"source": "main"}
-    if (source not in ROUTE_SOURCES or source not in ("room", "owner", "owner_words")
+    if (source not in OWNER_LEAD_SOURCES
             or not isinstance(value.get("model"), str) or not value["model"].strip()
             or not isinstance(value.get("use_local"), bool)):
         return None
