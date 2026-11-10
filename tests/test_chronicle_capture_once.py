@@ -44,6 +44,30 @@ def test_a_capture_parses_each_record_once(root):
     assert work["records_parsed"] and not work.get("records_parsed_again")
 
 
+def test_a_folded_part_is_parsed_once_in_a_real_capture(root, monkeypatch):
+    """Reading what a part folds goes through the same memo: a real capture's json parser sees the part's text once."""
+    import json
+
+    store = ChronicleStore(root)
+    page = store.records(kinds=("page",))[0]
+    part = store.publish_part(room_id=page["room_id"], text="One folded page.", member_ids=[page["id"]],
+                              author=shared.MIND, expected_sequence=store.room_head(page["room_id"]))
+    assert part.ok
+    mv._STORIES.clear()
+    parsed, loads = [], json.loads
+
+    def observed(text, *args, **kwargs):
+        value = loads(text, *args, **kwargs)
+        if isinstance(value, dict) and value.get("id") == part.record["id"] and value.get("kind") == "part":
+            parsed.append(value["id"])
+        return value
+
+    monkeypatch.setattr(json, "loads", observed)
+    task = {"id": "turn0001", "chat_id": 1}
+    assert mv.capture_memory_view(root, task, mv.view_spec_for_task(task, root)).active
+    assert parsed == [part.record["id"]]
+
+
 def test_without_a_capture_each_read_parses_again(root):
     """Outside a capture the index parses per read, as before: the memo belongs to one state of the chronicle."""
     store = ChronicleStore(root)

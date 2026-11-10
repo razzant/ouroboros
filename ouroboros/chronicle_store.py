@@ -424,7 +424,7 @@ class _Snapshot:
 
     def members_of(self, record_id):
         row = self.by_id.get(str(record_id))
-        covers = json.loads(row[5]).get("covers") if row and row[2] == "part" else None
+        covers = self.body(row).get("covers") if row and row[2] == "part" else None
         return [str(member) for member in covers.get("member_ids") or ()] if isinstance(covers, dict) else []
 
 
