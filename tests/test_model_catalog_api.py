@@ -154,6 +154,36 @@ def test_model_catalog_registers_openai_compatible_base_url_without_key(monkeypa
     }
 
 
+@pytest.mark.parametrize("settings, expected", [
+    ({"LOCAL_MODEL_SOURCE": "~/models/qwen3-coder-q4.gguf", "LOCAL_MODEL_CONTEXT_LENGTH": 32768},
+     {"id": "qwen3-coder-q4.gguf", "context_window": 32768}),
+    ({"LOCAL_MODEL_SOURCE": "bartowski/Qwen3-GGUF", "LOCAL_MODEL_FILENAME": "sub/qwen3-q8.gguf",
+      "LOCAL_MODEL_CONTEXT_LENGTH": "auto"}, {"id": "qwen3-q8.gguf"}),
+])
+def test_a_configured_local_model_is_one_catalog_row_that_says_it_is_local(monkeypatch, settings, expected):
+    """An install whose only model is local still has a row to choose (a local model has no route prefix)."""
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: settings)
+
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    local = [item for item in payload["items"] if item.get("use_local")]
+    assert len(local) == 1 and payload["items"] == local
+    row = local[0]
+    assert row["use_local"] is True and row["provider_id"] == "local" and row["id"] == expected["id"]
+    assert row["label"] == f'Local · {expected["id"]}'
+    assert row.get("context_window") == expected.get("context_window")
+    # No API source claims the row: every picker that lists a source's models by its route prefix leaves it out.
+    assert row["value"] == f'local::{expected["id"]}'
+
+
+def test_no_local_row_without_a_configured_local_model(monkeypatch):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"LOCAL_MODEL_SOURCE": "  ", "LOCAL_MODEL_PORT": 8766})
+
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    assert payload["items"] == []
+
+
 def test_openai_compatible_model_fetch_omits_blank_bearer_header():
     captured = {}
 

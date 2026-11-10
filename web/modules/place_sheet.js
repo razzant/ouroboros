@@ -571,7 +571,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         try {
             const data = await readModels({ cache: 'no-store', signal: abort.signal });
             if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error();
-            ui.models = data.items;
+            ui.models = data.items.filter((item) => !item?.use_local);  // a place's model is a route; a local model has none
             if (!sheet.closed) updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models);
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);
