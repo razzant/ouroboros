@@ -181,6 +181,24 @@ function room(initial = '') {
     return { composer, get text() { return text; }, set text(value) { text = value; } };
 }
 
+test('composer visibility writes only the hidden contribution keys and refreshes the projection', async () => {
+    const writes = [];
+    let prefs = { contributions: { hidden: ['other:control'] } };
+    const snapshots = [
+        { contributions: [item('claudexor_quotas:quota', { skill: 'claudexor_quotas', placement: 'composer.chips' })], preferences: prefs },
+        { contributions: [item('claudexor_quotas:quota', { skill: 'claudexor_quotas', placement: 'composer.chips' })], preferences: { contributions: { hidden: ['other:control', 'claudexor_quotas:quota'] } } },
+    ];
+    const reads = { uiContributions: async () => snapshots.shift(), uiPreferences: async () => prefs,
+        saveUiPreferences: async (payload) => { writes.push(payload); prefs = { contributions: payload.contributions }; } };
+    const store = createContributionsStore({ client: reads });
+    await store.refresh();
+    assert.equal(store.visibilityForSkill('claudexor_quotas')[0].hidden, false);
+    assert.equal(await store.setHidden('claudexor_quotas:quota', true), true);
+    assert.deepEqual(writes, [{ contributions: { hidden: ['other:control', 'claudexor_quotas:quota'] } }]);
+    assert.equal(store.visibilityForSkill('claudexor_quotas')[0].hidden, true);
+    assert.deepEqual(store.byPlacement('composer.chips'), []);
+});
+
 test('draft.insert puts words into the visible room\'s draft and never sends; a room without a composer says so', async () => {
     const notices = [];
     const notice = (text, tone) => notices.push([text, tone]);

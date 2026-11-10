@@ -733,6 +733,26 @@ function menuHtml(skill, { reviewing, repairing, submit }) {
     return `<div class="skills-card-menu"><button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="More actions for ${name}" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">${items.join('')}</dialog></div>`;
 }
 
+function contributionVisibilityHtml(skill, options = {}) {
+    const source = typeof options.contributionVisibility === 'function'
+        ? options.contributionVisibility(skill.name) : options.contributionVisibility;
+    const rows = Array.isArray(source) ? source : [];
+    if (!rows.length) return '';
+    const items = rows.map((row) => {
+        const key = escapeHtml(row.key || '');
+        const label = escapeHtml(row.label || row.skill_label || row.id || 'composer control');
+        const hidden = row.hidden === true;
+        return `<div class="skills-contribution-row" data-contribution-row="${key}">
+            <span><strong>${label}</strong><small>Composer</small></span>
+            <button type="button" class="btn btn-ghost btn-sm" ${actionAttrs(skill.name, 'toggle_contribution',
+                `data-contribution-key="${key}" data-contribution-hidden="${hidden ? 'true' : 'false'}" aria-label="${hidden ? 'Show' : 'Hide'} ${label} in composer"`)}>${hidden ? 'Show' : 'Hide'}</button>
+        </div>`;
+    }).join('');
+    return `<section class="skills-contributions" data-skill-detail-contributions>
+        <h4>In the composer</h4><p class="skills-details-note">Controls from this skill can be hidden without turning the skill off.</p>${items}
+    </section>`;
+}
+
 /** One installed card. `options.githubTokenConfigured` gates Publish; `live` names loaded UI tabs. */
 export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}, options = {}) {
     const safeName = escapeHtml(skill.name);
@@ -773,6 +793,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
             <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
+            ${contributionVisibilityHtml(skill, options)}
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
@@ -821,10 +842,11 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         else card.removeAttribute(name);
     }
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
-        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-facts]']) {
+        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
             if (selector === '.skills-card-purpose') card.querySelector('.skills-head-title')?.after(source);
+            else if (selector === '[data-skill-detail-contributions]') card.querySelector('[data-skill-detail-overflow]')?.after(source);
         } else if (target && !source) target.remove();
         else if (target && source && target.innerHTML !== source.innerHTML) target.innerHTML = source.innerHTML;
     }

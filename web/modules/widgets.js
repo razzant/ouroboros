@@ -34,6 +34,7 @@ import {
 } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { collectSafeFieldValues, downloadViaHostBridge } from './ui_helpers.js';
+import { getContributions } from './contributions.js';
 import { mountPinnedCard, setCardPinned } from './card_components.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad } from './holds.js';
 import {
@@ -61,13 +62,13 @@ function pageTemplate() {
     `;
 }
 
-function renderCardHtml(tab) {
+function renderCardHtml(tab, contributionVisibility = null) {
     // The card's own title names it; the skill's id is no owner word, so only a card kept from the chat says where from.
     const title = tab.title || tab.tab_id || tab.skill;
     const subtitle = tab.pinned_card ? '<span class="widgets-card-source">kept from the chat</span>' : '';
     const span = Number(tab.span || tab.grid_span || 1);
     const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
-    const { run, menu } = renderWidgetCardParts(tab);
+    const { run, menu } = renderWidgetCardParts(tab, { contributionVisibility: contributionVisibility?.(tab.skill) || [] });
     return `
         <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}">
             <div class="widgets-card-head">
@@ -90,17 +91,17 @@ function renderCardHtml(tab) {
 }
 
 // Full paint — only for a list that has no cards yet.
-function renderShell(host, tabs) {
+function renderShell(host, tabs, contributionVisibility = null) {
     if (!tabs.length) {
         host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension that registers a UI tab.</div>';
         return;
     }
-    host.innerHTML = tabs.map(renderCardHtml).join('');
+    host.innerHTML = tabs.map((tab) => renderCardHtml(tab, contributionVisibility)).join('');
 }
 
-function createCardElement(tab) {
+function createCardElement(tab, contributionVisibility = null) {
     const template = document.createElement('template');
-    template.innerHTML = renderCardHtml(tab).trim();
+    template.innerHTML = renderCardHtml(tab, contributionVisibility).trim();
     return template.content.firstElementChild;
 }
 
@@ -765,7 +766,7 @@ function retireCard(card, settling) {
 // on the same settle promise) — new cards are appended, every other card keeps
 // its DOM node. No node ever moves: the visible order is the masonry key order,
 // and a moved <iframe> would reload. The list's masonry relayouts on the mutation.
-function patchWidgetCards(list, previousTabs, nextTabs) {
+function patchWidgetCards(list, previousTabs, nextTabs, contributionVisibility = null) {
     const plan = planWidgetListPatch(previousTabs, nextTabs);
     for (const key of plan.removed) {
         const card = liveCardFor(list, key);
@@ -780,7 +781,7 @@ function patchWidgetCards(list, previousTabs, nextTabs) {
         const card = liveCardFor(list, key);
         if (card && !plan.changed.includes(key)) continue;
         const settling = disposeWidgetByKey(key);
-        const fresh = createCardElement(tab);
+        const fresh = createCardElement(tab, contributionVisibility);
         if (!card) list.append(fresh);
         else if (!settling) card.replaceWith(fresh);
         else {
@@ -849,6 +850,8 @@ export function initWidgets(ctx = {}) {
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
     const listRequests = widgetListRequests();
+    const contributions = getContributions();
+    const contributionVisibility = (skill) => contributions?.visibilityForSkill?.(skill) || [];
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
@@ -890,7 +893,7 @@ export function initWidgets(ctx = {}) {
     const relayout = widths.relayout;
 
     function paintShell(tabs) {
-        renderShell(list, tabs);
+        renderShell(list, tabs, contributionVisibility);
         bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
         relayout();
     }
@@ -979,7 +982,7 @@ export function initWidgets(ctx = {}) {
                     // moved (the sync still reconciles controls and layout below).
                     if (signature !== lastSignature) {
                         cardMenus.close();
-                        patchWidgetCards(list, lastTabs, tabs);
+                        patchWidgetCards(list, lastTabs, tabs, contributionVisibility);
                     }
                 } else {
                     cardMenus.close();
@@ -999,7 +1002,7 @@ export function initWidgets(ctx = {}) {
                     for (const key of (lastTabs || []).map(widgetKey)) {
                         if (!live.has(key)) widgetSessionState.delete(key);
                     }
-                    renderShell(list, tabs);
+                    renderShell(list, tabs, contributionVisibility);
                 }
                 lastTabs = tabs;
                 lastSignature = signature;
@@ -1149,10 +1152,32 @@ export function initWidgets(ctx = {}) {
     }
 
     const stopFromMenu = (key) => { const tab = tabByKey(key), card = liveCardFor(list, key); if (tab && card) stopWidgetByOwner(card, tab); };
-    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu);
+    function refreshContributionMenus() {
+        const hidden = new Set(contributions?.hiddenKeys?.() || []);
+        cardMenus?.close?.();
+        for (const tab of lastTabs || []) {
+            const card = liveCardFor(list, widgetKey(tab));
+            const menu = card?.querySelector('.skills-card-menu');
+            if (!menu) continue;
+            const fresh = document.createElement('template');
+            fresh.innerHTML = renderWidgetCardParts(tab, { contributionVisibility: contributionVisibility(tab.skill) }).menu.trim();
+            menu.replaceWith(fresh.content.firstElementChild);
+        }
+        list.querySelectorAll('[data-widget-contribution-key]').forEach((button) => {
+            const isHidden = hidden.has(button.dataset.widgetContributionKey || '');
+            button.dataset.widgetContributionHidden = isHidden ? 'true' : 'false';
+            button.setAttribute('aria-checked', isHidden ? 'false' : 'true');
+        });
+    }
+    async function toggleContribution(key, hidden) {
+        await contributions.setHidden(key, hidden);
+        refreshContributionMenus();
+    }
+    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu, toggleContribution);
+    const stopContributionFacts = contributions?.onChange?.(refreshContributionMenus);
     window.addEventListener('pagehide', (event) => {
         listRequests.abortAll();
-        if (!event.persisted) { cardMenus.destroy(); widths.dispose(); }
+        if (!event.persisted) { cardMenus.destroy(); widths.dispose(); stopContributionFacts?.(); }
     });
     // The head's power starts a stopped card and stops a running one, as the card menu's Stop does (widget_card.js).
     list.addEventListener('click', (event) => {

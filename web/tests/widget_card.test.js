@@ -150,6 +150,16 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
     }
 });
 
+test('a visible composer contribution gets a reversible control on its widget card', () => {
+    const menu = renderWidgetCardParts(tab({ kind: 'declarative', schema_version: 1, components: [] }), {
+        contributionVisibility: [{ key: 'claudexor_quotas:quota', label: 'Quotas', hidden: false }],
+    }).menu;
+    assert.match(menu, /aria-label="Composer"/);
+    assert.match(menu, /data-widget-contribution-key="claudexor_quotas:quota"/);
+    assert.match(menu, /data-widget-contribution-hidden="false"/);
+    assert.match(menu, /Hide Quotas/);
+});
+
 test('a card menu is the same markup however many widgets the page shows', () => {
     // The scale invariant (docs/DESIGN.md "Widgets board"): nothing in a card's
     // label or menu depends on its neighbours, so 1 card and 18 cards read alike.

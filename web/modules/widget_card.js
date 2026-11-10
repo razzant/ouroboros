@@ -76,9 +76,9 @@ export function withWidgetStartMode(current, key, mode) {
 // checked width when the menu opens (`bindWidgetCardMenus`). The head draws the two
 // parts apart (`renderWidgetCardParts`): the lifecycle controls may drop under the
 // title's row, the menu stays with the move handle in one pair that never splits.
-export function renderWidgetCardParts(tab) {
+export function renderWidgetCardParts(tab, { contributionVisibility = [] } = {}) {
     const item = (attrs, label, role = 'menuitemradio') => (
-        `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
+        `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' || role === 'menuitemcheckbox' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
     );
     const group = (label, items) => `<div role="group" aria-label="${label}"><div class="widgets-menu-heading" aria-hidden="true">${label}</div>${items}</div>`;
     const framed = isFramedWidget(tab);
@@ -88,6 +88,11 @@ export function renderWidgetCardParts(tab) {
     const sizes = group('Size', `<p class="widgets-menu-note" data-widget-size-note hidden>Widths apply when the list is wide.</p>${
         WIDGET_WIDTH_STEPS.map(({ w, label }) => item(`data-widget-size="${w}" aria-checked="false"`, label)).join('')
     }${item('data-widget-size="reset"', 'Reset size', 'menuitem')}`);
+    const composer = contributionVisibility.length ? group('Composer', contributionVisibility.map((row) => {
+        const hidden = row.hidden === true;
+        return item(`data-widget-contribution-key="${escapeHtml(row.key || '')}" data-widget-contribution-label="${escapeHtml(row.label || 'composer control')}" data-widget-contribution-hidden="${hidden ? 'true' : 'false'}" aria-checked="${hidden ? 'false' : 'true'}"`,
+            `${hidden ? 'Show' : 'Hide'} ${row.label || 'composer control'}`, 'menuitemcheckbox');
+    }).join('')) : '';
     // A card kept from the chat (`pinned_card`) is the owner's data: Remove takes it off the board.
     const remove = tab?.pinned_card ? `<div role="group" aria-label="Card">${item('data-widget-unpin', 'Remove', 'menuitem')}</div>` : '';
     const power = framed ? `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>
@@ -95,7 +100,7 @@ export function renderWidgetCardParts(tab) {
     const stop = framed ? item('data-widget-stop hidden', 'Stop', 'menuitem') : '';
     const menu = `<div class="skills-card-menu">
             <button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
-            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${sizes}${framed ? `<div role="group" aria-label="Run">${stop}<p class="widgets-menu-note" data-widget-fault-details hidden></p></div>` : ''}${remove}</dialog>
+            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${composer}${sizes}${framed ? `<div role="group" aria-label="Run">${stop}<p class="widgets-menu-note" data-widget-fault-details hidden></p></div>` : ''}${remove}</dialog>
         </div>`;
     return { run: power, menu };
 }
@@ -214,7 +219,7 @@ export function renderWidgetFacade(mount, tab) {
  * (`widths.widthOf(key)`) checked, and on the stacked column it says that
  * widths apply to the wide board only.
  */
-export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove = () => {}, onStop = () => {}) {
+export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove = () => {}, onStop = () => {}, onToggleContribution = () => {}) {
     if (!list) return { close() {}, destroy() {} };
     let active = null;
     const close = () => active?.binding.close();
@@ -239,12 +244,13 @@ export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove 
         popover.show();
         trigger.setAttribute('aria-expanded', 'true');
         const onSelect = (selection) => {
-            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-unpin], [data-widget-stop]');
+            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-unpin], [data-widget-stop], [data-widget-contribution-key]');
             if (!item) return;
             active?.binding.close({ restoreFocus: true });
             const size = item.dataset.widgetSize;
             if (item.hasAttribute('data-widget-stop')) onStop(key);
             else if (item.hasAttribute('data-widget-unpin')) onRemove(key);
+            else if (item.hasAttribute('data-widget-contribution-key')) onToggleContribution(item.dataset.widgetContributionKey, item.dataset.widgetContributionHidden !== 'true');
             else if (!size) onSelectMode(key, item.dataset.widgetStartMode || '');
             else widths?.setWidth(key, size === 'reset' ? null : Number(size));
         };

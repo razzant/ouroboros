@@ -69,6 +69,11 @@ export function createContributionsStore({ client = apiClient } = {}) {
     }
 
     const byKey = (key) => snapshot.contributions.find((item) => item.key === key) || null;
+    const hiddenKeys = () => new Set(
+        Array.isArray(objectOr(snapshot.preferences.contributions, {}).hidden)
+            ? objectOr(snapshot.preferences.contributions, {}).hidden : [],
+    );
+    const bySkill = (skill) => snapshot.contributions.filter((item) => item.skill === skill);
     /** The reason `key` is off for this page, while the revision that failed is still the live one. */
     function fault(key) {
         const entry = faults.get(key);
@@ -118,6 +123,44 @@ export function createContributionsStore({ client = apiClient } = {}) {
         /** Contributions whose own page module runs in this page (`render.kind: "host"`). */
         hostEntries: () => snapshot.contributions.filter((item) => item.render?.kind === 'host' && item.render.url),
         byKey,
+        bySkill,
+        visibilityForSkill(skill) {
+            const hidden = hiddenKeys();
+            return bySkill(skill).filter((item) => item.placement === 'composer.chips' || item.placement === 'composer.plus')
+                .map((item) => ({ ...item, hidden: hidden.has(item.key) }));
+        },
+        hiddenKeys: () => [...hiddenKeys()],
+        async setHidden(key, hidden) {
+            const cleanKey = String(key || '').trim();
+            if (!cleanKey) throw new Error('Contribution key is missing.');
+            const write = (store._visibilityWrite || Promise.resolve()).then(async () => {
+                let current = hiddenKeys();
+                try {
+                    const prefs = await client.uiPreferences?.();
+                    const rows = prefs?.contributions?.hidden;
+                    if (Array.isArray(rows)) current = new Set(rows.filter((value) => typeof value === 'string'));
+                } catch { /* use the last good contribution projection */ }
+                if (hidden) current.add(cleanKey); else current.delete(cleanKey);
+                const saved = await client.saveUiPreferences({ contributions: { hidden: [...current] } });
+                const returned = saved?.contributions?.hidden;
+                await store.refresh();
+                const refreshFailed = Boolean(lastError);
+                if (refreshFailed && Array.isArray(returned)) {
+                    const nextPreferences = { ...snapshot.preferences,
+                        contributions: { ...objectOr(snapshot.preferences.contributions, {}), hidden: returned } };
+                    snapshot = { ...snapshot, preferences: nextPreferences };
+                    signature = JSON.stringify(snapshot);
+                    loaded = true;
+                    lastError = null;
+                    notify();
+                }
+                const applied = hiddenKeys().has(cleanKey) === Boolean(hidden);
+                if (!applied) throw new Error('Composer visibility could not be read back.');
+                return true;
+            });
+            store._visibilityWrite = write.catch(() => {});
+            return write;
+        },
         fault,
         preferences: () => snapshot.preferences,
         icons: () => snapshot.icons,
