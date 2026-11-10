@@ -139,6 +139,22 @@ def test_addresses_refuse_core_and_governing_words_and_keep_prior_choices():
     assert p.core.memory_view_json == second.core.memory_view_json
 
 
+def test_a_selection_over_a_fact_of_other_forms_starts_from_the_whole_view_never_from_its_runs_or_counts():
+    """A projection whose floor fact names other forms (a later or an earlier body wrote it) keeps no choice it named:
+    the next selection is read anew, so the page it showed by address is whole again and no other page takes its
+    place by position or count."""
+    p, snap = plan()
+    newer = floor.select_view(p, "max", ["F5:page-001"])
+    facts = newer.max_projection.memory_facts
+    for other in ({"forms_version": floor.FORMS_VERSION + 1}, {"element_order": "another order"}):
+        held = replace(newer, max_projection=replace(newer.max_projection, memory_facts={
+            **facts, "floor": {**facts["floor"], **other}}))
+        again = floor.select_view(held, "max", ["F7:" + snap.room["lane1"][0]["address"]], owner_note=True)
+        assert dict(floor.kept_level(snap, again.max_projection.memory_facts).addressed) == {
+            "F7": (snap.room["lane1"][0]["address"],)}
+        assert "Page 1." in again.max_projection.system_content_json
+
+
 @pytest.mark.parametrize("accept", [True, False])
 def test_boundary_measures_before_publish_and_keeps_arrivals(tmp_path, monkeypatch, accept):
     p, snap = plan()

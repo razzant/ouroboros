@@ -166,9 +166,10 @@ def test_giveback_restores_small_earlier_elements_but_never_kept_choices():
 
 
 def test_floor_fact_records_index_runs_against_its_element_order():
-    """One representation of the selected forms: index runs in each step's element order, exact for a give-back hole
-    and for the mind's selection (F5l to F5, F8 labels to F8a); an older fact's ids and a fact of counts still read,
-    and runs counted against another element order read as counts. The fact keeps one size whatever the history
+    """One representation of the selected forms: index runs in each step's element order, of the forms the fact names,
+    exact for a give-back hole and for the mind's selection (F5l to F5, F8 labels to F8a); a fact written before the
+    forms were versioned and an older fact's ids still read. A fact of counts alone, of another element order or of
+    other forms is read anew, never as a step's first elements. The fact keeps one size whatever the history
     holds, and the trace keeps what a shortage reads without any element id."""
     import json
     from ouroboros.memory_inventory import VIEW_TRACE_KEY, shortage_from_trace
@@ -177,12 +178,18 @@ def test_floor_fact_records_index_runs_against_its_element_order():
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=replies))
     hole = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 2_000))  # give-back returned the small reply
     facts = mf.view_facts(snapshot, hole, window_tokens=200_000, mode="max", allowances={})
-    assert facts["floor"]["runs"] == {"F2": [[1, 1]]} and "addressed" not in facts["floor"]
-    assert mf.kept_level(snapshot, facts) == hole
-    older = {"floor": {**facts["floor"], "addressed": hole.addressed, "runs": None, "element_order": None}}
-    assert mf.kept_level(snapshot, {"floor": {"steps": {"F2": 1}}}) == mf.kept_level(
-        snapshot, {"floor": {**facts["floor"], "element_order": "another order"}}) != hole  # counts: the first reply
+    assert facts["floor"]["runs"] == {"F2": [[1, 1]]} and facts["floor"]["forms_version"] == mf.FORMS_VERSION == 1
+    assert "addressed" not in facts["floor"] and mf.kept_level(snapshot, facts) == hole
+    unversioned = {key: value for key, value in facts["floor"].items() if key != "forms_version"}
+    assert mf.kept_level(snapshot, {"floor": unversioned}) == hole
+    older = {"floor": {**unversioned, "addressed": hole.addressed, "runs": None, "element_order": None}}
     assert mf.kept_level(snapshot, {"floor": {k: v for k, v in older["floor"].items() if k != "runs"}}) == hole
+    for anew in ({"steps": {"F2": 1}}, {**facts["floor"], "element_order": "another order"},
+                 {**facts["floor"], "forms_version": mf.FORMS_VERSION + 1},
+                 {**older["floor"], "forms_version": mf.FORMS_VERSION + 1}):
+        assert mf.kept_level(snapshot, {"floor": anew}) == mv.FULL_VIEW  # never the first reply by its count
+        budget = mf.kept_level(snapshot, {"floor": {**anew, "steps": {"F2": 1}, "by_budget": 1}})
+        assert budget == mv.FloorLevel(by_budget=1)  # the owner's mode budget still frames the walk, no element kept
     room = syn.room("1", notes=3, lane1=[syn.spoken(i, "ouroboros", 400) for i in range(4)])
     chosen = syn.snapshot(room_facts=room, story=syn.pages(4, 400))
     pages, notes = [page["id"] for page in chosen.story], [note["id"] for note in room["notes"]]

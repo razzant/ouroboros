@@ -40,6 +40,9 @@ _SHOWN = (("F2", "{} of my replies"), ("F7", "{} owner rows"), ("F7p", "{} other
 _SHOWN += (("F7a", "{} aggregate row ranges"), ("F5a", "{} aggregate story lists"))
 _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note lists"))
 _SEALING_TOOLS = frozenset({"chronicle_write", "enable_tools"})  # sent, or loadable through enable_tools
+# The forms a floor fact names (``view_facts``): a change to what a step's elements are or how they are listed raises
+# it, so a fact of other forms is read anew (``kept_level``). A fact without one names the forms before it, version 1.
+FORMS_VERSION = 1
 
 
 def tokens_of(chars: int) -> int:
@@ -471,18 +474,19 @@ def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List
 
 
 def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.FloorLevel:
-    """The level a projection's floor fact names: its index runs while they count against this snapshot's element
-    order (an older fact's ``addressed`` ids likewise), else each step's first ``count`` elements, in ladder order."""
+    """The level a projection's floor fact names, exactly or not at all: its index runs while the fact names these
+    forms (``FORMS_VERSION``) and its runs count against this snapshot's element order, which fingerprints the exact
+    source ids (an older fact's ``addressed`` ids likewise). Any other fact is read anew: no element is kept, so the
+    next fit walks from the whole view; only its count of what the owner's mode budget took stays, which names that
+    budget to the walk and the note (``render_view_for_mode``). A step's count never stands for its first elements."""
     floor, table = (facts or {}).get("floor") or {}, _elements(snapshot)
-    if "runs" in floor and floor.get("element_order") == table.order:
+    forms, budget = floor.get("forms_version", 1) == FORMS_VERSION, int(floor.get("by_budget") or 0)
+    if forms and "runs" in floor and floor.get("element_order") == table.order:
         return table.level({(step, table.ids[step][n]) for step, spans in floor["runs"].items()
-                            for first, last in spans for n in range(first, last + 1)}, int(floor.get("by_budget") or 0))
-    if "addressed" in floor:
-        return mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in floor["addressed"]),
-                             by_budget=int(floor.get("by_budget") or 0))
-    counts = dict(floor.get("steps") or {})
-    prefixes = ((step, tuple(table.ids.get(step, ())[:int(counts.get(step) or 0)])) for step in LADDER)
-    return mv.FloorLevel(tuple((step, ids) for step, ids in prefixes if ids), by_budget=int(floor.get("by_budget") or 0))
+                            for first, last in spans for n in range(first, last + 1)}, budget)
+    if forms and "addressed" in floor:
+        return mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in floor["addressed"]), by_budget=budget)
+    return mv.FloorLevel(by_budget=budget)
 
 
 def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: Iterable[str], *,
@@ -663,8 +667,9 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
     """The floor fact of one projection, kept in the task trace: steps, boundaries, what is shown by address.
 
     ``runs`` are each step's addressed elements as index runs in its element order, which ``element_order``
-    fingerprints (``kept_level``); ``newest_addressed_row`` is the newest row of this room that F1, F2 or F7
-    shows only by address; ``pointer_records`` the records F4 and F5 show by a pointer. No list of rows.
+    fingerprints, of the forms ``forms_version`` names (``kept_level``); ``newest_addressed_row`` is the newest row of
+    this room that F1, F2 or F7 shows only by address; ``pointer_records`` the records F4 and F5 show by a pointer.
+    No list of rows.
     """
     gone = {step: set(ids) for step, ids in level.addressed}
     room = snapshot.room or {}
@@ -673,7 +678,7 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
     rows += [(item["pos"], item["address"]) for item in room.get("lane1") or () if item["address"] in addressed]
     status = snapshot.legacy_blocks or {}
     return {"role": snapshot.spec.role, "room_id": snapshot.spec.room_id,
-            "floor": {"steps": dict(level.steps), "runs": _elements(snapshot).runs(level),
+            "floor": {"steps": dict(level.steps), "runs": _elements(snapshot).runs(level), "forms_version": FORMS_VERSION,
                       "element_order": _elements(snapshot).order, "window_tokens": window_tokens, "mode": mode,
                       "allowance_tokens": allowances.get("margin"), "physical_allowance_tokens": allowances.get("physical"),
                       "target_tokens": target_tokens, "budget_allowance_tokens": allowances.get("budget"),

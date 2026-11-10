@@ -8,11 +8,13 @@ registered folder; `--session-provider` hands the same task and tool selection t
 extension-skill tools of a server, so the set may be smaller or larger than a real task's. The tools summary is the
 list the plan measured (Nano's when the plan falls to Nano; a call's own tools counted apart), the requested list only
 where they differ. `--reserve` is the route's reply ceiling (a call route's working reserve under `--session-provider`);
-each mode applies its own reserve (Nano keeps its 8,192 floor). Figures are chars/4 estimates at density 1.0 over the
-serialized request, never provider tokens; the assignment text is empty and unmeasured.
+each mode applies its own reserve (Nano keeps its 8,192 floor). Figures are chars/4 estimates over the serialized
+request at a cold density (`--ratio`, provider tokens per estimator token: 1.0 unless a route's measured figure is
+declared), never provider tokens; the assignment text is empty and unmeasured. `--dump FILE` writes the start's text
+(`start_text`), outside ROOT; the view's forms are counted by the law of forms (`view_counts`).
 
 Usage: `python devtools/context_fit_report.py --data ROOT --room ID --window TOKENS --reserve TOKENS
-[--caller direct|root]`; other options: `--mode max|low|nano`, `--json`. `--session-provider
+[--caller direct|root]`; other options: `--mode max|low|nano`, `--json`, `--ratio R`, `--dump FILE`. `--session-provider
 gemini_live|grok_realtime|openai_realtime` (direct caller only) also runs the real conversation host's tool selection
 and session-candidate seam with bundled default model/options and cached output limit (call tools, driver
 instructions, provider wire), never connecting. Output names missing inputs;
@@ -41,13 +43,70 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
+def start_text(messages):
+    """The start's messages as the mind reads them: each one's text, its blocks joined by a newline (the system message
+    first, as a saved request's ``system.txt``), the messages by a blank line."""
+    def text(content):
+        return content if isinstance(content, str) else '\n'.join(
+            block.get('text', '') for block in content or () if isinstance(block, dict))
+    return '\n\n'.join(text(message.get('content')) for message in messages)
+
+
+def view_counts(snapshot, level):
+    """The memory view's forms by the law of forms: whatever stands in place of what was said is a retelling printed in
+    the view, a fact the host knows itself, or an emergency form. Counted from the snapshot and its level (a task
+    line's closing sentence and a silent room's count read from their lines): ``retellings`` records, parts, accounts,
+    standing parts, folds and closing sentences shown whole; ``host_facts`` a task line without a closing sentence,
+    the earlier-tasks line, a repeat by its first copy, a silent room's line; ``unconsidered`` people's words no
+    consideration is recorded for, as a line or as text; ``emergency`` every other reduced form by its step (pages and
+    notes by their first sentence among them: no record carries a lead mark yet) and closing sentences folded into the
+    earlier-tasks line; ``rows_as_words`` the rows no retelling stands for that still stand as words."""
+    import re
+    from collections import Counter
+
+    gone = {step: set(ids) for step, ids in level.addressed}
+    room, lined, legacy = snapshot.room or {}, gone.get('F6g', set()), "legacy, a helper's"
+    rooms = [(group, item) for group in snapshot.conversations for item in group['rooms']]
+    words = [(group, word) for group, item in rooms for word in item['words']]
+    hidden = lambda group, word: (word['id'] in gone.get('F7', ()) if word['owner_side'] and not word.get('again')
+                                  else group['key'] in lined or word['id'] in gone.get('F6w', ()))
+    summary = lambda line: '— summary: «' in line or '; «' in line
+    early = [item for item in room.get('lane2', ()) if item['first'] in gone.get('F1', ())]
+    lines = [item['line'] for item in room.get('lane2', ()) if item not in early] + [
+        task['line'] for group, item in rooms if group['key'] not in lined for task in item['tasks']]
+    told = Counter(legacy if e['kind'] == 'legacy' else e['kind'] + (' draft' if e.get('status') == 'draft' else '')
+                   for e in snapshot.story if not e.get('told_by') and (e['room_id'] not in gone.get('F3', ()) if
+                   e['kind'] == 'legacy' else e['id'] not in gone.get('F5', set()) | gone.get('F5l', set())))
+    told.update('standing part member' if item.get('standing') else item.get('kind', legacy)
+                for item in [*room.get('legacy', ()), *room.get('under_parts', ())]
+                if item.get('standing') or item['id'] not in gone.get('F4', ()))
+    told.update({'fold_read': sum(bool(i.get('folded')) for group, i in rooms if group['key'] not in lined),
+                 'task summary': sum(map(summary, lines))})
+    silent = [(group['key'] in lined, re.search(r'(\d+) words nobody considered', i['silent']))
+              for group, i in rooms if not i['engaged']]
+    host = Counter({'task line': len(lines) - told['task summary'], 'earlier tasks': int(bool(early)),
+                    'repeat': sum(bool(w.get('again')) and not hidden(g, w) for g, w in words),
+                    'silent room': sum(not in_line for in_line, _found in silent)})
+    unconsidered = Counter('as a line' if hidden(g, w) else 'as text' for g, w in words if w['rank'] == 2)
+    unconsidered['as a line'] += sum(int(found.group(1)) for _in_line, found in silent if found)
+    emergency = Counter({step: len(ids) for step, ids in level.addressed if step != 'F1'})
+    emergency['F6w'] -= sum(w['rank'] == 2 and w['id'] in gone.get('F6w', ()) for _g, w in words)
+    emergency['closing sentences in earlier tasks'] = sum(summary(item['line']) for item in early)
+    addressed = gone.get('F2', set()) | gone.get('F7', set()) | gone.get('F7p', set())
+    rows = [*room.get('lane1', ()), *(item for item in room.get('project_words') or () if item.get('address'))]
+    return {'retellings': dict(+told), 'host_facts': dict(+host), 'unconsidered': dict(+unconsidered),
+            'emergency': dict(+emergency), 'rows_as_words': sum(item['address'] not in addressed for item in rows)
+            + len(room.get('origins', ())) + sum(not hidden(g, w) and not w.get('again') for g, w in words)}
+
+
 def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=None, fit=None,
-                 route=None, route_facts=None, response_limit=None, task=None):
+                 route=None, route_facts=None, response_limit=None, task=None, ratio=1.0, dump=None):
     """Observe the existing fitter, including the last frame of a typed refusal.
 
     ``task`` is the task ``core`` was captured for: its caller kind sets the role and the start work room, so the
     plan reads the same one (default: a direct chat turn in the captured room). Without ``route_facts``, ``reserve``
-    is a declared working reserve in every mode (a call route's geometry); ``ordinary_route`` declares a Main route."""
+    is a declared working reserve in every mode (a call route's geometry); ``ordinary_route`` declares a Main route.
+    ``ratio`` is the route's cold density; ``dump`` a path the start's text is written to (``start_text``)."""
     from ouroboros import context_budget, context_fit as cf, memory_floor as mf, memory_view as mv
     from ouroboros.section_floor import section_views
     from ouroboros.tool_policy import select_tool_schemas
@@ -71,7 +130,7 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     evidence = declared_evidence(window, reserve, route_facts, response_limit)
     route = route or {'provider': 'diagnostic', 'model': 'diagnostic'}
     failure, plan = None, prepared
-    with cold_density(), patch.object(
+    with cold_density(ratio), patch.object(
             cf, '_system_blocks', capture_system), patch.object(mf, 'render_view_for_mode', capture_memory):
         try:
             if plan is None:
@@ -92,7 +151,7 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         addressed = section_views((*core.semi_stable_sections, *core.dynamic_head_sections, *core.dynamic_sections, *governance[0]),
                                   facts.get('host_sections_addressed', ()))
         if fit is None:
-            with cold_density():
+            with cold_density(ratio):
                 fit = physical_fit(plan, plan.messages_for(selected), sent, root=root)
         input_tokens = fit['measurement']['estimated_input_tokens']
     else:
@@ -186,12 +245,13 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         boundary_tokens=record.boundary)
     start_room = budget['working_margin_tokens']
     requested_room = start_room if prepared is None else 0  # a renewal asks for no new start room (owner 5A)
-    result = dict(mode=selected, requested_mode=mode, density=1.0, window=capacity, reserve=actual_reserve,
+    result = dict(mode=selected, requested_mode=mode, density=ratio, window=capacity, reserve=actual_reserve,
         input_tokens=input_tokens, total_tokens=input_tokens + actual_reserve, margin_tokens=margin,
         verdict='MinimumViewUnfit' if failure else 'context_capacity' if fit.get('refusal') else 'fits',
         deficit_tokens=failure.deficit_tokens if failure else max(0, -margin),
         work_room_deficit_tokens=failure.work_room_deficit_tokens if failure else max(0, start_room - margin) if prepared is None else 0,
         ladder=dict(level.steps), ladder_basis='selected' if projection or memory else 'minimum bound before ladder',
+        view={**view_counts(snapshot, level), 'work_room_tokens': margin, 'requested_work_room_tokens': requested_room},
         blocks=blocks, profile=profile, work_room_levels=snapshot.spec.work_room_levels,
         start_work_room_tokens=requested_room, work_room_applies_to_verdict=False,
         arithmetic={'requested_window_tokens': window, 'capacity_tokens': capacity, 'boundary_tokens': record.boundary,
@@ -206,7 +266,7 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         estimator=('estimate_context_prompt_tokens over the serialized messages and tools, chars/4' if fit else
                    'plan-side minimum bound (_request_tokens + tool_schema_tokens), chars/4'),
         diagnostic_notes=['No live host: feature tools/instructions, dynamic tool notices and provider wire are absent.',
-                          'Density is fixed at 1.0; no account-scoped window observations are inferred.',
+                          f'Density is a cold estimate of {ratio}; no account-scoped window observations are inferred.',
                           'Figures are chars/4 estimates, never provider tokens: the input is the serialized request, section rows '
                           'are per-text estimates and the framing row is their signed remainder; the assignment text is empty.',
                           f"Reserve: {reserve} is declared as "
@@ -219,6 +279,10 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     else:
         result['diagnostic_notes'].append(
             'MinimumViewUnfit is a fresh-start refusal, not a session verdict; the input number is a lower bound, not a sent candidate.')
+    if dump is not None and plan is None:
+        result['diagnostic_notes'].append('No start text is written: the start was refused.')
+    elif dump is not None:
+        Path(dump).write_text(start_text(plan.messages_for(selected)), encoding='utf-8')
     return result
 
 
@@ -319,7 +383,8 @@ def tool_facts(registry, result, *, requested_mode, requested_count):
                                                    'MCP schemas of servers with no published catalog under the data root']}
 
 
-def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None, caller='direct'):
+def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None, caller='direct', ratio=1.0,
+           dump=None):
     from devtools._context_fit_readonly import readonly_inputs, server_alive, snapshot_root
     from ouroboros.test_environment import default_temp_parent
     root = Path(root).resolve(strict=True)
@@ -356,7 +421,7 @@ def report(root, room, window, reserve, mode='max', snapshot=False, session_prov
                 else:
                     facts, limit = ordinary_route(reserve)
                     result = measure_core(core, schemas, root=root, window=window, reserve=reserve, mode=mode, task=task,
-                                          route_facts=facts, response_limit=limit)
+                                          route_facts=facts, response_limit=limit, ratio=ratio, dump=dump)
                 result['caller'] = {'kind': caller, 'role': view_role(task), 'task_fields': sorted(
                     {*task, *(f'metadata.{key}' for key in task.get('metadata', ()))}
                     - {'id', 'chat_id', 'type', 'text', 'metadata'})}
@@ -384,18 +449,25 @@ def main(argv=None):
     parser.add_argument('--snapshot', action='store_true')
     parser.add_argument('--session-provider', choices=('gemini_live', 'grok_realtime', 'openai_realtime'),
                         help='also prepare a bundled provider session offline, with default call options (never connect)')
+    parser.add_argument('--ratio', type=float, default=1.0,
+                        help="the route's density, provider tokens per estimator token (chars/4), as its usage measured it")
+    parser.add_argument('--dump', type=Path, help="write the start's text to this file (outside the data root)")
     args = parser.parse_args(argv)
-    if args.window <= 0 or args.reserve <= 0:
-        parser.error('window and reserve must be positive')
+    if args.window <= 0 or args.reserve <= 0 or args.ratio <= 0:
+        parser.error('window, reserve and ratio must be positive')
     if args.session_provider and args.caller != 'direct':
         parser.error('--session-provider measures a live call, which is a direct caller')
+    if args.session_provider and (args.dump or args.ratio != 1.0):
+        parser.error('--dump and --ratio measure the ordinary start, not a call host')
+    if args.dump and args.dump.resolve().is_relative_to(args.data.resolve()):
+        parser.error('--dump writes outside the data root')
     previous_logging = logging.root.manager.disable
     previous_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     logging.disable(logging.CRITICAL)  # Never echo private source text or settings through capture warnings.
     try:
         result = report(args.data, args.room, args.window, args.reserve, args.mode, args.snapshot, args.session_provider,
-                        args.caller)
+                        args.caller, args.ratio, args.dump)
     except Unmeasurable as exc:
         print(f'Context measurement unavailable: {exc}', file=sys.stderr)
         return 2
@@ -414,6 +486,7 @@ def main(argv=None):
         print(f"{result['mode']}: input {result['input_tokens']} + reserve {result['reserve']} / {result['window']}; "
               f"{result['verdict']}, margin {result['margin_tokens']}, work-room deficit {result['work_room_deficit_tokens']}")
         print('Ladder (' + result['ladder_basis'] + '): ' + json.dumps(result['ladder']))
+        print('View by the law of forms: ' + json.dumps(result['view'], ensure_ascii=False))
         print(f"Phase: {result['phase']}; profile: {result['profile']}; work-room levels: {result['work_room_levels']}")
         if 'caller' in result:
             tools = result['tools']
