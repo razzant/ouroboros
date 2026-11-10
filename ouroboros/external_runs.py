@@ -209,8 +209,8 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
     try:
         detail = gateway.get_run(run.run_id)
     except ClaudexorUnavailable as exc:
-        if custody.daemon_says_absent(exc, gateway=gateway, run=run):
-            custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent")
+        if custody.daemon_says_absent(exc, run=run):
+            custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent", absence=exc)
             return {"outcome": custody.CANCEL_CONFIRMED, "detail": "absent"}
         return {"outcome": "unverified", "detail": f"{exc.code}: {exc}"}
     if custody.is_terminal(detail):

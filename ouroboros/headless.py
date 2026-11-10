@@ -749,11 +749,12 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
             current = copy_child_task_result(root, {**task, "id": task_id}) or current
         if str(current.get("status") or "") not in _FINAL_STATUSES:
             raise ValueError("terminal task result is missing or not settled")
-        # Workspace capture and a workspace-free child's memory export share the
-        # existing finalizer. Inline turns have no workspace capture obligation.
+        # Workspace capture and a workspace-free child's memory export share the existing finalizer; inline
+        # turns owe no capture, and recorded native capture debt (native_capture_pending) is still owed here.
         memory_export = child is not None and _workspace_root_from_task(task) is None and not task_is_readonly_subagent(task)
         if (not cancelled and (task_requires_workspace_capture(task) or memory_export)
-                and str(current.get("artifact_status") or "").strip().lower() not in ARTIFACT_TERMINAL_STATUSES):
+                and str(current.get("artifact_status") or "").strip().lower()
+                not in ARTIFACT_TERMINAL_STATUSES):
             finalize_task_artifacts(root, {**task, "id": task_id})
         report["result"] = load_task_result(root, task_id, strict=True)
         from ouroboros.obligations import drive_finished
@@ -1190,9 +1191,10 @@ def native_capture_custody(root, entry):
 
 
 def _native_capture_gap(root, task_id, pending, reason):
-    """Artifact-only failure BEFORE mutation; settled task lifecycle and old bytes stand."""
+    """Artifact-only gap BEFORE mutation; lifecycle and old bytes stand; settled owner: failed, live owner: owed (pending)."""
     from ouroboros.outcomes import artifact_bundle_from_result
     row = load_task_result(root, task_id, strict=True) or {}
+    status = ARTIFACT_STATUS_FAILED if row.get("status") in _FINAL_STATUSES else ARTIFACT_STATUS_PENDING
     base = task_artifacts_dir(root, task_id)
     folder = _capture_version_dir(base, row)
     manifest = _empty_patch_manifest(_workspace_root_from_task(row), status=ARTIFACT_STATUS_FAILED,
@@ -1209,14 +1211,14 @@ def _native_capture_gap(root, task_id, pending, reason):
         reason += f" Capture manifest unavailable: {type(exc).__name__}: {exc}"
         artifacts = [{"kind": "workspace_patch_manifest", "name": path.name, "path": str(path),
                       "status": "missing", "measured": False, "errors": [reason]}]
-    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": ARTIFACT_STATUS_FAILED,
+    fields = {"artifacts": _capture_artifact_rows(row, artifacts, base), "artifact_status": status,
               "artifact_error": reason, "native_capture_pending": sources}
     provisional = {**row, **fields}
     provisional.pop("artifact_bundle", None)
     fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
     if row.get("outcome_axes"):
         fields["outcome_axes"] = {**row["outcome_axes"], "artifacts": {
-            **row["outcome_axes"].get("artifacts", {}), "status": ARTIFACT_STATUS_FAILED}}
+            **row["outcome_axes"].get("artifacts", {}), "status": status}}
     write_task_result(root, task_id, row["status"], **fields)
     if failure is not None:
         raise failure

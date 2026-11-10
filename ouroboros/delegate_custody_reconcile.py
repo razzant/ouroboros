@@ -385,8 +385,10 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
 
     The stored canonical body is re-POSTed under the invocation's own wire key:
     the engine returns the ORIGINAL handle when the first POST was accepted, and
-    starts fresh only when the daemon truly never saw it. A definite 4xx retires
-    the invocation and its registration; an unknown outcome stays pending.
+    starts fresh only when the daemon truly never saw it. Keys live per engine
+    store, so the re-POST goes only to the store the start was submitted to
+    (``replay_store_unproven``). A definite 4xx retires the invocation and its
+    registration; an unknown outcome stays pending.
 
     A REVIEW surface's own pending invocation is retained untouched: its panel
     rejoins it through ``review_session_custody``, and a delegation-domain
@@ -408,8 +410,13 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     record = {**record, "request": body}
     from types import SimpleNamespace
 
+    from ouroboros.delegate_pending import replay_store_unproven
     from ouroboros.owner_pause import OwnerPauseRefused, run_operation
 
+    if unproven := replay_store_unproven(record, getattr(gateway, "store_identity", "")):  # the pass's handshake
+        # No row per pass: the pending request row stays the durable fact while that store is not served.
+        return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
+                "reason": "invocation_store_unproven", "detail": unproven}
     request = dict(body)
     try:
         # START_REQUESTED records custody, not an earlier executor handoff.
@@ -452,7 +459,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     from ouroboros.delegate_plan import plan_facts
 
     custody = _custody().RunCustody(
-        run_id=run_id, task_id=task_id,
+        run_id=run_id, task_id=task_id, daemon_store_id=_custody().admitted_store_id(handle),
         **plan_facts(record),
         route_id=str(record["route"] or body.get("primaryHarness") or ""),
         model=str(body.get("model") or ""),
@@ -614,8 +621,8 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
-        if _custody().daemon_says_absent(exc, gateway=gateway, run=custody):
-            _custody().close_absent_run(drive_root, gateway, custody, "reconcile_absent")
+        if _custody().daemon_says_absent(exc, run=custody):
+            _custody().close_absent_run(drive_root, gateway, custody, "reconcile_absent", absence=exc)
             result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "absent"}
         else:
             _custody().record_containment_fault(drive_root, custody, "reconcile_unreadable", f"{exc.code}: {exc}")

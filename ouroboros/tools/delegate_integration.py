@@ -1153,11 +1153,13 @@ def payload_host_instructions(text: str, skill_name: str) -> str:
 
 
 def claimed_start_request(drive: pathlib.Path, *, actor_ctx: Any = None,
-                          initial_bootstrap: bool = False, **request_row: Any) -> Tuple[bool, Dict[str, Any]]:
+                          initial_bootstrap: bool = False, serving_store_id: Any = "",
+                          **request_row: Any) -> Tuple[bool, Dict[str, Any]]:
     """The pre-POST custody decision; each private capture has its own admission."""
     from ouroboros.delegate_start_claims import claimed_start_request as claim
 
-    return claim(drive, actor_ctx=actor_ctx, initial_bootstrap=initial_bootstrap, **request_row)
+    return claim(drive, actor_ctx=actor_ctx, initial_bootstrap=initial_bootstrap,
+                 serving_store_id=serving_store_id, **request_row)
 
 
 def _payload_mutation_authority(

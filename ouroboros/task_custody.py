@@ -114,7 +114,7 @@ class _Retained(Exception):
 
 
 class CustodyBusy(OSError):
-    """A publisher could not take the task's custody lock: retry later, nothing failed."""
+    """A publisher could not take the task's custody lock; the cause does not decide the task's outcome."""
 
 
 class PublicationClosed(OSError):
@@ -177,8 +177,12 @@ def _task_lock(drive_root: Any, task_id: str, suffix: str, timeout_sec: float) -
     require_owned_root(drive_root)
     tid = validate_task_id(task_id)
     path = custody_anchor(drive_root, tid) / "task_results" / f"{tid}.{suffix}.lock"
+    held: Dict[str, Any] = {}
     fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=120.0, poll_sec=0.01,
-                                     owner_aware_stale=True)
+                                     owner_aware_stale=True, outcome=held)
+    if fd is None and held.get("reason") != "contention":
+        code, text = held.get("errno"), f"{suffix} lock of {tid} was not taken: platform outcome {held.get('reason') or 'unknown'}"
+        raise CustodyBusy(code, f"{text} ({os.strerror(code)})") if isinstance(code, int) else CustodyBusy(text)
     try:
         yield fd is not None
     finally:
@@ -191,7 +195,7 @@ def task_custody_lock(drive_root: Any, task_id: str, *, timeout_sec: float = 5.0
     settlement take it around every file they place and the row write that lists it. It
     lives on the canonical side (``task_results/<id>.custody.lock``), never inside a drive
     that settlement deletes, for the canonical root and every own child drive alike.
-    Yields whether it was acquired."""
+    Yields whether acquired; a non-contention refusal raises CustodyBusy with the known platform cause."""
     return _task_lock(drive_root, task_id, "custody", timeout_sec)
 
 

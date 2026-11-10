@@ -110,8 +110,8 @@ def task_scoped_supervision(data: Any) -> dict[str, Any]:
     return checkpoints.task_facts(data)
 
 
-def _save_state(ctx: Any, state: dict[str, Any]) -> None:
-    checkpoints.save_view(_state_path(ctx), custody.custody_root(ctx), str(ctx.task_id), state)
+def _save_state(ctx: Any, state: dict[str, Any], stage: str = "") -> None:
+    checkpoints.save_view(_state_path(ctx), custody.custody_root(ctx), str(ctx.task_id), state, stage)
 
 
 def _emit(ctx: Any, kind: str, payload: dict[str, Any]) -> bool:
@@ -1297,7 +1297,7 @@ def supervised_wait(
         # has not observed them yet; treating them as prior state loses a fast child
         # forever when the physical leaf stays quiet.  The ordinary pending-wake
         # cursor/ack path below publishes each existing terminal/attention fact once.
-        _save_state(ctx, state)
+        _save_state(ctx, state, "wait_entry")
         _emit(ctx, "delegate_supervision_wait_entered", {
             "run_id": str(run_id), "journal_cursor": int(state.get("journal_cursor") or 0),
             "checkpoint_scheduled": bool(checkpoint_after_sec is not None),
@@ -1450,7 +1450,7 @@ def supervised_wait(
                     "coordination_cursor": next_coordination_cursor,
                     "created_at": utc_now_iso(),
                 }
-                _save_state(ctx, state)
+                _save_state(ctx, state, "wake_publication")
                 payload = state["pending_wake"]["payload"]
                 wake_id = state["pending_wake"]["wake_id"]
                 _emit(ctx, "delegate_supervision_wake_pending", {
@@ -1492,7 +1492,7 @@ def supervised_wait(
                     "journal_cursor": int(state.get("journal_cursor") or 0),
                     "event_only": True,
                 })
-            _save_state(ctx, state)
+            _save_state(ctx, state, "quiet_renewal")
             if resumed:
                 model_sleep.announce_resumed(ctx)  # the held run works again, as recorded: no new start says so
     finally:
@@ -1577,11 +1577,17 @@ def delegate_wait_entry(
             "contract": "event_only",
         })
 
-    return supervised_wait(
-        ctx, runs if runs is not None else run_id, since_seq=since_seq,
-        checkpoint_after_sec=checkpoint_after_sec,
-        checkpoint_reason=checkpoint_reason,
-    )
+    try:
+        return supervised_wait(
+            ctx, runs if runs is not None else run_id, since_seq=since_seq,
+            checkpoint_after_sec=checkpoint_after_sec,
+            checkpoint_reason=checkpoint_reason,
+        )
+    except OSError as exc:  # Only a save failure names supervision_stage; other errors keep their handling.
+        if not (stage := getattr(exc, "supervision_stage", "")):
+            raise
+        detail, facts = checkpoints.save_failure(exc, stage)
+        return _fail("delegate_wait", "supervision_state_unsaved", detail, **facts)
 
 
 __all__ = [
