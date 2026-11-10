@@ -1163,7 +1163,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                     arg=unique_tail,
                 )
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"compact-activity-{browser_engine}-{width}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"compact-activity-{browser_engine}-{width}.png"),
                     full_page=True,
                 )
 
@@ -1803,10 +1803,10 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 assert replay_child.locator('[data-live-line-key="terminal-subagent-lifecycle-child1"]').count() == 1
                 page.wait_for_timeout(900)  # cover the routine background history sync
                 assert replay_child.locator('.chat-live-line-repeat:not([hidden])').count() == 0
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "review-truth-child-reconnect.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "review-truth-child-reconnect.png"), full_page=True)
                 replay_progress.locator(".chat-live-line-toggle").click()
                 replay_child.scroll_into_view_if_needed()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "lifecycle-current-status.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "lifecycle-current-status.png"), full_page=True)
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble", has_text="Final child answer should stay inside the child card.").count() == 0
 
@@ -2056,7 +2056,7 @@ def _mobile_keyboard_drawer_assertions(page, url: str, screenshot_path: pathlib.
     assert scroll["scrollHeight"] > scroll["clientHeight"], scroll
     assert scroll["scrollTop"] > 0, scroll
     assert scroll["overflowY"] in {"auto", "scroll"}, scroll
-    page.screenshot(path=str(diagnostic_directory(screenshot_path.parent, "ui-smoke") / screenshot_path.name), full_page=True)
+    page.screenshot(path=str(diagnostic_directory(screenshot_path.parent, "ui-smoke", publish=True) / screenshot_path.name), full_page=True)
 
     # Exercise the real backdrop click on the room's quarter left showing beside
     # the drawer (all the scrim covers), then require all state/ARIA projections
@@ -2566,7 +2566,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert_mobile_geometry(mobile)
                 assert_jump_geometry(mobile, "#page-chat")
                 mobile.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"live-card-depth-10-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-depth-10-{browser_engine}.png"),
                     full_page=True,
                 )
                 mobile.reload(wait_until="domcontentloaded", timeout=30_000)
@@ -2741,7 +2741,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     wide, "#panel-pchat-layout-project", require_overflow=False
                 )
                 wide.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / f"live-card-project-panel-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-project-panel-{browser_engine}.png"),
                     full_page=True,
                 )
             finally:
@@ -3708,7 +3708,7 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
                 page.keyboard.press("Escape")
                 menu.wait_for(state="detached", timeout=10_000)
                 assert cancel_btn.is_enabled()
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke") / "cancel-run.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / "cancel-run.png"), full_page=True)
             finally:
                 browser.close()
                 _release_mock_model()

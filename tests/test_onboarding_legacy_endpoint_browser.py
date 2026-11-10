@@ -126,7 +126,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"legacy-endpoint-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"legacy-endpoint-{engine}", publish=True)
     report = {"candidate_identity": ui["candidate_identity"], "version": ui["candidate_version"], "engine": engine, "frames": {}}
     with _endpoint(["legacy-model", "second-model"]) as (legacy_url, legacy_calls), \
             _endpoint(["dedicated-model"]) as (dedicated_url, dedicated_calls), sync_playwright() as pw:
@@ -361,7 +361,7 @@ def test_both_pairs_test_and_discovery_follow_the_cleared_dedicated_address(dire
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"both-pairs-{shape}-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"both-pairs-{shape}-{engine}", publish=True)
     report = {"candidate_identity": ui["candidate_identity"], "frames": {}, "steps": []}
     with _endpoint(["shared-model"]) as (legacy_url, legacy_calls), _endpoint(["shared-model"]) as (other_url, other_calls), \
             _endpoint(["lab-model"]) as (named_url, named_calls), sync_playwright() as pw:
@@ -500,7 +500,7 @@ def test_settings_row_describes_the_pair_its_test_sends(direct_server_with_data,
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
-    evidence = diagnostic_directory(tmp_path / "frames", f"settings-pair-{shape}-{engine}")
+    evidence = diagnostic_directory(tmp_path / "frames", f"settings-pair-{shape}-{engine}", publish=True)
     report = {"candidate_identity": ui["candidate_identity"], "engine": engine, "shape": shape, "frames": {}, "steps": []}
     with _endpoint(["legacy-model"]) as (legacy_url, legacy_calls), _endpoint(["other-model"]) as (other_url, other_calls), \
             _endpoint(["dedicated-model"]) as (dedicated_url, dedicated_calls), sync_playwright() as pw:

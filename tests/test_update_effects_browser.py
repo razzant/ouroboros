@@ -92,7 +92,7 @@ def test_apply_discloses_before_post_and_applied_card_restores_locally(engine, w
                     assert len([path for path, _body in calls if path == "/api/update/apply"]) == before
                     page.locator(button).click()
                     dialog.wait_for()
-                    output = diagnostic_directory(tmp_path, "update-effects") / f"{strategy}-{engine}-{width}.png"
+                    output = diagnostic_directory(tmp_path, "update-effects", publish=True) / f"{strategy}-{engine}-{width}.png"
                     page.screenshot(path=str(output), full_page=True)
                     print(f"UPDATE_EFFECTS_SCREENSHOT={output}")
                     dialog.locator("[data-confirm-ok]").click()
