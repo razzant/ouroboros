@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import gc
 import time
 from typing import Any, Callable, Dict, Hashable, Iterator, List, Optional, Set, Tuple
 
@@ -80,6 +81,31 @@ def measured_sections() -> Iterator[None]:
         _WORK.reset(work)
         _STARTED.reset(started)
         _SPANS.reset(token)
+
+
+@contextlib.contextmanager
+def collector_rests() -> Iterator[None]:
+    """The cyclic collector waits while a context build runs and resumes in ``finally``: the build allocates millions of
+    short-lived objects and creates no cycles, so each collection only walks the process's long-lived heap again.
+    A collection that still runs in the block (an explicit ``gc.collect``) counts in the measured window's work."""
+    resume = gc.isenabled()
+    gc.disable()
+    started = [0.0]
+
+    def collection(phase: str, _info: Dict[str, int]) -> None:
+        if phase == "start":
+            started[0] = time.perf_counter()
+        else:
+            counted("gc_collections")
+            counted("gc_ms", round((time.perf_counter() - started[0]) * 1000))
+
+    gc.callbacks.append(collection)
+    try:
+        yield
+    finally:
+        gc.callbacks.remove(collection)
+        if resume:
+            gc.enable()
 
 
 def section_spans() -> Dict[str, Dict[str, int]]:

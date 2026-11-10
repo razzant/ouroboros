@@ -855,9 +855,9 @@ class OuroborosAgent:
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)
         from ouroboros.config import get_context_mode
         from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
-        from ouroboros.context_timing import measured_sections
+        from ouroboros.context_timing import collector_rests, measured_sections
 
-        with measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
+        with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             messages, cap_info = build_llm_messages(
                 env=self.env,
                 memory=self.memory,

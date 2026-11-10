@@ -1,11 +1,12 @@
 """Section timing and counted work of one measured window: recorded only inside its scope, errors unchanged."""
 from __future__ import annotations
 
+import gc
 import threading
 
 import pytest
 
-from ouroboros.context_timing import counted, measured_sections, section_spans, timed, timed_section
+from ouroboros.context_timing import collector_rests, counted, measured_sections, section_spans, timed, timed_section
 
 
 @timed_section("demo")
@@ -99,6 +100,38 @@ def test_another_threads_window_does_not_see_this_ones_work():
     assert seen["spans"] == {}
 
 
+def test_the_collector_rests_for_a_block_and_resumes_after_it():
+    """The collector is off inside the block and back on after it, an exception included; a collector the host already
+    switched off stays off."""
+    assert gc.isenabled()
+    with collector_rests():
+        assert not gc.isenabled()
+    assert gc.isenabled()
+    with pytest.raises(RuntimeError):
+        with collector_rests():
+            raise RuntimeError("the build failed")
+    assert gc.isenabled()
+    gc.disable()
+    try:
+        with collector_rests():
+            assert not gc.isenabled()
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
+
+
+def test_a_collection_inside_the_resting_block_counts_in_its_window_and_nothing_outside_one():
+    """A collection that still happens inside a measured build (an explicit ``gc.collect``) is the build's work; the
+    collector's own count of it stays out of a window nobody opened."""
+    with collector_rests(), measured_sections():
+        gc.collect()
+        work = section_spans()["work"]
+    assert work["gc_collections"] >= 1 and work["gc_ms"] >= 0
+    with collector_rests():
+        gc.collect()
+    assert section_spans() == {}
+
+
 @pytest.mark.parametrize("realtime", [False, True])
 def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     """The agent opens the measured scope around its context build, so the receipt can carry the spans."""
@@ -117,7 +150,7 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
             assert _kwargs["route_resolver"] is route_resolver
         else:
             assert "route_resolver" not in _kwargs
-        seen.append(context_timing._SPANS.get() is not None)
+        seen.append(context_timing._SPANS.get() is not None and not gc.isenabled())
         raise RuntimeError("stop after the context build")
 
     monkeypatch.setattr(agent_module, "build_llm_messages", build)
@@ -131,4 +164,4 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     with pytest.raises(RuntimeError, match="stop after the context build"):
         agent._prepare_task_context({"id": "timed", "type": "task", "chat_id": 1, "text": "hi"})
     assert seen == [True]
-    assert context_timing._SPANS.get() is None
+    assert context_timing._SPANS.get() is None and gc.isenabled()
