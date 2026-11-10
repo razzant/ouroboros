@@ -2,6 +2,10 @@
 
 Signals, timeouts and engine terminal facts prove no OS exit; jobs stay until return. Cold receipts grant custody, not Resume or survival (§6). Switching restores stopped handles; boot retries unconfirmed custody.
 
+Pool pressure refuses only a new project process (§5), never killing work or turning a warm sleeper cold.
+
+At server start, `server_process.raise_open_file_limit` raises POSIX `RLIMIT_NOFILE` soft toward hard (macOS: at most 10,240) for per-run transports. Infinite soft stays; failures and the resulting limit are logged without blocking startup. Windows is unchanged.
+
 ### Shutdown doors
 
 | Door | Stops | Keeps | Durable mark |

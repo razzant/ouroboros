@@ -48,8 +48,8 @@ SLEEP_MODES = ("in_slot", "warm", "cold")
 SLEEP_PARAMS: Dict[str, Dict[str, Any]] = {
     "sleep_mode": {"type": "string", "enum": list(SLEEP_MODES), "description": (
         "Omitted: you sleep; your process is released once nothing live keeps it (what does is named and the "
-        "process stays) and timeout_sec, if given, is the wake time. in_slot holds your slot for timeout_sec. "
-        "warm keeps your process; cold saves your continuation and releases it (your own running work refuses "
+        "process stays) and timeout_sec is the wake time. in_slot keeps the process/call, yielding acting capacity. "
+        "warm keeps your process; cold saves your continuation and releases it (non-transferable work refuses "
         "it). A sleep wakes when this wait is satisfied, a waited child raises an attention beacon, addressed mail "
         "or owner input arrives or an executor of yours asks a question, and the wait's result then reaches your "
         "next request. A selected task whose record is lost wakes it as unknown, never success.")},

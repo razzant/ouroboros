@@ -369,7 +369,7 @@ def test_the_wake_read_is_one_detail_read_and_never_the_journal(tmp_path):
 
 
 def test_a_turn_with_no_continuation_owner_waits_in_its_slot_on_the_same_sources(tmp_path, monkeypatch, reads):
-    """A Presence turn cannot sleep: its delegate_wait holds the slot (marked as an in-slot wait on its runs) until a
+    """A Presence turn cannot sleep: its delegate_wait keeps the process (yielding acting capacity on its runs) until a
     source of the same sleep is ready, then answers through its result; a task that can sleep never does this."""
     from ouroboros import delegate_supervision as ds, model_sleep
 
@@ -443,7 +443,7 @@ def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_r
     assert wait.handler.__wrapped__ is delegate_wait_entry, "the one ToolResult->str publisher wraps the entry"
     text = " ".join(wait.schema["description"].split())
     assert "this wait's result is then owed to your next model request" in text
-    assert "it returns sleep_armed" in text and "holds no slot" in text and "with no further call" in text
+    assert "it returns sleep_armed" in text and "yields acting capacity" in text and "with no further call" in text
     assert "Each wake is delivered once and counts as shown only when shown whole" in text
     assert "a wait_sec an old transcript passes is accepted and sizes nothing" in text
     assert "wait_sec" in inspect.signature(delegate_wait_entry).parameters, "accepted, though the schema offers none"

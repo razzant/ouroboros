@@ -887,7 +887,7 @@ def _delegated_run_facts(drive_root: Path, child_id: str) -> Any:
 _AWAIT_MESSAGES_POLL_SEC = 2.0
 _AWAIT_MESSAGES_NOTE = (
     "Any pending message is delivered at the next round top, not by this tool; this wait "
-    "holds the worker slot and releases nothing."
+    "keeps the process and call stack while yielding acting capacity."
 )
 
 
@@ -1064,7 +1064,7 @@ def await_messages_entry() -> ToolEntry:
             "so does a selected task or sender held by a current stop you have not yet been shown (dependency_held, "
             "with its current_stop): the same request then sleeps. Sleep is not execution time; an explicit deadline "
             "still applies. A settled task is not a successful one: read its result when you wake. mode=in_slot (and "
-            "a zero timeout_sec, a peek) instead holds your worker slot until THIS task has unread mail or the window "
+            "a zero timeout_sec, a peek) keeps your process but yields acting capacity until this task has unread mail or the window "
             "elapses, narrowed only by your deadline or execution budget (the result names the bound), and delivers "
             "nothing itself: the message reaches you at the next round top, exactly as after a wait_task early return. "
             "The ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) off "
@@ -1075,7 +1075,7 @@ def await_messages_entry() -> ToolEntry:
         "parameters": {"type": "object", "properties": {
             "timeout_sec": {"type": "integer", "description": "Seconds: a sleep's wake time, or the in_slot window."},
             "mode": {"type": "string", "enum": ["in_slot", "warm", "cold"], "description":
-                     "Omitted: a sleep, released once nothing live keeps your process. in_slot holds your slot."},
+                     "Omitted: sleep, releasing the process when saved. in_slot keeps it while yielding acting capacity."},
             "senders": {"type": "array", "items": {"type": "string"},
                         "description": "Sleep: task ids whose ordinary mail wakes you."},
             "tasks": {"type": "array", "items": {"type": "string"},
