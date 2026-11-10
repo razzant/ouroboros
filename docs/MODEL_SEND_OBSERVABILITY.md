@@ -221,3 +221,28 @@ from "our two copies agree" to "the durable record agrees with the wire".
   non-blocking dispatch and reverse joins. History folded before the usage store
   existed is resolved through the retained evidence described in
   [Usage store](USAGE_STORE.md#8-explicit-history-audit).
+
+## 8. Round receipt
+
+Each round's `llm_round` carries what the host did to prepare its request
+(`llm_observability.round_window` around the model call; `round_starts` marks
+the batch's end). Facts for the log only; nothing decides by them.
+
+- `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
+  the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
+  of shared parts the CAS stored for the first time (`observability.write_part`).
+  R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
+  any start size.
+- `host_steps.steps`: `[wall ms, thread CPU ms]` between marks: `round_top`
+  (the batch's end to the model call), `model_call` (to the first record),
+  `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
+  (CPU null: it ends on the model sender's thread).
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
+  `lock_wait` and `manifest_write`; `context_facts`;
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+- `host_steps.rusage`: the process's voluntary and involuntary context
+  switches, major faults and block writes since the batch's end; absent on
+  Windows.
+
+About a kilobyte a round lands in the events archive kept for good (~14 MB a
+day at the 14,000 rounds a busy install made on 09.11).

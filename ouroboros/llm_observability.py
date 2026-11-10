@@ -62,16 +62,27 @@ def _rusage() -> Dict[str, int]:
     return {name[3:]: int(getattr(usage, name)) for name in _RUSAGE}
 
 
+def round_starts(slot: Any) -> None:
+    """A round's preparation starts now, at a batch's end: the next ``round_window`` on ``slot`` times its first step,
+    ``round_top`` (the loop's own work up to the model call), and its ``rusage`` from here."""
+    slot._round_prep_since = (time.perf_counter(), time.thread_time(), threading.get_ident(), _rusage())
+
+
 @contextlib.contextmanager
-def round_window() -> Iterator[None]:
-    """One round's preparation receipt (a ``context_timing`` window): from the end of a tool batch, or the loop's
-    start, to the round's ``llm_round``, which carries what the host did in it (``round_receipt``): the counted work,
-    each marked section's time, the time of each step between ``host_step`` marks and the process's ``_rusage`` over
-    the window. Facts for the log only: nothing reads them to decide."""
+def round_window(slot: Any = None) -> Iterator[None]:
+    """One round's model call as a ``context_timing`` window, receipted on its ``llm_round`` (``round_receipt``): the
+    counted work, each marked section's wall time, the steps between ``host_step`` marks (``round_top`` from
+    ``round_starts`` on ``slot``, used once) and the process's ``_rusage`` since the round's start. Facts for the log
+    only: nothing reads them to decide."""
+    since = getattr(slot, "_round_prep_since", None)
+    if since is not None:
+        slot._round_prep_since = None
+    now = (time.perf_counter(), time.thread_time(), threading.get_ident())
     with measured_sections():
-        token = _STEPS.set({"steps": {}, "rusage": _rusage(),
-                            "mark": (time.perf_counter(), time.thread_time(), threading.get_ident())})
+        token = _STEPS.set({"steps": {}, "mark": since[:3] if since else now, "rusage": since[3] if since else _rusage()})
         try:
+            if since is not None:
+                host_step("round_top")
             yield
         finally:
             _STEPS.reset(token)

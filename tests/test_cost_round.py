@@ -98,10 +98,11 @@ def test_r1_round_two_scans_only_the_bytes_it_adds(engine, turns):
 
 
 def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
-    """The window opens at the loop's start and at each batch's end and closes once its round's model call
-    returned: a call sees only the work counted since its window opened (round 2's includes the checkpoint of the
-    batch it follows, which stores the batch's result), and nothing stays open after the loop."""
+    """Each round's model call runs in its own window: a call sees only the work counted in it, round 2's receipt
+    times its ``round_top`` step from the batch's end (round 1 follows no batch), and nothing stays open after the
+    loop."""
     import ouroboros.loop as loop
+    from ouroboros.llm_observability import round_receipt
     from ouroboros.tools.registry import ToolRegistry
 
     seen = []
@@ -111,7 +112,7 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
 
     def fake_call(_llm, _messages, *_args, **_kwargs):
         counted("probe", key="same")  # a window carried over from the previous round would show it again
-        seen.append(section_spans().get("work"))
+        seen.append((section_spans().get("work"), set(round_receipt()["host_steps"]["steps"])))
         return {"role": "assistant", **next(replies)}, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
@@ -122,8 +123,7 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
                       emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="window-task",
                       drive_root=tmp_path)
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "one effect"
-    assert [{verb: n for verb, n in work.items() if verb.startswith("probe")} for work in seen] == [{"probe": 1}] * 2, seen
-    assert seen[1].get("new_parts", 0) > 0, seen
+    assert seen == [({"probe": 1}, set()), ({"probe": 1}, {"round_top"})], seen
     assert section_spans() == {}
 
 
