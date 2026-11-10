@@ -193,7 +193,8 @@ def test_owner_question_stays_warm_in_either_tool_order(tmp_path, monkeypatch):
 
 def test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_pause(tmp_path, monkeypatch):
     """The carrier's body raises after its pause was saved: no exception terminal is written and nothing
-    is emitted; the saved pause of this attempt is what the crash recovery parks again (#1196, F4)."""
+    but the start phase it reported is emitted; the saved pause of this attempt is what the crash recovery
+    parks again (#1196, F4)."""
     from ouroboros import budget_pause
     from ouroboros.task_results import load_task_result
     from supervisor import message_bus, worker_process
@@ -221,7 +222,7 @@ def test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_p
                                            repo_dir=str(tmp_path), drive_root=str(tmp_path))
     finally:
         budget_pause.end_dispatch_fence("head")  # the dying carrier's process-local fence goes with it
-    assert not emitted
+    assert [row["type"] for row in emitted] == ["direct_turn_phase"]
     assert budget_pause.death_returns_to_pause(budget_pause.budget_pause_row(tmp_path, "head"), 1)
     assert (load_task_result(tmp_path, "head") or {}).get("status") != "failed"
 

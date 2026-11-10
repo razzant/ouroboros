@@ -258,8 +258,8 @@ class TurnEventQueue:
     pooled task's control events are handled while its RUNNING row exists and
     keep their producer shape. The direct lane stamps every task-scoped event,
     plus its turn-only extras: the origin label and the Stop marker on work frames.
-    ``on_frame(kind, data)`` sees each of the task's own frames as it passes (the
-    direct lane reads its start facts there).
+    ``on_frame(kind, data)`` sees each of the task's own frames as it passes, in either
+    lane (its start phases are read there: ``worker_chat_lane.TurnPhaseFrames``).
     """
 
     def __init__(self, inner: Any, task_id: Any, chat_id: Any, initiator: Any = "",
@@ -390,8 +390,9 @@ def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
     process's log sink. A pooled task stamps only the telemetry lane; a conversation
     turn the lane carries (``execution_owner.lane == "conversation"``) stamps every
     task-scoped event plus the turn-only extras — its origin label, the Stop marker
-    on work frames — with the carrier's hooks (the namer on first work, the frame
-    observer that feeds its receipt and phases), as the in-process lane once did."""
+    on work frames — with the carrier's hooks (the namer on first work), as the
+    in-process lane once did. Either lane's frame observer (``on_frame``) feeds its
+    start phases; a conversation turn's also feeds its receipt."""
     chat_id = task.get("chat_id")
     try:
         chat_id = None if chat_id in (None, "") else int(chat_id)
@@ -402,7 +403,7 @@ def task_event_queue(inner: Any, task: Dict[str, Any], *, initiator: Any = "",
     endpoint = TurnEventQueue(inner, str(task.get("id") or ""), chat_id, initiator if conversation else "",
                               on_first_work if conversation else None, lineage=task,
                               direct_chat=bool(task.get("_is_direct_chat")), telemetry_only=not conversation,
-                              on_frame=on_frame if conversation else None)
+                              on_frame=on_frame)
     if endpoint.task_id:
         _TASK_ENDPOINTS[endpoint.task_id] = endpoint
     return endpoint

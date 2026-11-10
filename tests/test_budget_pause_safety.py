@@ -365,7 +365,8 @@ def test_a_lane_turns_exact_pause_is_parked_by_the_supervisor_from_its_row(tmp_p
         worker_process.run_worker_task(agent, dict(workers.RUNNING["direct"]["task"]), wid=slot.wid,
                                        out_q=SimpleNamespace(put=events.append), repo_dir=str(tmp_path),
                                        drive_root=str(tmp_path))
-        [event] = events  # the carrier emits the pause once, addressed by its slot
+        # The carrier emits the pause once, addressed by its slot (beside the start phase any carried task reports).
+        [event] = [row for row in events if row["type"] != "direct_turn_phase"]
         assert event["type"] == "budget_pause" and event["_is_direct_chat"] is True and event["worker_id"] == slot.wid
         park_lane_pause(event)
         assert workers.PENDING[0]["id"] == "direct" and workers.PENDING[0]["_budget_pause"]

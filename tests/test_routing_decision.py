@@ -510,9 +510,9 @@ def test_same_request_id_cannot_switch_options_and_stale_tokens_cannot_claim(
 def test_grounding_row_never_consumes_the_history_quota():
     """Scope finding: the hidden routing_options row is skipped by the render
     loop, so it must not count toward the human-row quota either."""
-    from ouroboros.gateway.history import _chat_quota_predicate
+    from ouroboros.gateway.history_paging import chat_quota_predicate
 
-    counts = _chat_quota_predicate(lambda chat_id, entry: True)
+    counts = chat_quota_predicate(lambda chat_id, entry: True, lambda chat_id, default: chat_id or default)
     assert counts({"direction": "out", "chat_id": 1, "text": "hi"})
     assert not counts({"direction": "out", "chat_id": 1,
                        "type": "routing_options", "text": "1. A"})

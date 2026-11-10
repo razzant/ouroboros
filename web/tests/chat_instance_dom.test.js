@@ -1584,3 +1584,51 @@ test('a parent whose evidence arrives later re-nests its child, keeping the node
         assert.equal(child.parentNode?.dataset?.subagentsFor, 'par-x', 'and nests under the parent');
     } finally { instance.destroy(); restoreDom(prior); }
 });
+
+// #2801: answer first. The root's final is saved before its result is stored; a reload in between replays the
+// final with its own status while the saved result still runs. Shapes are the real server's (isolated witness).
+test('an answer saved before its result is stored replays as Finalizing…, never a finished Done (#2801)', async () => {
+    const replay = async (finalRow, progressPhase) => {
+        const rows = [
+            { chat_id: 2, role: 'assistant', is_progress: true, system_type: 'model_narration', content: 'still working',
+                ts: '2026-11-09T06:13:59Z', task_id: 'early', task_phase: progressPhase },
+            { chat_id: 2, role: 'assistant', content: 'Witness answer.', text: 'Witness answer.',
+                ts: '2026-11-09T06:14:02Z', task_id: 'early', ...finalRow },
+        ];
+        const { prior, mount } = installDom(async (url) => (String(url).startsWith('/api/chat/history')
+            ? { ok: true, json: async () => ({ messages: rows }) }
+            : { ok: true, json: async () => ({ active_direct_turns: [] }) }));
+        const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
+        let generation = 0;
+        const stateSnapshots = {
+            begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+            isCurrent: () => true, apply() {},
+        };
+        let instance;
+        try {
+            instance = createChatInstance({
+                ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+                updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
+            });
+            await instance.refreshHistory({ revision: 1 });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const card = globalThis.document.byId.get('chat-messages').children.find((node) =>
+                node.classList.contains('chat-live-card') && node.dataset.taskId === 'early');
+            assert.ok(card, 'the replayed final row minted its task card');
+            const chip = card.querySelector('[data-live-phase]');
+            return { finished: card.dataset.finished, label: chip?.getAttribute('aria-label') || chip?.textContent || '' };
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    };
+    // The server's projection now: the saved nonterminal result refutes the final's own word; the card holds.
+    const held = await replay({ task_phase: 'finalizing', outcome_final: false }, 'finalizing');
+    assert.equal(held.finished, '0');
+    assert.match(held.label, /Finalizing/);
+    assert.doesNotMatch(held.label, /Done/, 'an outcome no store has answered is not said');
+    // Control: a settled final still closes its card with its word.
+    const settled = await replay({ task_terminal_status: 'completed', outcome_final: true }, undefined);
+    assert.equal(settled.finished, '1');
+    assert.match(settled.label, /Done/);
+});

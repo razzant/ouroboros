@@ -713,7 +713,7 @@ class ActiveDirectTurn(TypedDict):
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
-    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker; a worker-held running root: worker
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority

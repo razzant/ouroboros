@@ -33,7 +33,7 @@ from ouroboros.safety_config import OWNER_RULES_KEY
 
 from ouroboros.safety_records import (
     _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts,
-    verdict_history_bytes, parse_safety_response as _parse_safety_response,
+    safety_check_wait, verdict_history_bytes, parse_safety_response as _parse_safety_response,
 )
 from ouroboros.consciousness_authority import work_kind, effective_runtime_mode
 
@@ -1039,66 +1039,64 @@ def _safety_model_call(
             processing = resolve_processing_preference("safety")
 
     if latch and time.time() < _SAFETY_STORM_UNTIL:
-        raise _SafetyRateLimited(
-            "safety lane cooling down after a recent rate-limit storm; no attempt made",
-            latched=True,
-        )
-    reason = ""
-    for attempt in range(attempts_limit):
-        if attempt:
-            deadline = _safety_deadline_epoch(ctx)
-            if deadline is not None and time.time() >= deadline:
-                break  # the task deadline is spent: the retry would be a paid call past it
-            _safety_rate_limit_backoff(ctx)
-            if deadline is not None and time.time() >= deadline:
-                break  # the backoff sleep itself consumed the deadline
-        exc: Optional[Exception] = None
-        msg: Dict[str, Any] = {}
-        usage: Optional[Dict[str, Any]] = None
-        try:
-            deadline = _safety_deadline_epoch(ctx)
-            # The physical sender takes the provider slot; this only carries the deadline. The same
-            # task deadline that ends the slot wait and the retry also bounds the send (#572).
-            with model_concurrency.model_call_scope(light_model, use_local, deadline):
-                msg, usage = chat_observed(
-                    client,
-                    drive_root=_safety_drive_root(ctx),
-                    task_id=str(getattr(ctx, "task_id", "") or "safety"),
-                    call_type=call_type,
-                    # Stable, tool-free SAFETY.md prefix; subject remains uncached.
-                    messages=[
-                        {"role": "system", "content": cached_prompt_blocks(
-                            (system_prompt if system_prompt is not None else _get_safety_prompt()), ttl=_SAFETY_CACHE_TTL)},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    model=light_model, use_local=use_local,
-                    max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
-                    timeout=get_safety_call_timeout_sec(),
-                    model_role=model_role, model_account_override=account, processing_preference=processing,
-                    wait_for_resources=(not mode_has_unrestricted_agency(_runtime_mode(ctx))
-                                        if wait_for_resources is None else wait_for_resources),
-                    response_format=({"type": "json_object"}
-                                     if LLMClient.supports_response_format(light_model, use_local=use_local)
-                                     else None),
-                    **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
-                )
-        except Exception as e:
-            from ouroboros.llm_claudexor import propagate_model_error
-            propagate_model_error(e)
-            exc = e
-        safe_error = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}") if exc else ""
-        rate_limited = _safety_rate_limit_reason(exc, usage, safe_error)
-        on_usage(usage)
-        if rate_limited is None:
-            if exc is not None:
-                raise exc
-            return msg, usage
-        reason = rate_limited
-        attempts = attempt + 1
-        log.warning(
-            "Safety check rate-limited for %s (attempt %d/2): %s", tool_name, attempts, reason,
-        )
-    raise _SafetyRateLimited(reason, attempts=attempts)
+        raise _SafetyRateLimited("safety lane cooling down after a recent rate-limit storm; no attempt made", latched=True)
+    with safety_check_wait(ctx, tool_name):  # the tool waits on this check, its bounded retry included
+        reason = ""
+        for attempt in range(attempts_limit):
+            if attempt:
+                deadline = _safety_deadline_epoch(ctx)
+                if deadline is not None and time.time() >= deadline:
+                    break  # the task deadline is spent: the retry would be a paid call past it
+                _safety_rate_limit_backoff(ctx)
+                if deadline is not None and time.time() >= deadline:
+                    break  # the backoff sleep itself consumed the deadline
+            exc: Optional[Exception] = None
+            msg: Dict[str, Any] = {}
+            usage: Optional[Dict[str, Any]] = None
+            try:
+                deadline = _safety_deadline_epoch(ctx)
+                # The physical sender takes the provider slot; this only carries the deadline. The same
+                # task deadline that ends the slot wait and the retry also bounds the send (#572).
+                with model_concurrency.model_call_scope(light_model, use_local, deadline):
+                    msg, usage = chat_observed(
+                        client,
+                        drive_root=_safety_drive_root(ctx),
+                        task_id=str(getattr(ctx, "task_id", "") or "safety"),
+                        call_type=call_type,
+                        # Stable, tool-free SAFETY.md prefix; subject remains uncached.
+                        messages=[
+                            {"role": "system", "content": cached_prompt_blocks(
+                                (system_prompt if system_prompt is not None else _get_safety_prompt()), ttl=_SAFETY_CACHE_TTL)},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        model=light_model, use_local=use_local,
+                        max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
+                        timeout=get_safety_call_timeout_sec(),
+                        model_role=model_role, model_account_override=account, processing_preference=processing,
+                        wait_for_resources=(not mode_has_unrestricted_agency(_runtime_mode(ctx))
+                                            if wait_for_resources is None else wait_for_resources),
+                        response_format=({"type": "json_object"}
+                                         if LLMClient.supports_response_format(light_model, use_local=use_local)
+                                         else None),
+                        **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
+                    )
+            except Exception as e:
+                from ouroboros.llm_claudexor import propagate_model_error
+                propagate_model_error(e)
+                exc = e
+            safe_error = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}") if exc else ""
+            rate_limited = _safety_rate_limit_reason(exc, usage, safe_error)
+            on_usage(usage)
+            if rate_limited is None:
+                if exc is not None:
+                    raise exc
+                return msg, usage
+            reason = rate_limited
+            attempts = attempt + 1
+            log.warning(
+                "Safety check rate-limited for %s (attempt %d/2): %s", tool_name, attempts, reason,
+            )
+        raise _SafetyRateLimited(reason, attempts=attempts)
 
 
 def _safety_routes(model: str, use_local: bool, overrides: Optional[dict] = None) -> List[Tuple[str, bool, str, tuple]]:

@@ -764,13 +764,70 @@ def refusal_terminal(agent: Any, task: Dict[str, Any], refusal: ConversationRefu
     return events
 
 
+class TurnPhaseFrames:
+    """The one producer of a task's start phases for the census: its execution (``TurnExecution``) observes the
+    task's own frames, and each phase it newly passes leaves as a ``direct_turn_phase`` frame naming its attempt and
+    execution, and the worker slot carrying it, which ``conversation_lane.handle_direct_turn_phase`` lands on the
+    RUNNING row that slot holds. A conversation turn's carrier (``CarrierTurn``) and a pooled task's endpoint
+    (``pooled_turn_phases``) both publish through it."""
+
+    def __init__(self, task_id: str, attempt: int, execution: Any, out_q: Any, worker_id: Any = None,
+                 phase_generation: str = "") -> None:
+        self.task_id, self.attempt, self.execution, self._out_q = task_id, attempt, execution, out_q
+        self.worker_id = worker_id
+        self.phase_generation = str(phase_generation or "")
+
+    def observe(self, kind: str, data: Dict[str, Any]) -> None:
+        before = self.execution.phase
+        self.execution.observe(kind, data)
+        if self.execution.phase != before:
+            self.publish()
+
+    def publish(self) -> None:
+        """The execution's current phase as one frame (each new phase, and a pooled task's first fact)."""
+        frame = {"type": "direct_turn_phase", "task_id": self.task_id, "task_attempt": self.attempt,
+                 "execution_id": self.execution.execution_id, "phase": self.execution.phase}
+        if self.worker_id is not None:
+            frame["worker_id"] = self.worker_id
+        if self.phase_generation:
+            frame["phase_generation"] = self.phase_generation
+        try:
+            self._out_q.put(frame)
+        except Exception:
+            log.debug("direct_turn_phase frame failed for %s", self.task_id, exc_info=True)
+
+
+def pooled_turn_phases(task: Dict[str, Any], out_q: Any, worker_id: Any = None) -> TurnPhaseFrames:
+    """A pooled task's start phases (#2862), so its Project card says Preparing with its step until its first Main
+    call starts, as a carried turn's does. An inline executor's entry keeps its one execution (as ``CarrierTurn``);
+    any other gets one that only observes, never a direct turn's receipt, liveness entry or dispatch fact. Its
+    first frame (``started``) leaves at once: the slot's row says Preparing from its start, and this execution,
+    not a late frame of an earlier one, owns the row before any other frame of its own. A body the Presence carrier
+    runs (``worker_process._run_task_body``) has no such frame: it re-admits from durable facts before any agent
+    exists, so a refused or unreadable turn claims no phase and its first frame is its own first context or model
+    fact (its phase generation, not that frame, fences an earlier execution)."""
+    from supervisor.active_activity import TurnExecution, get_direct_activity_registry
+
+    task_id = str(task.get("id") or "")
+    entry = get_direct_activity_registry().get(task_id)
+    execution = entry.execution if entry is not None and entry.execution is not None else None
+    if execution is None:
+        execution = TurnExecution(int(task.get("chat_id") or 0), task_id=task_id)
+        execution.advance("started")
+    frames = TurnPhaseFrames(task_id, int(task.get("_attempt") or 1), execution, out_q, worker_id,
+                             task.get("_phase_generation", ""))
+    if not (task.get("_presence_run") or task.get("_presence_turn")):
+        frames.publish()
+    return frames
+
+
 class CarrierTurn:
     """A conversation turn's execution facts inside its carrier: the receipt (``TurnExecution``)
     seeded from the admission's wall clock, the endpoint hooks (the Stop marker, the namer, the
-    frame observer that also publishes each start phase as a ``direct_turn_phase`` frame), the
-    thread's store meter and an owner turn's intake fact, held from the take to the end."""
+    frame observer whose start phases ``TurnPhaseFrames`` publishes), the thread's store meter and
+    an owner turn's intake fact, held from the take to the end."""
 
-    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any) -> None:
+    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any, worker_id: Any = None) -> None:
         from supervisor.active_activity import TurnExecution, get_direct_activity_registry
         from supervisor.conversation_lane import PREPARE_KEY
 
@@ -797,6 +854,8 @@ class CarrierTurn:
         from supervisor.active_activity import carry_turn_execution
 
         carry_turn_execution(self.task_id, self.execution)  # the turn's own wait fact reads it in this carrier
+        self._phases = TurnPhaseFrames(self.task_id, self.attempt, self.execution, out_q, worker_id,
+                                       task.get("_phase_generation", ""))
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
         self.intake = open_owner_intake(task, drive_root)  # the host's fact becomes this carrier's, whatever follows
@@ -816,14 +875,7 @@ class CarrierTurn:
             from supervisor.conversation_lane import carrier_rss
 
             data["_carrier_rss"] = carrier_rss()
-        before = self.execution.phase
-        self.execution.observe(kind, data)
-        if self.execution.phase != before:
-            try:
-                self._out_q.put({"type": "direct_turn_phase", "task_id": self.task_id,
-                                 "task_attempt": self.attempt, "phase": self.execution.phase})
-            except Exception:
-                log.debug("direct_turn_phase frame failed for %s", self.task_id, exc_info=True)
+        self._phases.observe(kind, data)
 
     def hooks(self) -> Dict[str, Any]:
         return {"initiator": self.initiator, "on_first_work": self._namer, "on_frame": self.observe}
