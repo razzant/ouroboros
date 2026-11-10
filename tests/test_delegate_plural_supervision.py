@@ -142,13 +142,17 @@ def test_unknown_hold_latch_never_replaces_unreadable_run_checkpoints(tmp_path, 
 
 
 def test_child_projection_reads_each_runs_own_observation(tmp_path):
+    """Each run's cursor comes from the child's own record and each run's observation from the body's record of it."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.tools.control_task_results import _delegated_run_facts
-    from tests.test_wait_child_projection_and_window import _seed_child, CHILD
+    from tests.test_wait_child_projection_and_window import _observed, _seed_child, CHILD
 
-    _seed_child(tmp_path, record={"schema": 2, "runs": {
-        "run-a": {"journal_cursor": 11, "observation": {"answered": True, "run_state": "running"}},
-        "run-b": {"journal_cursor": 23, "observation": {"answered": False, "reason": "daemon_unreachable"}},
-    }}, runs=("run-a", "run-b"))
-    facts = {item["run_id"]: item["supervision"] for item in _delegated_run_facts(tmp_path, CHILD)}
-    assert facts["run-a"]["journal_cursor"] == 11 and facts["run-a"]["observation_failure"] == ""
-    assert facts["run-b"]["journal_cursor"] == 23 and facts["run-b"]["observation_failure"] == "daemon_unreachable"
+    _seed_child(tmp_path, record={"schema": 2, "runs": {"run-a": {"journal_cursor": 11}, "run-b": {"journal_cursor": 23}}},
+                runs=("run-a", "run-b"))
+    _observed(tmp_path, "run-a")
+    _observed(tmp_path, "run-b", error=ClaudexorUnavailable(
+        "daemon_unreachable", "nothing answered", observation_timeout=True, observation_reason="daemon_unreachable"))
+    facts = {item["run_id"]: item for item in _delegated_run_facts(tmp_path, CHILD)}
+    assert facts["run-a"]["supervision"] == {"journal_cursor": 11} and facts["run-a"]["observation"]["observation_failure"] == ""
+    assert facts["run-b"]["supervision"] == {"journal_cursor": 23}
+    assert facts["run-b"]["observation"]["observation_failure"] == "daemon_unreachable"

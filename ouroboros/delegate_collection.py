@@ -822,6 +822,7 @@ class BodyRuntime:
                 "at": time.monotonic()}  # dated on this process's clock, like every in-process reader
         with self.lock:
             previous, self.observed[entry.run_id] = self.observed.get(entry.run_id), fact
+        self.feed.record(entry, fact, error)  # the parent's dated view, written only when it changed
         if run_activity(fact) is True and (previous is None or run_activity(previous) is not True):
             announce_working(entry)  # first seen working too: a restarted host's idle cue learns of it
 

@@ -836,59 +836,50 @@ def _age_sec(stamp: Any, now: float) -> Any:
 def _delegated_run_facts(drive_root: Path, child_id: str) -> Any:
     """The child's own open delegated runs, as DATED facts read once per result.
 
-    Rows come from delegate custody (``open_runs`` + ``run_timing``; review-owned
-    runs belong to their panel, as in ``prepare_handoff``). The child's supervision
-    record (``state/delegate_supervision/<child>.json``) is read ONCE, after the
-    wait, with no handle kept and no retry loop: a missing, unreadable or racing
-    file (Windows ``os.replace``) is the fact ``unknown``. Its facts attach only to
-    the run it names. Ages are facts; there is no threshold and no liveness verdict.
+    Rows come from delegate custody (``open_runs`` + ``run_timing``; review-owned runs belong to their
+    panel). ``observation`` is what the host's one observer of runs last recorded of each
+    (``delegate_feed.read_observation``): the run's state and question as read, or that the engine
+    stopped answering, with ``observed_since`` when that began; it is written on a change, never per
+    read, so its dates prove no recent read. ``supervision`` is the child's own wake cursor. Each file
+    is read ONCE, after the wait, with no handle kept and no retry: a missing, unreadable or racing
+    file (Windows ``os.replace``) is the fact ``unknown``, and a record names only its own run and
+    invocation. Ages are facts; there is no threshold and no liveness verdict.
     """
     from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_feed import read_observation
+    from ouroboros.delegate_supervision_state import normalize
 
     try:
-        runs = [run for run in custody.open_runs(drive_root)
-                if run.task_id == child_id and not run.review_owned]
+        runs = [run for run in custody.open_runs(drive_root) if run.task_id == child_id and not run.review_owned]
     except Exception:
         return {"state": "unknown", "reason": "custody_unreadable"}
-    if not runs:
-        return []
     record: Any = None
     try:
         path = Path(drive_root) / "state" / "delegate_supervision" / f"{child_id}.json"
-        from ouroboros.delegate_supervision_state import normalize
-
-        record = normalize(json.loads(path.read_text(encoding="utf-8")))
-        reason = ""
+        record, reason = (normalize(json.loads(path.read_text(encoding="utf-8"))), "") if runs else (None, "")
     except FileNotFoundError:
         reason = "no_supervision_record"
     except (OSError, ValueError):
         reason = "unreadable"
-    now = time.time()
-    rows: List[Dict[str, Any]] = []
+    now, rows = time.time(), []
     for run in runs:
         started_at, max_seconds = custody.run_timing(drive_root, run.run_id)
-        row: Dict[str, Any] = {"run_id": run.run_id, "started_at": started_at or "unknown",
-                               "age_sec": _age_sec(started_at, now), "max_seconds": max_seconds or None}
-        if reason:
-            row["supervision"] = {"state": "unknown", "reason": reason}
-        elif run.run_id not in record["runs"]:
-            row["supervision"] = {"state": "unknown", "reason": "record_names_another_run"}
-        else:
-            state = record["runs"][run.run_id]
-            observation = state.get("observation") if isinstance(state.get("observation"), dict) else None
-            entry = state.get("sleep_entry") if isinstance(state.get("sleep_entry"), dict) else {}
-            last = str(state.get("last_answered_observation_at") or "")
-            row["supervision"] = {
-                "hold_entered_at": str(entry.get("entered_at") or "unknown"),
-                "last_answered_observation_at": last or "unknown",
-                "observation_age_sec": _age_sec(last, now) if last else None,
-                "observed_run_state": str((observation or {}).get("run_state") or "unknown"),
-                "observation_failure": (
-                    "unknown" if observation is None else "" if observation.get("answered")
-                    else str(observation.get("reason") or observation.get("status") or "unanswered")),
-                "journal_cursor": state.get("journal_cursor"),
-            }
-        rows.append(row)
+        seen, why = read_observation(drive_root, run.run_id)
+        if seen is not None and str(seen.get("invocation_id") or "") != run.invocation_id:
+            seen, why = None, "record_names_another_invocation"
+        last = str((seen or {}).get("last_answered_at") or "")
+        rows.append({"run_id": run.run_id, "started_at": started_at or "unknown",
+                     "age_sec": _age_sec(started_at, now), "max_seconds": max_seconds or None,
+                     "observation": {"state": "unknown", "reason": why} if seen is None else {
+                         "observed_run_state": str(seen.get("run_state") or "unknown"),
+                         "observed_waiting_on_user": bool(seen.get("waiting_on_user")),
+                         "observation_failure": str(seen.get("reason") or ""),
+                         "observed_since": str(seen.get("since") or "unknown"),
+                         "last_answered_observation_at": last or "unknown",
+                         "observation_age_sec": _age_sec(last, now) if last else None},
+                     "supervision": {"state": "unknown", "reason": reason} if reason else (
+                         {"state": "unknown", "reason": "record_names_another_run"} if run.run_id not in record["runs"]
+                         else {"journal_cursor": record["runs"][run.run_id].get("journal_cursor")})})
     return rows
 
 

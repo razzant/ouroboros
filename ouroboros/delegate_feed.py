@@ -22,13 +22,20 @@ one made for a run:
   did not answer then, or the send's outcome was unknown) are sent by the body once the engine answers
   the run again, on its own observation pass (``delegate_message_store.replay_frames``); the starter's
   round top stays the idempotent catch-up.
+* **The parent's view.** A dated record of what the body last saw of a held run
+  (``state/delegate_observation/<run_id>.json``, about 300 bytes; ``read_observation``): written
+  only when the run's state or question changed, or the engine stopped or resumed answering it
+  (the outage class above), with the time that began, never once per read; removed once the run
+  settled or left the held set (a new body sweeps what an earlier one left).
 
 A frame reaches the owner as its worker's progress frame does (``Agent._emit_progress``): one
 ``send_message`` progress event on the supervisor's bus, with the task's chat and lineage.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -36,10 +43,42 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
+from ouroboros.utils import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 _UNREACHABLE = "daemon_unreachable"  # the gateway's reason for a read nothing answered (``_observation_reason``)
 _ENDED = "ended"
+_KEPT = ("task_id", "invocation_id", "run_state", "waiting_on_user", "answered", "reason")  # what a record says
+
+
+def _observation_dir(root: Any) -> pathlib.Path:
+    return pathlib.Path(root) / "state" / "delegate_observation"
+
+
+def observation_path(root: Any, run_id: str) -> pathlib.Path:
+    return _observation_dir(root) / f"{run_id}.json"
+
+
+def read_observation(root: Any, run_id: str) -> tuple:
+    """``(record, "")`` of the body's latest record of a run, else ``(None, why)``: one read with no lock and no
+    retry, so a missing or racing file (Windows ``os.replace``) is the fact ``unknown``."""
+    try:
+        record = json.loads(observation_path(root, run_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "no_observation_record"
+    except (OSError, ValueError):
+        return None, "unreadable"
+    return (record, "") if isinstance(record, dict) else (None, "unreadable")
+
+
+def forget_observations(root: Any, run_ids: Iterable[str]) -> None:
+    """Remove the records of runs that settled or left the held set (``Feed.refresh``)."""
+    for run_id in run_ids:
+        try:
+            observation_path(root, run_id).unlink(missing_ok=True)
+        except OSError:
+            log.debug("Observation record of %s not removed; the next pass retries", run_id, exc_info=True)
 
 
 def _bus() -> Any:
@@ -147,6 +186,10 @@ class Feed:
         self.told: set = set()  # tasks told of the open episode
         self.owed: set = set()  # runs my human's frames are still pending for (``owe``)
         self.placing: Dict[str, Any] = {}  # run id -> its send in flight
+        self.record_lock = threading.Lock()  # one record write at a time (``record``)
+        self.recorded: Dict[str, Dict[str, Any]] = {}  # run id -> the record this body wrote or read
+        self.answered_at: Dict[str, float] = {}  # run id -> wall time of its latest answered read
+        self.swept = False  # whether this body removed the records an earlier one left
 
     def refresh(self, held: Dict[str, Any]) -> None:
         """The body's latest listing, and the live tasks (with a chat their frames can go to: a worker drops a
@@ -161,6 +204,53 @@ class Feed:
                 del self.windows[run_id]
             self.owed &= set(held)  # a run no longer held is owed nothing here; its next continuation carries the words
             self.placing = {run_id: job for run_id, job in self.placing.items() if run_id in self.owed}
+        with self.record_lock:  # the parent lists open runs only: a settled or released run's record goes
+            known = set(self.recorded)
+            if not self.swept:
+                try:
+                    known |= {name[:-5] for name in os.listdir(_observation_dir(self.root)) if name.endswith(".json")}
+                except OSError:
+                    pass
+                self.swept = True
+            gone = [rid for rid in known if rid not in held or held[rid].entry.settled]
+            forget_observations(self.root, gone)
+            for run_id in gone:
+                self.recorded.pop(run_id, None)
+                self.answered_at.pop(run_id, None)
+
+    def record(self, entry: Any, fact: Dict[str, Any], error: Any = None) -> None:
+        """Keep what one read saw of a held run for its parent (``read_observation``) when it changed: the run's
+        state and question as read, or that the engine stopped answering (the outage class ``reached`` tells the
+        owner), dated by when that began. A slow read or a refusal says nothing; nothing is written per read."""
+        now = time.time()
+        if error is not None and (fact["answered"] or str(getattr(error, "observation_reason", "") or "")
+                                  != _UNREACHABLE):
+            return
+        with self.record_lock:
+            last = self.recorded.get(entry.run_id)
+            if last is None:
+                last = read_observation(self.root, entry.run_id)[0] or {}
+            new = {"run_id": entry.run_id, "task_id": entry.task_id, "invocation_id": entry.invocation_id,
+                   "run_state": fact["run_state"], "waiting_on_user": fact["waiting_on_user"],
+                   "answered": error is None, "reason": "" if error is None else _UNREACHABLE}
+            if error is None:
+                self.answered_at[entry.run_id] = now
+            elif last.get("invocation_id") == entry.invocation_id:  # unanswered: its last answered state stands
+                new.update(run_state=str(last.get("run_state") or ""), waiting_on_user=bool(last.get("waiting_on_user")))
+            if all(new[key] == last.get(key) for key in _KEPT):
+                self.recorded[entry.run_id] = last
+                return
+            answered = self.answered_at.get(entry.run_id)
+            new.update(since=_iso(now), last_answered_at=_iso(answered) if answered is not None
+                       else str(last.get("last_answered_at") or ""))
+            try:
+                path = observation_path(self.root, entry.run_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(path, new)
+            except OSError:
+                log.debug("Observation record of %s unwritten; the next change writes it", entry.run_id, exc_info=True)
+                return
+            self.recorded[entry.run_id] = new
 
     def owe(self, run_id: str) -> None:
         with self.lock:
@@ -341,3 +431,7 @@ def owe_placement(root: Any, run_id: str) -> None:
     if runtime is not None:
         runtime.feed.owe(run_id)
         runtime.changed.set()
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))

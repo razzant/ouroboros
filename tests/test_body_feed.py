@@ -369,6 +369,58 @@ def test_an_unreachable_engine_is_one_owner_line_each_way_per_episode(world):
         assert {meta["task_incident"] for _, meta in mine} == {"delegation_daemon_unreachable"}
 
 
+def test_the_body_records_a_runs_state_for_its_parent_when_it_changes_and_removes_it_once_settled(world, monkeypatch):
+    """The parent's view of a held run (``delegate_feed.read_observation``) has one writer, the body: a record when
+    the run's state or question changes or the engine stops or resumes answering (the owner line's outage class),
+    dated by when that began, never once per read; a slow read changes nothing. A settled run's record goes, and a
+    new body removes the records an earlier one left for runs it no longer holds."""
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_custody as custody
+
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(delegate_feed, "time", SimpleNamespace(
+        time=lambda: clock[0], strftime=time.strftime, gmtime=time.gmtime, monotonic=time.monotonic))
+    writes, real = [], delegate_feed.atomic_write_json
+    monkeypatch.setattr(delegate_feed, "atomic_write_json", lambda path, value: writes.append(value) or real(path, value))
+    entry = started(world.root, "run-p", "task-p")
+
+    def detail(run_id="run-p", asks=False):
+        return {"summary": {"runId": run_id, "state": "running", "effectiveAccess": "readonly", "waitingOnUser": asks},
+                "lastSeq": 3, "pendingInteractions": []}
+    details = {"run-p": [detail()]}
+    leftover = delegate_feed.observation_path(world.root, "run-gone")
+    with _body(world, _engine(details=details, routes=())) as (runtime, _tick):
+        for _ in range(3):
+            runtime._observe(entry)
+            clock[0] += 5
+        assert [(w["run_state"], w["answered"], w["since"]) for w in writes] == [
+            ("running", True, "2027-01-15T08:00:00Z")], "three reads of one state: one record"
+        details["run-p"][:] = [detail("run-p", asks=True)]
+        runtime._observe(entry)
+        clock[0] += 5
+        runtime._unanswered([entry], _hole(), None)
+        clock[0] += 5
+        runtime._unanswered([entry], _hole(), None)
+        runtime._unanswered([entry], _hole("observation_read_timeout"), None)
+        assert len(writes) == 3
+        record, why = delegate_feed.read_observation(world.root, "run-p")
+        assert why == "" and (record["run_state"], record["waiting_on_user"], record["reason"]) == (
+            "running", True, "daemon_unreachable"), "the last answered state stands beside why it is not current"
+        assert (record["since"], record["last_answered_at"]) == ("2027-01-15T08:00:20Z", "2027-01-15T08:00:15Z")
+        runtime._observe(entry)
+        assert len(writes) == 4 and delegate_feed.read_observation(world.root, "run-p")[0]["answered"] is True
+        assert custody.emit(world.root, custody.SETTLED, {"run_id": "run-p", "task_id": "task-p", "state": "succeeded"})
+        runtime.feed.refresh(runtime._held())
+        assert delegate_feed.read_observation(world.root, "run-p") == (None, "no_observation_record")
+    leftover.write_text("{}", encoding="utf-8")  # an earlier body's record of a run that settled while none ran
+    kept = started(world.root, "run-k", "task-k")
+    with _body(world, _engine(details={"run-k": [detail("run-k")]}, routes=())) as (runtime, _tick):
+        runtime._observe(kept)
+        runtime.feed.refresh(runtime._held())
+        assert not leftover.exists() and delegate_feed.read_observation(world.root, "run-k")[1] == ""
+
+
 @pytest.mark.parametrize("runs", [20, 60, 200])
 def test_one_observer_reads_every_run_at_once_and_a_quiet_run_blocks_no_speech(world, runs):
     """The cost of one observer at 20/60/200 held runs: one journal read in flight per run, each on the run's own
