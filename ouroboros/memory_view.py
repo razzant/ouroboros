@@ -1131,16 +1131,25 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     chronicle, the room labels, the helper route and ``level`` (the physical floor's; the
     empty level renders the full view): F3 turns a room's retold records into one line; F5l keeps
     page first sentences, then F5 addresses pages and parts by covered-period age, independently
-    of display order. Selected accounts stay whole.
+    of display order. Selected accounts stay whole. Only those steps (``STORY_STEPS``) reach the text, so a
+    snapshot keeps its latest story with them as its key: a walk prices many levels that differ in the room alone.
     """
-    counted("view_renders", key=("story", id(snapshot), tuple(item for item in level.addressed if item[0] in STORY_STEPS)))
+    key = tuple(item for item in level.addressed if item[0] in STORY_STEPS)
+    counted("view_renders", key=("story", id(snapshot), key))
+    held = snapshot.__dict__.get("_story_text")
+    if held is None or held[0] != key:  # a non-field attribute, like the floor's element table
+        held = (key, _story_text(snapshot, dict(key)))
+        object.__setattr__(snapshot, "_story_text", held)
+    return held[1]
+
+
+def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
     spec = snapshot.spec
     if not spec.story:
         return ""
     if not snapshot.active:
         return (f"## My story — unavailable now ({snapshot.store_status.get('reason')})\n\n"
                 f"The old memory files are untouched: read_file(root='runtime_data', path='{LEGACY_FILE}').")
-    gone = dict(level.addressed)
     told: Dict[str, List[Dict[str, Any]]] = {}
     for entry in snapshot.story:
         if entry.get("told_by"):
@@ -1305,10 +1314,20 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     ``level`` is the physical floor's (the empty level renders the full view);
     ``floor_note`` (``### Physical floor``) closes the block. Before the import has completed
     the room is one line naming the reason and a reader that works without the chronicle.
+    A snapshot keeps its two latest levels' texts without the note: a level's receipt sizes it bare, then its request adds the note.
     """
+    counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
+    held = snapshot.__dict__.setdefault("_room_texts", {})  # a non-field attribute, like ``_story_text``
+    if level.addressed not in held:
+        if len(held) > 1:
+            held.pop(next(iter(held)))
+        held[level.addressed] = _room_text_bare(snapshot, dict(level.addressed))
+    return "\n\n".join(part for part in (held[level.addressed], floor_note if snapshot.active else "") if part)
+
+
+def _room_text_bare(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
     from ouroboros import memory_view_conversations as conversations
 
-    counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     parts = [snapshot.owner_words]
     spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
@@ -1318,7 +1337,6 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
                          f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
                          f"room, newest first; this room is chat_id {room['room_id']}.")
         return "\n\n".join(part for part in parts if part)
-    gone = dict(level.addressed)
     # A snapshot persisted before other rooms' late reviews left this view (a pointer entry: ``own_room`` False, no
     # words) is re-rendered after an update (``context_fit``); such an entry draws nothing.
     late = [mark for mark in snapshot.marks if mark.get("late_review") and mark["late_review"].get("own_room") is not False]
@@ -1331,7 +1349,6 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
         parts.append(_room_text(room, gone))
     if snapshot.spec.other_conversations:
         parts.append(conversations.render(snapshot.conversations, gone))
-    parts.append(floor_note)
     return "\n\n".join(part for part in parts if part)
 
 
