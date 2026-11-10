@@ -776,7 +776,7 @@ def test_windows_shaped_ids_and_paths_reach_the_session_whole(tmp_path, monkeypa
     assert pmc.run_pytest(windows, tmp_path / "a b", cwd=tmp_path) == 0
     assert commands[0][3:5] == ["--ci-evidence-dir", str(tmp_path / "a b")]
     argsfile = Path(commands[0][2].removeprefix("@"))
-    argsfile.write_bytes(argsfile.read_bytes().replace(b"\n", b"\r\n"))
+    argsfile.write_bytes(argsfile.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8"))
     parser = argparse.ArgumentParser(fromfile_prefix_chars="@", allow_abbrev=False)
     parser.add_argument("paths", nargs="*")
     known, options = parser.parse_known_args([commands[0][2]])
