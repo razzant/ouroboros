@@ -702,11 +702,17 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     control = str(getattr(exc, "control_reason", "") or "")
     stopped = before_start and control in {"cancelled", "finalize_requested"}
     exhausted = before_start and control == "budget_exhausted"
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_text, record_held_task
+
+    held = before_start and control == HOLD_REASON  # a required extension this carrier does not run
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     correlation = _host_operation_failure(metadata).get("progress_meta", {})
     origin = {"origin_message_ref": correlation["origin_message_ref"]} if "origin_message_ref" in correlation else {}
     try:
-        if stopped or exhausted:
+        if held:
+            text = hold_text()
+            record_held_task(agent.env.drive_root, task, text, **origin)
+        elif stopped or exhausted:
             from ouroboros.outcomes import infra_failed_axes
             from ouroboros.subagents import effort_result_fields
             from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
@@ -739,7 +745,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
         event_queue.put({"type": "send_message", "task_id": task_id, "chat_id": int(task.get("chat_id") or 0),
                          "text": text, "progress_meta": progress_meta, "role": "system",
-                         "system_type": "task_not_started" if stopped or exhausted else "task_error"})
+                         "system_type": "task_not_started" if stopped or exhausted or held else "task_error"})
     except Exception:
         log.debug("keyed final of turn %s failed", task_id, exc_info=True)
 

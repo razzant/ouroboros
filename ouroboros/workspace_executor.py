@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ouroboros.docker_process_observer import proc_observer_function as _docker_proc_observer_function
+from ouroboros.execution_domain import managed_executor_ref
 from ouroboros.observability import redact_projection
 from ouroboros.platform_layer import (
     IS_WINDOWS,
@@ -97,8 +98,9 @@ _PROCESS_RECORD_OWNER = "ouroboros_workspace_executor"
 _PROCESS_RECORD_SCHEMA_VERSION = 1
 
 def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
-    """Return a normalized executor ref from ToolContext/task metadata."""
-
+    """A managed deployment's pinned executor (``execution_domain``), else the ToolContext/task metadata's ref."""
+    if (pinned := managed_executor_ref()) is not None:
+        return pinned
     accessor = getattr(ctx, "workspace_executor_ref", None)
     if callable(accessor):
         raw = accessor()
@@ -111,7 +113,6 @@ def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
     if not isinstance(raw, dict):
         return None
     return normalize_executor_ref(raw)
-
 
 
 def execute(
@@ -304,22 +305,7 @@ def _execute_docker(
     prefix = f"OUROBOROS_PROCESS_ENV_{uuid.uuid4().hex}_"
     aliases = {key: f"{prefix}{index}" for index, key in enumerate(target_env or {})}
     command = _docker_env_command(shlex.join(str(part) for part in cmd), aliases, replace_env=replace_env)
-    exec_payload = shlex.quote(f"exec {command}")
-    quoted_pidfile = shlex.quote(pidfile)
-    wrapper = (
-        f"rm -f {quoted_pidfile}; "
-        "if command -v setsid >/dev/null 2>&1; then "
-        f"setsid sh -c {exec_payload} & "
-        "else "
-        f"sh -c {exec_payload} & "
-        "fi; "
-        f"pid=$!; echo $pid > {quoted_pidfile}; "
-        "wait $pid; rc=$?; "
-        # The same owned pidfile retains the wrapper's positive wait evidence.
-        # Absence (including a CLI that died before launch) proves nothing.
-        f"echo completed > {quoted_pidfile}; "
-        "exit $rc"
-    )
+    wrapper = _docker_exec_wrapper(command, pidfile)
     docker_cmd = [
         "docker",
         "exec",
@@ -390,17 +376,10 @@ def _execute_docker(
 
 
 def _docker_exec_completed(container_name: str, pidfile: str) -> bool:
-    """Read the backend wrapper's wait fact, never infer it from CLI exit."""
-    quoted = shlex.quote(pidfile)
-    try:
-        proc = subprocess.run(
-            ["docker", "exec", container_name, "sh", "-lc",
-             f'[ "$(cat {quoted})" = completed ] && printf completed'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
-        )
-        return proc.returncode == 0 and proc.stdout == "completed"
-    except Exception:
-        return False
+    """The backend wrapper's wait fact, never the CLI's exit: ``completed:<pid>`` (the leader ended) settles its group
+    as an attached launch's does (observed, else stopped and confirmed quiescent); a leader still running stays."""
+    guard = f'case "$(cat {shlex.quote(pidfile)} 2>/dev/null)" in completed|completed:*) ;; *) exit 1;; esac; '
+    return _cleanup_docker_exec_timeout(container_name, pidfile, guard=guard)
 
 
 def _retire_docker_completion(record_path: pathlib.Path | None) -> bool:
@@ -432,8 +411,8 @@ def _retire_docker_completion(record_path: pathlib.Path | None) -> bool:
         return False
 
 
-def _cleanup_docker_exec_timeout(container_name: str, pidfile: str) -> bool:
-    shell = _docker_exec_pidfile_stop_shell(pidfile)
+def _cleanup_docker_exec_timeout(container_name: str, pidfile: str, *, guard: str = "") -> bool:
+    shell = guard + _docker_exec_pidfile_stop_shell(pidfile)
     try:
         bootstrap_process_path()
         proc = subprocess.run(
@@ -449,12 +428,14 @@ def _cleanup_docker_exec_timeout(container_name: str, pidfile: str) -> bool:
         return False
 
 def _docker_exec_pidfile_stop_shell(pidfile: str) -> str:
+    """``completed:<pid>``: an attached leader ended; its group is observed first, else stopped like a running pid."""
     quoted_pidfile = shlex.quote(pidfile)
     return (
-        f"pid=$(cat {quoted_pidfile} 2>/dev/null || true); "
-        'case "$pid" in completed) printf completed; exit $?;; '
-        "''|0|*[!0-9]*) exit 1;; esac; "
-        + _docker_stop_group_shell() + "; "
+        f"{_docker_proc_observer_function()}; pid=$(cat {quoted_pidfile} 2>/dev/null || true); "
+        'case "$pid" in completed) printf completed; exit $?;; completed:*) pid=${pid#completed:}; '
+        'if [ "$(_ouroboros_proc_observe "$pid" group 2>/dev/null)" = exited ]; then '
+        f"printf completed > {quoted_pidfile} && printf completed; exit $?; fi;; esac; "
+        'case "$pid" in \'\'|0|*[!0-9]*) exit 1;; esac; ' + _docker_stop_group_shell() + "; "
         f"printf completed > {quoted_pidfile} && printf completed"
     )
 
@@ -1340,6 +1321,23 @@ def _docker_env_command(command: str, aliases: dict[str, str] | None, *, replace
     return f"env {unset} -- {assignments} {command}"
 
 
+def _docker_group_requirement(pidfile: str = "") -> str:
+    # No inherited-group fallback: cleanup owns only a group whose id is the recorded leader. The empty launch
+    # may be settled positively, but a missing/unreadable receipt after a launch never proves absence.
+    empty = f"printf completed > {shlex.quote(pidfile)}; " if pidfile else ""
+    return ("command -v setsid >/dev/null 2>&1 || { " + empty +
+            "printf 'Container requires setsid for process isolation; command not started.\\n' >&2; exit 127; }; ")
+
+
+def _docker_exec_wrapper(command: str, pidfile: str) -> str:
+    """One group and wait receipt for foreground/attached calls. Save stdin before POSIX backgrounding replaces
+    it with /dev/null; a completed leader still names its group until bounded settlement confirms it ended."""
+    quoted = shlex.quote(pidfile)
+    return (f"rm -f {quoted}; " + _docker_group_requirement(pidfile) + "exec 3<&0; " +
+            f"setsid sh -c {shlex.quote('exec ' + command)} <&3 3<&- & pid=$!; exec 3<&-; "
+            f"echo $pid > {quoted}; wait $pid; rc=$?; echo completed:$pid > {quoted}; exit $rc")
+
+
 def _docker_service_start_shell(record: _ExecutorService, log_path: str, aliases: dict[str, str] | None = None,
                                 *, replace_env: bool = False) -> str:
     command = _docker_env_command(shlex.join(record.cmd), aliases, replace_env=replace_env)
@@ -1347,12 +1345,8 @@ def _docker_service_start_shell(record: _ExecutorService, log_path: str, aliases
     quoted_cwd = shlex.quote(record.backend_cwd)
     quoted_log = shlex.quote(log_path)
     return (
-        f"cd {quoted_cwd} && "
-        "if command -v setsid >/dev/null 2>&1; then "
-        f"nohup setsid sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!; "
-        "else "
-        f"nohup sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!; "
-        "fi"
+        _docker_group_requirement() + f"cd {quoted_cwd} || exit $?; "
+        f"nohup setsid sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!"
     )
 
 

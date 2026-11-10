@@ -385,11 +385,10 @@ def _patch_touched_paths(patch_path: pathlib.Path, target: pathlib.Path, env: An
     NUL-safe readings replaces it without the quoting bug.)
     """
     touched: set[str] = set()
+    from ouroboros.tools.patch_staging import git_apply  # a work target reads it as the work domain (stdin)
+
     for direction in ([], ["-R"]):
-        numstat = subprocess.run(
-            ["git", "apply", *direction, "--numstat", "-z", str(patch_path)],
-            cwd=str(target), capture_output=True, env=env,
-        )
+        numstat = git_apply(target, patch_path, [*direction, "--numstat", "-z"], env=env)
         if numstat.returncode != 0:
             detail = (numstat.stderr or numstat.stdout or b"").decode("utf-8", errors="replace")
             return set(), detail.strip()[:600]

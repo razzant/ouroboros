@@ -145,6 +145,8 @@ class RunCustody:
     # gets a fresh id. ``idempotency_key`` above only finds pending work.
     invocation_id: str = ""
     daemon_store_id: str = ""  # immutable engine store UUID; empty legacy authority stays unknown
+    # The managed work engine the run was started on (``execution_domain``), recorded before its POST; {} = owned.
+    engine_ref: Dict[str, Any] = field(default_factory=dict)
     # Configured-actor binding. Empty on historical/root-legacy delegate starts.
     selected_subagent_id: str = ""
     config_fingerprint: str = ""
@@ -321,14 +323,18 @@ def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustod
 
 
 def _absence_provable(run: RunCustody, gateway: Any) -> bool:
-    return not run.terminal_source and (not run.daemon_store_id
-                                        or run.daemon_store_id == getattr(gateway, "store_identity", ""))
+    from ouroboros.execution_domain import same_engine  # another engine's 404 never speaks for this run
+
+    return not run.terminal_source and same_engine(gateway, run) and (
+        not run.daemon_store_id or run.daemon_store_id == getattr(gateway, "store_identity", ""))
 
 
 def bind_daemon_store(drive_root: Any, gateway: Any, entry: RunCustody) -> None:
     """Bind a successful exact run read, never infer identity from a 404 or PID."""
+    from ouroboros.execution_domain import same_engine
+
     identity = getattr(gateway, "store_identity", "")
-    if isinstance(identity, str) and identity and not entry.daemon_store_id:
+    if isinstance(identity, str) and identity and not entry.daemon_store_id and same_engine(gateway, entry):
         if emit(drive_root, STORE_BOUND, {"run_id": entry.run_id, "task_id": entry.task_id,
                 "invocation_id": entry.invocation_id, "daemon_store_id": identity}):
             entry.daemon_store_id = identity
@@ -559,6 +565,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         entry = RunCustody(
             run_id=run_id,
             daemon_store_id=str(row.get("daemon_store_id") or ""),
+            engine_ref=copy.deepcopy(row["engine_ref"]) if isinstance(row.get("engine_ref"), dict) else {},
             project_owned=bool(row.get("project_owned")),
             project_persistent=bool(row.get("project_persistent")),
             delegated=row.get("delegated") is True,
@@ -998,6 +1005,7 @@ def record_started(drive_root: Any, custody: RunCustody,
     landed = emit(drive_root, STARTED, {
         "run_id": custody.run_id,
         "daemon_store_id": custody.daemon_store_id,
+        **({"engine_ref": copy.deepcopy(custody.engine_ref)} if custody.engine_ref else {}),
         "project_owned": custody.project_owned, "project_persistent": custody.project_persistent,
         "resource_ref": custody.resource_ref or {},
         **{key: copy.deepcopy(getattr(custody, key)) for key in _STARTED_MAPPING_FIELDS},
@@ -1110,6 +1118,9 @@ def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *
         log.warning("Retirement deferred: replay failed for %s",
                     custody.run_id, exc_info=True)
         return
+    from ouroboros.execution_domain import same_engine
+    if not same_engine(gateway, custody):
+        return  # the registration lives on the run's own engine: that engine's pass retires it
     try:
         gateway.remove_project(custody.project_id)
     except Exception as exc:

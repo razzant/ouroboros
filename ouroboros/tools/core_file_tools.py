@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import contextlib
 import hashlib
 import json
 import logging
@@ -20,7 +21,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint, resol
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
 from ouroboros.project_facts import project_store_access_block as _project_store_access_block
 from ouroboros.protected_artifacts import block_reason_for_path
-from ouroboros import store
+from ouroboros import store, work_domain
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     UserFilesPathBlockedError,
@@ -286,11 +287,11 @@ def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) ->
     text; source_revision names the actual file bytes, including CRLF. Reopening
     only to hash could bind a delivered view to a different concurrent revision.
     """
-    try:
-        raw = store.read_file_bytes(target)
+    try:  # a work file: the confined intake (a link on its path: the work domain's own read)
+        raw = work_domain.read_bytes(target)
     except FileNotFoundError:
         from ouroboros.evidence_packs import materialize_path
-        if materialize_path(target) is None:  # a packed checkpoint handle is written back first
+        if work_domain.is_work(target) or materialize_path(target) is None:  # a packed checkpoint handle is written back first
             raise
         raw = store.read_file_bytes(target)
     content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
@@ -359,45 +360,48 @@ class _ListingMiss(_ListingFailure):
 
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
-    target = (root / safe_relpath(rel)).resolve()
+    work = work_domain.is_work(root)  # a work folder by its spelling: listed from held descriptors, never followed
+    target = work_domain.settle(root / safe_relpath(rel))
     # CONFINE to the root before any iterdir: a resolved target that escapes (e.g. an
     # in-tree symlink pointing outside — common in untrusted child-created project /
     # deliverable trees behind the new read-only roots) is rejected, never listed.
     try:
-        target.relative_to(root.resolve())
+        target.relative_to(work_domain.settle(root))
     except ValueError:
         raise _ListingFailure(f"Path escapes root: {rel}") from None
-    if not target.exists():
+    if not work_domain.exists(target):
         raise _ListingMiss(f"Directory not found: {rel}")
-    if not target.is_dir():
+    if not work_domain.is_dir(target):
         raise _ListingMiss(f"Not a directory: {rel}")
     items = []
     # A hard iterdir/permission/race failure PROPAGATES: _list_files renders it
     # as a first-class "⚠️ LIST_FILES_ERROR" tool error, never an ok-shaped JSON
     # listing carrying an error string inside (v6.54.3, review round 3).
     from ouroboros.evidence_packs import packed_handle_names_at
-    entries = list(target.iterdir())  # a task's packed checkpoint handles list beside the loose ones
+    kinds = dict(work_domain.entries(target)) if work else {}  # a work folder has no packed handles to read
+    entries = [target / name for name in kinds] if work else list(target.iterdir())  # packed handles beside loose
     present = {entry.name for entry in entries}
-    entries += [target / name for name in packed_handle_names_at(target) if name not in present]
+    entries += [target / name for name in ([] if work else packed_handle_names_at(target)) if name not in present]
     for entry in sorted(entries):
         if len(items) >= max_entries:
             items.append(f"...(truncated at {max_entries})")
             break
-        suffix = "/" if entry.is_dir() else ""
+        suffix = "/" if (kinds.get(entry.name) == "dir" if work else entry.is_dir()) else ""
         items.append(entry.relative_to(root).as_posix() + suffix)
     return items
 
 
 def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
-    if not target.exists():
+    if not work_domain.exists(target):
         raise _ListingMiss(f"Directory not found: {target}")
-    if not target.is_dir():
+    if not work_domain.is_dir(target):
         raise _ListingMiss(f"Not a directory: {target}")
     items: List[str] = []
     hidden = 0
     # A hard iterdir/permission/race failure PROPAGATES to the first-class
     # "⚠️ LIST_FILES_ERROR" path in _list_files (v6.54.3, review round 3).
-    for entry in sorted(target.iterdir()):
+    kinds = dict(work_domain.entries(target)) if work_domain.is_work(target) else None  # held descriptors, no link followed
+    for entry in sorted([target / name for name in kinds] if kinds is not None else target.iterdir()):
         # operation="list" (capinv-447 / В23=A): the root principal's listing no
         # longer hides credential-SHAPED names — only control-plane/outside-home
         # entries stay omitted (and counted in the marker below).
@@ -407,7 +411,7 @@ def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.P
         if len(items) >= max_entries:
             items.append(f"...(truncated at {max_entries})")
             break
-        suffix = "/" if entry.is_dir() else ""
+        suffix = "/" if (kinds[entry.name] == "dir" if kinds is not None else entry.is_dir()) else ""
         # An external-workspace listing outside the user_files home has no
         # home-relative form — render the absolute path instead of crashing
         # the whole listing on relative_to (v6.54.3: the TB2.1
@@ -442,14 +446,15 @@ def _tree_list(ctx: ToolContext, binding: ResolvedResourceBinding, depth: int, i
     from ouroboros.evidence_packs import _checkpoint_path
 
     base, target, user_files = binding.base_path, binding.target_path, binding.root == "user_files"
+    work = work_domain.is_work(target)  # each folder listed from held descriptors: a link named, never followed
 
     def shown(entry: pathlib.Path) -> str:  # an external user_files workspace has no home-relative form
         return entry.relative_to(base).as_posix() if entry.is_relative_to(base) else str(entry)
 
-    if not user_files and not target.resolve().is_relative_to(base.resolve()):
+    if not user_files and not work_domain.settle(target).is_relative_to(work_domain.settle(base)):
         raise _ListingFailure(f"Path escapes root: {shown(target)}")
-    if not target.is_dir():
-        raise _ListingMiss(f"{'Not a directory' if target.exists() else 'Directory not found'}: {shown(target)}")
+    if not work_domain.is_dir(target):
+        raise _ListingMiss(f"{'Not a directory' if work_domain.exists(target) else 'Directory not found'}: {shown(target)}")
     hidden_by_policy = _runtime_data_read_check(ctx, listing=True, root=binding.root)
     gaps: Dict[str, List[str]] = {kind: [] for kind in _TREE_GAP_HINTS}
     entries: List[str] = []
@@ -460,17 +465,19 @@ def _tree_list(ctx: ToolContext, binding: ResolvedResourceBinding, depth: int, i
             break
         folder, level = queue.popleft()
         # Recheck queued paths after earlier iterations; directory snapshots are not atomic.
-        if folder != target and (folder.is_symlink() or not folder.resolve().is_relative_to(target.resolve())):
+        if folder != target and not work and (folder.is_symlink() or not folder.resolve().is_relative_to(target.resolve())):
             gaps["symlink_not_followed"].append(shown(folder))
             continue
         batch: List[pathlib.Path] = []
+        kinds: Dict[pathlib.Path, str] = {}
         try:
-            with os.scandir(folder) as stream:
+            with (contextlib.nullcontext(work_domain.entries(folder)) if work else os.scandir(folder)) as stream:
                 for item in stream:
                     if scanned + len(batch) >= max_scan:
                         cut = True  # the one look-ahead entry: the directory goes on; it is not examined
                         break
-                    batch.append(pathlib.Path(item.path))
+                    batch.append(folder / item[0] if work else pathlib.Path(item.path))
+                    kinds[batch[-1]] = item[1] if work else ""
         except OSError as exc:
             if folder == target:
                 raise  # the requested directory itself: the first-class LIST_FILES_ERROR
@@ -484,8 +491,8 @@ def _tree_list(ctx: ToolContext, binding: ResolvedResourceBinding, depth: int, i
             if hidden_by_policy(child) or (user_files and user_files_path_block_reason(ctx, child, operation="list")):
                 hidden += 1
                 continue
-            rel, link = shown(child), child.is_symlink()
-            is_dir = not link and child.is_dir()
+            rel, link = shown(child), (kinds[child] == "link") if work else child.is_symlink()
+            is_dir = not link and ((kinds[child] == "dir") if work else child.is_dir())
             gap = ("symlink_not_followed" if link else "" if not is_dir else "depth_limit" if level >= depth
                    else "generated_not_descended" if binding.root in {"active_workspace", "system_repo", "skill_payload"} and child.name in SKIP_DIRS
                    else "protected_not_descended" if block_reason_for_path(ctx, child, "static_introspection", binding) else "")
@@ -777,9 +784,8 @@ def _not_text_error(root: str, path: str, target: Any, exc: UnicodeDecodeError, 
     reader that opens that kind (``read_archive`` loads on demand; ``selectors``: a skill payload's own)."""
     from ouroboros.archive_reader import file_kind
 
-    try:
-        with open(target, "rb") as handle:
-            kind = file_kind(handle.read(8))
+    try:  # a work file through the confined intake, as its text read was (``work_domain.read_bytes``)
+        kind = file_kind(work_domain.read_bytes(target, limit=8))
     except OSError:
         kind = ""
     where = json.dumps(str(target))
@@ -875,7 +881,7 @@ def _read_file(
     opened_root = str(binding.root)  # the NORMALIZED root the binding used, not the model's spelling
     selectors = (f", bucket={json.dumps(bucket or binding.source)}, skill_name={json.dumps(skill_name or binding.skill_name)}"
                  if normalized == "skill_payload" else "")  # a hint's call keeps the canonical/physical identity
-    if target.is_dir():  # admitted, but no file here: the read becomes the listing call to make
+    if work_domain.is_dir(target):  # admitted, but no file here (a work path's kind: its own, never followed)
         call = f"list_files(root={json.dumps(normalized)}, path={json.dumps(str(target))}" + selectors
         return _publish_tool_result(ctx, ToolResult(status="ok", code="LEGACY_WARNING", text=(
             f"⚠️ NOT_FOUND: {_root_display_path(normalized, opened)} is a directory, not a file. List it:\n"

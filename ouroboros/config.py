@@ -177,7 +177,7 @@ HOME = pathlib.Path.home()
 APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE = _launch_roots.configured_roots()
 
 # Settings pin + write guards: SSOT settings_integrity; re-exported for config.X imports.
-from ouroboros import settings_integrity as _settings_integrity  # noqa: E402
+from ouroboros import deployment_policy as _deployment_policy, settings_integrity as _settings_integrity  # noqa: E402
 SETTINGS_INTEGRITY_ENV = _settings_integrity.SETTINGS_INTEGRITY_ENV
 SettingsIntegrityError = _settings_integrity.SettingsIntegrityError
 from ouroboros.settings_integrity import (  # noqa: E402, F401 — public config read seam
@@ -405,14 +405,9 @@ def get_starter_skills_turn_on() -> bool:
 
 
 def get_runtime_mode() -> str:
-    """Return effective Access, preserving the process's restart-bound baseline."""
-    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
-    if _BOOT_RUNTIME_MODE is not None:
-        return normalize_runtime_mode(_BOOT_RUNTIME_MODE)
-    inherited = _resolve_baseline_from_env()
-    if inherited is not None:
-        return normalize_runtime_mode(inherited)
-    return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
+    """Effective Access: the restart-bound baseline (the ratchets' raw pin) under the deployment's ceiling."""
+    mode = _BOOT_RUNTIME_MODE or _resolve_baseline_from_env() or os.environ.get("OUROBOROS_RUNTIME_MODE", "")
+    return _deployment_policy.effective_value("OUROBOROS_RUNTIME_MODE", normalize_runtime_mode(mode))
 
 
 def get_context_mode() -> str:
@@ -472,11 +467,13 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
         allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
     """Normalize settings writes under existing ratchets. Only the actual writer names authored_keys; a defaults
     merge preserves absent disk-owned intent, forwarded environment choices (an absent ``SAVED_CHOICE_SETTINGS``
-    key stays absent) and install-time provenance."""
+    key stays absent) and install-time provenance. A deployment policy judges the write first, before any effect."""
+    stored = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
+    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if isinstance(stored, dict) else {})
     from ouroboros.review_pool_receipts import persist_write_receipts
     persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)  # the review-pool receipts THIS write owes, before the pre-image goes
     authored = set(authored_keys or ())
-    unauthored = unauthored_saved_choices(settings, _settings_integrity.read_settings_json_verified(SETTINGS_PATH), authored)
+    unauthored = unauthored_saved_choices(settings, stored, authored)
     prepared = {k: v for k, v in settings.items() if k not in unauthored and not (
         k in _DISK_AUTHORED_SETTINGS and k not in authored and not _settings_file_value(k, "")
         and not (
@@ -686,7 +683,9 @@ def coerce_settings_raw(raw: Any) -> dict:
 
 
 def verify_settings_integrity() -> str | None:
-    """Verify the strict child pin, returning the observed digest when present."""
+    """A server start's settings trust roots: load and pin this generation's deployment policy, then verify the
+    strict child pin, returning its observed digest when present; either failure is a ``SettingsIntegrityError``."""
+    _deployment_policy.load_for_generation()
     return _settings_integrity.verify_settings_integrity(SETTINGS_PATH)
 
 
@@ -809,9 +808,6 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = 
     precondition needs the effective settings as of NOW. Only under that lock (a writer, or a
     ``load_settings(migrate=True)`` that acquired it) are the raw compatibility upgrades persisted: the
     raw mapping plus the normalized pair, never a defaults-merged document; a lock-free read writes nothing."""
-    from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
-    from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
-    loaded: dict = {}
     try:
         reader = _settings_integrity.read_settings_json_strict if strict else _settings_integrity.read_settings_json_verified
         raw = reader(SETTINGS_PATH, behind_writer=not _settings_lock_held)
@@ -829,9 +825,18 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = 
             lock_held=_settings_lock_held,
             guard_live_write=_guard_live_settings_write,
         )
-        loaded = normalize_settings_raw(raw)
     # An existing (even unreadable) document keeps the optional bounds it ran under.
-    settings = defaults_for_settings_document(raw is not None or SETTINGS_PATH.exists())
+    return settings_of_document(raw, present=raw is not None or SETTINGS_PATH.exists())
+
+
+def settings_of_document(raw: Any, *, present: bool = True) -> dict:
+    """The loader's read of one document, pure: defaults, its normalized keys, the environment the read
+    binds (``settings_integrity.read_environ``) where it leaves a key to it, proposals, the deployment policy
+    last. ``load_settings`` reads the saved document; a write's policy step, the one it would save."""
+    from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
+    from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
+    loaded = normalize_settings_raw(raw) if isinstance(raw, dict) else {}
+    settings = defaults_for_settings_document(present)
     settings.update(loaded)
     env_wins = environment_overridable_keys(raw)  # a seam default for an ABSENT key is not the owner's value
     env_authored, echo = set(), _settings_integrity.projected_proposals(environ := _settings_integrity.read_environ())
@@ -855,7 +860,7 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = 
     # Unauthored slots and the never-configured catalog follow the configured access.
     propose_unauthored_model_slots(settings, authored_model_slots(loaded) | env_authored)
     apply_at_read_seam(settings, merged=True)
-    return settings
+    return _deployment_policy.effective_settings(settings)
 
 
 def save_settings(

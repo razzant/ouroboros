@@ -1,4 +1,4 @@
-"""Verdict-neutral storage and accounting for the Safety Supervisor."""
+"""Parse, retain and account for reported Safety verdicts without assigning them execution authority."""
 
 import json
 import logging
@@ -14,6 +14,75 @@ _CHECK_CHIPS = ("checked", "warned", "sent_despite", "held", "not_checked")
 _CHECK_TOOL_CHARS = 160
 _RECORDED_CHIPS: dict[tuple[pathlib.Path, str], set[str]] = {}
 _CHIP_LOCK = threading.RLock()
+
+
+def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
+    """Parse the ``{"status", "reason", "speech", "quote"}`` verdict from a Safety model response.
+
+    ``speech`` is kept only as a boolean and ``quote`` only as non-empty text; both are the checker's claims.
+    Models occasionally wrap the JSON in prose or code fences despite the prompt.
+    The whole reply and every outermost ``{...}`` in it are candidates; the
+    strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
+    equals), so a quoted SAFE cannot outrank a direct flag. Only when no candidate
+    carries a verdict is the whole reply read as ``{"answer": "<verdict JSON>"}``
+    with no other key: that string is decoded once, never searched. Otherwise
+    None: the caller fails closed.
+    """
+    clean = text.replace("```json", "").replace("```", "").strip()
+    candidates = [clean]
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for idx, ch in enumerate(clean):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(clean[start:idx + 1])
+                start = -1
+    best: Dict[str, Any] | None = None
+    rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
+
+    def verdict_of(raw: str) -> Optional[Dict[str, Any]]:
+        obj = json.loads(raw)
+        status = str(obj.get("status") or "").upper() if isinstance(obj, dict) else ""
+        if status not in rank:
+            return None
+        quote = obj.get("quote")
+        return {"status": status, "reason": str(obj.get("reason") or ""),
+                **({"speech": obj["speech"]} if isinstance(obj.get("speech"), bool) else {}),
+                **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
+
+    for candidate in candidates:
+        try:
+            found = verdict_of(candidate)
+        except json.JSONDecodeError:
+            continue
+        if found and (best is None or rank[found["status"]] > rank[best["status"]]):
+            best = found
+    if best is None:
+        try:
+            envelope = json.loads(clean)
+            if isinstance(envelope, dict) and list(envelope) == ["answer"] and isinstance(envelope["answer"], str):
+                best = verdict_of(envelope["answer"])
+        except (ValueError, RecursionError):  # a degenerate payload stays unparseable, as before
+            pass
+    return best
+
 
 
 def coalesce_verdicts(previous, incoming):
@@ -34,7 +103,7 @@ def coalesce_verdicts(previous, incoming):
 def verdict_history_bytes(history):
     """Charge distinct rows and their counters once; counter growth is not new evidence."""
     evidence = {key: {**row, "verdicts": [
-        {**verdict, "repeat_count": 0} for verdict in row["verdicts"]]}
+        {**verdict, "repeat_count": 0} for verdict in row.get("verdicts", ())]}
         for key, row in history.items()}
     return len(json.dumps(evidence, ensure_ascii=False).encode("utf-8", "replace"))
 

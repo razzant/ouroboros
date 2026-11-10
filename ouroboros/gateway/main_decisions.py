@@ -99,7 +99,10 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
     phase = activity.get("phase")
     attempt = int(activity.get("task_attempt") or 1)
     current = {} if phase in {"budget_paused", "budget_pausing"} else activity.get("model_waits") or {}
-    waits = {key: row for key, row in current.items() if isinstance(row, dict) and human_required_model_wait(row, attempt)}
+    from ouroboros.deployment_policy import served_waits
+
+    waits = served_waits({key: row for key, row in current.items()
+                          if isinstance(row, dict) and human_required_model_wait(row, attempt)})
     from ouroboros.work_stop import activity_stop_view
 
     view = activity_stop_view(activity)

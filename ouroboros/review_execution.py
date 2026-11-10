@@ -673,7 +673,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     existing runs; reconciliation never replaces them. The nanny verifies cancellation at ``timeout_sec`` and reads full output before ``delegate_custody`` settlement.
     """
     from ouroboros import delegate_custody as custody
-    from ouroboros.claudexor_daemon import ensure_owned_gateway
+    from ouroboros.execution_domain import seat_gateway
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, final_attempt_facts
     from ouroboros.subagents import delegated_run_shape
     from ouroboros.usage_accounting import current_usage_scope
@@ -737,7 +737,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if invocation.reconcile_only and not recovering:
             raise ReviewRouteUnavailable("the exact delegated review invocation is no longer available for "
                 "reconciliation; refusing to start a second paid run", code="review_custody_lost")
-        gateway = ensure_owned_gateway()
+        seat_engine, gateway = seat_gateway(record if recovering else None, root)  # recorded engine, else the domain's
         if use_thread and shape.investigation and not run_id:
             from ouroboros.review_thread_continuity import require_delegated_review_threads
             require_delegated_review_threads(gateway)
@@ -801,7 +801,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                     review_source_delivery=delivery_facts,
                     work_order_source_request=delivery_facts,
                     prompt_cache_ttl=delivery_facts.get("prompt_cache_ttl"),
-                    **usage_custody, **checking.get("custody", {}),
+                    **usage_custody, **checking.get("custody", {}), **seat_engine,
                 )
             except BillingAuthorityUnavailable as exc:  # Outer pre-start boundary owns cleanup; nothing sent.
                 raise ReviewRouteUnavailable(f"{exc}; the delegated review session was NOT started",
@@ -852,7 +852,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 root_task_id=root_task_id, parent_task_id=parent_task_id, **usage_custody,
                 ledger_root=str(custody_drive), idempotency_key=key, invocation_id=invocation_id or retry_token,
                 continuation_of=str((record or {}).get("continuation_of") or "") if recovering else "",
-                **checking.get("custody", {}))
+                **checking.get("custody", {}), **seat_engine)
             # A missing started row leaves the run process-local and unresumable.
             custody_durable = bool(custody.record_started(custody_drive, entry, shape={
                 "effort": route.effort, "access": shape.access, "mode": shape.mode,

@@ -693,8 +693,9 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     if not decision.get("thread_id") and scope.get("kind") == "project" and not scope.get("ephemeral"):
         from ouroboros.claudexor_daemon import ensure_owned_gateway
         from ouroboros.delegate_registration_policy import resolve_registration
+        from ouroboros.execution_domain import run_gateway
 
-        gateway = ensure_owned_gateway()  # the stopped run's registration may already be retired
+        gateway = run_gateway(source, ensure_owned_gateway)  # its engine; the stopped run's registration may be retired
         try:
             project_id, owned_id, _persistent, _ = resolve_registration(gateway, str(scope.get("root") or ""), "",
                                                                      str(body.get("access") or "readonly"))
@@ -718,6 +719,7 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
         surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
         project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
         prompt_cache_ttl=source.get("prompt_cache_ttl") or None, **({RESTORE_KEY: restore} if restore else {}),
+        **({"engine_ref": source["engine_ref"]} if source.get("engine_ref") else {}),  # the predecessor's engine
         **({"generation_end_at": closes.isoformat()} if closes is not None else {}),
         **{key: str(source.get(key) or "") for key in ("root_task_id", "parent_task_id", "category", "source",
                                                        *REVIEW_ATTRIBUTION_KEYS, "authority_source", "execution_root", "target_root")})

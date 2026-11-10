@@ -17,9 +17,18 @@ def claimed_start_request(
     A start that continues IN a predecessor's snapshot (``capture_id``) claims
     under that snapshot's one disposition lock, so no apply/reject of the
     predecessor can interleave with its hand-over (``delegate_continuation``).
+    A start bound to a managed work engine whose request names a path that
+    engine does not see is refused before its row (``execution_domain``).
     """
+    from ouroboros.execution_domain import is_work_ref, request_paths_refusal
     from ouroboros.usage_ledger import BillingAuthorityUnavailable
 
+    if is_work_ref(request_row.get("engine_ref")) and (
+            unseen := request_paths_refusal(request_row.get("request") or {})):
+        from ouroboros.delegate_invocation import invocation_record
+
+        fresh = invocation_record(drive, str(request_row.get("invocation_id") or "")) is None
+        return False, {"reason": "work_path_unmapped", "detail": unseen, **({"definitely_unrun": True} if fresh else {})}
     try:
         if request_row.get("capture_id") and request_row.get("continuation_of"):
             from ouroboros.delegate_continuation import snapshot_handover

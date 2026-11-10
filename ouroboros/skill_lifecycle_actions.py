@@ -119,9 +119,16 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
     failure); ``progress`` receives the job's message while packages install."""
     facts = _review_facts(skill, drive_root)
     collision = skill.load_error.lower().startswith("skill name collision:")
+    from ouroboros.deployment_extensions import TRUST_SENTENCES, change_refusal, trust_gap
+
+    if not enabled and (managed := change_refusal(skill.name, "disable")):  # before the collision unload or a write
+        return _refusal("Your organization requires it.", 403, code="managed_by_deployment", detail=managed, **facts)
     if enabled:
         if skill.load_error:
             return _refusal("Its files could not be loaded.", 400, code="load_error", detail=skill.load_error, **facts)
+        if skill.manifest.is_extension() and (gap := trust_gap(skill.name, skill.skill_dir, skill.content_hash)):
+            return _refusal("Only extensions your organization delivers run here.", 403, code="managed_by_deployment",
+                            detail=TRUST_SENTENCES[gap], **facts)
         conflict = skill_conflict_status(skill, discover_skills(drive_root, repo_path=repo_path))
         if conflict:
             return _refusal("Another skill that is on uses the same tool names; turn it off first.",

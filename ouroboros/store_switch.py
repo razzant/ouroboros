@@ -505,6 +505,10 @@ def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = 
     ran is recorded for the startup owner notice (press the door again), never replayed."""
     root = pathlib.Path(root)
     if read_switch_intent(root) is not None:
+        from ouroboros.deployment_policy import body_replacement_refusal
+
+        if refusal := body_replacement_refusal():  # recorded before this deployment was managed: it waits, untouched
+            return {"status": "managed_by_deployment", "message": refusal}
         return run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
                                restore_handles=restore_handles or evidence_packs.restore_checkpoint_handles)
     receipt = read_json_dict(root / RECEIPT_REL) or {}

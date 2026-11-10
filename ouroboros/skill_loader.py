@@ -945,7 +945,9 @@ def load_skill(
     except SkillPayloadUnreadable as exc:
         content_hash = ""
         load_error = f"payload unreadable: {exc}"
-    enabled = load_enabled(drive_root, name)
+    from ouroboros.deployment_extensions import effective_enabled  # a deployment's required package reads as on
+
+    enabled = effective_enabled(name, load_enabled(drive_root, name), skill_dir, content_hash)
     is_module_widget = (
         manifest.is_extension()
         and isinstance(manifest.ui_tab, dict)

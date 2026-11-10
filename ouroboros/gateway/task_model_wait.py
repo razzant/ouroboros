@@ -12,6 +12,7 @@ from typing import Any
 
 from starlette.responses import JSONResponse
 
+from ouroboros.deployment_policy import served_wait
 from ouroboros.gateway._helpers import json_error
 from ouroboros.model_wait import mutate_wait
 from ouroboros.task_results import validate_task_id
@@ -41,17 +42,18 @@ def history_wait_overlay(messages: list[dict], owner_limit: int) -> tuple[list[d
         for wait_id, row in message["model_waits"].items():
             previous = current["model_waits"].get(wait_id) or {}
             if int(row.get("revision") or 0) > int(previous.get("revision") or 0):
-                current["model_waits"][wait_id] = copy.deepcopy(row)
+                current["model_waits"][wait_id] = served_wait(copy.deepcopy(row))
     ordered = sorted(by_owner.values(), key=lambda row: row["ts"])
     return other, ordered[-owner_limit:] if owner_limit > 0 else [], len(ordered) > owner_limit
 
 
 class WaitDecisionRefused(ValueError):
-    def __init__(self, reason: str, row: dict | None = None, status: int = 409):
+    def __init__(self, reason: str, row: dict | None = None, status: int = 409, text: str = ""):
         super().__init__(reason)
         self.reason = reason
         self.row = row or {}
         self.status = status
+        self.text = text or reason  # the sentence a card shows; ``reason`` stays the typed code
 
 
 def _action(body: dict) -> tuple[str, str, dict]:
@@ -227,6 +229,12 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
                 return None
             if previous.get("state") != "waiting" or previous.get("revision") != action["revision"]:
                 raise WaitDecisionRefused("stale_model_wait", previous)
+            from ouroboros.deployment_policy import managed_model_roles
+            from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+            if action["action"] == "switch" and previous.get("role") in managed_model_roles():
+                raise WaitDecisionRefused(MANAGED_BY_DEPLOYMENT, previous, 403,  # Retry and auto-continue stay
+                                          "Your organization sets this model; its administrator changes it. Retry or keep waiting.")
             if action.get("persist_role"):
                 from ouroboros.gateway.owner_settings import _owner_read_settings_raw
                 from ouroboros.model_slots import apply_model_role_override
@@ -307,18 +315,18 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
                                                msg_id=f"model_wait:{wait_id}:{action['request_id']}", kind=KIND_MODEL_WAIT):
                         raise WaitDecisionRefused("mailbox_write_failed", row, 503)
         return JSONResponse({"ok": True, "decision_id": body["decision_id"], "request_id": action["request_id"],
-                             "state": row["state"], "wait": row, "duplicate": duplicate, "applied": applied,
+                             "state": row["state"], "wait": served_wait(row), "duplicate": duplicate, "applied": applied,
                              "saved": saved()},
                             status_code=200 if duplicate else 202)
     except WaitDecisionRefused as error:
         # Applied, saved and the refusal are separate facts; after a claim its row is read as it now is.
         applied = claim_as_it_is()
         current = row if claimed else error.row
-        return json_error(error.reason, error.status, ok=False, reason_code=error.reason,
-                          state=current.get("state", ""), wait=current, applied=applied, saved=saved())
+        return json_error(error.text, error.status, ok=False, reason_code=error.reason,
+                          state=current.get("state", ""), wait=served_wait(current), applied=applied, saved=saved())
     except Exception as error:
         applied = claim_as_it_is()
-        return json_error(str(error), 503, ok=False, reason_code="model_wait_decision_failed", wait=row,
+        return json_error(str(error), 503, ok=False, reason_code="model_wait_decision_failed", wait=served_wait(row),
                           applied=applied, saved=saved())
 
 

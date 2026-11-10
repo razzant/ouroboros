@@ -239,6 +239,9 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
                                                   "review_subject_restore") if key in row},  # a released review checkout
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
+        # The engine the attempt was bound to before its POST: a retry re-posts there, never elsewhere.
+        **({"engine_ref": copy.deepcopy(row["engine_ref"])} if isinstance(row.get("engine_ref"), dict)
+           and row["engine_ref"] else {}),
         "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
         "config_fingerprint": str(row.get("config_fingerprint") or ""),
         "work_order_fingerprint": str(row.get("work_order_fingerprint") or ""),

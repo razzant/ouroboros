@@ -315,6 +315,7 @@ async def _dispatch_extension_message(
         return True
 
     if handler_spec.get("out_of_process"):
+        from ouroboros.deployment_extensions import failure_words
         try:
             from ouroboros.extension_process_runner import dispatch_extension_ws_subprocess
 
@@ -328,10 +329,11 @@ async def _dispatch_extension_message(
             if result is not None:
                 await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
         except Exception as exc:
-            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {type(exc).__name__}: {exc}"}}))
+            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {failure_words(skill_name, exc)}"}}))
         return True
 
     handler = handler_spec.get("handler")
+    from ouroboros.deployment_extensions import failure_words
     try:
         from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
 
@@ -350,7 +352,7 @@ async def _dispatch_extension_message(
                 "level": "error",
                 "message": (
                     f"extension WS handler {msg_type!r} model-cost disclosure failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{failure_words(skill_name, exc)}"
                 ),
             },
         }))
@@ -370,7 +372,7 @@ async def _dispatch_extension_message(
         if result is not None:
             await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
     except Exception as exc:
-        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {type(exc).__name__}: {exc}"}}))
+        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {failure_words(skill_name, exc)}"}}))
     return True
 
 

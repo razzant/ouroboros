@@ -62,8 +62,9 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     loading fails typed and is rewritten by the next check). The owned daemon is warmed, and an
     OpenRouter install's model catalogue observed unless a process recorded a current one, for
     provisioned homes only (``warm_daemon``): background work off the startup path, so a request
-    reads the catalogue and never waits for it. A sign-in entry naming a copy of the app that is
-    gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
+    reads the catalogue and never waits for it. A managed execution domain's dedicated containers
+    are measured for Panic, also off the startup path (``execution_domain``). A sign-in entry naming
+    a copy of the app that is gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
     if local_model and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
 
@@ -73,6 +74,9 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
         from ouroboros.claudexor_daemon import warm_owned_daemon
 
         warm_owned_daemon()
+    from ouroboros.execution_domain import measure_generation_identity
+
+    measure_generation_identity()  # a managed domain's dedicated containers, for this generation's Panic
     from ouroboros.provider_models import configured_kinds
 
     if warm_daemon and "openrouter" in configured_kinds(settings):  # any OpenRouter key, built-in or added, that serves
