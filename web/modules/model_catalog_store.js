@@ -1,0 +1,111 @@
+// One client store over /api/model-catalog for every composer in the window (DESIGN "Composer owner controls"):
+// the catalog as last read, the owner's recent models (`model_recents` of /api/ui/preferences, written by the
+// server on each of his model acts) and, only when a saved choice names an API source the catalog did not list,
+// the settings document's connection list that says why. A read happens when a Model capsule opens and then only
+// when stale or failed, never on a timer; a failed read keeps what an earlier one listed and says so. Settings ›
+// Models refreshing its own catalog feeds this one without another request.
+import { apiClient, apiFetch } from './api_client.js';
+import { apiConnections } from './route_editor_primitives.js';
+import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog } from './settings_catalog.js';
+import { buildModelIndex, normalizeRoute } from './chat_model_routes.js';
+
+const CATALOG_FRESH_MS = 5 * 60 * 1000;
+
+async function fetchCatalog() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
+    try {
+        const response = await apiFetch('/api/model-catalog', { cache: 'no-store', signal: controller.signal });
+        const data = await response.json();
+        if (!response.ok || !Array.isArray(data?.items)) throw new Error(data?.error || `HTTP ${response.status}`);
+        return data;
+    } catch (error) {
+        throw error?.name === 'AbortError' ? new Error('timed out') : error;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * @param {object} [deps]
+ * @param {() => Promise<object>} [deps.readCatalog]  one `/api/model-catalog` answer, or a rejection
+ * @param {() => Promise<object>} [deps.readPreferences]  `apiClient.uiPreferences`
+ * @param {() => Promise<object>} [deps.readSettings]  `apiClient.settings`
+ * @param {() => number} [deps.now]
+ */
+export function createModelCatalogStore({ readCatalog = fetchCatalog, readPreferences = () => apiClient.uiPreferences(),
+    readSettings = () => apiClient.settings(), now = () => Date.now() } = {}) {
+    const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
+        connections: null, connectionsReading: null, index: null };
+    const listeners = new Set();
+    const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
+
+    function adopt(data) {
+        state.catalog = mergeModelCatalog(state.catalog || {}, data);
+        state.readAt = now();
+        state.failed = false;
+    }
+
+    function read({ force = false } = {}) {
+        if (state.reading) return state.reading;
+        if (!force && state.catalog && !state.failed && now() - state.readAt < CATALOG_FRESH_MS) return Promise.resolve();
+        state.reading = (async () => {
+            try {
+                adopt(await readCatalog());
+            } catch (error) {
+                // A failed read keeps what an earlier one listed, and says so.
+                state.catalog = mergeModelCatalog(state.catalog || {}, { read_state: 'transport',
+                    errors: [{ provider_id: 'catalog', error: String(error?.message || error) }] });
+                state.readAt = now();
+                state.failed = true;
+            } finally {
+                state.reading = null;
+                notify();
+            }
+        })();
+        notify();
+        return state.reading;
+    }
+
+    /** The owner's recent models, newest first; a body without the field, or a failed read, is no recents. */
+    function readRecents() {
+        state.recentsReading ||= Promise.resolve().then(readPreferences)
+            .then((prefs) => {
+                state.recents = (Array.isArray(prefs?.model_recents) ? prefs.model_recents : [])
+                    .map(normalizeRoute).filter(Boolean);
+            })
+            .catch(() => {})
+            .finally(() => { state.recentsReading = null; notify(); });
+        return state.recentsReading;
+    }
+
+    /** The settings document's API connections, read once: which key a saved source names and why it cannot send. */
+    function readConnections() {
+        if (state.connections) return Promise.resolve();
+        state.connectionsReading ||= Promise.resolve().then(readSettings)
+            .then((settings) => {
+                state.connections = apiConnections(settings, settings?._meta?.setup_contract?.providerProfiles || {});
+            })
+            .catch(() => {})
+            .finally(() => { state.connectionsReading = null; notify(); });
+        return state.connectionsReading;
+    }
+
+    return {
+        read, readRecents, readConnections,
+        /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
+        adopt(data) { if (Array.isArray(data?.items)) { adopt(data); notify(); } },
+        /** The index of the catalog as last read (chat_model_routes.js), built once per change. */
+        index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections }); },
+        recents: () => state.recents,
+        /** `reading`: a read is in flight; `read`: one has answered; `failed`: the last one did not. */
+        status: () => ({ reading: Boolean(state.reading), read: Boolean(state.catalog), failed: state.failed }),
+        subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    };
+}
+
+export const modelCatalog = createModelCatalogStore();
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('settings-model-catalog:updated', (event) => modelCatalog.adopt(event?.detail));
+}

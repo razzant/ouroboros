@@ -69,15 +69,21 @@ export function mount({ hover = false, save, win } = {}) {
     };
 }
 
-/* The composer row as chat.js builds it: the Subagents anchor, then the context anchor; Effort mounts after Context.
-   `subagents` mounts the Subagents capsule on its anchor too (its writer answers `subagentAnswer`). */
-export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', chatId, subagents = false } = {}) {
+/* The composer row as chat.js builds it: the Model anchor, the Subagents anchor, then the context anchor; Effort mounts
+   after Context. `subagents` mounts the Subagents capsule on its anchor too (its writer answers `subagentAnswer`), and
+   `model` the Model capsule on its own (its writer answers `modelAnswer`; `model` holds its seams: `store`, `askMain`,
+   `isStack`, `isCoarse`). */
+export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', chatId, subagents = false, model = null } = {}) {
     const doc = stubDocument();
+    doc.body = doc.createElement('body');  // where a capsule's floating list is put
     const box = doc.createElement('section');
     const row = doc.createElement('div');
     box.appendChild(row);
     row.className = 'chat-toolbar-row';
     row.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });  // not laid out: no fit
+    const modelEl = doc.createElement('div');
+    modelEl.className = 'chat-model-mode';
+    if (model) row.appendChild(modelEl);
     const subagentsEl = doc.createElement('div');
     subagentsEl.className = 'chat-subagents-mode';
     row.appendChild(subagentsEl);
@@ -91,6 +97,7 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const answer = { value: reply || { ok: true } };
     const effortAnswer = { value: null };
     const subagentAnswer = { value: null };
+    const modelAnswer = { value: null };
     const settingsOpened = [];
     const subagentsWriter = subagents ? {
         saveSubagentsMode: async (body) => {
@@ -98,12 +105,25 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
             const reply = await subagentAnswer.value;
             return reply || { ok: true, project_id: projectId, subagents_mode: body.mode, cognition: { subagents_mode: body.mode } };
         },
-        openSettings: () => settingsOpened.push('agents'),
+    } : {};
+    // The endpoint's own answers (CONTRACT §2): a room's saved choice, or Main as written.
+    const modelWriter = model ? {
+        saveChatModel: async (body) => {
+            posts.push(['/api/owner/chat-model', body]);
+            const reply = await modelAnswer.value;
+            if (reply) return reply;
+            const route = { model: body.model, use_local: body.use_local === true };
+            return body.project_id ? { ok: true, project_id: body.project_id, previous_model_choice: { kind: 'main' },
+                model_choice: body.kind === 'main' ? { kind: 'main' } : { kind: 'model', ...route } }
+                : { ok: true, project_id: '', main_route: route, previous_main_route: route, account: 'none', window_reset: false };
+        },
+        modelDeps: { watchLayout: () => () => {}, placeList: () => ({ reposition() {}, destroy() {} }), ...model },
     } : {};
     const controls = createComposerOwnerControls({
-        ...subagentsWriter,
+        ...subagentsWriter, ...modelWriter, openSettings: (tab) => settingsOpened.push(tab),
         projectId, ...(chatId === undefined ? {} : { chatId }), row, box: withBox ? box : null, doc, win: win || hoverWindow(hover),
-        byId: (suffix) => (suffix === 'context-mode' ? contextEl : suffix === 'subagents-mode' ? subagentsEl : null),
+        byId: (suffix) => (suffix === 'context-mode' ? contextEl : suffix === 'subagents-mode' ? subagentsEl
+            : suffix === 'model-mode' ? modelEl : null),
         apiFetch: async (url, init) => {
             const body = JSON.parse(init.body); posts.push([url, body]);
             const response = await answer.value;
@@ -121,6 +141,8 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const onSeg = (mode) => ({ closest: (selector) => (selector === '.chat-seg' ? subSeg(mode) : null) });
     return {
         controls, row, box, doc, contextEl, effortEl, posts, toasts, refreshes, answer, effortAnswer, seg,
+        modelEl, modelAnswer, modelHead: modelEl.querySelector('.chat-model-head'), modelHint: modelEl.querySelector('.ui-hint'),
+        fire,
         subagentsEl, subagentAnswer, settingsOpened, subSeg, subHead: subagentsEl.querySelector('.chat-subagents-head'),
         subHint: subagentsEl.querySelector('.ui-hint'),
         contextHint: contextEl.querySelector('.ui-hint'), effortHint: effortEl.querySelector('.ui-hint'),

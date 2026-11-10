@@ -457,40 +457,36 @@ Enter as a line break.
 
 ### Composer owner controls
 
-Each composer saves its room's **model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after ☰. Main supplies a one-time copy of the three capsules to new Projects (the model is never
-copied: a new room follows Main); later changes stay in their room.
+Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
+in that order after ☰ (owner 10.11, «1. A»). Main supplies a one-time copy of the last three to new Projects; a
+room's Model is never copied: it follows Main until the room chooses, and says so (name `Main`, value Main's model);
+later changes stay in their room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
 
-**The chat model names what new work starts on** (owner 29.10, the approved Favorites / Subscription / API mockup).
-First on the row, before the capsules, a quiet trigger with no body until hovered or open: the source's mark, the
-model's name (the first value a closed line too narrow cuts: to a few letters, then to the mark alone, whose
-crimson still says `this chat`, so the capsules keep their values on a 390 px phone; the trigger's label and the
-sheet keep the whole name; 30.10), `this chat` in the crimson word while the room chose its own, and a chevron;
-while a choice saves the word says `Saving`. It opens the composer's one sheet (the capsules still
-never do): a search, then **Favorites · Subscription · API** as equal filter segments (the chosen one in the accent
-wash of a chosen menu choice), a source rail of marks (vertical beside the list on a desk, a row above it on a
-phone; a source without a mark of its own shows its initial, never an invented logo), the routes, and a foot with
-**Main** and **Fallback**, each `In use` or `Use`, over «Applies to new work in this chat; running work keeps its
-model. Main and Fallback stay as set.» A row is one route, its source included: the same model through two sources
-is two rows and two stars; a row names its source and lane in Favorites, in search and under All API sources. Rows
-read newer first (owner 30.10): no catalog states a release date, so within a family, the words before a name's
-first number, the higher stated version leads (6.1, 6, 5.6); families follow each other by name and a name stating
-no number comes after them; a list across sources keeps the rail's order of sources; Favorites keep the order they
-were starred in. A row is an explicit route even when it is Main's model; the foot's `Use` is the reference that
-follows Settings. Subscription lists the catalog's model sources, never agent sessions; API the connections whose
-lists answered or failed. The catalog suggests and never admits: a saved or starred route it does not list stays,
-marked `not listed`; a search offers the typed model ID through the selected source; a list that could not be read
-says so beside the rows it kept. The catalog is read when the sheet opens, never polled. Search spans every source
-and steps the tabs aside; Escape clears it, then closes; an outside press closes; focus returns to the trigger. On a
-narrow screen the sheet rises from the bottom over a dim, and a touch opening leaves the keyboard down. A choice
-posts at once; Send waits for it, Panic never does.
+**Model is the model new work here starts on.** Its glyph is the mark of the source that model is reached through
+(a source without a mark of its own shows its initial, never an invented logo), lit only while the room chose its
+own; then the name is that source. Closed, it always shows the room's choice, never a running work's model, and
+wears no mark for one (owner 11.11, «Все A», 1); open, its hint adds one fact line when works here run on other
+models, over «Applies to new work here; running work keeps its model.» In the Main chat the capsule is Main itself:
+a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
+`model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main
+(owner 10.11, «6. A»). Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
+under a neutral thumb; a press chooses, arrows only move. **Search is a field in the row; its suggestions float
+above the row like the hint and never move the composer** (owner 10.11, «9. A»): Main, the recents, then the sources
+that can lead a work (those Settings offers the Main role, never agent sessions; with one source, its models at
+once). A row is one model through one source, however many accounts list it, never an account: the source, whether
+it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
+account can serve it now. Search spans the sources, a model once per provider; a key that cannot send keeps
+Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
+Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
+never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the
+field, then leaves the search, then closes. A room's pick posts at once; Send waits for it, Panic never does.
 
-Each is a neutral **capsule** of the pills' height — ring, name, value: `Subagents Auto`, `Context Max`,
-`Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
-and only the ring's lit arc coloured (crimson; Low neutral ink, Nano the Project's): a level is never amber.
+Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
+`Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
+and only the ring's lit arc or Model's mark coloured (crimson; Low neutral ink, Nano the Project's): a level is never amber.
 Subagents is no exception: closed, Off is muted and Auto and Swarm read like the others' values; its lit network
 tells them apart, and Swarm never fills the capsule (owner 28.10).
 Until the room's values arrive the ring stays unlit and the value secondary,
@@ -502,7 +498,7 @@ Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three
 Auto one helper/thread, Swarm all helpers and their connecting threads.
 
 **A capsule opens inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
-withdrawn 27.10); its value yields to the strip. Context: Nano · Low · Max under a glass thumb;
+withdrawn 27.10; Model's Search alone floats its suggestions above the row, 10.11 «9. A»); its value yields to the strip. Context: Nano · Low · Max under a glass thumb;
 choosing posts at once, then waits for the answer. Subagents: Off · Auto · Swarm, likewise. Open, one
 hint ("Hints") above it (owner 28.10) gives the mode's meaning (hovering another previews it), Context's
 dated observation/cause, and «Applies to new steps; running work finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
@@ -524,8 +520,9 @@ scrolling and dragging.
 (padding down to `--space-1`), else alone while they step aside (down to 3 px, the
 pill's corners tightening; the name and divider yield first), last scrolling inside
 itself, faded where levels hide. A closed line too narrow drops the names, then
-ellipsizes the longest values, never rings. All is measured, so no breakpoint
-(`web/modules/capsule_fit.js`).
+ellipsizes the longest values; before that cut reaches Model's value, Subagents, Context and Effort
+fold to their glyphs, which still say their values (owner 10.11, «10. A»; before: never rings), and
+only then is Model's value cut. All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
 
 **It opens in place.** Beside the others the strip grows by its width. Alone, its
 glass grows from the closed capsule to the whole line in 300 ms on the iOS sheet
@@ -2651,7 +2648,8 @@ Accounts is the common connection surface for subscriptions and API keys. An API
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
-picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; it forecasts no tokens
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save, as the Main chat's Model capsule does
+before it writes Main (owner 10.11, «6. A»); it forecasts no tokens
 or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
@@ -2680,7 +2678,8 @@ each enabled key holding its credential, named "OpenRouter" or "OpenRouter ·
 Claude credits", then one disabled pointer to Accounts; a saved choice that
 cannot send stays selectable as "(no key)", "(off)" or "(removed)"), Agents · sessions where a session
 is possible. The model chooser lists only the chosen source's catalog, so a
-suggestion's transport is the selected source; any id can still be typed. The
+suggestion's transport is the selected source; any id can still be typed. The composer's
+Model capsule alone searches across sources, each row naming its own (owner 10.11, «9. A»). The
 stored spellings (`provider::model`, `claudexor::source=model`,
 `harness=model`) are serialization authored by the editor: never required from
 the owner, never a field placeholder or help-text instruction, never the

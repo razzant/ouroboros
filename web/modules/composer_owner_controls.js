@@ -1,6 +1,6 @@
-// Each composer's saved room settings: Subagents, Context and Effort, three inline capsules of one
+// Each composer's saved room settings: Model, Subagents, Context and Effort, four inline capsules of one
 // family. Main and Projects read their own authoritative values and save through the owner
-// endpoints (DESIGN: Composer owner controls); all three run on the capsule machine (capsule.js).
+// endpoints (DESIGN: Composer owner controls); all four run on the capsule machine (capsule.js).
 import { fmt } from './i18n.js';
 import {
     EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, OWNER_TIERS, effortText, normalizeEffortRange, ownerLevelIndex,
@@ -9,6 +9,7 @@ import { createCapsule, observeLayout } from './capsule.js';
 import { SEG_PAD, px, widthOf } from './capsule_fit.js';
 import { haptic } from './haptics.js';
 import { createComposerFold } from './composer_fold.js';
+import { createModelControl } from './composer_model.js';
 import { createSubagentsControl } from './composer_subagents.js';
 import { CONTEXT_LABELS, CONTEXT_MODES, UNKNOWN_CONTEXT, contextShown, observeContext } from './context_observation.js';
 
@@ -19,10 +20,6 @@ const CONTEXT_MEANINGS = Object.freeze({
 });
 const contextModeOf = (mode) => (['nano', 'low', 'max'].includes(mode) ? mode : 'max');
 const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
-// How far a closed line's values give way in turn (fitNames): the chat model's name to a few letters, then away to
-// its source's mark, before a capsule's value goes to a letter and its ellipsis.
-const VALUE_FLOOR_PX = 18;
-const NAME_FLOOR_PX = 44;
 
 /** The primary level is independent; the helper brackets cannot cross each other. */
 export function applyHandle(base, which, value) {
@@ -540,16 +537,18 @@ function createContextModeControl({ el, row, chatId, saveContextMode, showToast,
  * @param {typeof fetch} deps.apiFetch
  * @param {(body: object) => Promise<object>} deps.saveEffortRange  `apiClient.ownerEffortRange`
  * @param {(body: object) => Promise<object>} [deps.saveSubagentsMode]  the room's subagents mode writer
- * @param {() => void} [deps.openSettings]  Settings › Agents, where subagents are turned on
+ * @param {(body: object) => Promise<object>} [deps.saveChatModel]  the room's model writer (`apiClient.ownerChatModel`)
+ * @param {(tab: string) => void} [deps.openSettings]  a Settings tab: Agents, where subagents are turned on; Accounts
+ *   (`providers`), where a model source is added
  * @param {(message: string, tone?: string) => void} deps.showToast
  * @param {(force?: boolean) => Promise<void>|void} deps.refreshState  a forced `/api/state` re-read
  * @param {() => void} [deps.onLayout]  a strip opened or closed on its own line
  * @param {number|null} [deps.chatId]  the room whose works' observed context mode the Context capsule shows (Main: 1)
  * @param {HTMLElement} [deps.box]  independently sized page the composer docks inside
  * @param {() => boolean} [deps.readingBack]  the owner's own gesture took the room off its newest row (composer_fold.js)
- * @param {() => Element[]} [deps.fitValues]  other values on the line the fit may cut with the capsules' (the chat model)
+ * @param {object} [deps.modelDeps]  the Model capsule's own seams (its catalog store, its confirming sheet)
  */
-export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', chatId = projectId ? null : 1, box = null, win = globalThis.window, doc = globalThis.document, readingBack, fitValues = () => [] }) {
+export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, saveChatModel, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', chatId = projectId ? null : 1, box = null, win = globalThis.window, doc = globalThis.document, readingBack, modelDeps = {} }) {
     let destroyed = false;
     const scoped = body => projectId ? { ...body, project_id: projectId } : body;
     const readback = reply => {
@@ -593,9 +592,8 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     function fitNames() {
         if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
         delete row.dataset.ownerCompact;
-        delete row.dataset.ownerModelMark;
+        delete row.dataset.ownerGlyphs;
         row.style.setProperty('--capsule-value-cap', '');
-        row.style.setProperty('--chat-model-name-cap', '');
         capsules.forEach((capsule) => { delete capsule.el.dataset.nameFit; capsule.measureName(); });
         if (!wraps()) return;
         // Names give way one at a time, the longest first, so two capsules of one value keep the words that tell them
@@ -609,36 +607,21 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         const rowStyle = win?.getComputedStyle?.(row);
         const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);
         if (!(room > 0) || !wraps()) return;  // not laid out (the unit-test DOM), or the line holds
-        const overflow = () => {
+        const over = () => {
             const kids = shownKids();
             return kids.reduce((sum, kid) => sum + widthOf(kid), 0) + px(rowStyle?.columnGap) * (kids.length - 1) - room + 1;  // 1 px of slack
         };
-        // Values yield in turns, each to its floor: the chat model's name to a few letters, then away with `this chat`
-        // (the source's mark stays, crimson for the room's own choice; the trigger's label, title and sheet keep the
-        // whole name), so Auto, Max and Medium stay readable on a phone; then the capsules' to a letter and its
-        // ellipsis (their rings still say them), then to their rings.
-        const widths = { capsule: capsules.map((capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'))),
-            model: fitValues().map(widthOf) };
-        const caps = {};
-        let rest = overflow();
-        const yieldTo = (group, floor) => {
-            if (rest <= 0 || !widths[group].length) return;
-            const current = widths[group].map((width) => Math.min(width, caps[group] ?? width));
-            const give = current.reduce((sum, width) => sum + Math.max(0, width - floor), 0);
-            caps[group] = give >= rest ? Math.max(floor, waterLevel(current, rest)) : floor;
-            rest -= Math.min(give, rest);
-        };
-        yieldTo('model', NAME_FLOOR_PX);
-        if (rest > 0 && widths.model.length) {
-            // Never a letter and an ellipsis beside the mark: the name and `this chat` go whole (style.css), and the
-            // line is measured again as the mark leaves it.
-            row.dataset.ownerModelMark = 'true';
-            rest = overflow();
+        const valueWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'));
+        let cap = waterLevel(capsules.map(valueWidth), over());
+        // The model keeps its value (owner 10.11, «10. A»): where the cap would cut it, Subagents, Context and Effort
+        // fold to their glyphs first, and only a line that still wraps cuts the model's own value.
+        const model = capsules.find((capsule) => capsule.kind === 'model');
+        if (model && cap < valueWidth(model)) {
+            row.dataset.ownerGlyphs = 'true';
+            if (!wraps()) return;
+            cap = waterLevel([valueWidth(model)], over());
         }
-        yieldTo('capsule', VALUE_FLOOR_PX);
-        yieldTo('capsule', 0);
-        if (caps.capsule !== undefined) row.style.setProperty('--capsule-value-cap', `${caps.capsule}px`);
-        if (caps.model !== undefined) row.style.setProperty('--chat-model-name-cap', `${caps.model}px`);
+        row.style.setProperty('--capsule-value-cap', `${cap}px`);
         row.dataset.ownerCompact = 'values';
     }
     // A capsule settled closed refits the names and asks the fold again (a short keyboard room folds the row then).
@@ -653,8 +636,12 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         return { subagents_mode: readback(reply)?.subagents_mode ?? reply?.subagents_mode };
     };
     const subagents = subagentsEl ? createSubagentsControl({ el: subagentsEl, row, capsule: createCapsule,
-        save: saveRoomSubagents, openSettings, ...shared }) : null;
-    const controls = [subagents, context, effort].filter(Boolean);
+        save: saveRoomSubagents, openSettings: () => openSettings('agents'), ...shared }) : null;
+    // The room's Model, first in the row. Its endpoint answers the room's own choice, so it scopes and checks itself.
+    const modelEl = row && saveChatModel ? byId('model-mode') : null;
+    const model = modelEl ? createModelControl({ el: modelEl, row, projectId, chatId, save: saveChatModel,
+        openSettings: () => openSettings('providers'), ...shared, ...modelDeps }) : null;
+    const controls = [model, subagents, context, effort].filter(Boolean);
     for (const control of controls) capsules.push(control.capsule);
     // One capsule is open at a time.
     for (const capsule of capsules) capsule.peers = capsules.filter((other) => other !== capsule);
@@ -686,6 +673,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         wrap: row?.closest?.('.chat-input-wrap'), row, win, doc, readingBack }) : null;
 
     return {
+        model,
         context,
         effort,
         subagents,
@@ -695,6 +683,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
             if (destroyed) return;
             const values = projectId ? data?.projects?.find(project => project.id === projectId)?.cognition : data;
             subagents?.syncState(values, data?.subagents_availability);
+            model?.syncState(data);
             context?.observe(data);
             if (!values) return;
             context?.syncState(values); effort?.syncState(values); fitNames();
@@ -711,7 +700,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
             textObserver?.disconnect();
             for (const control of controls) control.destroy();
             fold?.destroy();
-            if (row?.dataset) delete row.dataset.ownerCompact;
+            if (row?.dataset) { delete row.dataset.ownerCompact; delete row.dataset.ownerGlyphs; }
             row?.style?.setProperty?.('--capsule-value-cap', '');
         },
     };

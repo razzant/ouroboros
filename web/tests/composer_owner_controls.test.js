@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ElementStub } from './chat_dom_fixture.js';
+import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { CHANGE_RULE } from '../modules/capsule.js';
 import { applyHandle, createEffortRangeControl, snapRange } from '../modules/composer_owner_controls.js';
 import { hoverWindow, mount, mountPair, sleep, stubDocument } from './composer_controls_fixture.js';
@@ -970,6 +971,67 @@ test('closed names give way one at a time, the longest first: two equal values k
     m.effortEl.getBoundingClientRect = () => ({ top: 0, bottom: 32, width: 130 });
     m.controls.syncState({});
     assert.deepEqual([m.contextEl.dataset.nameFit, m.effortEl.dataset.nameFit], [undefined, undefined], 'room again: every name back');
+    m.controls.destroy();
+});
+
+// A row laid out by numbers: each closed capsule is its glyph, its name while it has one and its value as the row's
+// fit leaves it (cut to the cap, or folded away with the glyphs); the last capsule drops to a second line while the
+// four are wider than the row.
+function layRow(m, { width, values, names = { model: 30, subagents: 70, context: 52, effort: 40 } }) {
+    const GLYPH = 34;
+    const els = { model: m.modelEl, subagents: m.subagentsEl, context: m.contextEl, effort: m.effortEl };
+    const kinds = Object.keys(els).filter((kind) => els[kind].parentNode === m.row && els[kind].children.length);
+    const cap = () => { const said = m.row.style.getPropertyValue('--capsule-value-cap'); return said ? parseFloat(said) : Infinity; };
+    const valueWidth = (kind) => (m.row.dataset.ownerGlyphs === 'true' && kind !== 'model' ? 0
+        : m.row.dataset.ownerCompact === 'values' ? Math.min(values[kind], cap()) : values[kind]);
+    const nameWidth = (kind) => (els[kind].dataset.nameFit === 'off' ? 0 : names[kind]);
+    const capsuleWidth = (kind) => GLYPH + nameWidth(kind) + valueWidth(kind);
+    const total = () => kinds.reduce((sum, kind) => sum + capsuleWidth(kind), 0);
+    m.row.getBoundingClientRect = () => ({ top: 0, bottom: 32, left: 0, right: width, width, height: 32 });
+    for (const kind of kinds) {
+        const last = kind === kinds.at(-1);
+        els[kind].getBoundingClientRect = () => { const top = last && total() > width ? 40 : 0; return { top, bottom: top + 32, width: capsuleWidth(kind) }; };
+        els[kind].querySelector('.chat-capsule-name').getBoundingClientRect = () => ({ top: 0, bottom: 20, width: nameWidth(kind) });
+        els[kind].querySelector('.chat-capsule-value').getBoundingClientRect = () => ({ top: 0, bottom: 20, width: valueWidth(kind) });
+    }
+    return { total, said: () => [m.row.dataset.ownerCompact, m.row.dataset.ownerGlyphs, m.row.style.getPropertyValue('--capsule-value-cap')] };
+}
+
+test('the model keeps its value: where the cap would cut it, Subagents, Context and Effort fold to their glyphs first (owner 10.11)', () => {
+    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+    const m = mountPair({ subagents: true, model: { store } });
+    const values = { model: 90, subagents: 40, context: 30, effort: 50 };
+    // Wide enough for every name and value: nothing gives way.
+    let line = layRow(m, { width: 560, values });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), [undefined, undefined, '']);
+    // The names are not enough, and the cap that would hold the line (46 px) cuts the model's 90: the neighbours fold.
+    line = layRow(m, { width: 300, values });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), ['true', 'true', ''], 'the glyphs alone hold the line: the model\'s value is whole');
+    assert.ok(line.total() <= 300);
+    // A line that still wraps with the glyphs folded cuts the model's own value, last.
+    line = layRow(m, { width: 200, values });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), ['values', 'true', '63px']);
+    assert.ok(line.total() <= 200);
+    // Room again: values and names come back.
+    line = layRow(m, { width: 560, values });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), [undefined, undefined, '']);
+    // A model with a short value is not what the cap cuts: the widest values are cut as before, nothing folds.
+    line = layRow(m, { width: 380, values: { model: 20, subagents: 80, context: 80, effort: 80 } });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), ['values', undefined, '74px']);
+    m.controls.destroy();
+    assert.deepEqual([m.row.dataset.ownerCompact, m.row.dataset.ownerGlyphs], [undefined, undefined]);
+});
+
+test('a row without the model keeps the fit it had: names, then the widest values cut, never glyphs alone', () => {
+    const m = mountPair({ subagents: true });
+    const line = layRow(m, { width: 180, values: { subagents: 40, context: 30, effort: 50 } });
+    m.controls.syncState({});
+    assert.deepEqual(line.said(), ['values', undefined, '25px']);
     m.controls.destroy();
 });
 
