@@ -1104,7 +1104,7 @@ def _preserve(row: Dict[str, Any], work: Dict[str, Any]) -> str:
 
 
 def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[Any] = None,
-                      discard_excluded: bool = False) -> Dict[str, Any]:
+                      discard_excluded: bool = False, owed: Optional[Any] = None) -> Dict[str, Any]:
     """Whether the worktree GC may delete this candidate's checkout, and with what kept.
 
     ``{"remove": bool, "keep_branch": bool, "reason": str, "pin": str}``. Age alone
@@ -1112,6 +1112,8 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
     and an incomplete capture retains the original directory. ``discard_excluded`` is the
     owner's explicit discard alone (``copy_capture_proof.discard_unsaved_copy``): the paths
     the capture leaves out are the accepted loss, everything else is still captured first.
+    ``owed`` (a pass over many rows): called only when this row reaches the kept-output gate, for the pass's one read of
+    those debts; ``verdict_holds`` reads them fresh at the effect.
     """
     path = pathlib.Path(str(row.get("path") or ""))
     if not path.is_dir():
@@ -1124,6 +1126,8 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
         return {"remove": False, "keep_branch": True, "reason": "owner_not_terminal", "pin": ""}
     if live_lineage_processes(data_dir, str(row.get("task_id") or "")):
         return {"remove": False, "keep_branch": True, "reason": "owner_processes_live", "pin": ""}
+    if _capture_owed(row, data_dir, owed() if owed else None):
+        return {"remove": False, "keep_branch": True, "reason": "kept_service_capture_owed", "pin": ""}
     if _retained_scratch(row, classify=True, data_dir=data_dir):
         return {"remove": False, "keep_branch": True, "reason": "retained_process_environment", "pin": ""}
     work = unique_work(row)
@@ -1147,6 +1151,15 @@ def retention_verdict(row: Dict[str, Any], *, expired: bool, data_dir: Optional[
             "owner": _owner_stamp(row)}
 
 
+def _capture_owed(row: Dict[str, Any], data_dir: Optional[Any], owed: Any = None) -> bool:
+    """A kept service's declared outputs, not yet captured, live in this checkout (its working directory, an output
+    or the declaration): it stays until a complete capture (``kept_service_outputs.owed_output_hold``); ``owed``, the
+    selection a pass over many rows already read."""
+    from ouroboros.tools.kept_service_outputs import owed_output_hold
+
+    return bool(row.get("path")) and bool(owed_output_hold(_wt._data_dir(data_dir), str(row["path"]), owed=owed))
+
+
 def _owner_stamp(row: Dict[str, Any]) -> Dict[str, Any]:
     return {"task_id": str(row.get("task_id") or ""), "used_at": float(row.get("used_at") or 0)}
 
@@ -1166,7 +1179,7 @@ def verdict_holds(row: Dict[str, Any], verdict: Dict[str, Any], *, data_dir: Opt
     if verdict.get("owner") != _owner_stamp(row):
         return False
     if not _recorded_terminal(str(row.get("task_id") or ""), data_dir) or live_lineage_processes(
-            data_dir, str(row.get("task_id") or "")):
+            data_dir, str(row.get("task_id") or "")) or _capture_owed(row, data_dir):
         return False
     seen = verdict.get("work") or {}
     now = unique_work(row)

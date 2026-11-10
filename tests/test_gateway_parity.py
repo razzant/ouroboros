@@ -264,6 +264,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "StateResponse",
         "ActiveDirectTurn",
         "ActiveChatActivity",
+        "ContextAttemptFact",
         "TypingOutbound",
         "HealthResponse",
         "SettingsMeta",
@@ -462,16 +463,23 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     # (__required_keys__ ignores NotRequired on some 3.10 setups, so inspect
     # the declared annotations instead.)
     assert _notrequired_fields(ActiveDirectTurn) == {"model_waits", "task_attempt", "model_activity", "turn_phase",
-                                                   "executor", "carrier"}, (
+                                                   "executor", "carrier", "context_attempt"}, (
         "ActiveDirectTurn keeps its required base; waits, attempt, start phase and the lane's carrier facts are optional"
     )
     assert _notrequired_fields(ActiveChatActivity) == {
-        "model_waits", "model_activity", "task_attempt", "turn_phase", "executor", "carrier", "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
+        "model_waits", "model_activity", "context_attempt", "task_attempt", "turn_phase", "executor", "carrier", "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
         "timeout_retry_from", "original_task_id",
         "finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause",
         "last_line", "last_line_at", "tool_calls", "detached", "project_name",
     }, "ActiveChatActivity adds optional outcome/retry/review evidence without changing required activity facts"
+    from ouroboros.physical_attempt_context import ContextAttemptFact
+
+    js = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "task_activity_types.js").read_text(
+        encoding="utf-8")
+    assert _js_typedef_fields(js, "ContextAttemptFact") == set(ContextAttemptFact.__annotations__)
+    assert {name for name in ("ActiveDirectTurn", "ActiveChatActivity") if "context_attempt" in _js_typedef_fields(
+        js, name)} == {"ActiveDirectTurn", "ActiveChatActivity"}
     activity_fields = get_type_hints(ActiveChatActivity, include_extras=True)
     question_keys = {"required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait"}
     question_keys |= {"status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
@@ -484,6 +492,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     from ouroboros.gateway.schema import json_schema_for
 
     activity_schema = json_schema_for(ActiveChatActivity)
+    context_schema = activity_schema["properties"]["context_attempt"]
+    assert set(context_schema["properties"]["previous"]["properties"]) == set(ContextAttemptFact.__annotations__) - {"previous"}
     assert activity_schema["properties"].pop("required_question")["type"] == "object"
     assert activity_schema["properties"].pop("required_question_unavailable")["type"] == "boolean"
     assert activity_schema["properties"].pop("project_admission_hold")["type"] == "object"
@@ -511,8 +521,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     turn_decl = re.search(r"@typedef \{Object\} ActiveDirectTurn\b([\s\S]*?)\*/", text)
     assert turn_decl and set(re.findall(
         r"@property \{[^}]*=\} (\w+)", turn_decl.group(1)
-    )) == {"model_waits", "task_attempt", "model_activity", "turn_phase", "executor", "carrier"}, (
-        "ActiveDirectTurn browser mirror keeps wait/attempt/start-phase and carrier facts optional"
+    )) == {"model_waits", "task_attempt", "model_activity", "context_attempt", "turn_phase", "executor", "carrier"}, (
+        "ActiveDirectTurn browser mirror keeps wait/attempt/start-phase, sent-attempt and carrier facts optional"
     )
     typing_decl = re.search(r"@typedef \{Object\} TypingOutbound\b([\s\S]*?)\*/", text)
     assert typing_decl
@@ -597,7 +607,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "suppress_bubble",
         "ts", "project_name", "target_task_ids", "target_titles"
     }
-    # The notice carrier is one literal pair in both mirrors: an ACK and its paired System row read the same words.
+    # The notice carrier is one literal pair in both mirrors: an ACK and the System row beside it read the same words.
     for cls in (MessageAnnotationOutbound, ChatOutbound):
         carrier = get_type_hints(cls, include_extras=True)["routing_notice_carrier"]
         assert get_args(get_args(carrier)[0]) == ("routing_ack", "system"), cls.__name__

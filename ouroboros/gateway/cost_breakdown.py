@@ -94,6 +94,18 @@ def _compat_cost_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
         "prompt_cache_ttls": dict(bucket.get("prompt_cache_ttls") or {}),
     }
 
+def _recorded(bucket: Dict[str, Any]) -> bool:
+    """The ledger recorded something for this value: a call, an unpriced row, a priced row (a disclosed
+    $0 subscription session has no physical call) or an amount. A value with no row stays out, never $0."""
+    return bool(
+        int(bucket.get("physical_calls") or 0)
+        or int(bucket.get("unknown_unmetered") or 0)
+        or int(bucket.get("priced_rows") or 0)
+        or int(bucket.get("subscription_sessions") or 0)
+        or float(bucket.get("accounted_usd") or 0.0)
+    )
+
+
 def _compat_cost_groups(
     groups: Dict[str, Dict[str, Any]],
     unattributed: Dict[str, Any],
@@ -102,11 +114,7 @@ def _compat_cost_groups(
 ) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     for name, raw_bucket in groups.items():
-        if not (
-            int(raw_bucket.get("physical_calls") or 0)
-            or int(raw_bucket.get("unknown_unmetered") or 0)
-            or float(raw_bucket.get("accounted_usd") or 0.0)
-        ):
+        if not _recorded(raw_bucket):
             continue
         key = group_key(str(name)) if group_key else str(name)
         source = _compat_cost_bucket(raw_bucket)
@@ -123,11 +131,7 @@ def _compat_cost_groups(
         target["cost_final"] = target["cost_final"] and source["cost_final"]
         for ttl, count in source["prompt_cache_ttls"].items():
             target["prompt_cache_ttls"][ttl] = int(target["prompt_cache_ttls"].get(ttl, 0)) + int(count)
-    if (
-        int(unattributed.get("physical_calls") or 0)
-        or int(unattributed.get("unknown_unmetered") or 0)
-        or float(unattributed.get("accounted_usd") or 0.0)
-    ):
+    if _recorded(unattributed):
         result["unattributed"] = _compat_cost_bucket(unattributed)
     for bucket in result.values():
         bucket["cost"] = round(float(bucket["cost"]), 6)

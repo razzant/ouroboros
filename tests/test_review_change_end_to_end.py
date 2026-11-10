@@ -3,7 +3,6 @@ The only brief differences are the narrative line in ``## Informational context 
 and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -19,43 +18,10 @@ from ouroboros.tools.review_change import run_review_change
 from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 from tests import _contributor_packet_shared as shared
 from tests._worlds import clone_repository, world
+from tests._review_change_fixtures import GOAL, SCOPE, _brief_text, staged_body as staged_body
 from tests.review_pool_rosters import set_review_pool
 
-GOAL = "Make the installed body's helper return the proposal's constant."
-SCOPE = "ouroboros/helper.py only; the checklist and tests stay as they are."
 COMMIT_MESSAGE = "fix: return the proposal's constant\n\nThe narrative body of the intended commit."
-
-
-def _brief_text(brief: dict) -> str:
-    """All delivered message bodies and, for a retrieving seat, its session task."""
-    parts = []
-    for message in brief["messages"]:
-        content = message.get("content") or ""
-        if isinstance(content, list):
-            parts.extend(str(block.get("text") or json.dumps(block, sort_keys=True)) for block in content)
-        else:
-            parts.append(str(content))
-    return "\n".join(parts) + "\n" + brief["session_task"]
-
-
-@pytest.fixture
-def staged_body(tmp_path, monkeypatch):
-    fixture = shared.init_installed_body(tmp_path)
-    repo = Path(fixture["repo"])
-    # A real install carries a .gitignore; without one the gate's `git add -A`
-    # door would stage the one it writes and review a different tree.
-    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
-    shared.git(repo, "add", ".gitignore")
-    shared.git(repo, "commit", "-q", "-m", "ignore caches")
-    shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
-    fixture["staged_tree_sha"] = shared.git(repo, "write-tree")
-    assert fixture["staged_tree_sha"] != fixture["head_tree_sha"]
-    set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the proposal touches a protected surface
-    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
-    return fixture
 
 
 def test_review_change_on_the_system_index_is_the_commit_gates_brief(staged_body, tmp_path, monkeypatch):
@@ -496,6 +462,34 @@ def test_an_unstaged_worktree_change_is_read_in_its_isolated_checkout_by_every_d
             assert brief["session_root"] == checkout and brief["index_at_call"].strip() == frozen_diff.strip()
     assert not Path(checkout).exists() and not result["subject"].get("retained_checkout")
     assert shared.git(project, "diff", "--cached") == "" and shared.git(project, "worktree", "list").count("\n") == 0
+
+
+def test_a_filtered_clone_of_the_update_source_is_reviewed_under_the_body_layer(tmp_path, monkeypatch):
+    """#3004: a project cloned from the install's update source with a partial-clone filter, whose remote reads
+    ``<url> (fetch) [blob:none]`` in ``git remote -v``, is the body by its fetch URL without ``treat_as_body``:
+    the record names that fact, the seats judging the change get the body layer of the checklist and the retrieving
+    seats the serving constitution."""
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    serving, source = Path(ctx.system_repo_dir), "https://example.invalid/razzant/ouroboros.git"
+    (serving / "BIBLE.md").write_text(f"# Constitution\n\n{SERVING_RULE}\n", encoding="utf-8")
+    shared.git(serving, "add", "BIBLE.md")
+    shared.git(serving, "commit", "-q", "-m", "constitution")
+    shared.git(serving, "remote", "add", "managed", source)  # a source install's update remote
+    shared.git(project, "remote", "set-url", "origin", source)
+    shared.git(project, "config", "remote.origin.partialclonefilter", "blob:none")
+    (project / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    briefs: list[dict] = []
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
+
+    result = run_review_change(ctx, subject="worktree", goal="Bump the value", scope="app.py only")
+
+    assert result["state"] == "settled" and result["aggregate"] == "PASS", result
+    assert result["subject"]["root"] == str(project)
+    assert result["checklist"] == {"layer": "body", "body_fact": "true", "how": "managed_remote", "treat_as_body": False}
+    texts = {brief["slot_id"]: _brief_text(brief) for brief in briefs}
+    assert sorted(texts) == ["s1", "t1", "t2"]
+    assert all("| 10 | bible_compliance |" in texts[slot] for slot in ("t1", "t2")), texts
+    assert all(SERVING_RULE in texts[slot] for slot in ("t2", "s1")), texts
 
 
 def test_an_index_against_another_base_delivers_the_frozen_delta_not_the_live_index(tmp_path, monkeypatch):

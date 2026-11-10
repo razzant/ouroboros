@@ -197,8 +197,8 @@ def _is_signal_death(item: Dict[str, Any]) -> bool:
 # read_file/search_code/query_code refused by the resource policy — is honest
 # telemetry, not a degraded execution: the agent simply could not look there.
 # DISTINCT from _NON_BLOCKING_RECOVERABLE_STATUSES / _COSMETIC_TOOL_NAMES so this
-# never demotes a run_command resource block. Routed to a FULLY-IGNORED bucket (not
-# cosmetic) so it raises no WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW — the goal is
+# never demotes a run_command resource block. Routed to a FULLY-IGNORED bucket (neither
+# residual list) so it never reaches WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW — the goal is
 # honest telemetry, not a new visible warning. The read-only tool whitelist reuses
 # the capability SSOT (READ_ONLY_PARALLEL_TOOLS). Write/edit/data/protected/
 # light_mode/integration blocks are intentionally NOT demoted here.
@@ -282,16 +282,40 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
     from ouroboros.tool_capabilities import PURE_READ_TOOLS
 
     if record["tool"] in PURE_READ_TOOLS:
-        record["read_only"] = True  # a known pure read: its failure stays in the details (warns_without_review)
+        record["read_only"] = True  # a known pure read: its failure stays in the details
     return record
 
 
+# Owner 09.11 («Q1: A»): the badge means "look at this". Of the leftovers the record keeps, these are
+# `details_only` and stay in the card's details: a call the tool refused for its arguments or because it named no
+# tool (the mind saw the refusal at once; what it did next is its answer's to say), and a command that ran and
+# failed or timed out without being redone, which the host cannot tell from one the task went past. Loud, as
+# before: every other unrecovered error — an effect that did not land, a send or command Safety stopped, a tool of
+# unknown kind that ran and failed (MCP and extension tools included), a declared output that never registered —
+# and a command killed by a signal
+# (D7: a kernel, OOM or external kill is the install acting; the 43-SIGKILL incident once hid as "cosmetic"; only a
+# directly spawned POSIX process reports one).
+_UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
+_DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "timeout"})
+
+
+def _is_details_only_leftover(record: Dict[str, Any]) -> bool:
+    """The classifier's verdict, stamped on the record as ``details_only``: a call the tool refused before running,
+    or a command that ran and failed or timed out (not killed by a signal). A known read is ``read_only`` instead."""
+    if record.get("status") in _UNEXECUTED_STATUSES:
+        return True
+    return (record.get("tool") in _COSMETIC_TOOL_NAMES and record.get("status") in _DETAILS_ONLY_COMMAND_STATUSES
+            and not _is_signal_death(record))
+
+
 def warns_without_review(*bundles: Any) -> bool:
-    """Owner 06.11 («A — изменения и команды»): a leftover tool error warns that no review checked the result only
-    when it is not a known pure read (``read_only`` on its record, from PURE_READ_TOOLS). An effect that did
-    not happen, a failed command and a tool of unknown kind (MCP, extensions) stay loud; a failed read or search is
-    recorded in the details. A record written before the flag existed stays loud."""
-    return any(isinstance(error, dict) and not error.get("read_only") for errors in bundles for error in errors or [])
+    """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review of the result, a leftover
+    tool error turns Done into Done with warnings only when it is loud — neither a known pure read (``read_only``)
+    nor a details-only leftover (``details_only``: a command that ran and failed or timed out, a call refused before
+    running). A record written before the flags existed stays loud; the twin of this predicate for the card's words
+    is ``tool_error_words``."""
+    return any(isinstance(error, dict) and not (error.get("read_only") or error.get("details_only"))
+               for errors in bundles for error in errors or [])
 
 
 def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -406,6 +430,9 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             policy_denials.append(_tool_error_record(item))
             continue
         unresolved.append(_tool_error_record(item))
+    for record in (*unresolved, *cosmetic_items):  # only the leftovers the badge reads carry the verdict
+        if not record.get("read_only") and _is_details_only_leftover(record):
+            record["details_only"] = True
     return {
         "unresolved": unresolved,
         "recovered": recovered_items,

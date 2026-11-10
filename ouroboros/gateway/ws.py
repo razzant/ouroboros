@@ -315,6 +315,7 @@ async def _dispatch_extension_message(
         return True
 
     if handler_spec.get("out_of_process"):
+        from ouroboros.deployment_extensions import failure_words
         try:
             from ouroboros.extension_process_runner import dispatch_extension_ws_subprocess
 
@@ -328,10 +329,11 @@ async def _dispatch_extension_message(
             if result is not None:
                 await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
         except Exception as exc:
-            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {type(exc).__name__}: {exc}"}}))
+            await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} child failed: {failure_words(skill_name, exc)}"}}))
         return True
 
     handler = handler_spec.get("handler")
+    from ouroboros.deployment_extensions import failure_words
     try:
         from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
 
@@ -350,7 +352,7 @@ async def _dispatch_extension_message(
                 "level": "error",
                 "message": (
                     f"extension WS handler {msg_type!r} model-cost disclosure failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{failure_words(skill_name, exc)}"
                 ),
             },
         }))
@@ -370,7 +372,7 @@ async def _dispatch_extension_message(
         if result is not None:
             await websocket.send_text(json.dumps({"type": msg_type + ".reply", "data": result}))
     except Exception as exc:
-        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {type(exc).__name__}: {exc}"}}))
+        await websocket.send_text(json.dumps({"type": "log", "data": {"level": "error", "message": f"extension WS handler {msg_type!r} raised: {failure_words(skill_name, exc)}"}}))
     return True
 
 
@@ -519,7 +521,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                                 dispatch_accepted_restart, bridge,
                                 callback=getattr(websocket.app.state, "startup_owner_command", None))
                     else:
-                        send_kwargs = {"broadcast": False}
+                        from supervisor.message_ingress import ui_control_fact
+
+                        try:  # a control's press composed this command: no row will speak as my human
+                            control = ui_control_fact(msg.get("ui_control"), pressed_at=utc_now_iso(), command=str(payload))
+                        except ValueError as exc:
+                            await websocket.send_text(json.dumps({"type": "log", "data": {
+                                "level": "warning", "message": f"command refused: {exc}"}}))
+                            continue
+                        send_kwargs = {"broadcast": False, **({"task_metadata": {"ui_control": control}} if control else {})}
                     if msg_type == "command" and (bridge is None or str(payload).strip().lower() == "/restart"):
                         callback = getattr(websocket.app.state, "startup_owner_command", None)
                         action = callback(payload, send_kwargs=send_kwargs) if callable(callback) else None

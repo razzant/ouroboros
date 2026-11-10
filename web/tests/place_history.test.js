@@ -5,9 +5,10 @@ import { installCardDom, TextNode } from './helpers/card_dom.js';
 import { applyPayload, createTranslator, setMissTransport } from '../modules/i18n.js';
 import { normalizePlace, readPlaceRooms } from '../modules/consciousness_api.js';
 import { wakeFactWord } from '../modules/consciousness_words.js';
-import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeRoomsHtml, shownTime } from '../modules/place_history.js';
+import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
+import { PREVIEW_KEY } from '../modules/chat_preview.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const unsafeText = '<img src="x" onerror="bad()"> & "hello"';
@@ -58,6 +59,17 @@ function mount(f, options = {}, currentPlace = place) {
     const reader = mountPlaceHistory(host, currentPlace, room, { onBack: () => reader.close(), ...options });
     return reader;
 }
+
+test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
+    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
+    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
+    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
+    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
+    assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
+        'Silent now: it still hears and wakes here; what it would say or change here is held.');
+});
 
 test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(['user', 'assistant', 'system'].map((role) => historySpeaker({role, sender_label: 'Alice'})), ['Alice', 'Ouroboros', 'System']);
@@ -486,4 +498,27 @@ test('a row shows the send time its arrival recorded; the title keeps when it wa
     const times = [...f.doc.body.querySelectorAll('time')];
     assert.deepEqual(times.map((node) => node.getAttribute('datetime')), [imported.ts, '2026-10-26T08:00:00+00:00', receipt.ts]);
     assert.match(times[0].textContent, /2024/); reader.close();
+});
+
+test('a current refused read takes the saved conversation text; a failed one, or one the closed sheet left, does not', async (t) => {
+    // The Place sheet reads history outside any room (chat_preview.js previewsRefused): the session's refusal is the same.
+    const f = fixture(t), values = new Map(), prior = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
+        removeItem: (key) => values.delete(key) };
+    t.after(() => { globalThis.localStorage = prior; });
+    const seed = () => values.set(PREVIEW_KEY, '{"v":2,"rooms":[]}');
+    const failing = (status) => async () => { throw Object.assign(new Error('Authentication required.'), { status }); };
+    seed();
+    let reader = mount(f, { readHistory: failing(500) }); await tick();
+    assert.equal(values.has(PREVIEW_KEY), true, 'a failed read is no statement about the session');
+    reader.close();
+    reader = mount(f, { readHistory: failing(401) }); await tick();
+    assert.equal(values.has(PREVIEW_KEY), false, 'a current refusal takes it at once');
+    reader.close();
+    seed();
+    const pending = deferred();
+    reader = mount(f, { readHistory: () => pending.promise.then(failing(403)) });
+    f.q('[data-history-back]').click(); reader.close();
+    pending.resolve(); await tick(); await tick();
+    assert.equal(values.has(PREVIEW_KEY), true, 'a read the closed sheet abandoned decides nothing');
 });

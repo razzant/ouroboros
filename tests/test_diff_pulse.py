@@ -13,9 +13,10 @@ from pathlib import Path
 
 from ouroboros.review import DIFF_PULSE_QUESTION, diff_pulse
 from ouroboros.tools.registry import ToolContext
-from tests.test_reference_book_balance import _registry
-from tests.test_review_change_end_to_end import GOAL, SCOPE, _brief_text, staged_body  # noqa: F401 -- the fixture
 from tests._cases import case_folders
+from tests._reference_book_fixtures import BODY, CHAPTER, ENTRY
+from tests._reference_book_fixtures import _registry
+from tests._review_change_fixtures import GOAL, SCOPE, _brief_text, staged_body  # noqa: F401 -- the fixture
 
 
 OFFICIAL = "https://github.com/razzant/ouroboros.git"
@@ -95,6 +96,20 @@ def test_an_unmeasurable_root_has_no_pulse_and_raises_nothing(tmp_path):
     plain = tmp_path / "plain"
     _write(plain, "ouroboros/core.py", 3)
     assert diff_pulse(plain) == "" and diff_pulse(tmp_path / "missing") == ""
+
+
+def test_with_no_readable_diff_the_touched_books_keep_their_balance(tmp_path):
+    """Neither a contribution base nor HEAD can be diffed (a body checkout before its first commit): no fact
+    line, yet the touched books keep the balance Git can measure instead of disappearing with the pulse."""
+    from ouroboros.reference_books import book_balance_note
+
+    repo = tmp_path / "unborn"
+    for path, text in {"docs/ARCHITECTURE.md": ENTRY, CHAPTER: BODY}.items():
+        _write(repo, path, 1, text)
+    _git(repo, "init", "-q")
+    note = book_balance_note(repo, [CHAPTER])
+    assert "n/a vs HEAD; contribution unknown" in note
+    assert diff_pulse(repo, [CHAPTER]) == note and diff_pulse(repo) == ""  # unshown, no book is known to be touched
 
 
 def test_one_shape_and_one_question_for_any_size(tmp_path):

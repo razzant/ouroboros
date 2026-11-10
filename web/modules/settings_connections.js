@@ -9,6 +9,7 @@ import { apiClient } from './api_client.js';
 import { adoptConnectionLabels } from './connection_labels.js';
 import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';
 import { setButtonBusy } from './settings_controls.js';
+import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
 import { PROVIDER_CARDS, connectionRowHtml } from './settings_provider_cards.js';
 import { revealNewRow, setInlineStatus } from './ui_helpers.js';
@@ -78,12 +79,12 @@ export function connectionUsage(settings = {}, slots = []) {
 
 /** A row's status word and meta line: what is true of this key now (docs/DESIGN.md §6). `legacyAddress`:
  * the built-in compatible row is served by the legacy OPENAI_BASE_URL pair, which only Settings edits. */
-export function connectionRowFacts({ draft = false, enabled = true, configured = false, source = '', usedBy = [], legacyAddress = '' } = {}) {
+export function connectionRowFacts({ draft = false, enabled = true, configured = false, source = '', usedBy = [], legacyAddress = '', fixed = false } = {}) {
     if (draft) return { tone: 'neutral', label: 'Not saved', meta: '' };
     const users = usedBy.join(', ');
     if (!enabled) return { tone: 'neutral', label: 'Disabled', meta: `${users ? `Named by ${users}` : 'Not used by any role'} · nothing is sent through it` };
     const use = users ? `used by ${users}` : 'not used by any role';
-    const legacy = legacyAddress ? `Legacy OpenAI Base URL ${legacyAddress} with the OpenAI API key · change the address in Settings → Accounts` : '';
+    const legacy = legacyAddress ? `Legacy OpenAI Base URL ${legacyAddress} with the OpenAI API key${fixed ? '' : ' · change the address in Settings → Accounts'}` : '';
     if (!configured) return { tone: 'neutral', label: 'No key', meta: legacy ? `${legacy} · ${use}` : `${use[0].toUpperCase()}${use.slice(1)}` };
     return { tone: 'ok', label: 'Ready', meta: `${source === 'environment' ? 'Provided by environment' : legacy || 'Enabled'} · ${use}` };
 }
@@ -188,6 +189,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     let pageSettings = {};      // the page's flat settings as last loaded or refreshed
     let legacyAddress = '';     // the built-in compatible row's legacy OPENAI_BASE_URL, when that pair serves it
     let builtinOff = new Set();
+    let deployment = null;      // a managed deployment's checker connections are shown, never edited (settings_policy.js)
     let originals = new Map();  // uid → the loaded row: fields this page does not show travel unchanged
     let foreign = [];           // loaded rows of a kind this page has no card for, kept as they are
     let baseline = '[]';        // the rows as loaded: the setting travels only when they differ
@@ -262,7 +264,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         // legacy pair travels with): the facts loaded or refreshed stand only while the draft still reaches their pair.
         const moved = builtin && kind === 'openai-compatible' && reachesAnotherPair(pageSettings, flatDraft());
         const changed = draft || moved || rowFingerprint(row) !== rowBaselines.get(row);
-        const facts = connectionRowFacts({ draft: changed, enabled,
+        const fixed = !draft && checkerUses(deployment, id);
+        const facts = connectionRowFacts({ draft: changed, enabled, fixed,
             configured: Boolean(entry?.configured), source: entry?.source, usedBy: usage.get(id) || [], legacyAddress: legacy });
         const status = row.querySelector('[data-connection-status]');
         Object.assign(status, { textContent: facts.label, hidden: false });
@@ -284,6 +287,19 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         remove.title = builtin ? 'Clear this key when you save' : draft ? 'Discard this key' : 'Forget this key when you save';
         const note = changed ? '' : cacheHintsNote(listed.find((item) => item?.id === id));
         Object.assign(row.querySelector('[data-connection-cache]'), { textContent: note, hidden: !note });
+        // The organization's Supervisor sends through this key: it keeps Test, and nothing here changes it. A built-in
+        // key it only borrows a field of (the legacy compatible pair's OpenAI key) keeps its row: only that field is fixed.
+        row.querySelector('[data-connection-fixed]').hidden = !fixed;
+        const read = builtin && !fixed ? card.fields.filter((field) => checkerReads(deployment, field.settingKey)) : [];
+        Object.assign(row.querySelector('[data-connection-fixed-fields]'), {
+            textContent: checkerFieldsNote(read.map((field) => field.label)), hidden: !read.length });
+        if (read.some((field) => field.secret || field.credential)) remove.hidden = true;
+        const inputs = fixed ? [...row.querySelectorAll('.connection-fields input')] : read.map((field) => fieldInput(row, field));
+        for (const input of inputs.filter(Boolean)) {
+            input.readOnly = true;
+            input.closest('.form-field')?.querySelector('.secret-clear')?.setAttribute('hidden', '');
+        }
+        if (fixed) { toggle.hidden = true; remove.hidden = true; }
     }
 
     function paintAll() {
@@ -310,6 +326,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     function load(settings = {}, { modelSlots = [] } = {}) {
         slots = modelSlots;
         pageSettings = settings;
+        deployment = deploymentOf(settings?._meta);
         entries = apiConnections(settings);
         listed = Array.isArray(settings?._meta?.connections) ? settings._meta.connections : [];
         adoptConnectionLabels(settings?._meta?.connections);

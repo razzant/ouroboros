@@ -475,6 +475,21 @@ def _child_row_held_for_root(api, event: Dict[str, Any]) -> bool:
     return status not in FINAL_STATUSES
 
 
+def _child_final_report(event: Dict[str, Any]) -> bool:
+    """Whether a row is a child task's own final report to its parent, never sent here.
+
+    Typed facts only: the child's lineage, no progress, card or lifecycle marking, no
+    host type and the plain assistant role. A child's deliberate message to the owner is
+    typed (``proactive_message``, ``relay_reply``, ``main_notice``), a host notice about
+    it carries the system role, and a row without lineage is never held back.
+    """
+    if str(event.get("delegation_role") or "").strip().lower() != "subagent":
+        return False
+    if event.get("is_progress") or event.get("card_row") or event.get("subagent_event") or event.get("system_type"):
+        return False
+    return str(event.get("role") or "assistant").strip().lower() == "assistant"
+
+
 _SUBAGENT_ICONS = {
     "scheduled": "🔵", "running": "🟡", "update": "🟡", "progress": "🟡",
     "completed": "✅", "completed_warn": "⚠️", "failed": "❌",

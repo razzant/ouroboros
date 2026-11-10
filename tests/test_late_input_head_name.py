@@ -34,15 +34,17 @@ QUESTIONS = (("q1", QUESTION), ("q2", "Should migrations run on deploy?"), ("q3"
 COINED = "Postgres for the new service"
 
 
+_LIGHTS: list = []  # this test's Light doubles, for _namers_settle_before_the_patches_undo
+
+
 class _Light:
-    """Light as the namer meets it: records each request it is asked to name, then coins ``coin`` or fails.
-    ``hold`` keeps the call open until it is set (a namer that settles late)."""
+    """Light as the namer meets it: the client the real ``project_naming.llm_project_name`` is handed
+    (``llm_client``). Records each request it is asked to name, then coins ``coin`` or fails. ``hold`` keeps
+    the call open until it is set (a namer that settles late)."""
 
     def __init__(self, coin="", hold=None):
         self.coin, self.hold, self.requests = coin, hold, []
-
-    def __call__(self, *_args, **_kwargs):  # LLMClient()
-        return self
+        _LIGHTS.append(self)
 
     def chat(self, messages, **_kwargs):
         self.requests.append(str(messages[0]["content"]).split("Owner request:\n", 1)[1])
@@ -150,9 +152,16 @@ def _lane(root, monkeypatch, coin="", *, hold=None, carrier=True):
     monkeypatch.setattr(mb, "load_state", lambda: {"session_id": "s-1"})
     monkeypatch.setattr(mb, "publish_event", lambda *_a, **_k: None)
     monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
-    light = _Light(coin, hold)
-    monkeypatch.setattr("ouroboros.llm.LLMClient", light)
-    monkeypatch.setattr("ouroboros.project_naming._light_naming_model", lambda: "light-test")
+    # Light reaches the namer as its client, never as ``ouroboros.llm.LLMClient``: a module the lane imports first
+    # (the carrier's ``agent`` and its loop) would keep that name bound to Light for the rest of the process (#2853).
+    from ouroboros import project_naming
+
+    light, namer = _Light(coin, hold), project_naming.llm_project_name
+    monkeypatch.setattr(project_naming, "llm_project_name",
+                        lambda *args, **kwargs: namer(*args, **{**kwargs, "llm_client": light}))
+    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "light-test")
+    for send in ("chat", "chat_async"):  # any other model client of the lane sends nothing
+        monkeypatch.setattr(f"ouroboros.llm.LLMClient.{send}", lambda *_a, **_k: pytest.fail("no provider call"))
     get_direct_activity_registry().clear()
     return SimpleNamespace(bridge=bridge, frames=frames, app=_decision_app(root, monkeypatch), light=light,
                            spare=spare, supervisor=_Supervisor(bridge))
@@ -228,6 +237,23 @@ def _join_namers(task_id):
         if thread.name in {f"namer-{task_id}", f"namer-call-{task_id}"}:
             thread.join(10)
             assert not thread.is_alive()
+
+
+@pytest.fixture(autouse=True)
+def _namers_settle_before_the_patches_undo(monkeypatch):
+    """A namer a test leaves waiting in Light (a ``hold`` never set: the test failed or ended first) is released and
+    joined while this test's patches still stand, never finishing later in the next test's queue and Light. Its
+    ``monkeypatch`` argument orders this teardown before monkeypatch's own undo."""
+    previous_threads = set(threading.enumerate())
+    yield
+    lights, _LIGHTS[:] = list(_LIGHTS), []
+    for light in lights:
+        if light.hold is not None:
+            light.hold.set()
+    for thread in threading.enumerate():
+        if thread not in previous_threads and thread.name.startswith("namer-"):
+            thread.join(10)
+            assert not thread.is_alive(), f"{thread.name} did not settle"
 
 
 def _receipt(lane, root, client_message_id, chat_id):
@@ -430,7 +456,8 @@ def test_a_press_admitted_after_its_card_changed_reads_the_press_it_accepted(tmp
                                      "lost_in_a_restart"])
 def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, monkeypatch, settles):
     """A Main head whose namer coined a name is paused and parked by the supervisor (RUNNING -> PENDING, the
-    one path a park and a detach take), then Resumed on a project worker, which runs no namer. The namer writes
+    one path a park and a detach take), then Resumed on its conversation carrier (never the idle project worker beside
+    it), whose resumed attempt runs no namer. The namer writes
     the record before its ``task_named`` frame, and the server handles that frame before the park, after it,
     after the Resume handed the worker the row's older copy, crossed with the resumed attempt's own first frame
     (two carrier processes' frames), or never: it was lost with its carrier when the application restarted
@@ -440,10 +467,10 @@ def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, 
     from supervisor import queue
     from supervisor.worker_process import run_worker_task
     from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _quiet_external
-    from tests.conversation_carrier_support import park_lane_pause
-    from tests.test_agent_restart_intent import worker
+    from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare, park_lane_pause
     from tests.test_restart_retention import _pool_events
     from tests.test_restart_saved_work import _stop_and_boot
+    from tests.worker_pool_support import affirm_ready
 
     _asker(tmp_path, 1)
     hold = threading.Event()
@@ -486,14 +513,18 @@ def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, 
     parked = _names(tmp_path, tid)
 
     assert queue.resume_budget_paused_task(tid)["ok"]
-    _, sent = worker(SimpleNamespace(workers=workers), monkeypatch)  # one READY project worker takes it
+    if lost:  # the restart's pool: its lane spare again
+        lane.spare = install_lane_spare(workers)
+    sent: list = []  # one READY idle project worker beside the lane's spare
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, in_q=SimpleNamespace(put=sent.append)))
     workers.assign_tasks()
-    [resumed] = sent
+    [resumed] = dispatched_tasks(lane.spare)
+    assert not [row for row in sent if row.get("type") != "worker_quiescence"], "my human's head returns on its lane"
     if settles == "after_the_resume":
         settle()
     lane.supervisor.holding = crossing
     again = _Head(tmp_path, during=settle if crossing else None)
-    run_worker_task(again, dict(resumed), wid=0, out_q=lane.supervisor, repo_dir=str(tmp_path),
+    run_worker_task(again, dict(resumed), wid=lane.spare.wid, out_q=lane.supervisor, repo_dir=str(tmp_path),
                     drive_root=str(tmp_path))
     if crossing:  # the first attempt's frame reaches the server first, the resumed attempt's own first frame last
         lane.supervisor.release(crossed=True)

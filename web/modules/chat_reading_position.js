@@ -20,6 +20,9 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
     let releasedBox = '';
     const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
+    // The box the place was last applied to (reflow). Until a changed box has had its reflow, a reader following the
+    // newest message follows it still, whatever a write finds in between (mutate).
+    let settledBox = feedBox();
     // Where the app's own write (mutate) moved the feed while a drag was released: a scroll there is that write's.
     let placed = null;
     // WebKit also ends each step of an animated page scroll, and each batch of a
@@ -90,7 +93,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (!visible()) return;
             if (state.stick) feed.scrollTop = feed.scrollHeight;
             else anchors.restore(viewportAnchor);
-            state.top = feed.scrollTop; state.remember(true); updateButton();
+            settledBox = feedBox(); state.top = feed.scrollTop; state.remember(true); updateButton();
         },
         scroll() {
             scrolls++;
@@ -120,7 +123,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (remoteContent && result && !state.stick) activity();
                 return result;
             }
-            const follow = forceFollow || (state.stick && state.nearBottom());
+            const follow = forceFollow || (state.stick && (state.nearBottom() || feedBox() !== settledBox));
             const anchor = follow ? null : anchors.capture(excludeAnchorNode);
             const height = feed.scrollHeight, top = feed.scrollTop;
             mutationDepth++;
@@ -192,6 +195,12 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     if (event.target === feed) { state.cancel(); state.stick = false; state.ownMove = true; }
                     dragging = event.target === feed ? 'held' : '';
                     return; // a scrollbar drag owns position, not archive traversal
+                }
+                // A second finger makes the touch a pinch, which only magnifies: no reading, paging or keyboard
+                // dismissal, until a new one-finger touch begins.
+                if (event.type === 'touchstart' || event.type === 'touchmove') {
+                    if (event.touches?.length > 1) axis = 'pinch';
+                    if (axis === 'pinch' && (event.type === 'touchmove' || event.touches?.length > 1)) return;
                 }
                 if (event.type === 'touchstart') {
                     const t = event.touches?.[0];

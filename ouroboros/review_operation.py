@@ -920,8 +920,10 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
     from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
     from ouroboros.triad_review import default_output_contract, request_output_shape
 
-    try:
-        gateway = read_owned_gateway()
+    from ouroboros.execution_domain import run_gateway
+
+    try:  # the engine the seat's invocation was bound to (``execution_domain``)
+        gateway = run_gateway(invocation, read_owned_gateway)
     except Exception:
         log.debug("attach-only review observation: daemon unavailable", exc_info=True)
         return None

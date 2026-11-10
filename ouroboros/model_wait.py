@@ -681,8 +681,12 @@ class TaskModelWait:
         separately (#1196) and is subtracted by every finite-lifetime read.
         ``None`` keeps whatever the task row already supplied.
         """
+        from ouroboros.deployment_policy import managed_model_roles
+
         with self.lock:
-            self.overrides = copy.deepcopy(saved.get("overrides") or {})
+            # A deployment's checker route is its policy's: a switch saved before it was managed never returns.
+            self.overrides = {role: override for role, override in copy.deepcopy(saved.get("overrides") or {}).items()
+                              if role not in managed_model_roles()}
             self.auto_continue = dict(saved.get("auto_continue") or {})
             clock = saved.get("quota_clock") or {}
             self.revision = int(clock.get("revision") or 0)
@@ -1174,21 +1178,6 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
         reason, gap = None, exc
     if reason:
         return reason
-    if owner is not None:
-        from ouroboros.store import acquisition_budget
-        from ouroboros.work_diagnostics import control_reason, withdraw_revoked
-
-        with acquisition_budget(0):
-            reason = control_reason(owner.task, owner.canonical_root, before_handoff=not handed_off)
-        if reason == "cancelled":
-            withdraw_revoked(owner.task, owner.canonical_root)  # custody settles it; never a task exception
-        if reason:
-            if reason == RAIL_OWNER_PAUSE and before_task_start:
-                fence = read_fence(owner.canonical_root, owner.task["root_task_id"])
-                if not fence_closed(fence) or not fence.get("fence_id"):
-                    return "owner_launch_authority_unavailable:diagnostic_pause_unbound"
-                owner.prestart_pause_fence = dict(fence)
-            return reason
     if handed_off:
         if gap is not None:
             raise gap

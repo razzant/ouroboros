@@ -8,6 +8,8 @@ on_unload failure) or drop the live->broken health memory.
 from __future__ import annotations
 
 
+from types import SimpleNamespace
+
 import pytest
 
 from ouroboros import extension_loader, extension_health
@@ -153,12 +155,13 @@ def test_regressed_extensions_skips_uninstalled_or_disabled(tmp_path, monkeypatc
     extension_health.record_extension_health(tmp_path, "ghost", status="broken", sha="b")
     # An uninstalled (unresolvable) skill must not raise a permanent false alarm.
     assert extension_health.regressed_extensions(tmp_path) == []
-    # Installed + enabled -> surfaced.
-    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda dr, name, **k: object())
-    monkeypatch.setattr("ouroboros.skill_loader.load_enabled", lambda dr, name: True)
-    assert [r["skill"] for r in extension_health.regressed_extensions(tmp_path)] == ["ghost"]
-    # Installed but disabled -> filtered out.
+    # The loader's effective switch governs the alarm, including a required package over saved Off.
+    loaded = SimpleNamespace(enabled=True)
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda dr, name, **k: loaded)
     monkeypatch.setattr("ouroboros.skill_loader.load_enabled", lambda dr, name: False)
+    assert [r["skill"] for r in extension_health.regressed_extensions(tmp_path)] == ["ghost"]
+    # Installed but effectively disabled -> filtered out.
+    loaded.enabled = False
     assert extension_health.regressed_extensions(tmp_path) == []
 
 

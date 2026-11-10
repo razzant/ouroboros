@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
@@ -13,6 +14,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.launch_custody import (  # noqa: F401 -- public re-exports
+    KeptService, KeptServiceStopRequest, KeptServiceStopResponse, KeptServicesResponse,
+)
 from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
     StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
 )
@@ -97,11 +101,13 @@ class TaskConstraintInbound(TypedDict, total=False):
 
 
 class CommandInbound(TypedDict):
-    """Inbound WS command message."""
+    """Inbound WS command message. ``ui_control`` (``{name, owner_text?}``) marks a command a host-drawn
+    control composed: the press is the owner's, its words are not, so no owner row is written for it."""
 
     type: Literal["command"]
     cmd: str
     client_surface: NotRequired[dict]
+    ui_control: NotRequired[dict]
 
 
 class PanicAcceptedOutbound(TypedDict):
@@ -556,7 +562,7 @@ class MessageAnnotationOutbound(TypedDict):
     routing_token: NotRequired[str]
     cause: NotRequired[str]
     reasoning_effort: NotRequired[str]  # #1539: the explicit start a New task picked from this card requests
-    # #966: this ACK is the SELECTED carrier of the act's owner notice (never delivery proof), answering reply_to.
+    # #966: the notice's SELECTED carrier (never delivery proof): this ACK, answering reply_to, or the System row.
     routing_notice_carrier: NotRequired[Literal["routing_ack", "system"]]
     reply_to: NotRequired[Dict[str, Any]]
     ts: NotRequired[str]
@@ -706,6 +712,7 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
@@ -857,13 +864,6 @@ class SettingsPolicyAxis(TypedDict, total=False):
     restart_required: bool
     pending: bool
     applies: Literal["restart", "next_task"]
-
-
-class SettingsPolicyState(TypedDict):
-    access: SettingsPolicyAxis
-    supervisor: SettingsPolicyAxis
-    review: SettingsPolicyAxis
-    running_task_snapshot: bool
 
 
 class SettingsMeta(SettingsNetworkMeta, total=False):
@@ -1477,7 +1477,7 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState, SettingsPolicyState  # noqa: E402,F401
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
     "conversation_finished", "chat", "command",
@@ -1580,6 +1580,7 @@ __all__ = [
     "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
+    "KeptService", "KeptServicesResponse", "KeptServiceStopRequest", "KeptServiceStopResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

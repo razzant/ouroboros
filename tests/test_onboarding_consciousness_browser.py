@@ -258,8 +258,22 @@ def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(
             page.screenshot(path=str(out / "first-setup-after-save-webkit-light.png"))
             page.wait_for_url(srv.url + "/", timeout=240_000)
             page.wait_for_timeout(1500)
+            # The press is the owner's act, its command the host's words (#2778): Main shows the one System
+            # receipt, never a "You · /bg start" bubble, on the live page and in the history a reload reads.
+            receipt = page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness")
+            receipt.first.wait_for(state="visible", timeout=60_000)
             page.screenshot(path=str(out / "first-setup-main-after-handoff-webkit-light.png"))
-            assert seen["commands"] == [{"cmd": "/bg start", "if_boot": _get(srv.url, "/api/health")["boot"]["since"]}], seen["commands"]
+            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "a press writes no owner bubble"
+            history = _get(srv.url, "/api/chat/history?limit=50")["messages"]
+            assert [row["text"] for row in history if row.get("role") == "user"] == [], history
+            assert [row["system_type"] for row in history if "Background consciousness" in row.get("text", "")] == ["command_reply"]
+            page.reload(wait_until="networkidle")
+            page.locator("#chat-messages .chat-bubble").filter(has_text="Background consciousness").first.wait_for(
+                state="visible", timeout=60_000)
+            assert page.locator("#chat-messages .chat-bubble.user").count() == 0, "nor after a reload"
+            page.screenshot(path=str(out / "first-setup-main-after-reload-webkit-light.png"))
+            assert seen["commands"] == [{"cmd": "/bg start", "if_boot": _get(srv.url, "/api/health")["boot"]["since"],
+                                         "ui_control": {"name": "setup_consciousness"}}], seen["commands"]
             assert len(seen["completions"]) == 1
             assert not any("onscious" in key for key in seen["completions"][0]), "nothing rides the save"
             assert not seen["errors"], seen["errors"]

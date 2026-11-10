@@ -94,3 +94,40 @@ def test_settings_get_exposes_policy_state_in_existing_meta(monkeypatch):
     response = asyncio.run(gateway.api_settings_get(Request(scope)))
     payload = json.loads(response.body)
     assert payload["_meta"]["policy_state"]["access"]["restart_required"] is True
+
+
+def test_a_managed_deployment_projects_what_its_policy_fixes_and_no_secret(tmp_path, monkeypatch):
+    import hashlib
+    import ouroboros.gateway.settings as gateway
+    from ouroboros import config, deployment_policy
+
+    policy = tmp_path / "admin" / "deployment-policy.json"
+    policy.parent.mkdir()
+    policy.write_text(json.dumps({"version": 1, "access": {"max": "advanced"}, "safety": {
+        "min_coverage": "full", "checker": {"model": "anthropic@safety::claude-opus-5-5"}},
+        "rules": "Keep customer records internal."}), encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-never-projected")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setattr(gateway, "_has_started_agent_tasks", lambda: False)
+    config.reset_runtime_mode_baseline_for_tests()
+    deployment_policy.reset_for_tests()
+    try:
+        unmanaged = gateway._build_policy_state({"OUROBOROS_RUNTIME_MODE": "cyber_pro"})
+        monkeypatch.setenv(deployment_policy.POLICY_ENV, str(policy))
+        deployment_policy.reset_for_tests()
+        managed = gateway._build_policy_state({"OUROBOROS_RUNTIME_MODE": "cyber_pro"})
+    finally:
+        deployment_policy.reset_for_tests()
+    assert "deployment" not in unmanaged and unmanaged["access"]["effective"] == "cyber_pro"
+    assert managed["deployment"] == {
+        "source": "deployment_policy", "version": 1,
+        "digest": hashlib.sha256(policy.read_bytes()).hexdigest()[:16],
+        "access_max": "advanced", "min_coverage": "full",
+        "checker": {"model": "anthropic@safety::claude-opus-5-5", "account": "", "fallbacks": [],
+                    "connections": ["anthropic@safety"], "fields": [], "local": False},
+        "allowed_exits": ["repeat_after_dangerous", "release_after_dangerous"],  # checker: no unjudged release
+        "organization_rules": True, "extensions": None,
+    }
+    assert (managed["access"]["effective"], managed["supervisor"]["effective"]) == ("advanced", "full")
+    assert "sk-ant" not in json.dumps(managed) and "Keep customer records" not in json.dumps(managed)

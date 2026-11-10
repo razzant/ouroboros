@@ -206,6 +206,10 @@ class DirectActivityEntry:
     actor: Any = field(default=None, repr=False, compare=False)
     execution: Optional[TurnExecution] = field(default=None, repr=False, compare=False)
     active_llm_call: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    # The active call's sent attempt context (``events._handle_main_llm_call_state``); kept past it. The public fact,
+    # derived from the private newest-first attempts below (``physical_attempt_context.fold_attempt``), unpublished.
+    context_attempt: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    context_attempts: Optional[List[Dict[str, Any]]] = field(default=None, repr=False, compare=False)
     parked_wait: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     parked_root: Any = field(default=None, repr=False, compare=False)
 
@@ -281,6 +285,8 @@ class DirectActivityEntry:
         active = self.active_llm_call
         if active and active.get("task_attempt") == row.get("task_attempt") and active.get("model_activity"):
             row["model_activity"] = dict(active["model_activity"])
+        if self.context_attempt and self.context_attempt.get("task_attempt") == row.get("task_attempt"):
+            row["context_attempt"] = dict(self.context_attempt)
         if wait_availability.get("complete") is False:
             row["phase"] = "unknown"
             if availability is not None:

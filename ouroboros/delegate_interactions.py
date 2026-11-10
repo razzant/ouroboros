@@ -472,9 +472,9 @@ def _delegate_answer(
     ever reaches the model as a raw traceback (F7).
     """
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import (
-        ClaudexorGateway,
-        ClaudexorSubscriptionWindowExhausted,
+        ClaudexorGateway, ClaudexorSubscriptionWindowExhausted,
         ClaudexorUnavailable,
     )
 
@@ -530,8 +530,8 @@ def _delegate_answer(
     def _left() -> float:
         return deadline - time.monotonic()
 
-    try:
-        gateway = ClaudexorGateway()
+    try:  # the engine the run was started on (``execution_domain``), never the current default
+        gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
         gateway.handshake(timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
     except ClaudexorUnavailable as exc:
         return _fail("delegate_answer", exc.code, str(exc), run_id=rid)
@@ -969,6 +969,7 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
     traceback.
     """
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 
     rid = str(run_id or "").strip()
@@ -1009,11 +1010,13 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
     def _left() -> float:
         return deadline - time.monotonic()
 
-    gateway = ClaudexorGateway()
-    try:
+    gateway = None
+    try:  # the engine the run was started on (``execution_domain``); an unreachable one is a typed failure
+        gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
         gateway.handshake(timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
     except ClaudexorUnavailable as exc:
-        gateway.close()
+        if gateway is not None:
+            gateway.close()
         return _fail("delegate_message", exc.code, str(exc), run_id=rid, message_id=mid)
     try:
         live_input = ""
@@ -1103,6 +1106,7 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
     from ouroboros.delegate_custody_reconcile import open_runs
     from ouroboros.delegate_message_store import placed_words, prepare
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
     from ouroboros.owner_relay import _quote_body, _rows_to_carry, carried_quote_line, stamped_refs
 
@@ -1127,7 +1131,8 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
             continue
         deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
         try:  # a missing or unreadable daemon descriptor is the engine's absence this round, never the task's end
-            gateway = ClaudexorGateway()
+            gateway = run_gateway(run, ClaudexorGateway,  # the run's own engine (``execution_domain``)
+                                  timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
         except ClaudexorUnavailable:
             log.warning("owner words placement into run %s waits: engine not discovered", run.run_id, exc_info=True)
             continue

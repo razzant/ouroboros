@@ -89,7 +89,6 @@ from ouroboros.workspace_executor import normalize_executor_ref
 log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
-    "work_diagnostic",
     "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
     "task_id",
     "parent_task_id",
@@ -112,6 +111,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
     "origin_message_ref",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
+    # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
+    "objective_author", "context_author", "owner_corpus", "ui_control",
+    "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
 })
 
 

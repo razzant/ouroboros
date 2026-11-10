@@ -175,7 +175,7 @@ ROOT_FACTS = """id => {
         card: box(card), contentRight: inner.right - pad - 20, contentLeft: inner.left + pad + 20,
         hscroll: card.scrollWidth > card.clientWidth + 1, order: parts,
         kids: kids.map((kid) => ({id: kid.dataset.taskId, role: kid.querySelector('[data-live-title]').textContent,
-            box: box(kid), titleBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-title]')),
+            box: box(kid), finished: kid.dataset.finished === '1', titleBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-title]')),
             chipBox: box(kid.querySelector(':scope > .chat-live-summary-button [data-live-phase]')),
             sideBox: box(kid.querySelector(':scope > .chat-live-summary-button .chat-live-summary-side')),
             when: kid.querySelector('[data-live-when]')?.hidden === false,
@@ -454,6 +454,18 @@ def test_root_card_live_terminal_and_reload_keep_one_composition(engine):
         ended = room["facts"]("w-root")
         _assert_b_root(ended, clock="", reviews="Reviews 2", buttons=("Turn into project",))
         assert ended["chip"] == "Done" and (ended["title"], ended["line"]) == (WORK_TITLE, WORK_LINE), ended
+        # Helpers' outcomes are the finished root's Details: a finished helper folds away, a running one stays in view.
+        assert {kid["finished"] for kid in ended["kids"]} == {True, False}, ended["kids"]
+        assert all((kid["box"] is None) == kid["finished"] for kid in ended["kids"]), ended["kids"]
+        # A finished helper that holds a running helper of its own stays in view while that one runs.
+        room["emit"]([("chat", {"chat_id": 1, "task_id": "w-grand-3d1f", "subagent_task_id": "w-grand-3d1f",
+                                "parent_task_id": "w-kid-7c2e", "root_task_id": "w-root", "delegation_role": "subagent",
+                                "subagent_event": "running", "subagent_role": "Сверка таблиц", "role": "assistant",
+                                "is_progress": True, "narration": True, "content": "Сверяю таблицы.",
+                                "text": "Сверяю таблицы.", "ts": _at("22:59:30")})])
+        _settle(page)
+        held = {kid["id"]: kid for kid in room["facts"]("w-root")["kids"]}
+        assert held["w-kid-7c2e"]["finished"] and held["w-kid-7c2e"]["box"], held
         room["rows"][:] = _history(WORK + end)
         room["load"]()
         page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').wait_for()
@@ -463,6 +475,11 @@ def test_root_card_live_terminal_and_reload_keep_one_composition(engine):
         for key in ("chip", "title", "line", "meta"):
             assert replayed[key] == ended[key], (key, ended, replayed)
         assert [kid["role"] for kid in replayed["kids"]] == [kid["role"] for kid in ended["kids"]], replayed
+        assert all((kid["box"] is None) == kid["finished"] for kid in replayed["kids"]), replayed["kids"]
+        page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"] > .chat-live-summary-button [data-live-disclosure]').click()
+        _settle(page)
+        opened = room["facts"]("w-root")
+        assert opened["expanded"] and all(kid["box"] for kid in opened["kids"]), opened["kids"]  # an open root shows every helper
 
 
 FOOT = """id => { const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]:not(.subagent)`);

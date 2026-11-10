@@ -13,10 +13,22 @@ import pathlib
 import subprocess
 from typing import Any, Dict, List
 
+from ouroboros import work_domain  # a work target's Git and files are the work domain's (its container)
+
+
+def git_apply(target: pathlib.Path, patch_path: Any, flags: List[str], **options: Any) -> Any:
+    """``git apply FLAGS <patch>`` in TARGET. A work target cannot see the service's patch file, so the open file
+    streams on stdin there (``-``), never read whole; any other target reads the file by its path, as before."""
+    if work_domain.is_work(target):
+        with open(patch_path, "rb") as patch:
+            return work_domain.run(["git", "apply", *flags, "-"], cwd=str(target), stdin=patch, capture_output=True,
+                                   **{key: value for key, value in options.items() if key in ("text", "env")})
+    return subprocess.run(["git", "apply", *flags, str(patch_path)], cwd=str(target), capture_output=True, **options)
+
 
 def _git_paths(target: pathlib.Path, args: List[str], paths: List[str], prefix: bytes = b"") -> Any:
     """One Git command reading NUL-delimited paths on stdin: byte-safe, immune to argv limits."""
-    return subprocess.run(["git", *args], cwd=str(target), capture_output=True, input=b"".join(
+    return work_domain.run(["git", *args], cwd=str(target), capture_output=True, input=b"".join(
         prefix + path.encode("utf-8", errors="surrogateescape") + b"\0" for path in paths))
 
 
@@ -36,7 +48,7 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
     --index-info`` takes back), then the flags Git keeps beside it, ``+assume-unchanged``, ``+skip-worktree``
     and ``+intent-to-add``. Raises when the index cannot be read: unknown is not untracked."""
     wanted, entries, flags = set(paths), {}, {}
-    listed = subprocess.run(["git", "ls-files", "--stage", "-v", "-z"], cwd=str(target), capture_output=True, check=True)
+    listed = work_domain.run(["git", "ls-files", "--stage", "-v", "-z"], cwd=str(target), capture_output=True, check=True)
     for line in listed.stdout.split(b"\0"):
         meta, _, raw = line.partition(b"\t")
         if (path := raw.decode("utf-8", errors="surrogateescape")) in wanted:
@@ -46,7 +58,7 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
                 {"+assume-unchanged"} if tag.islower() else set(), {"+skip-worktree"} if tag.upper() == "S" else set())
     # Porcelain status alone tells intent-to-add (index mode 000000) from a staged empty file; it writes no index.
     if candidates := [path for path, rows in entries.items() if len(rows) == 1 and rows[0].split()[1] in _EMPTY_BLOBS]:
-        status = subprocess.run(["git", "--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v2", "-z",
+        status = work_domain.run(["git", "--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v2", "-z",
                                  "--untracked-files=no", "--ignore-submodules=all", "--no-renames", "--", *candidates],
                                 cwd=str(target), capture_output=True, check=True)
         for record in status.stdout.split(b"\0"):
@@ -128,7 +140,7 @@ def restore_index(target: pathlib.Path, paths: List[str], indexed: Dict[str, tup
         lines = [f"0 {null}\t{path}" for path in changed]
         lines += [f"{entry}\t{path}" for path, record in before.items() if "+intent-to-add" not in record
                   for entry in record if not entry.startswith("+")]
-        restore = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=str(target), capture_output=True,
+        restore = work_domain.run(["git", "update-index", "-z", "--index-info"], cwd=str(target), capture_output=True,
                                  input="".join(f"{line}\0" for line in lines).encode("utf-8", errors="surrogateescape"))
         if restore.returncode:
             return _git_failure(restore)
@@ -148,7 +160,8 @@ def restore_index(target: pathlib.Path, paths: List[str], indexed: Dict[str, tup
 
 def sparse_absent(target: pathlib.Path, paths: List[str], indexed: Dict[str, tuple]) -> List[str]:
     """Skip-worktree paths absent from the tree before the apply: a three-way apply materializes them."""
-    return [path for path in paths if "+skip-worktree" in indexed.get(path, ()) and not os.path.lexists(target / path)]
+    return [path for path in paths if "+skip-worktree" in indexed.get(path, ()) and not (
+        work_domain.exists(target / path) if work_domain.is_work(target) else os.path.lexists(target / path))]
 
 
 def undo_applied(target: pathlib.Path, patch_path: Any, prepared: Any, paths: List[str], indexed: Dict[str, tuple],
@@ -163,14 +176,13 @@ def undo_applied(target: pathlib.Path, patch_path: Any, prepared: Any, paths: Li
             prepared.rollback()
     except Exception as exc:
         problems.append(f"file rollback: {type(exc).__name__}: {exc}")
-    tree_reverted = patch_path is None or all(subprocess.run(
-        ["git", "apply", *check, "--reverse", str(patch_path)], cwd=str(target), capture_output=True,
-    ).returncode == 0 for check in (["--check"], []))
+    tree_reverted = patch_path is None or all(
+        git_apply(target, patch_path, [*check, "--reverse"]).returncode == 0 for check in (["--check"], []))
     if not tree_reverted:
         problems.append("the patch could not be reversed in the working tree")
     for path in sparse if tree_reverted else ():
         try:  # the attempt's own file: the sparse checkout had none
-            (target / path).unlink(missing_ok=True)
+            work_domain.remove(target / path) if work_domain.is_work(target) else (target / path).unlink(missing_ok=True)
         except OSError as exc:
             problems.append(f"sparse file {path}: {exc}")
     if problem := restore_index(target, paths, indexed):

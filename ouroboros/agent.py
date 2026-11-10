@@ -977,7 +977,6 @@ class OuroborosAgent:
         from ouroboros.usage_accounting import usage_scope
         from ouroboros.model_wait import task_model_wait_scope
         from ouroboros.utils import in_worker_process
-
         from ouroboros.config import task_settings_scope
 
         with task_model_wait_scope(task=task, drive_root=self.env.drive_root, event_queue=self._event_queue,
@@ -991,8 +990,9 @@ class OuroborosAgent:
                 from ouroboros._usage_wait import retry_presend
                 from ouroboros.model_wait import dispatch_control_reason
                 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+                from ouroboros.deployment_extensions import hold_reason  # a required extension not running HERE
                 reason = retry_presend(lambda: dispatch_control_reason(waiter, before_task_start=True),
-                                       check=False, before_task_start=True)
+                                       check=False, before_task_start=True) or hold_reason()
                 if reason:
                     raise PhysicalDispatchInterrupted(reason)
             except Exception as exc:

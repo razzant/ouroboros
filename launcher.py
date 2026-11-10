@@ -144,17 +144,17 @@ _file_handler = RotatingFileHandler(
     backupCount=2,
     encoding="utf-8",
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
 _handlers: list[logging.Handler] = [_file_handler]
 if not getattr(sys, "frozen", False):
     _handlers.append(logging.StreamHandler())
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
 # Shared SSOTs: redaction filter, uncaught exceptions into these handlers; quiet request-URL lines (credentials).
 try:
+    from ouroboros.process_logging import install_exception_hooks, utc_log_formatter
     from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
     for _handler in _handlers:
+        _handler.setFormatter(utc_log_formatter())  # the JSON logs' clock (UTC, Z) over basicConfig's local fallback
         _handler.addFilter(_RedactFilter())
-    from ouroboros.process_logging import install_exception_hooks
     install_exception_hooks()
 except Exception:
     pass  # defensive: a broken observability import must not kill the launcher
@@ -799,8 +799,8 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_existing_repo_from_bundle()
-            if not _install_deps():
+            _sync_existing_repo_from_bundle()  # a deployment policy's packages are its administrator's: none synced
+            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not _install_deps():
                 # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "

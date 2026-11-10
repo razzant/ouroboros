@@ -153,18 +153,18 @@ _PENDING_FIELDS = (
 )
 
 def _saved_pending_task(row: dict) -> dict:
-    """A saved PENDING row's task with the queue time its outer row keeps (#1805).
-
-    The outer value decides, an explicit null included; only a row without one
-    falls back to a nested copy. Text and a finite epoch (``direct_pause.retain_direct_hold``
-    stamps one) are known; a time no row kept stays unknown (``None``), never this restore's clock.
+    """A saved PENDING row's task with the queue time its outer row keeps (#1805) and the carrier record a previous
+    release's row lacks, from its own result (``conversation_lane.saved_carrier``, #2870). The outer value decides,
+    an explicit null included; only a row without one falls back to a nested copy. Text and a finite epoch
+    (``direct_pause.retain_direct_hold`` stamps one) are known; a time no row kept stays unknown (``None``), never
+    this restore's clock.
     """
     task = dict(row["task"])
     value = row["queued_at"] if "queued_at" in row else task.get("queued_at")
     known = (isinstance(value, str) and value.strip()) or (
         isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)
-    task["queued_at"] = value if known else None
-    return task
+    from supervisor.conversation_lane import saved_carrier
+    return {**task, "queued_at": value if known else None, **saved_carrier(task, _queue().DRIVE_ROOT)}
 
 
 def parse_iso_to_ts(iso_ts: str) -> Optional[float]:

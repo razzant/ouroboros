@@ -117,7 +117,7 @@ def _reissue(a, reference):
 
 
 def _seat(a, reference, slot_id="second"):
-    record = load_record(ledger_root(a.ctx), reference["record_id"])
+    record = load_record(ledger_root(a.ctx), reference.get("record_id") or reference["review_record_id"])
     return record, {row["seat_id"]: row for row in record["rows"]}[slot_id]
 
 
@@ -173,12 +173,12 @@ def _producer(a):
     return review_operation.recover_review_producer(a.data, request, slot, row)
 
 
-def _noticed_and_ended(a, reference):
+def _noticed_and_ended(a, reference, surface="change"):
     """The living author reads its custody notice (the record stays owed); the seat's worker and its
     operation end, leaving only its completed producer receipt, still in flight. Returns the seat's token."""
     a.reviewer.release()
     a.release.set()
-    until(lambda: _notices(a, "change"))
+    until(lambda: _notices(a, surface))
     until(lambda: not review_custody._ACTIVE and not [op for op in review_operation._LIVE.values() if op.task_id == TASK])
     assert _seat(a, reference)[0]["state"] == "pending" and _producer(a).operation_state == "in_flight"
     return _session_row(a)["pending_invocation_id"]
@@ -262,6 +262,130 @@ def test_a_bound_run_still_running_keeps_the_ended_authors_record_owed_until_its
     assert not [call for reader in readers for call in reader.start_requests + reader.cancels]
     assert [key for key, _body in engine.posts] == [token], "the one accepted start, never re-posted"
     assert replay_owed_late_reviews(a.data) == NOTHING_OWED
+
+
+def _leave_commit(a):
+    """The author's paid commit wave, left on mail while the delegated seat still prepares its first launch."""
+    from tests.test_receptive_commit_review import _commit
+
+    first = {}
+    thread = _commit(a, first)
+    assert a.reviewer.sent["m1"].wait(60) and a.preparing.wait(60)
+    write_owner_message(a.data, "Is the review done?", TASK)
+    _join(thread)
+    assert first["result"].startswith("Review outcome returned before commit: reviewers are still running."), first
+    return _payload(first["result"])["review_reference"]
+
+
+def _cold_context(a, task_id, repo=None):
+    """A new controller's context for ``task_id``: nothing process-local of the original author's call carried over."""
+    from ouroboros.tools.registry import ToolContext
+
+    ctx = ToolContext(repo_dir=repo or a.repo, drive_root=a.data, task_id=task_id, emit_progress_fn=lambda *_a, **_k: None)
+    ctx.task_attempt, ctx.current_task_type, ctx._loop_mailbox_seen_ids = 1, "task", set()
+    ctx.branch_dev, ctx.owner_wait_callback, ctx.task_lifecycle_bound = a.ctx.branch_dev, lambda *_a, **_k: "parked", True
+    return ctx
+
+
+@pytest.mark.parametrize("case", ["terminal", "running", "unbound", "original_author", "forged_lineage", "foreign_repo"])
+def test_a_recorded_continue_successor_collects_its_predecessors_bound_run_attach_only(lost_reply, monkeypatch,
+                                                                                       tmp_path, case):
+    """#2901 (Astra, 9 Nov): the predecessor's paid commit wave left a delegated seat whose worker and operation ended
+    while its run, bound in custody, went on; the record still reads pending, and the predecessor's task ended. In a new
+    controller, the recorded Continue successor's collection of that reference reads the original run attach-only (one
+    GET; no POST, no Git) and returns its answer at $0, settling the record and the predecessor's row; the successor
+    may then decide. Controls: a run still going stays honestly pending; an unbound start is neither read as an answer
+    nor replayed (the daemon answers, so a POST would show); the original author's own collection settles the same run;
+    a forged lineage and another repository are refused before any read."""
+    from ouroboros import claudexor_daemon
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.review_state import _attempt_has_active_review_custody
+    from ouroboros.task_store import patch_document
+    from tests.test_receptive_commit_review import _commit_count, _git
+    from tests.test_review_reference_collection import _record_continue, _successor_scope
+
+    a, engine = lost_reply
+    reference = _leave_commit(a)
+    token = _noticed_and_ended(a, reference, surface="commit")
+    run_id = engine.runs[token][1]
+    if case != "unbound":  # a worker that lost only its observation leaves the accepted run bound (custody STARTED)
+        surface = str(custody.invocation_record(a.data, token).get("surface") or "multi_model_review")
+        custody.emit(a.data, custody.STARTED, {"run_id": run_id, "invocation_id": token, "task_id": TASK,
+                                               "surface": surface})
+    engine.daemon_down.clear()  # the daemon answers again: a replayed start would reach the engine
+    readers = []
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway",
+                        lambda **_kw: readers.append(FakeGateway()) or readers[-1])
+    FakeGateway.nonterminal = case == "running"
+
+    def sent():
+        return list(engine.posts), sum(len(gateway.start_requests) + len(gateway.cancels) for gateway in FakeGateway.instances)
+
+    def predecessor():
+        return next(item for item in load_state(a.data).attempts if (item.task_id, item.attempt) == (TASK, reference["attempt"]))
+    before, head, index = sent(), _git(a.repo, "rev-parse", "HEAD"), _git(a.repo, "write-tree")
+    actor, repo = TASK, a.repo
+    if case != "original_author":
+        actor = "successor-task"
+        write_task_result(a.data, TASK, "completed", chat_id=7, result="Continued by the owner.")
+        write_task_result(a.data, actor, "running", chat_id=7)
+        if case == "forged_lineage":  # a Continue claim whose hash-bound binding was never recorded
+            binding = {"successor_task_id": actor}
+            patch_document(a.data, TASK, lambda current: {**current, "continued_by": {
+                "successor_task_id": actor, "binding": binding, "binding_sha256": "0" * len(binding_sha(binding)),
+                "state": "admitted"}})
+        else:
+            _record_continue(a, TASK, actor)
+        if case == "foreign_repo":
+            repo = tmp_path / "foreign"
+            repo.mkdir()
+            _git(repo, "init", "-q")
+    ctx = _cold_context(a, actor, repo)
+    with (_parent(a) if actor == TASK else _successor_scope(a, actor)):
+        text = a.git._commit_reviewed(ctx, review_reference=reference)
+
+    assert sent() == before, "no POST and no cancel"
+    assert (_git(a.repo, "rev-parse", "HEAD"), _commit_count(a)) == (head, 1), "no commit"
+    if actor != TASK:
+        assert _git(a.repo, "write-tree") == index, "nothing staged"
+    record, seat = _seat(a, reference)
+    row = next(item for item in predecessor().triad_raw_results if item["slot_id"] == "second")
+    if case in {"forged_lineage", "foreign_repo"}:
+        assert ("does not name this author's review record" if case == "forged_lineage"
+                else "belongs to another repository") in text, text
+        assert not readers and record["state"] == "pending" and row["operation_state"] == "in_flight"
+        return
+    if case == "unbound":
+        assert "still running" in text and not readers, text
+        assert record["state"] == "pending" and seat["operation_state"] != "custody_lost", seat
+        assert not seat.get("reported_cause"), "an unbound start is no answer"
+        assert (row["operation_state"], row["pending_invocation_id"]) == ("in_flight", token), "left as recorded"
+        assert custody.invocation_record(a.data, token)["state"] == "pending", "nothing bound or replayed it"
+        return
+    assert [reader.run_gets for reader in readers] == [[run_id]], "one bounded read of the bound run"
+    if case == "running":
+        assert "still running" in text and record["state"] == "pending" and row["operation_state"] == "in_flight", text
+        assert _attempt_has_active_review_custody(predecessor())
+        return
+    assert (record["state"], record["verdict"]["aggregate"], seat["status"]) == ("settled", "PASS", "responded"), text
+    assert SESSION_ANSWER in str(row.get("raw_text") or "") and row["operation_state"] in {"settled", "late_settled"}, row
+    settled = predecessor()
+    assert (settled.paid, settled.status, settled.phase) == (True, "reviewed", "review_only")
+    assert not _attempt_has_active_review_custody(settled)
+    if case == "original_author":  # its own gate's handback of the same collected outcome
+        assert text.startswith("Review outcome returned before commit.") and SESSION_ANSWER in text, text
+        return
+    assert text.startswith("Review outcome collected read-only") and "recorded Continue" in text, text
+    payload = _payload(text)
+    assert payload["state"] == "settled" and payload["cost"]["usd"] == 0, payload
+    assert all(payload["review_reference"][key] == value for key, value in reference.items())
+    decision = {"disposition": "accepted", "rationale": "I read the predecessor's collected review; landing it."}
+    with _successor_scope(a, actor):
+        landed = a.git._commit_reviewed(ctx, "", review_reference=reference, author_disposition=decision)
+    assert _commit_count(a) == 2 and sent() == before and [r.run_gets for r in readers] == [[run_id]], landed
+    own = [item for item in load_state(a.data).attempts if item.task_id == actor and item.status == "succeeded"]
+    assert len(own) == 1 and own[0].author_disposition["review_reference"] == reference
+    assert not predecessor().author_disposition, "the predecessor's row records no decision it never made"
 
 
 def test_a_reissue_while_the_start_reply_is_outstanding_waits_on_the_live_seat(session_wave, monkeypatch):

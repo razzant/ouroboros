@@ -447,7 +447,9 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id",
                                           "delegated_runs_unreconciled") if key in data}
     if isinstance(data.get("model_waits"), dict):
-        display["model_waits"] = data["model_waits"]
+        from ouroboros.deployment_policy import served_waits
+
+        display["model_waits"] = served_waits(data["model_waits"])
     if data.get("status") or data.get("outcome_axes"):
         display["outcome_axes"] = normalize_outcome_axes(data)
     if isinstance(data.get("cancel_origin"), dict):
@@ -538,7 +540,7 @@ def _raw_work_facts(row: dict) -> dict:
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
-                                        "_presence_turn") if row.get(key)}
+                                        "_presence_turn", "silence_attention") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
     return {**facts, **({"continuation": edges} if edges else {})}
 
@@ -661,7 +663,10 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
+                    "context_attempt": meta.get("context_attempt"),
                     "owner_wait": dict(meta.get("owner_wait") or {}),
+                    # The live silence fact is the RUNNING row's, never its task's (silence_attention.observe).
+                    "silence_attention": dict(meta.get("silence_attention") or {}),
                     "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
                 for task_id, meta in queue_mod.RUNNING.items()]
@@ -824,6 +829,8 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
                 **({"model_activity": row["model_activity"]} if row.get("model_activity")
                    and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
+                **({"context_attempt": row["context_attempt"]} if isinstance(row.get("context_attempt"), dict)
+                   and row["context_attempt"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }
@@ -857,8 +864,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
         from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
-            if task_id in census_ids:
-                continue  # a conversation turn the lane carries is already its own direct row
+            if task_id in census_ids:  # a conversation turn the lane carries is already its own direct row,
+                if work_facts is not None and not owners_only and row.get("silence_attention"):  # its silence: RUNNING's
+                    work_facts.setdefault(task_id, {})["silence_attention"] = row["silence_attention"]
+                continue
             if task_id:
                 root = _is_root(task_id, row)
                 if root:

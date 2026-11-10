@@ -84,17 +84,20 @@ def _configured_session(ctx: Any) -> bool:
 
 
 def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
-    """READ-ONLY liveness probe: one short engine poll, no lease/settle/cancel.
+    """READ-ONLY liveness probe: one short engine poll of the run's own engine, no lease/settle/cancel.
 
     Requires a POSITIVE non-terminal engine state. A gateway failure, refusal,
     or state-less payload is not evidence of a live leaf (fail-closed)."""
     import contextlib
 
     try:
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
+        from ouroboros import claudexor_daemon
         from ouroboros.delegate_progress import bounded_poll
+        from ouroboros.execution_domain import run_gateway
 
-        with contextlib.closing(ensure_owned_gateway(admission_wait_sec=0)) as gateway:
+        entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1]
+        with contextlib.closing(run_gateway(entry, lambda: claudexor_daemon.ensure_owned_gateway(
+                admission_wait_sec=0), timeout_sec=5.0)) as gateway:
             detail = bounded_poll(gateway, run_id, 5.0)
         state = str(custody.summary_of(detail).get("state") or "")
     except Exception:
@@ -227,6 +230,25 @@ def _wake_is_control(payload: Dict[str, Any]) -> bool:
     return False
 
 
+def _whole_wake(ctx: Any, payload: Dict[str, Any]) -> Any:
+    """The wake a receipt carries whole before its ACK: a spilled one's exact source (the same wake id), else
+    None for the no-resend exit. A summary would acknowledge questions and mail it never showed."""
+    delivery = payload.get("wake_delivery")
+    if not isinstance(delivery, dict) or delivery.get("complete") is not False:
+        return payload
+    wake_id, marker = payload.get("supervision_wake_id"), {k: payload[k] for k in ("replay_of",) if k in payload}
+    try:
+        from ouroboros.artifacts import read_actor_source_bytes, task_id_for_artifacts
+
+        whole = json.loads(read_actor_source_bytes(pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx),
+                                                   delivery.get("source")))
+    except Exception:
+        log.warning("Spilled wake source unreadable for the hold receipt", exc_info=True)
+        return None
+    return {**marker, **whole} if isinstance(whole, dict) and wake_id and whole.get("supervision_wake_id") == wake_id \
+        else None
+
+
 def _append_wake_receipt(
     messages: List[Dict[str, Any]], payload: Dict[str, Any], run_id: str,
     attempt_id: str,
@@ -341,6 +363,9 @@ def hold_step(
         # A refusal/fault is a daemon statement, not a leaf wake: no proof of a
         # live leaf, so no paid resume — take the honest no-resend terminal.
         return _exit_terminal("wait_" + str(payload.get("status")))
+    payload = _whole_wake(ctx, payload)
+    if payload is None:
+        return _exit_terminal("wake_source_unreadable")
     _append_wake_receipt(messages, payload, run_id, attempt_id)
     acked = False
     for _ in range(_ACK_ATTEMPTS):

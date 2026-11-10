@@ -230,7 +230,10 @@ const HELD_FACTS = {
                 + `${Array.isArray(b.effects) && b.effects.length > 1 ? 'are' : 'is'} not confirmed`,
         })[b.reason] || `a ${tool} call of task ${b.task_id} is held`;
     },
-    merge_operation: (b) => `a merge of task ${b.task_id} is not settled`,
+    merge_operation: (b) => ({
+        merge_effect_unknown: `the outcome of a merge request of task ${b.task_id} is unknown`,
+        merge_queued: `a merge of task ${b.task_id} is queued on GitHub`,
+    })[b.reason] || `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
         : b.stop_outcome === 'pending_invocation_unbound'

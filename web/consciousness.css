@@ -92,6 +92,16 @@ textarea.ui-control.consciousness-owner-words {
 .cx-wake-time { color: var(--text-meta); font-variant-numeric: tabular-nums; }
 .cx-wake-text { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); }
 .cx-wake-outcome { font-size: var(--type-meta); color: var(--text-meta); }
+/* A wake in a place is a door to that place's sheet: the whole row is the target, one state layer over all of it;
+   under a finger the row itself reaches the touch minimum, so neighbouring rows never share a reach. */
+.cx-wake-door {
+    width: 100%; margin: 0; padding: 0; border: 0; border-radius: var(--radius-inner); background: transparent;
+    font-family: inherit; font-weight: inherit; text-align: start; cursor: pointer;
+}
+.cx-wake-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.cx-wake-door:disabled { cursor: default; }
+@media (hover: hover) { .cx-wake-door:not(:disabled):hover { background: var(--menu-item-hover); } }
+@media (pointer: coarse) { .cx-wake-door { min-height: var(--touch-target-min); } }
 .cx-doors { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-2); }
 .cx-door {
     padding: 0; border: 0; border-radius: var(--pill-radius); background: transparent; cursor: pointer;
@@ -258,7 +268,7 @@ textarea.ui-control.consciousness-owner-words {
 /* On the desk the Connect list is as tall as its rows (a phone keeps the reader's full sheet). */
 /* A modal dialog keeps the engine's inset 0, so only fit-content (never auto) sizes it to its rows. */
 :root[data-layout="docked"] .document-reader.place-connect { height: fit-content; }
-:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5))); }
+:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5) - var(--inset-top))); }
 .place-sheet .document-reader-title { display: flex; align-items: center; gap: var(--space-3); white-space: normal; }
 .place-sheet-body { display: flex; flex-direction: column; gap: var(--space-5); container: placesheet / inline-size; }
 /* One column under the sheet's head: the sections start where its title starts. */

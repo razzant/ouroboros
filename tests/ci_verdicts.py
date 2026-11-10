@@ -2,8 +2,8 @@
 
 scripts/ci_retry.py writes a pass's verdict.json beside its projection (results.json and
 events.jsonl, tests/ci_evidence.py) and runs each retry round in `retry-<k>` beside them.
-Here is what both need to read them: a report row and a session's final export, a
-verdict and whether it lets a red session pass, the run's weight table the lane plugins
+Here is what both need to read them: a report row, the tests it shows failing as their
+xfail marker expects, a session's final export, a verdict and whether it lets a red session pass, the run's weight table the lane plugins
 shard by (`durations_table`), the table one run's projections make for the next ones
 (`collect_durations`), and the complete list of a run's flaky, accepted, failed and
 never-run tests (`render_run_verdict`). Stdlib only: tests/ci_evidence.py's CLI runs these
@@ -59,7 +59,32 @@ def valid(row) -> bool:
             and all(isinstance(row.get(key), str) for key in ("nodeid", "phase", "outcome"))
             and (row["phase"] in PHASES or row["phase"] == "crash")
             and row["outcome"] in {"passed", "failed", "skipped"}
-            and ("is_subtest" not in row or type(row["is_subtest"]) is bool))
+            and ("is_subtest" not in row or type(row["is_subtest"]) is bool)
+            and (row.get("wasxfail") is None or isinstance(row["wasxfail"], str)))
+
+
+def expected_failures(rows) -> dict[str, str]:
+    """{nodeid: its marker's reason} of each test that ran and failed as its xfail marker expects (XFAIL).
+
+    pytest reports that call as "skipped" with the reason in `wasxfail`; tests/ci_evidence.py keeps both and
+    gives every skipped row the field (None for a real skip). Its setup and teardown must be on record as passed,
+    and every other report of the test too: an xfail at setup (`run=False`, a failed fixture) never ran the test,
+    one at teardown is a teardown error the marker absorbed, a call ended by `pytest.xfail()` (error type
+    `XFailed`) opted out as a skip does, and a session that ended before one of the phases was reported (a lost
+    worker, a torn journal) does not show the test ran whole. A skipped row without the field predates it and
+    proves nothing; a strict XPASS is a failed call.
+    """
+    reasons, spoiled, passed = {}, set(), set()
+    for row in rows:
+        if (row["phase"] == "call" and row["outcome"] == "skipped" and isinstance(row.get("wasxfail"), str)
+                and row.get("error_type") != "XFailed" and not row.get("is_subtest")):
+            reasons.setdefault(row["nodeid"], row["wasxfail"])
+        elif row["outcome"] != "passed":
+            spoiled.add(row["nodeid"])
+        elif row["phase"] in ("setup", "teardown") and not row.get("is_subtest"):
+            passed.add((row["nodeid"], row["phase"]))
+    return {node: reason for node, reason in reasons.items()
+            if node not in spoiled and {(node, "setup"), (node, "teardown")} <= passed}
 
 
 def error_text(row) -> str:

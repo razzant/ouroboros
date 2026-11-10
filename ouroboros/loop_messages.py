@@ -238,10 +238,14 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     Other runs record the first user row, labelled only by what the host knows:
     ``initial_user`` when the owner door stamped this run (``run_origin``'s
     ``owner_ingress``), ``initial_text`` otherwise — a Presence event, a wake, a
-    schedule, a follow-up, a child's work order or an unmarked context. The bytes of
-    an owner row do not change, so ``owner_source_sha256`` stays what it was; the
-    label is read by the models that judge the corpus (acceptance, safety, the
-    post-task synthesis), never branched on by the host.
+    schedule, a follow-up, a child's work order or an unmarked context; a first turn
+    the host composed for my human's press of a control (``objective_author`` kind
+    ``ui_control``) is ``initial_text`` although the press stamped the run. A
+    schedule's text (its own schedule's, and its tree's by value) follows on every
+    path as ``schedule_text``: provenance, outside the owner sources, owed nothing.
+    The bytes of an owner row do not change, so ``owner_source_sha256`` stays what it
+    was; the label is read by the models that judge the corpus (acceptance, safety,
+    the post-task synthesis), never branched on by the host.
     """
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
@@ -251,7 +255,15 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
     from ouroboros.owner_continue import ROW_IDS
-    from ouroboros.owner_words import OWNER_SOURCES, PLACE_CONFIRMED, answered_card_reply, place_confirmed_words, place_row_facts, reply_target
+    from ouroboros.owner_words import (
+        OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply, place_confirmed_words,
+        place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
+    )
+
+    def schedule_text() -> None:  # the schedule this run fired from, then what its tree carried (a helper's field)
+        for item in (*scheduled_text_items(metadata, getattr(ctx, "task_contract", None)), *task_schedule_items({"metadata": metadata})):
+            _loop()._record_owner_directive(ctx, source=SCHEDULE_TEXT, content=item["content"], carried=True,
+                                            origin={key: item.get(key) for key in SCHEDULE_ITEM_IDS})
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
@@ -265,14 +277,15 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
-            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
+        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words and a schedule's text as provenance (owed nothing)
+            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") in {PLACE_CONFIRMED, SCHEDULE_TEXT}):
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in (*ROW_IDS[1:], "ts", "received") if row.get(key)},
+                    origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
+        schedule_text()
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
     event = presence.get("event") or {}
@@ -286,14 +299,17 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
-            stamped = run_origin({"metadata": metadata})["owner_ingress"]
+            # The door's stamp names who started the run; a control's prompt is the host's words even then.
+            composed = isinstance(author, dict) and author.get("kind") == "ui_control"
+            stamped = run_origin({"metadata": metadata})["owner_ingress"] and not composed
             target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
             # A late answer's head: my human's words with the card they answered, never the host's frame.
             late_words = late_answer_owner_text(answered) if answered and stamped else ""
             card = answered_card_reply(answered, late["task_id"]) if late_words else {}
             _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
                                             content=late_words or message.get("content"), reply_to=card or target or None)
-            return
+            break
+    schedule_text()
 
 
 def owner_source_sha256(ctx: Any) -> str:

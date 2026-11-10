@@ -907,7 +907,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         // Rewritten only when the record changes, so a refresh keeps the owner's selection in it.
         const raw = observed ? JSON.stringify(observed, null, 2) : '';
         if (attemptRawText.textContent !== raw) attemptRawText.textContent = raw;
-        attemptRestore.hidden = !view.restoreTarget;
+        attemptRestore.hidden = !view.restoreTarget || Boolean(latestStatus?.managed_by_deployment);
         attemptRestore.dataset.target = view.restoreTarget || '';
         attemptRestore.disabled = replaceInFlight || Boolean(latestStatus?.update_tx?.active)
             || ['preflighting', 'updating', 'restarting'].includes(phase);
@@ -915,6 +915,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
 
     function render() {
         const verdict = updateVerdict(latestStatus || {}, phase, lastAppVersion());
+        // A managed deployment's administrator replaces the serving program (deployment_policy): no update, replace,
+        // restore or recovery point is offered here; a restart of the same program stays.
+        const managed = String(latestStatus?.managed_by_deployment || '');
+        if (managed) Object.assign(verdict, { headline: 'Managed by your organization', hint: managed,
+            action: verdict.action?.id === 'restart' ? verdict.action : null });
+        page.querySelector('.updates-recovery').hidden = Boolean(managed);
         paintStatusMark(dot, { shape: TONE_MARKS[verdict.tone] ? 'dot' : 'none', hue: TONE_MARKS[verdict.tone] || 'ink' });
         summary.textContent = verdict.headline;
         const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
@@ -1195,7 +1201,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             const resp = await apiFetch('/api/command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cmd: '/restart' }),
+                body: JSON.stringify({ cmd: '/restart', ui_control: { name: 'restart' } }),
             });
             if (!resp.ok) throw new Error(`restart command refused (HTTP ${resp.status})`);
             showToast('Restart requested.', 'success');

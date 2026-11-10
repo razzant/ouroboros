@@ -283,7 +283,10 @@ def test_names_that_point_outside_or_link_elsewhere_stay_text_and_nothing_is_wri
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("../../escape.txt", "outside")
         archive.writestr("/abs/root.txt", "absolute")
-        archive.writestr("C:\\windows\\drive.txt", "drive")
+        drive = zipfile.ZipInfo("C:\\windows\\drive.txt")
+        # ZipInfo normalizes Windows separators; preserve this hostile stored name.
+        drive.filename = drive.orig_filename
+        archive.writestr(drive, "drive")
         link = zipfile.ZipInfo("link-to-secret")
         link.create_system = 3
         link.external_attr = (stat.S_IFLNK | 0o777) << 16
@@ -291,6 +294,11 @@ def test_names_that_point_outside_or_link_elsewhere_stay_text_and_nothing_is_wri
         archive.writestr("invoice\u202etxt.exe", "bidi")
         archive.writestr("two\nlines.txt", "newline")
         archive.writestr("folder/", "")
+    raw = path.read_bytes()
+    # Both the local header and central directory must contain the exact name.
+    assert raw.count(b"C:\\windows\\drive.txt") == 2
+    assert b"C:/windows/drive.txt" not in raw
+
     def tree():
         return sorted(str(rel) for rel in (item.relative_to(tmp_path) for item in tmp_path.rglob("*")) if rel.parts[0] != "data")
 
@@ -305,6 +313,10 @@ def test_names_that_point_outside_or_link_elsewhere_stay_text_and_nothing_is_wri
     assert '6. "two\\u000alines.txt"' in listing and "two\nlines" not in listing
     assert '7. "folder/" (folder)' in listing
     assert registry.execute("read_archive", {"path": "tricky.zip", "entry": 1}).endswith("\n\noutside")
+    drive_read = registry.execute_result("read_archive", {"path": "tricky.zip", "member": "C:\\windows\\drive.txt"})
+    assert drive_read.text.endswith("\n\ndrive")
+    assert drive_read.meta["archive_member_view"]["entry"] == 3
+    assert drive_read.meta["archive_member_view"]["member_name_sha256"] == hashlib.sha256(b"C:\\windows\\drive.txt").hexdigest()
     assert registry.execute("read_archive", {"path": "tricky.zip", "entry": 4}).endswith("\n\n/etc/passwd")
     assert registry.execute("read_archive", {"path": "tricky.zip", "member": "invoice\u202etxt.exe"}).endswith("bidi")
     assert "is a folder" in registry.execute("read_archive", {"path": "tricky.zip", "entry": 7})

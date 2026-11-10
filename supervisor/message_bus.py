@@ -511,8 +511,8 @@ class LocalChatBridge:
         Web consumes the WS annotation; non-Web skills receive the same additive typed envelope on
         their existing outbound subscription.  ``text`` stays empty and ``suppress_bubble`` is
         explicit, so legacy transports do not invent a human-visible mirror message.
-        ``routing_notice_carrier`` names this ACK the selected carrier of the act's owner notice
-        (never delivery proof); ``reply_to`` is the owner message that notice answers.
+        ``routing_notice_carrier`` names the selected carrier of the act's owner notice, this ACK or
+        the System row (never delivery proof); ``reply_to`` is the owner message this ACK's notice answers.
         """
         payload = {
             "type": "message_annotation",

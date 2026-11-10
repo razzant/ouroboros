@@ -102,7 +102,18 @@ function missingGrantLoadError(skill) {
 const PACKAGES_INSTALLABLE = ['deps_missing', 'deps_failed', 'deps_stale'];
 const packagesInstallable = (skill) => PACKAGES_INSTALLABLE.includes(String(skill?.live_reason || ''));
 
+// A package the organization requires is its administrator's to change: no removal, update or repair is offered.
+const requiredBy = (skill) => (skill?.deployment && typeof skill.deployment === 'object' ? skill.deployment : null);
+// An extension under a deployment's execution domain: whether the service runs its code (`trust`), and whether its
+// name is the administrator's, so its doors refuse every change but turning it off.
+const trustOf = (skill) => (skill?.trust && typeof skill.trust === 'object' ? skill.trust : null);
+const untrusted = (skill) => trustOf(skill)?.state === 'untrusted';
+const administered = (skill) => Boolean(requiredBy(skill) || trustOf(skill)?.administered);
+// An update, review or repair of code the service will not run, or of the administrator's package, leads nowhere.
+const offersChanges = (skill) => !administered(skill) && !untrusted(skill);
+
 function repairableSource(skill) {
+    if (!offersChanges(skill)) return false;
     const source = sourceTag(skill);
     const payloadRoot = String(skill.payload_root || '');
     // self_authored payloads live under skills/external/, so the payload-root
@@ -207,6 +218,36 @@ function problemCountText(skill) {
     return `Review found ${plural(problems, 'problem')}${notes ? ` and ${plural(notes, 'note')}` : ''}.`;
 }
 
+const REQUIRED_LOCK = 'Required by your organization.';
+const REQUIRED_WAIT = {
+    hold: 'Ordinary work waits until it runs. Stop, Panic and Settings stay available.',
+    warn: 'Work goes on while it isn’t running.',
+};
+
+/** The organization's requirement that this package does not meet here, in its own words (no value, no secret). */
+function requiredTray(required) {
+    return trayHtml({ tone: 'warn', attrs: 'data-required-unmet',
+        sentence: `Your organization requires it, and it isn’t running: ${escapeHtml(boundedText(required.detail || required.reason || '', 240))}`,
+        note: escapeHtml(REQUIRED_WAIT[required.when_unmet] || '') });
+}
+
+/**
+ * The organization's required extensions that are not running, above the list (``/api/extensions`` ``deployment``):
+ * a missing package has no card, so its row is said here. '' when every requirement runs or nothing is required.
+ */
+export function renderRequirementNotice(deployment) {
+    const rows = (deployment?.required || []).filter((row) => row?.state === 'unmet');
+    if (!rows.length) return '';
+    const items = rows.map((row) => `<li data-required-name="${escapeHtml(row.name)}"><code data-i18n-authored>${escapeHtml(row.name)}</code> · ${escapeHtml(boundedText(row.detail || row.reason || '', 240))}</li>`).join('');
+    const subject = rows.length === 1 ? 'an extension that isn’t' : `${rows.length} extensions that aren’t`;
+    const process = rows[0]?.process?.role ? `Seen by the ${escapeHtml(rows[0].process.role)} process; each worker checks its own before it starts work.` : '';
+    return `<section class="skills-org-requirements" data-tone="warn" aria-label="Required by your organization" data-skills-org-requirements>
+        <p class="skills-org-requirements-lead">Your organization requires ${subject} running here.</p>
+        <ul class="skills-org-requirements-list">${items}</ul>
+        <p class="skills-org-requirements-note">${escapeHtml(REQUIRED_WAIT[deployment.when_unmet] || '')} ${process}</p>
+    </section>`;
+}
+
 const actionAttrs = (name, action, extra = '') => `data-skill="${escapeHtml(name)}" data-skill-action="${escapeHtml(action)}"${extra ? ` ${extra}` : ''}`;
 const smallButton = (label, name, action, extra = '') => buttonHtml(label, { tone: 'default', attrs: actionAttrs(name, action, extra) });
 const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionAttrs(name, 'attest_review'), label);
@@ -267,7 +308,13 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         return { chip, trays, overflow: [], needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
     }
 
-    if (install?.pending_update) {
+    if (untrusted(skill)) {
+        // The organization's choice, not the owner's move: a neutral fact with nothing here that would make it run.
+        if (!skill.lifecycle_pending) chip = chipHtml('Doesn’t run here', 'neutral');
+        trays.push(trayHtml({ sentence: escapeHtml(boundedText(trustOf(skill).detail || '', 240)),
+            note: 'New extensions and their versions come from your organization’s administrator.' }));
+        lockReason = 'Only extensions your organization delivers run here.';
+    } else if (install?.pending_update) {
         chip = chipHtml('Reviewing…', 'neutral', { work: true });
         trays.push(trayHtml({ sentence: `Updating to ${escapeHtml(install.pending_update.version)}: it stays off until the review finishes.` }));
         lockReason = 'Can’t turn on until the review finishes.';
@@ -335,7 +382,11 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         const parts = [];
         if (keys.length) parts.push(`Wants to use ${escapeHtml(keys.join(', '))}.`);
         if (permissions.length) parts.push(`Wants your permission to ${escapeHtml(grantPhrases(permissions).join(', '))}.`);
-        trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.',
+        // The same fact the readiness line carries: the grant exists, for an earlier version of the files.
+        const earlier = new Set(grants.earlier_grant ? [...(grants.earlier_grant.keys || []), ...(grants.earlier_grant.permissions || [])] : []);
+        const share = [...keys, ...permissions].every((item) => earlier.has(item)) ? 'this' : 'some of this';
+        const note = earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '';
+        trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.', note,
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }
 
@@ -343,7 +394,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (secrets.tray) trays.push(secrets.tray);
     if (secrets.needs) needs = true;
 
-    const updateAction = update && !install?.pending_update
+    const updateAction = update && !install?.pending_update && offersChanges(skill)
         ? smallButton(modified || install?.base_known === false ? 'Update…' : 'Update', name, 'update') : '';
     if (withdrawn) {
         needs = true;
@@ -355,8 +406,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             note: withdrawn.version && updateAction
                 ? `You can update to ${escapeHtml(versionText(update.version))}, or uninstall it.`
                 : 'It won’t be installed anew. You can uninstall it.',
-            actions: (withdrawn.version ? updateAction : '') + smallButton('Uninstall', name, 'uninstall') }));
-    } else if (install?.update_rejected) {
+            actions: (withdrawn.version ? updateAction : '') + (administered(skill) ? '' : smallButton('Uninstall', name, 'uninstall')) }));
+    } else if (install?.update_rejected && offersChanges(skill)) {
         needs = true;
         const rejected = install.update_rejected;
         trays.push(trayHtml({ sentence: escapeHtml(updateRejectionSentence(rejected)),
@@ -364,7 +415,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             actions: updateAction
                 + (['review_blockers', 'preflight_failed'].includes(rejected.reason) ? smallButton('See findings', name, 'read_findings') : '')
                 + (canUpdateWithoutReview(install) ? smallButton('Update without review', name, 'update_without_review') : '') }));
-    } else if (update && !install?.pending_update) {
+    } else if (update && !install?.pending_update && offersChanges(skill)) {
         const v = escapeHtml(versionText(update.version) || 'A new version');
         trays.push(modified || install?.base_known === false
             ? trayHtml({ sentence: `${escapeHtml(sourceName)} has ${v}. ${!modified ? 'Its original files aren’t known' : modified.by === 'owner' ? 'You changed this skill here' : 'This skill was changed here'}, so updating asks what to keep.`,
@@ -388,10 +439,15 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         pageHolds.forEach((hold) => pageTrays.push(pageTray('hold', hold)));
     }
     if (!skill.enabled && !lockReason && conflict) lockReason = `Conflicts with ${conflict}.`;
-    const allTrays = [...pageTrays, ...trays];
+    const required = requiredBy(skill);
+    const requiredTrays = required?.state === 'unmet' ? [requiredTray(required)] : [];
+    if (requiredTrays.length) needs = true;
+    const allTrays = [...requiredTrays, ...pageTrays, ...trays];
     return {
-        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, lockReason: skill.enabled ? '' : lockReason, sourceName, modified, install,
-        update: Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
+        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, sourceName, modified, install,
+        // The switch shows what runs; whether it may be off is the organization's (the toggle refuses it too).
+        lockReason: required ? REQUIRED_LOCK : (skill.enabled ? '' : lockReason),
+        update: offersChanges(skill) && Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
         widgets: skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live),
     };
 }
@@ -625,7 +681,7 @@ function provenanceRows(skill) {
 function makeRunnableOffer(skill, repairing) {
     // An instruction skill from a source or made here can become a runnable
     // script skill through the ordinary repair path.
-    return skill.type === 'instruction'
+    return skill.type === 'instruction' && !administered(skill)
         && ['clawhub', 'ouroboroshub', 'external', 'self_authored'].includes(sourceTag(skill))
         && /^skills\/(external|clawhub|ouroboroshub)\//.test(String(skill.payload_root || ''))
         && !repairing;
@@ -653,7 +709,7 @@ function menuHtml(skill, { reviewing, repairing, submit }) {
     const name = escapeHtml(skill.name);
     const items = [];
     items.push(`<button type="button" role="menuitem" class="skills-menu-item" ${actionAttrs(skill.name, 'open_detail')}>Details…</button>`);
-    if (!reviewing && !(preflightFailed(skill) && repairReady(skill))) {
+    if (!reviewing && !untrusted(skill) && !(preflightFailed(skill) && repairReady(skill))) {
         const label = skill.review_status === 'pending' && !skill.review_stale ? 'Review' : 'Review again';
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-review" ${actionAttrs(skill.name, skill.review_stale ? 'rereview' : 'review')}>${label}</button>`);
     }
@@ -667,7 +723,9 @@ function menuHtml(skill, { reviewing, repairing, submit }) {
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub" ${actionAttrs(skill.name, 'submit_hub')} data-submit-disabled="${submit.disabled ? 'true' : 'false'}" data-submit-reason="${escapeHtml(submit.reason || '')}" data-submit-state="${escapeHtml(submit.state || '')}" data-publication-ready="${submit.publication_ready === true ? 'true' : 'false'}" aria-disabled="${submit.disabled ? 'true' : 'false'}">Publish…</button>`);
     }
     // The host names the removal it offers (listing `removal`, the rule both removers admit by); the card renders exactly that.
-    if (skill.removal === 'uninstall') {
+    if (administered(skill)) {
+        // The administrator's package (required, or delivered for an execution domain): nothing here removes it.
+    } else if (skill.removal === 'uninstall') {
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-uninstall" ${actionAttrs(skill.name, 'uninstall')}>Uninstall</button>`);
     } else if (skill.removal === 'delete') {
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-delete-local" ${actionAttrs(skill.name, 'delete', `data-payload-root="${escapeHtml(skill.payload_root || '')}"`)}>Delete</button>`);
@@ -696,6 +754,8 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         <span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span>
     </label>`;
     const marks = [
+        requiredBy(skill) ? chipHtml('Required by your organization', 'neutral', { attrs: 'data-required-by-organization' })
+            : trustOf(skill)?.state === 'trusted' ? chipHtml('Delivered by your organization', 'neutral', { attrs: 'data-delivered-by-organization' }) : '',
         isBuiltIn(skill) ? chipHtml('Built in', 'neutral') : '',
         model.install?.official ? officialMarkHtml({ sourceId: model.install.source?.id }) : '',
         model.modified ? chipHtml(model.modified.by === 'owner' ? 'Modified · edited by you' : 'Modified', 'neutral') : '',

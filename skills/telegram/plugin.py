@@ -11,10 +11,8 @@ from typing import Any, Dict
 
 import httpx
 
-# Native skills are version-resynced with Ouroboros core; reuse its truncation
-# SSOT instead of vendoring a divergent payload-local copy.
 from ouroboros.net_transport import env_proxies_configured
-from ouroboros.utils import in_worker_process, truncate_review_artifact
+from ouroboros.utils import in_worker_process
 
 from .lib.telegram_api import (
     TELEGRAM_RETRY_INITIAL_SEC,
@@ -34,7 +32,7 @@ from .lib.telegram_state import (
     _state_file, _load_settings, _is_silent_mode_enabled,
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
-    _jsonl_tail, _load_runtime_state, _child_row_held_for_root,
+    _load_runtime_state, _child_row_held_for_root, _child_final_report,
     _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
     _quiet_progress,
 )
@@ -178,13 +176,11 @@ def _build_menu_status(command_mode: str, lang: str = "en", info_text: str = "")
     return header, keyboard
 
 
-def _build_menu_mind(command_mode: str, lang: str = "en", bg_enabled: bool = False, thoughts_text: str = "") -> tuple[str, list[list[dict]]]:
+def _build_menu_mind(command_mode: str, lang: str = "en", bg_enabled: bool = False) -> tuple[str, list[list[dict]]]:
     """Return mind controlling header and buttons."""
     t = _LOCALIZED_TEXTS[lang]
     state_str = t["mind_state_active"] if bg_enabled else t["mind_state_sleeping"]
     header = t.format("mind_title", state_str=state_str)
-    if thoughts_text:
-        header += t.format("mind_thoughts", thoughts_text=thoughts_text)
 
     row = []
     if command_mode == _COMMAND_MODE_FULL:
@@ -196,49 +192,8 @@ def _build_menu_mind(command_mode: str, lang: str = "en", bg_enabled: bool = Fal
     keyboard = []
     if row:
         keyboard.append(row)
-    keyboard.append([{"text": t["btn_thoughts"], "callback_data": "cmd_act:bg_thoughts"}])
     keyboard.append([{"text": t["btn_back"], "callback_data": "nav:menu"}])
     return header, keyboard
-
-
-def _load_recent_thoughts(api) -> str:
-    """Read the last few SQL progress rows and build a text snapshot."""
-    progress_file = _data_dir(api) / "logs" / "progress.jsonl"
-    try:
-        entries, _prefix_omitted = _jsonl_tail(
-            progress_file,
-            max_entries=40,
-            tail_bytes=256 * 1024,
-        )
-        recent = []
-        for elem in reversed(entries):
-            text = str(elem.get("text") or elem.get("message") or elem.get("thoughts") or "").strip()
-            if not text or len(text) <= 10:
-                continue
-            text = text.replace("`", "").replace("*", "").replace("#", "")
-            preview = truncate_review_artifact(text, 100)
-            timestamp = str(elem.get("ts") or elem.get("timestamp") or elem.get("created_at") or "")
-            task_id = str(elem.get("task_id") or "").strip()
-            if preview != text:
-                ref = "data/state/dialog.sqlite (progress)"
-                if timestamp:
-                    ref += f" @ {timestamp}"
-                if task_id:
-                    ref += f" task {task_id}"
-                preview += f"\n  Full ref: {ref}"
-            if timestamp:
-                time_match = re.search(r"T(\d{2}:\d{2})", timestamp)
-                time_str = f"[{time_match.group(1)}] " if time_match else f"[{timestamp[:10]}] "
-            else:
-                time_str = ""
-            recent.append(f"• {time_str}{preview}")
-            if len(recent) >= 4:
-                break
-        if not recent:
-            return "_Thoughts log is empty or waiting for next cycle._"
-        return "\n".join(recent) + "\n\nShowing up to 4 recent entries. Full source: data/state/dialog.sqlite (progress)"
-    except Exception as exc:
-        return f"_Failed to read log: {exc}_"
 
 
 def _bot_commands(command_mode: str, lang: str = "") -> list:
@@ -766,10 +721,11 @@ async def _poller(api) -> None:
                                 continue
 
                             elif action == "bg_thoughts":
-                                await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["extracting_thoughts"])
+                                # The retired thoughts button of a panel sent earlier: settle its spinner
+                                # and show the current panel, reading nothing.
+                                await client.answer_callback_query(cb_id)
                                 bg_enabled = _is_bg_consciousness_active(api)
-                                thoughts = await asyncio.to_thread(_load_recent_thoughts, api)
-                                header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled, thoughts)
+                                header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
                                 await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
                                 continue
 
@@ -795,6 +751,8 @@ async def _poller(api) -> None:
                                     "image_base64": "",
                                     "image_mime": "",
                                     "image_caption": "",
+                                    # The press is the owner's; the command is this button's words, not theirs.
+                                    "ui_control": {"name": "telegram_mind_panel"},
                                 })
                                 confirmed = None  # the host took the command: it is not injected again
                                 # Give it a tiny moment to commit setting then refresh mind panel
@@ -1099,6 +1057,11 @@ def _make_outbound(api, cue: TypingCue | None = None):
             # root accounts for its children). A root's own placed row is an
             # ordinary progress note here and follows the progress toggle below.
             if _child_row_held_for_root(api, event):
+                return
+
+            # A child's own final report speaks to its parent: the web keeps it inside the child's
+            # card and the root answers here. Its deliberate messages and host notices are typed and go.
+            if _child_final_report(event):
                 return
 
             # Progress telemetry and a root's own card rows → dropped by default (a child's row waits above,

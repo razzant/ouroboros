@@ -200,6 +200,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
+        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them.
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
@@ -213,6 +215,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
         # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
         # read against the beacon cursors the actor was shown.
         "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
@@ -1133,7 +1136,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     """Rebind the saved cognition onto the live loop objects (shared by every
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
-    from ouroboros.loop_delivery import DeliveryCandidate
+    from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
 
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
@@ -1163,6 +1166,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive; read coverage is process-local
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
@@ -1199,7 +1203,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         if key != "repair_attempted"}) if candidate else None
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
-        if value.control_episode_seen or value.finalization_control not in {"candidate", "owner_revision_required"}:
+        if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:
             ctx._delivery_control_required = True
             value.control_episode_seen = True
 
@@ -1213,8 +1217,10 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     from ouroboros.memory_floor import MODES
     from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
+    from ouroboros.context_fit import restored_start
 
     ctx = tools._ctx
+    ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
     model_wait = getattr(ctx, "model_wait_context", None)
     role, account = task_model_binding(
         {"model_role": state.get("context_model_role"), "task_metadata": ctx.task_metadata},

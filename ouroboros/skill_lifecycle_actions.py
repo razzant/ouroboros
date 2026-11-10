@@ -30,6 +30,7 @@ from ouroboros.skill_loader import (
     requested_skill_permissions, save_enabled, save_skill_grants, skill_conflict_status,
     skill_state_dir, skill_state_dir_path,
 )
+from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.tool_access import active_tool_profile, canonical_data_root
 from ouroboros.utils import append_jsonl, read_json_dict, utc_now_iso
 
@@ -87,6 +88,11 @@ def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: 
         origin = (task or {}).get("origin_message_ref")
         if not origin and isinstance(metadata, dict):
             origin = metadata.get("origin_message_ref")
+        press = metadata.get("ui_control") if isinstance(metadata, dict) and isinstance(metadata.get("ui_control"), dict) else {}
+        if not origin and press.get("name") == "skill_repair" and constraint.has_selected_skill and press.get("pressed_at"):
+            # My human pressed Repair for this selected skill ("turns it on when it is ready"): the press is the
+            # request, held by the host at the door; its words were the host's, so nothing is quoted as theirs.
+            return "", {"kind": "control", "control": "skill_repair", "ts": str(press["pressed_at"]), "text": ""}
         owner_source = {"kind": "chat", "ref": origin}
     resolved = resolve_skill_owner_source(ctx, owner_source)
     if not resolved:
@@ -113,9 +119,16 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
     failure); ``progress`` receives the job's message while packages install."""
     facts = _review_facts(skill, drive_root)
     collision = skill.load_error.lower().startswith("skill name collision:")
+    from ouroboros.deployment_extensions import TRUST_SENTENCES, change_refusal, trust_gap
+
+    if not enabled and (managed := change_refusal(skill.name, "disable")):  # before the collision unload or a write
+        return _refusal("Your organization requires it.", 403, code="managed_by_deployment", detail=managed, **facts)
     if enabled:
         if skill.load_error:
             return _refusal("Its files could not be loaded.", 400, code="load_error", detail=skill.load_error, **facts)
+        if skill.manifest.is_extension() and (gap := trust_gap(skill.name, skill.skill_dir, skill.content_hash)):
+            return _refusal("Only extensions your organization delivers run here.", 403, code="managed_by_deployment",
+                            detail=TRUST_SENTENCES[gap], **facts)
         conflict = skill_conflict_status(skill, discover_skills(drive_root, repo_path=repo_path))
         if conflict:
             return _refusal("Another skill that is on uses the same tool names; turn it off first.",
@@ -124,7 +137,8 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
             need = executable_review_requirement(facts["review_gate"], strict_review=_strict_review(skill))
             return _refusal("It turns on after a review passes.", code="acceptance", detail=need, **facts)
         if not facts["grants"].get("all_granted", True):
-            return _refusal("Grant it the keys and permissions it asks for first.", code="grants", **facts)
+            return _refusal("Grant it the keys and permissions it asks for first.", code="grants",
+                            detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies
 
         deps_status, detail = ensure_skill_dependencies(drive_root, skill, progress=progress)

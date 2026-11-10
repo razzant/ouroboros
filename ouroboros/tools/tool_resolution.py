@@ -624,6 +624,37 @@ def _binding_set_targets_system_repo(ctx: Any, binding: Any) -> bool:
     return bool(items) and any(_registry().binding_targets_system_repo(ctx, item) for item in items)
 
 
+def serving_body_refusal(ctx: Any, binding: Any, *, intrinsic: bool) -> str:
+    """A managed deployment's refusal of a repository mutation that lands in the serving checkout itself
+    (``deployment_policy.body_replacement_refusal``): an edit there or a moved HEAD reaches the program at its next
+    restart. A bound body candidate, an isolated child's worktree and every other workspace answer "", as does an
+    unmanaged install. ``intrinsic`` tools act on the context's own body root (the candidate, when one is bound)."""
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.deployment_policy import body_replacement_refusal
+    from ouroboros.tool_access import path_is_relative_to
+
+    refusal = body_replacement_refusal()
+    if not refusal:
+        return ""
+    serving = serving_repo_dir_for(ctx).resolve(strict=False)
+    items = () if intrinsic else _binding_items(binding)
+    targets = [item.repository_path or item.target_path for item in items] or [system_repo_dir_for(ctx)]
+    return refusal if any(path_is_relative_to(pathlib.Path(target).resolve(strict=False), serving)
+                          for target in targets) else ""
+
+
+def required_extension_refusal(binding: Any) -> str:
+    """A managed deployment's refusal of a file edit landing in a package it requires, or starting a second package
+    of that name under the data skills folder (``deployment_extensions.payload_write_refusal``); "" otherwise, and
+    always unmanaged. A shell or process outside these editors is the deployment's operating-system boundary."""
+    from ouroboros.deployment_extensions import payload_write_refusal
+
+    for item in _binding_items(binding):
+        if refusal := payload_write_refusal(item.target_path, data_root=item.state_drive_root):
+            return refusal
+    return ""
+
+
 def _user_files_binding_reaches_repo(ctx: Any, binding: Any) -> bool:
     """Whether a ``user_files`` target physically lands inside the Ouroboros repo.
 
@@ -753,6 +784,12 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
     if name == "query_code":
         return ToolResult(status="error", code="TOOL_ARG_ERROR", text=text)
     if name == "vcs_read":  # the profile's vcs roots above are wider than this reader's own two
+        if isinstance(exc, ValueError):
+            # A root, repository or path the call named wrongly is the call's own argument fault, typed
+            # like query_code's (status error, so tools.jsonl and the task feed count it); a failure of
+            # the binding machinery itself (OSError, RuntimeError) stays the Git terminal below.
+            return ToolResult(status="error", code="TOOL_ARG_ERROR",
+                              text=f"⚠️ TOOL_ARG_ERROR (vcs_read): {detail}{_VCS_READ_ROOTS}")
         return ToolResult(status="ok", code="GIT_ERROR", text=text + _VCS_READ_ROOTS)
     if name not in prefixes:
         return ToolResult(status="error", code="TOOL_ERROR", text=text)

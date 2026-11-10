@@ -62,14 +62,19 @@ class UiContributionsResponse(TypedDict):
 
 def _uninstalled_builtin_offers(installed: set) -> List[Dict[str, Any]]:
     """Dictation engines of built-ins this install has not installed (the bundled ``skills/`` folder, this host only):
-    the chooser sends the owner to Browse, where the built-in source installs them; nothing here installs."""
+    the chooser sends the owner to Browse, where the built-in source installs them; nothing here installs. Under an
+    execution domain only a built-in its policy trusts is offered: no other one's code would run."""
+    from ouroboros.deployment_extensions import trusted
+    from ouroboros.deployment_policy import trusted_extensions
     from ouroboros.extension_ui_validation import validate_contributions
     from ouroboros.skill_builtin import applies_here, bundled_skills_dir
     from ouroboros.skill_identity import _parse_manifest
 
-    root, rows = bundled_skills_dir(), []
+    root, rows, checked = bundled_skills_dir(), [], trusted_extensions() is not None
     for folder in sorted(root.iterdir()) if root.is_dir() else []:
         if not folder.is_dir() or folder.name.startswith(".") or folder.name in installed or not applies_here(folder):
+            continue
+        if checked and trusted(folder.name) is None:
             continue
         manifest = _parse_manifest(folder)
         if manifest is None:
@@ -83,6 +88,7 @@ def _uninstalled_builtin_offers(installed: set) -> List[Dict[str, Any]]:
 
 
 def contribution_catalog(drive_root, repo_path=None, *, skills=None, live=None) -> dict:
+    from ouroboros.deployment_extensions import trust_gap
     from ouroboros.extension_contributions import project_contributions
     from ouroboros.extension_registry_state import live_contribution_problems, live_contribution_projection
     from ouroboros.extension_ui_validation import CONTRIBUTION_ICONS, validate_contributions
@@ -105,7 +111,8 @@ def contribution_catalog(drive_root, repo_path=None, *, skills=None, live=None) 
                 and not skill_conflict_status(skill, skills)):
             rows.extend(project_contributions(skill.name, clean, skill.content_hash, skill.manifest.name))
             live_names.add(skill.name)
-        if skill.source == "native" and skill.name not in live_names:
+        if skill.source == "native" and skill.name not in live_names and not (
+                skill.manifest.is_extension() and trust_gap(skill.name, skill.skill_dir, skill.content_hash)):
             offers.extend({"skill": skill.name, "skill_label": skill.manifest.name, "id": item["id"],
                            "label": item["label"], "title": item["title"], "destination": item["destination"],
                            "install_size": item.get("install_size", ""), "enabled": False, "installed": True}

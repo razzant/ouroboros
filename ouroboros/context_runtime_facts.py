@@ -486,7 +486,9 @@ _ROUTES_SHOWN = 4  # failing routes rendered in the line; the row keeps every ro
 _CAUSE_CHARS = 80  # of a top cause's message in the line; the row keeps the engine's whole first line
 _STORE_FILES = ("state/current.sqlite", "state/dialog.sqlite", "state/usage.sqlite")
 _JOURNAL_MODES: Dict[str, str] = {}  # per process: each store file's header, read once
-VITALS_READER = "query_data(kind='supervisor_log', op='jsonl')"  # the minimal working call: the kind requires op='jsonl'
+# The minimal working call: the kind requires op='jsonl', and these rows are the installation's journal,
+# which a forked drive does not keep (plane='canonical' reads it from any focus).
+VITALS_READER = "query_data(kind='supervisor_log', op='jsonl', plane='canonical')"
 VITALS_NOTE = f"No verdict here, the weighing is mine; clocks UTC; rows: {VITALS_READER}"
 WAL_GATE = ("WAL needs a SQLite with the WAL-reset fix (3.51.3+, or 3.50.7+ / 3.44.6+ within those series),"
             " enforced kernel locks and a local filesystem; an Update keeps this interpreter")
@@ -830,10 +832,14 @@ def admission_observation(data_root: Any, *, observed_at: str) -> str:
 
 
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
-    """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
-    site, ``context.build_runtime_section``."""
+    """The Runtime section's ``storage``, ``vitals`` and ``kept_services`` keys, each present only with its fact: one
+    call site, ``context.build_runtime_section``. ``kept_services`` is what custody says runs now, never a task's
+    ``services_kept`` history (``launch_custody.kept_services_fact``)."""
+    from ouroboros.launch_custody import kept_services_fact
+
     facts = {"storage": storage_fact(data_root, observed_at=observed_at),
-             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
+             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at),
+             "kept_services": kept_services_fact(data_root)}
     return {key: value for key, value in facts.items() if value is not None}
 
 

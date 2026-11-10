@@ -410,6 +410,8 @@ def test_a_byte_only_copy_takes_the_given_mode_and_its_own_times_and_a_read_only
     read-only source keeps its clone (the copy's mode is set on the new inode), and ``clone=False`` never asks."""
     source = _aged_source(tmp_path / "pack-1.pack")
     source.chmod(0o444)
+    aged = os.lstat(source).st_mtime_ns  # as stored: NTFS keeps the requested ns time in 100-ns ticks
+    assert aged // 100 == _AGED[1] // 100, "the source holds its aged time"
     outcomes, real = [], artifacts.clone_file
     monkeypatch.setattr(artifacts, "clone_file", lambda src, dst: outcomes.append(real(src, dst)) or outcomes[-1])
     copied, started = tmp_path / "copy" / "pack-1.pack", time.time()
@@ -417,7 +419,7 @@ def test_a_byte_only_copy_takes_the_given_mode_and_its_own_times_and_a_read_only
     assert measured == _measured(source) == _measured(copied) and copied.read_bytes() == _BYTES
     if os.name != "nt":  # Windows keeps only a read-only bit of a POSIX mode
         assert (_mode(copied), _mode(source)) == (0o640, 0o444)
-    assert os.lstat(source).st_mtime_ns == _AGED[1] and os.lstat(copied).st_mtime >= started - 2, "its own times"
+    assert os.lstat(source).st_mtime_ns == aged and os.lstat(copied).st_mtime >= started - 2, "its own times"
     if not clone:
         assert outcomes == [], "a stream is never preceded by a clone attempt"
     elif sys.platform == "darwin":
@@ -426,7 +428,7 @@ def test_a_byte_only_copy_takes_the_given_mode_and_its_own_times_and_a_read_only
         assert artifact_storage._may_share(copied) is clone and artifact_storage._may_share(source) is clone
     assert sorted(path.name for path in copied.parent.iterdir()) == ["pack-1.pack"]
     default = artifacts.copy_artifact_file(source, tmp_path / "default" / "pack-1.pack")  # every other caller
-    assert default == measured and os.lstat(tmp_path / "default" / "pack-1.pack").st_mtime_ns == _AGED[1]
+    assert default == measured and os.lstat(tmp_path / "default" / "pack-1.pack").st_mtime_ns == aged
     assert _mode(tmp_path / "default" / "pack-1.pack") == _mode(source), "copystat stays the default"
     for path in (source, tmp_path / "default" / "pack-1.pack"):
         path.chmod(0o644)  # a read-only file outlives its scratch on Windows

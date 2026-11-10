@@ -832,12 +832,12 @@ calls and runtime behaviours:
 | `tool` | The skill may call `register_tool`. |
 | `realtime_provider` | The skill may call `register_realtime_provider` (PluginAPI 2.1, in-process only). |
 | `live_conversation` | The skill may register the in-process Live Conversation feature (PluginAPI 2.1); the host retains admission, tools, memory, budget and Stop. |
-| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; Presence admission still requires its binding and `presence` grant. External speech conveys no owner authority. |
+| `call_peer` | A reviewed companion may join an admitted media call through the Host Service; opening one needs its place, `presence` grant and a `/presence/turn` event. External speech conveys no owner authority. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -922,7 +922,9 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants.
+label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
+values are untouched.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
@@ -2839,27 +2841,27 @@ Publish never downloads the scanner automatically. Typed failures return the
 completed stage, external effects, and a repair hint; Ouroboros decides whether
 to inspect, repair, re-review, retry, clean up, or stop.
 
-A successful publication also writes a durable local receipt to
-`data/state/skills/<name>/ouroboroshub.json` (`published` section: slug,
-version, content hash, repository, PR number/url, timestamp). The receipt is
-best-effort: a write failure is disclosed as `publication_recorded: false` in
-the tool result and never cancels the real PR. The skill's details show it as
-quiet submission history: the submitted version (not the current local one),
-the PR link and whether the local files now differ from the submitted copy. It
-is history, not a status: it never claims that the PR merged and never gates an
-action. The receipt survives uninstall (including the startup cleanup of
-uninstalled state) and reinstall; a republish overwrites it, and an explicit
-**Delete** of a local skill removes it with the rest of that skill's state.
+Successful publication best-effort writes a durable `published` receipt in
+`data/state/skills/<name>/ouroboroshub.json`: slug, submitted version, content
+hash, repository, PR number/URL and timestamp. Write failure is disclosed as
+`publication_recorded: false` without cancelling the real PR. Details show quiet
+submission history: that version (not the local one), the PR link and whether
+local files differ. It never claims merge or gates actions. Uninstall (including
+startup cleanup) and reinstall keep it; republishing replaces it; explicit
+**Delete** removes it with the skill's state.
 
-Forgetting the record in that history deliberately clears the local receipt.
-Nothing else needs it: the installed files, review and grants stay, the GitHub
-PR is not closed or changed, and installs and updates never wait for it. It
-clears the receipt shown; if another publication replaced it, refresh first.
+Forget clears only the displayed receipt; refresh if another publication replaced
+it. Installed files, review, grants and the GitHub PR stay unchanged; installs
+and updates never wait for this history.
 
 For an update of a catalog entry, the tool result and PR body name both the
-current catalog version and the proposed version. Versions are opaque strings:
-an older-looking or non-semantic version is allowed, while an identical version
-still needs to change before publishing an update.
+current catalog version and the proposed version; versions are opaque strings,
+so an older-looking or non-semantic one is allowed and only an identical one is
+refused. Before anything is written, the skill's files and entry at the
+destination are compared with the release its install record names for that
+folder: what the destination changed since, or would lose without such a
+release, is replaced only on Ouroboros's decision bound to that comparison,
+which the PR records.
 
 Publication succeeds only when the task records a validated pull-request
 receipt in the destination repository for this exact skill. A branch,

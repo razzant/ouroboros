@@ -46,7 +46,8 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES, answered_card, answered_card_reply, carded, reply_target
+from ouroboros.owner_words import (OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card, answered_card_reply,
+                                   carded, reply_target, scheduled_text_items)
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
@@ -108,6 +109,9 @@ CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed account in a place: provenance, whole
+# A schedule's text under its recorded supplier (``owner_words.SCHEDULE_TEXT``): the work's assignment and conditions,
+# carried whole to every successor and from it to its helpers, never owner text.
+CORPUS_SCHEDULE_SOURCES = frozenset({SCHEDULE_TEXT})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
 # identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
@@ -413,6 +417,28 @@ def inputs_text(predecessor_task_id: str, copied: List[Dict[str, Any]], authorit
                                    f"inputs): {lost}." if lost else ""))
 
 
+def _keep_schedule_text(kept: List[Dict[str, Any]], item: Dict[str, Any]) -> None:
+    """One ``SCHEDULE_TEXT`` row per schedule, field and words, under the supplier the host recorded for it."""
+    row = {"source": SCHEDULE_TEXT, "content": item["content"],
+           **{key: str(item[key]) for key in SCHEDULE_ITEM_IDS if item.get(key)}}
+    if not any((old.get("schedule_id"), old.get("field"), old["content"])
+               == (row.get("schedule_id"), row.get("field"), row["content"]) for old in kept):
+        kept.append(row)
+
+
+def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
+    """The text a scheduled occurrence was accepted with (its frozen admission receipt) as ``SCHEDULE_TEXT`` rows;
+    empty for work no schedule admitted: a successor's copy rides its chained corpus (``owner_corpus``)."""
+    from ouroboros.schedule_continuation import admission_basis, valid_basis
+    kept: List[Dict[str, Any]] = []
+    if valid_basis(admission_basis(result, task_id)):
+        frozen = result["schedule_admission"]["task"]
+        for item in scheduled_text_items(frozen.get("metadata"), frozen.get("task_contract")
+                                         or (frozen.get("metadata") or {}).get("task_contract")):
+            _keep_schedule_text(kept, item)
+    return kept
+
+
 def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """The predecessor's owner sources, authored note pointer and peer context, apart.
 
@@ -491,6 +517,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     seen: Dict[str, Tuple[str, bool]] = {row["msg_id"]: (row["content"], True) for row in (start or {}).get("answers") or []}
     exact: Dict[str, str] = {}  # this task's own exact rows by msg_id: the mailbox pass fills it after reading drives
 
+    schedule_text = occurrence_schedule_text(result, task_id)  # then the chained corpus's: one per schedule/field/words
     def named(identity: str, words: str, owner: bool, corpus: Optional[Dict[str, Any]] = None) -> Optional[bool]:
         """One message under one identity, compared by its words (#2941): None when first named (now recorded), True
         when its words and owner/peer side repeat, else False and a gap. A corpus row also stands for its exact twin
@@ -556,6 +583,9 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 client_identity = row_identity({"chat_id": row.get("chat_id") or original_chat_id,
                                                 "client_message_id": client})
                 origin_identity = original_id
+            if source in CORPUS_SCHEDULE_SOURCES:  # the assignment's text, carried whole beside the words, never theirs
+                _keep_schedule_text(schedule_text, row)
+                continue
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES | CORPUS_PLACE_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
@@ -700,7 +730,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                    and row.get("kind") == "memory_export" and pathlib.Path(str(row.get("path") or "")).is_file()), "")
     readable = (*(drive / "task_drives" / task_id for drive in drives), *task_artifact_stores(root, task_id))
     return {"original": original, "schedule": schedule, "start": start, "wake": wake, "api": api, "later": later,
-            "peer_context": peers, "confirmed_place": confirmed, "gaps": list(dict.fromkeys(gaps)),
+            "peer_context": peers, "confirmed_place": confirmed, "schedule_text": schedule_text,
+            "gaps": list(dict.fromkeys(gaps)),
             "open_relays": result.get("open_relays", chained.get("open_relays", {})),
             "held_owner_messages": {**chained.get("held_owner_messages", {}), **result.get("held_owner_messages", {})},
             "attached": attached, "quoted": quoted, "drives": drives, "memory_export": export,
@@ -752,6 +783,10 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
                          **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {}),
                          **{key: row[key] for key in ("words",) if key in row}})  # exact, even empty
+    for row in sources.get("schedule_text") or []:  # a schedule's text under its supplier, by value, never owner words
+        if isinstance(row, dict) and str(row.get("content") or "").strip():
+            rows.append({"source": SCHEDULE_TEXT, "content": row["content"],
+                         **{key: row[key] for key in SCHEDULE_ITEM_IDS if row.get(key)}})
     for row in sources.get("confirmed_place") or []:  # provenance rows ride beside the owner's, outside the owner sources
         if isinstance(row, dict) and str(row.get("content") or "").strip():
             rows.append({"source": "place_confirmed", "content": row["content"],

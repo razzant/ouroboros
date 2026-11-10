@@ -642,6 +642,7 @@ def companion_spawn_env(
     computational.
     """
     from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+    from ouroboros.deployment_policy import child_policy_env, fixed_settings
     from ouroboros.extension_isolated_deps import _isolated_python_site_dirs
     from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
     from ouroboros.node_runtime import prepend_skill_node_emergency_path, skill_manifest_owns_path
@@ -654,7 +655,9 @@ def companion_spawn_env(
     # undefined winner. Same contract as the executor-local service lane.
     from ouroboros.workspace_executor import overlay_env
 
-    reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL", PARENT_PID_ENV}
+    # Under a deployment policy, a manifest's env never stands in for a value it fixes, or for its file and pin.
+    reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL", PARENT_PID_ENV,
+                                                *child_policy_env(), *fixed_settings()}
     env = overlay_env(
         _scrub_env(
             list(env_allow), state_dir, skill,

@@ -41,7 +41,6 @@ from ouroboros.tool_capabilities import (
     LOCAL_READONLY_SUBAGENT_MODE,
     LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
     META_TOOL_NAMES,
-    TASK_DIAGNOSTIC_TOOL_NAMES,
 )
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -465,10 +464,6 @@ class ToolRegistry:
         Restoring cognition clears auto-start activity, not this eligibility.
         The private host marker binds the exception; the handler proves custody.
         """
-        from ouroboros.work_diagnostics import context_ref
-
-        if context_ref(self._ctx):
-            return name in TASK_DIAGNOSTIC_TOOL_NAMES | schema_selection_tools_for_context(self._ctx)
         if name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(self._ctx):
             return True
         if name != "verify_and_record" or not self._is_local_readonly_subagent():
@@ -481,10 +476,6 @@ class ToolRegistry:
         )
 
     def initial_tool_names(self) -> frozenset[str]:
-        from ouroboros.work_diagnostics import context_ref
-
-        if context_ref(self._ctx):
-            return TASK_DIAGNOSTIC_TOOL_NAMES | schema_selection_tools_for_context(self._ctx)
         if self._is_local_readonly_subagent():
             names = set(LOCAL_READONLY_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(self._ctx))
             if self._readonly_tool_allowed("verify_and_record"):
@@ -679,10 +670,6 @@ class ToolRegistry:
         ``record`` (``schemas()`` only) writes shadow collisions to the omission
         ledger; a name-miss read leaves it untouched. A loader failure raises.
         """
-        from ouroboros.work_diagnostics import context_ref
-
-        if context_ref(self._ctx):
-            return []
         from ouroboros.extension_loader import _lock as _ext_lock, _tools as _ext_tools, is_extension_live as _ext_is_live
 
         grants = self._acting_tool_grants() if self._is_acting_subagent() else None
@@ -716,10 +703,6 @@ class ToolRegistry:
 
     def _mcp_rows(self, *, record: bool) -> List[Dict[str, Any]]:
         """Current published MCP rows under the task's unchanged capability filters."""
-        from ouroboros.work_diagnostics import context_ref
-
-        if context_ref(self._ctx):
-            return []
         from ouroboros.mcp_client import ensure_configured_from_settings as _mcp_ensure_configured, get_manager as _mcp_get_manager
 
         _mcp_ensure_configured()
@@ -918,9 +901,6 @@ class ToolRegistry:
             if acting_subagent and requested not in acting_tool_names_for_context(self._ctx, self._entries):
                 return None
             return self._schema_for_entry(entry)
-        from ouroboros.work_diagnostics import context_ref
-        if context_ref(self._ctx):
-            return None  # No diagnostic extension/MCP discovery, even for a schema-only request.
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
@@ -1367,6 +1347,14 @@ class ToolRegistry:
                 implicit_skill_cwd_allowed=selected_skill,
                 allow_short_relative=allow_short_relative,
             ))
+        if name in _REPO_MUTATION_TOOLS and (managed := tool_resolution.serving_body_refusal(
+                self._ctx, resolved_binding, intrinsic=name in _SYSTEM_INTRINSIC_REPO_MUTATION_TOOLS)):
+            return ToolResult(status="blocked", code="MANAGED_BY_DEPLOYMENT", text=(
+                f"⚠️ MANAGED_BY_DEPLOYMENT: {name!r} would change the serving checkout. {managed} Author the change "
+                "in a body candidate or another workspace; it reaches this installation only through its administrator."))
+        if name in tool_resolution._ROOT_ARG_REPO_WRITE_TOOLS and (
+                managed := tool_resolution.required_extension_refusal(resolved_binding)):
+            return ToolResult(status="blocked", code="MANAGED_BY_DEPLOYMENT", text=f"⚠️ MANAGED_BY_DEPLOYMENT: {managed}")
         if name in _SYSTEM_INTRINSIC_REPO_MUTATION_TOOLS:
             light_targets_system = True
         elif resolved_binding is not None:

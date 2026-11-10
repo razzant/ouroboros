@@ -16,7 +16,7 @@ import re
 import subprocess
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Tuple
 
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding
@@ -99,10 +99,12 @@ WHOLE_INDEX = "whole index"  # ``_staged_selection`` after a whole-tree ``git ad
 def _unstage_candidate(ctx: ToolContext) -> None:
     """Undo exactly this call's staging (``ctx._staged_selection``, recorded by
     ``_stage_candidate_for_review``): the recorded paths, so a path someone else staged
-    stays staged; the whole index after a whole-tree add; nothing before any staging."""
+    stays staged; the whole index after a whole-tree add; nothing before any staging.
+    Both are path resets: a pathless ``git reset HEAD`` would also drop a staged merge
+    (MERGE_HEAD, MERGE_MODE, MERGE_MSG). ``:/`` names the whole tree from any directory."""
     paths = getattr(ctx, "_staged_selection", None)
     if paths == WHOLE_INDEX:
-        _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        _git().run_cmd(["git", "reset", "-q", "HEAD", "--", ":/"], cwd=ctx.repo_dir)
     elif paths:
         _git().run_cmd(["git", "--literal-pathspecs", "reset", "-q", "HEAD", "--", *paths], cwd=ctx.repo_dir)
 
@@ -135,8 +137,10 @@ def _git_lock_path(ctx: ToolContext, repo_dir: Any = None) -> pathlib.Path:
     wait for each other, while one tree's index and HEAD stay serialized (audit of early stops, 06.11)."""
     repo = pathlib.Path(repo_dir or ctx.repo_dir)
     try:
-        git_dir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=str(repo), capture_output=True,
-                                 text=True, timeout=30, check=True).stdout.strip()
+        from ouroboros.work_domain import run
+
+        git_dir = run(["git", "rev-parse", "--absolute-git-dir"], cwd=str(repo), capture_output=True,
+                      text=True, timeout=30, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         git_dir = ""  # not a work tree: its own path keys the lock
     key = hashlib.sha256(os.path.realpath(git_dir or str(repo)).encode("utf-8")).hexdigest()[:16]
@@ -184,3 +188,23 @@ def _binding_repo_rel(binding: ResolvedResourceBinding) -> str:
 
 def _binding_targets_system_repo(ctx: ToolContext, binding: ResolvedResourceBinding) -> bool:
     return binding.base_path.resolve(strict=False) == _git().system_repo_dir_for(ctx).resolve(strict=False)
+
+
+def network_git_bounded(args: List[str], *, cwd: Any) -> Tuple[int, str, str]:
+    """``update_source._git_network_bounded`` (its bounds, environment and timeout reply) for a service repository;
+    a work repository's remote, credentials and ssh are the work domain's own, so there it runs as the work domain."""
+    from ouroboros import work_domain
+    from supervisor.update_source import FETCH_TIMEOUT_RC, _git_network_bounded
+
+    if not work_domain.is_work(cwd):
+        return _git_network_bounded(args, cwd=cwd)
+    from ouroboros.update_channels import get_managed_update_fetch_timeout_sec
+
+    limit = float(get_managed_update_fetch_timeout_sec())
+    try:
+        done = work_domain.run(["git", "-c", "http.lowSpeedLimit=1024", "-c", "http.lowSpeedTime=30", *args],
+                               cwd=str(cwd), capture_output=True, text=True, errors="replace", timeout=limit,
+                               env={**os.environ, "LC_ALL": "C", "LANG": "C", "GIT_TERMINAL_PROMPT": "0"})
+    except subprocess.TimeoutExpired:
+        return FETCH_TIMEOUT_RC, "", f"git {' '.join(args[:2])} exceeded {limit:.0f}s and was terminated"
+    return done.returncode, (done.stdout or "").strip(), (done.stderr or "").strip()

@@ -11,7 +11,8 @@ What is counted, per tag:
 
 - ``connect`` (and ``connect:<category>``): every ``sqlite3.connect``; each new connection gets
   a trace callback (``statements``, ``begins``, ``commits``, ``writes``) and a progress handler
-  that adds ``VM_STEP`` to ``vm_steps`` every ``VM_STEP`` SQLite virtual-machine instructions;
+  that adds one to ``vm_steps`` on every SQLite virtual-machine instruction (the count is exact;
+  ``VM_STEP`` is only the unit the allowances are written in);
 - ``stat`` / ``scandir`` / ``listdir`` (and per category): ``os.stat``, ``os.lstat``,
   ``os.scandir``, ``os.listdir`` and the ``pathlib`` accessor (Python 3.10 binds those at
   class creation, so they are wrapped separately), ``os.walk`` and ``glob`` included;
@@ -78,6 +79,12 @@ import urllib.parse
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 BOUNDARY: contextvars.ContextVar = contextvars.ContextVar("cost_boundary", default=None)
+# ``vm_steps`` counts every instruction (``_w_connect``). SQLite calls a progress handler of period N at multiples of
+# N of each prepared statement's own instruction count, a phase the statement carries across its executions, the
+# boundaries that run it and Python's statement cache: identical work counted in chunks of 100 read up to 100 apart per
+# statement, and a statement that runs fewer than 100 read 0 (#2691). ``VM_STEP`` stays the unit the allowances are
+# written in, one chunk of that former period (tests/test_cost_contract.py ``vm_allowance``,
+# tests/test_store_capture_readers.py): counting exactly changes none of them.
 VM_STEP = 100
 # Unrelated-history locations of a data root (POSIX separators, relative to the root).
 CATEGORIES = (("archive/", "archive"), ("state/headless_tasks/", "headless"),
@@ -101,13 +108,29 @@ _DOORS = ("tests._cost_meter", "subprocess", "pathlib", "os", "genericpath", "po
 
 def caller(depth: int = 2) -> str:
     """The nearest ``depth`` frames outside the meter and the standard library doors, innermost first."""
-    frame, found = sys._getframe(2), []
+    return _named(sys._getframe(2), depth)[1]
+
+
+def _named(frame: Any, depth: int) -> Tuple[tuple, str]:
+    """(the code of every frame walked out to the ``depth``-th outside the doors, with a trailing None where the stack
+    ended first; their names, innermost first): the names follow from those codes alone."""
+    codes, found = [], []
     while frame is not None and len(found) < depth:
+        codes.append(frame.f_code)
         name = frame.f_globals.get("__name__", "")
         if name not in _DOORS:
             found.append(f"{name}.{frame.f_code.co_name}")
         frame = frame.f_back
-    return " <- ".join(found) or "?"
+    return (*codes, None) if frame is None else tuple(codes), " <- ".join(found) or "?"
+
+
+def _walks(frame: Any, codes: tuple) -> bool:
+    """Whether the stack from ``frame`` runs through exactly ``codes`` (``_named``): then it names the same callers."""
+    for code in codes:
+        if frame is None or frame.f_code is not code:
+            return frame is None and code is None
+        frame = frame.f_back
+    return True
 
 
 def tag_of() -> str:
@@ -117,7 +140,11 @@ def tag_of() -> str:
     tag = getattr(_LOCAL, "tag", None)
     if tag is not None:
         return tag
-    return "bg:" + _DIGITS.sub("", threading.current_thread().name or "thread")
+    name = threading.current_thread().name or "thread"
+    kept = getattr(_LOCAL, "bg_tag", None)  # the name rule once per name: ``_progress`` asks on every instruction
+    if kept is None or kept[0] != name:
+        kept = _LOCAL.bg_tag = (name, "bg:" + _DIGITS.sub("", name))
+    return kept[1]
 
 
 def _forms(path: Any) -> List[str]:
@@ -530,9 +557,22 @@ def _trace(store: str, statement: str) -> None:
 
 
 def _progress() -> int:
+    """One SQLite instruction under the tag of the thread running it, credited like ``add`` to the reader stack that
+    steps it. The thread keeps the codes that stack ran through and its names: an instruction whose stack runs through
+    the same codes names the same readers, so only another stack is named again (naming every instruction took about
+    twice the time in a measured scan). No frame is kept: a frame's address can serve another call once it returns, and
+    holding one would hold its locals, an open cursor among them."""
     meter = _ACTIVE
     if meter is not None:
-        meter.add("vm_steps", VM_STEP)
+        frame = sys._getframe(1)
+        reader = getattr(_LOCAL, "vm_reader", None)
+        if reader is None or not _walks(frame, reader[0]):
+            codes, names = _named(frame, 4)
+            reader = _LOCAL.vm_reader = (codes, "vm_steps <- " + names)
+        tag = tag_of()
+        with meter._lock:
+            meter.counts[tag]["vm_steps"] += 1
+            meter.callers[tag][reader[1]] += 1
     return 0
 
 
@@ -545,7 +585,7 @@ def _w_connect(database, *args, **kwargs):
             name = os.path.basename(meter.path_of(database))
             store = name.split(".", 1)[0] if name in ("current.sqlite", "dialog.sqlite", "usage.sqlite") else "other"
             conn.set_trace_callback(functools.partial(_trace, store))
-            conn.set_progress_handler(_progress, VM_STEP)
+            conn.set_progress_handler(_progress, 1)  # every instruction: ``VM_STEP``'s note
         except Exception:
             pass
     return conn

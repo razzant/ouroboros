@@ -218,9 +218,10 @@ def regressed_extensions(drive_root: pathlib.Path) -> List[Dict[str, Any]]:
         # false CRITICAL (its health.json can outlive the payload).
         name = str(record.get("skill") or skill_dir.name)
         try:
-            from ouroboros.skill_loader import find_skill, load_enabled
+            from ouroboros.skill_loader import find_skill
 
-            if find_skill(pathlib.Path(drive_root), name) is None or not load_enabled(pathlib.Path(drive_root), name):
+            skill = find_skill(pathlib.Path(drive_root), name)
+            if skill is None or not skill.enabled:  # the effective switch: a required package stays alarmed
                 continue
         except Exception:
             pass

@@ -234,7 +234,8 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_context_low_is_neutral_ink(subscription_ui, theme):
-    """Low is a level the owner chose: its lit arc and thumb are the neutral pair; Max stays crimson, Nano fuchsia."""
+    """Low is a level, never a warning: its lit arc and the thumb on it are the neutral pair; Max stays crimson, Nano
+    fuchsia. The thumb follows the saved mode, the lit arc the observed one (`data-lit`), each in its mode's ink."""
     page = open_app(subscription_ui)
     set_theme(page, theme)
     page.wait_for_selector('#chat-context-mode .chat-context-arc[data-arc="low"]', state="attached")
@@ -244,12 +245,16 @@ def test_context_low_is_neutral_ink(subscription_ui, theme):
         const saved = el.dataset.contextMode;
         thumb.style.transition = 'none';  // the colour, not its 0.2s fade, is what this reads
         const out = {};
+        const arcs = [...el.querySelectorAll('.chat-context-arc')];
+        const lit = arcs.map((arc) => arc.getAttribute('data-lit'));
         for (const mode of ['low', 'max', 'nano']) {
             el.dataset.contextMode = mode;
+            arcs.forEach((arc) => arc.setAttribute('data-lit', String(arc.dataset.arc === mode)));
             out[mode] = { arc: getComputedStyle(el.querySelector(`.chat-context-arc[data-arc="${mode}"]`)).stroke,
                 thumb: getComputedStyle(thumb).backgroundColor };
         }
         el.dataset.contextMode = saved;
+        arcs.forEach((arc, i) => arc.setAttribute('data-lit', lit[i]));
         thumb.style.transition = '';
         return out;
     }""")

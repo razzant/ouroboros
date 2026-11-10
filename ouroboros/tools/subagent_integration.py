@@ -45,8 +45,8 @@ from ouroboros.review_state import invalidate_advisory_after_mutation
 from ouroboros.runtime_mode_policy import (
     mode_allows_protected_write,
     protected_paths_in,
-    protected_write_block_message,
 )
+from ouroboros.workspace_copies import protected_apply_refusal
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.config import get_runtime_mode
@@ -385,11 +385,10 @@ def _patch_touched_paths(patch_path: pathlib.Path, target: pathlib.Path, env: An
     NUL-safe readings replaces it without the quoting bug.)
     """
     touched: set[str] = set()
+    from ouroboros.tools.patch_staging import git_apply  # a work target reads it as the work domain (stdin)
+
     for direction in ([], ["-R"]):
-        numstat = subprocess.run(
-            ["git", "apply", *direction, "--numstat", "-z", str(patch_path)],
-            cwd=str(target), capture_output=True, env=env,
-        )
+        numstat = git_apply(target, patch_path, [*direction, "--numstat", "-z"], env=env)
         if numstat.returncode != 0:
             detail = (numstat.stderr or numstat.stdout or b"").decode("utf-8", errors="replace")
             return set(), detail.strip()[:600]
@@ -942,21 +941,21 @@ def _handle_external_workspace_integration(
         ctx, child_task_id, outcome=outcome, reason=reason, files=authoritative_touched,
         manifest=manifest, applied=False, conflicts=conflicts,
         protected=[], target=str(target), lineage=lineage, child_result_sha256=result_sha, observation=observation, failures=facts)
-    snapshot = (f"its captured snapshot of the shared tree ({len(authoritative_touched)} path(s): every change since "
-                "the child's base, which may include other writers' work; it names no author)")
+    snapshot = (f"its captured snapshot of the shared tree ({len(authoritative_touched)} path(s): every change Git "
+                "does not ignore since the child's base, which may include other writers' work; it names no author)")
     if verified:
         warning = _record_integration_disposition(
             ctx, child_task_id, "integrated",
             reason or "verified child result at its recorded shared target; no transfer to parent",
             result_sha,
             lineage=lineage, verdict=verdict, unretained=facts)
-        prefix = ("OK: cooperative no-op — work is ALREADY in the shared coop tree. " if coop else
+        prefix = (f"OK: cooperative no-op for child {child_task_id}: " if coop else
                   f"✅ Verified external_workspace child {child_task_id}: ")
         checkpoint = " The host attempts a best-effort checkpoint commit of this tree when the root task finalizes." if coop else ""
         # A passing reverse check does not prove whole-file equality or explain a representation change.
         tolerated = (" (the reverse check still passes despite these differences; it does not prove whole-file equality)"
                      if any(row["state"] in ("changed", "removed", "recreated") for row in findings) else "")
-        return (f"{prefix}{snapshot} still verifies in {target}. {seen}{tolerated}. "
+        return (f"{prefix}{snapshot} still verifies in {target}; only that delta was checked. {seen}{tolerated}. "
                 f"No patch was re-applied or transferred to the parent's folder.{checkpoint} "
                 f"Verdict: {verdict or '(unwritten)'}.{_format_patch_exclusions(manifest)}{warning}")
     if missing:
@@ -1266,10 +1265,10 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
                 manifest=manifest, applied=False, conflicts=[], protected=[p.path for p in protected],
                 target=str(target), lineage=lineage, child_result_sha256=_child_result_sha256(child_result),
             )
-            return protected_write_block_message(
+            return protected_apply_refusal(
                 path=protected[0].path,
                 runtime_mode=runtime_mode,
-                action=f"integrate subagent patch {child_task_id} touching",
+                action=f"integrate subagent patch {child_task_id} touching", grant_ok=grant_ok,
             )
 
     unindexed = []

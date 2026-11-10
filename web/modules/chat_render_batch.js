@@ -158,8 +158,6 @@ export function createLiveCardBound(cap) {
     let raisedInFlight = false;
     return {
         isArmed: () => armed,
-        /** The offline bootstrap painted sessionStorage: the next sync must rebuild. */
-        arm() { armed = true; },
         observe(size) { if (size > floor + cap) armed = true; },
         begin() {
             inherited = armed;
@@ -587,9 +585,9 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         // merely the root card whose own top may be far above the viewport.
         let node = topNode;
         if (!topNode.dataset?.historyId && !topNode.classList.contains('chat-live-card')) {
-            // Media owns a layout wrapper around keyed bubbles. Save the
-            // physical child being read, not an unidentifiable wrapper.
-            node = [...topNode.querySelectorAll('[data-history-id]')]
+            // Media owns a layout wrapper around keyed bubbles, the saved preview (chat_preview.js) its rows.
+            // Save the physical child being read, not an unidentifiable wrapper.
+            node = [...topNode.querySelectorAll('[data-history-id], [data-preview-history-id]')]
                 .find(child => child.getBoundingClientRect().bottom > messagesRect.top) || topNode;
         }
         if (topNode.classList.contains('chat-live-card')) {
@@ -709,7 +707,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             // lifecycle key below selects the line inside that page's mixed card.
             historyId: lineItem?.historyId || lineItem?.sourceHistoryId
                 || node.closest?.('[data-history-id]')?.dataset?.historyId
-                || topNode.dataset?.historyId || '',
+                || node.dataset?.previewHistoryId || topNode.dataset?.historyId || '',
             reviewKey: ['reviewAttemptDetail', 'reviewAttempt', 'reviewGroup', 'reviewSection']
                 .find(key => node.dataset?.[key]) || '',
             reviewValue: node.dataset?.reviewAttemptDetail || node.dataset?.reviewAttempt

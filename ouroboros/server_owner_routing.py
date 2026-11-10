@@ -149,18 +149,17 @@ def _owner_turn_key(ctx: Any, row: Dict[str, Any], meta: Any, chat_id: int) -> s
     return key
 
 
-def _owner_turn_closed(ctx: Any, row: Dict[str, Any], chat_id: int) -> bool:
-    """Whether ROW is my human's own turn of this chat whose final drain already read last: its own fact for the
-    attempt RUNNING names is closed (``conversation_lease.author_intake_closed``). It finishes what it holds and
-    reads no more words. No fact, an unreadable or foreign one, or another attempt's proves nothing."""
+def _owner_turn_closed(row: Dict[str, Any], meta: Any, key: str) -> bool:
+    """Whether ROW, my human's own turn of this chat (``key``: its ``_owner_turn_key``, ``meta``: its RUNNING row),
+    has a final drain that already read last: its own fact for the attempt RUNNING names is closed
+    (``conversation_lease.author_intake_closed``). It finishes what it holds and reads no more words. No fact, an
+    unreadable or foreign one, or another attempt's proves nothing."""
     from ouroboros.conversation_lease import author_intake_closed
     from supervisor.queue import _task_drive_for_task
 
     tid = str(row["task_id"])
-    meta = getattr(ctx, "RUNNING", {}).get(tid)
-    key = _owner_turn_key(ctx, row, meta, chat_id)
-    return bool(key) and author_intake_closed(_task_drive_for_task(meta["task"], tid), tid, key,
-                                              attempt=int(meta.get("attempt") or 1))
+    return author_intake_closed(_task_drive_for_task(meta["task"], tid), tid, key,
+                                attempt=int(meta.get("attempt") or 1))
 
 
 def _route_main_followup(
@@ -176,24 +175,30 @@ def _route_main_followup(
     """Main's ordinary owner message reaches the one turn reading this conversation when it is my human's own.
 
     One author per conversation: a clarification typed while that turn still awaits its carrier or prepares must not
-    start a second author acting on the same request. Every reader of the chat counts first: a wake, a call or
-    background work beside the turn leaves the words their own turn, and none is chosen among several; an owner turn
-    whose own fact is closed (``_owner_turn_closed``) reads no more and is none. From its confirmed admission the
-    turn takes them only under its durable intake for the attempt judged
-    (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail lock, and
-    never once its result settled: no settled-result check alone orders words against a loop in another process.
-    A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
+    start a second author acting on the same request. The candidates are the rows that ARE my human's own turn of
+    this chat by the host's facts (``_owner_turn_key``: the conversation lane, the owner door's ingress, no Project
+    binding, not a wake, a call, Presence or detached work) and still read (``_owner_turn_closed``); exactly one
+    candidate takes the words, none or several leave them their own turn. A wake, a call or background work beside
+    the turn holds no ``owner:<chat>`` conversation and is no candidate: skipping it is a cut by the row's kind, never
+    a choice among readers. From its confirmed admission the turn takes them only under its durable intake for the
+    attempt judged (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail
+    lock, and never once its result settled: no settled-result check alone orders words against a loop in another
+    process. A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
     message's one root snapshot."""
     try:
         roots = roots if roots is not None else addressable_roots(ctx)
-        readers = [row for row in roots.rows(chat_id)
-                   if row.get("room_reader") and not _owner_turn_closed(ctx, row, chat_id)]
-        if roots.gap or len(readers) != 1:
+        if roots.gap:
             return ""
-        meta = getattr(ctx, "RUNNING", {}).get(str(readers[0]["task_id"]))
-        key = _owner_turn_key(ctx, readers[0], meta, chat_id)
-        return _deliver_to_reader(ctx, readers[0], message, client_message_id, task_metadata=task_metadata,
-                                  image_data=image_data, owner=(key, meta)) if key else ""
+        running = getattr(ctx, "RUNNING", {})
+        owner_turns = [(row, meta, key) for row in roots.rows(chat_id) if row.get("room_reader")
+                       for meta in (running.get(str(row["task_id"])),)
+                       for key in (_owner_turn_key(ctx, row, meta, chat_id),)
+                       if key and not _owner_turn_closed(row, meta, key)]
+        if len(owner_turns) != 1:
+            return ""
+        row, meta, key = owner_turns[0]
+        return _deliver_to_reader(ctx, row, message, client_message_id, task_metadata=task_metadata,
+                                  image_data=image_data, owner=(key, meta))
     except Exception:
         log.debug("Main follow-up routing failed; the message starts its own turn", exc_info=True)
     return ""
@@ -362,7 +367,9 @@ def _deliver_to_reader(
                 # answer/result settled. Its solve loop no longer drains this
                 # mailbox; accepting an owner follow-up here would label it
                 # delivered, then terminal cleanup would erase it unread. One
-                # predicate with the quiz ingress (TZ-2 D15).
+                # predicate with the quiz ingress (TZ-2 D15). A pooled root writes no
+                # intake fact, so words after its final drain and before its stored
+                # result still land here, kept unread on that result (PERSISTENCE).
                 if mailbox_drain_ended(task_drive, tid):
                     return ""
                 # Phase A: a task whose cancellation is PENDING must not accept a
@@ -631,6 +638,11 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         metadata = task_metadata if isinstance(task_metadata, dict) else {}
         if isinstance(metadata.get("client_surface"), dict):
             event["client_surface"] = dict(metadata["client_surface"])
+        if isinstance(metadata.get("ui_control"), dict):
+            # My human pressed a control and the host wrote this request: the press rides the task as its
+            # own fact (enable authority for this repair, ``skill_lifecycle_actions``), the words as the host's.
+            event["ui_control"] = dict(metadata["ui_control"])
+            event["objective_author"] = {"kind": "ui_control", "control": str(metadata["ui_control"].get("name") or "")}
         if isinstance(metadata.get("presence"), dict) and metadata["presence"]:
             event["presence"] = dict(metadata["presence"])
             event["task_contract"] = dict(metadata.get("task_contract") or {})
@@ -697,6 +709,9 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # A suppressed (never-logged) message has a DESIGNED absence of origin;
         # downstream binders must not classify it as a producer bug.
         task_metadata = {**(task_metadata or {}), "origin_suppressed": True}
+    if isinstance(task_metadata.get("ui_control"), dict):
+        # A press composed these words: the act stamped the turn, the words stay the host's (never initial_user).
+        task_metadata["objective_author"] = {"kind": "ui_control", "control": str(task_metadata["ui_control"].get("name") or "")}
     # Owner Surface Fact channel fallback: a non-web ingress (telegram/skill
     # transports) carries no browser observables, but its channel IS the
     # surface fact, with the common ingress receipt stamp (``received_at``,

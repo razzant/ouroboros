@@ -173,12 +173,19 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             : !observesAccess ? 'Configured API access' : row.credential_profile_id ? `Account: ${row.credential_profile_id}` : 'Auto rotation'}`;
         const reset = row.reset_at ? new Date(row.reset_at) : null;
         const known = reset && Number.isFinite(reset.getTime());
-        node.querySelector('[data-wait-reset]').textContent = keyOff
-            ? 'This API key is turned off or removed in Accounts. Turn it back on, choose another model, or stop.' : !observesAccess
-            ? 'Automatic access checks are unavailable. Retry after access is restored, choose another model, or stop.' : (mixed
+        // The organization's Supervisor (deployment_policy, projected on every served row) is never switched here:
+        // no branch offers another model or a key its Accounts row cannot turn back on.
+        const managed = row.managed === true;
+        node.querySelector('[data-wait-reset]').textContent = ((keyOff
+            ? (managed ? 'This API key is turned off or removed in Accounts. Retry once it is back, or stop.'
+                : 'This API key is turned off or removed in Accounts. Turn it back on, choose another model, or stop.') : !observesAccess
+            ? `Automatic access checks are unavailable. Retry after access is restored, ${managed ? '' : 'choose another model, '}or stop.` : (mixed
             ? 'Some accounts need sign-in; others are waiting for quota. ' : '') + (pool
             ? `No account can serve this model now. ${known ? `The engine reported a reset at ${reset.toLocaleString()}; availability is unconfirmed.` : 'The reset time is not known.'}`
-            : quota ? (known ? `Quota resets ${reset.toLocaleString()}.` : 'Quota reset time is not known.') : '');
+            : quota ? (known ? `Quota resets ${reset.toLocaleString()}.` : 'Quota reset time is not known.') : ''))
+            + (managed ? ' Your organization sets this model; only its administrator changes it.' : '')).trim();
+        node.querySelector('[data-wait-change]').hidden = managed;
+        if (managed) node.querySelector('[data-wait-picker]').hidden = true;
         const automatic = node.querySelector('[data-wait-auto]');
         automatic.parentElement.hidden = !timed;
         node.querySelector('[data-wait-auto-label]').textContent = mixed || pool

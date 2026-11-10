@@ -408,7 +408,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness: Optional[bool] = None, _plan_answers: Any = None,
                     attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False,
                     input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None) -> ToolResult:
-    from ouroboros.claudexor_daemon import ensure_owned_gateway
+    from ouroboros.execution_domain import start_engine
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.subagents import delegated_execution_workspace_root, delegated_run_shape, resolve_subagent_executor, route_health
@@ -478,8 +478,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         )
     access = authority.access
     start_attempted = recovering  # Recovery may already own a physical run.
-    try:
-        gateway = ensure_owned_gateway()
+    try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
+        engine, gateway = start_engine(drive, retry_token, continuation_token)
     except ClaudexorUnavailable as exc:
         resolution = resolve_subagent_executor("harness", route=route, unavailable_reason=exc.code)
         return _fail("delegate_start", exc.code, str(exc), executor=resolution.executor)
@@ -597,11 +597,12 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         lineage = lineage if isinstance(lineage, dict) else {}
         snapshot_facts = dict(snapshot_id=snapshot_id, baseline_sha=baseline_sha, target_root=target_root,
                               authority_source=authority_source, resource_ref=resource_ref,
-                              execution_binding_fingerprint=binding_fingerprint, **continuation.custody)
+                              execution_binding_fingerprint=binding_fingerprint, **continuation.custody, **engine)
         requested, claim_refusal = claimed_start_request(
             drive, actor_ctx=ctx, initial_bootstrap=_initial_bootstrap and not recovering,
+            serving_store_id=str(getattr(gateway, "store_identity", "") or ""),
             run_id="", task_id=str(getattr(ctx, "task_id", "") or ""),
-            idempotency_key=key, invocation_id=invocation_id,
+            idempotency_key=key, invocation_id=invocation_id,  # claimed_start_request records store observations, not admission
             max_seconds=seconds, max_seconds_basis=seconds_basis, request=request_body, project_id=project_id,
             project_owned=bool(owned_project_id), project_persistent=project_persistent, route=route.route_id,
             root_task_id=str(lineage.get("root_task_id") or ""), parent_task_id=str(lineage.get("parent_task_id") or ""),
@@ -674,7 +675,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     durable = record_started_custody(
         drive, run_id, ctx, route, authority,
         key=key, access=access, root=root, seconds=seconds,
-        invocation_id=invocation_id, project_id=project_id,
+        invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),
         project_owned=bool(owned_project_id), project_persistent=project_persistent,
         **actor_facts, **{k: v for k, v in snapshot_facts.items() if k not in plan_facts(snapshot_facts)},
         plan_facts=plan_facts(snapshot_facts), processing=processing_info, prompt_cache_ttl=ttl_info,
@@ -1045,9 +1046,9 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     Legacy caller-sized waits preserve their last-poll expiry contract.
     """
     from ouroboros.config import get_delegate_wait_max_sec, get_delegate_wait_sec
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import (
-        ClaudexorGateway,
-        ClaudexorUnavailable,
+        ClaudexorGateway, ClaudexorUnavailable,
         pending_interactions as _cx_pending,
     )
 
@@ -1122,7 +1123,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                                   lease_id=_lease_id)
     try:
         if gateway is None:
-            gateway = ClaudexorGateway()
+            gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=progress.poll_bound(read_window()))  # its engine
         if not getattr(gateway, "engine_version", ""):
             gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
         step = None
@@ -1247,8 +1248,8 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolRes
     control is worse than saying nothing: it retires the operator's attention from a run
     that is still writing to a workspace.
     """
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
-
     rid = str(run_id or "").strip()
     if not rid:
         return _fail("delegate_cancel", "missing_run_id", "run_id is required")
@@ -1256,7 +1257,7 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolRes
     if not_mine or entry is None:
         return not_mine or _fail("delegate_cancel", "run_ownership_unknown", "custody unresolved", run_id=rid)
     try:
-        gateway = ClaudexorGateway()
+        gateway = run_gateway(entry, ClaudexorGateway)  # the engine the run was started on, never another
         gateway.handshake()
     except ClaudexorUnavailable as exc:
         return _fail("delegate_cancel", exc.code, str(exc), run_id=rid)

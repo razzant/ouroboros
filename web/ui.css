@@ -309,13 +309,20 @@
     /* The shell's insets (DESIGN "Shell"): the system's safe area, reported by the browser as env() and inside
        Telegram as --tg-safe-area-inset-* (the SDK writes them inline; host_telegram.js mirrors its object; the same
        inset, so the larger wins, never the sum), plus Telegram's own controls over the content
-       (--tg-content-safe-area-inset-*). Outside Telegram the Telegram tokens rest at 0. */
+       (--tg-content-safe-area-inset-*). Outside Telegram the Telegram tokens rest at 0. The sides are read only
+       inside Telegram (style.css html[data-telegram-fullscreen]). */
     --tg-safe-area-inset-top: 0px;
     --tg-safe-area-inset-bottom: 0px;
+    --tg-safe-area-inset-left: 0px;
+    --tg-safe-area-inset-right: 0px;
     --tg-content-safe-area-inset-top: 0px;
     --tg-content-safe-area-inset-bottom: 0px;
+    --tg-content-safe-area-inset-left: 0px;
+    --tg-content-safe-area-inset-right: 0px;
     --inset-top: calc(max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top)) + var(--tg-content-safe-area-inset-top));
     --inset-bottom: calc(max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom)) + var(--tg-content-safe-area-inset-bottom));
+    --inset-left: calc(max(env(safe-area-inset-left, 0px), var(--tg-safe-area-inset-left)) + var(--tg-content-safe-area-inset-left));
+    --inset-right: calc(max(env(safe-area-inset-right, 0px), var(--tg-safe-area-inset-right)) + var(--tg-content-safe-area-inset-right));
     /* The shell's stacking order (DESIGN "Shell"), lowest first: Main's floating header, the sidebar column (on a
        phone the drawer, which lies under the room), the room (on a phone the card the drawer pushes aside), the
        sidebar's resize handle, the Project panel over the content area (its scrim beneath it; the stack layout's
@@ -1129,8 +1136,15 @@ textarea.ui-control { resize: vertical; }
 
 /* Measured popup placement and its floating material are shared; menu/listbox interaction stays separate. The paint
    belongs to the popup itself, so a menu, a dialog and a listbox are one backed sheet on
-   the float shadow: a role below chooses layout, never paint. */
+   the float shadow: a role below chooses layout, never paint. The screen's top inset (--inset-top, Telegram's band in
+   fullscreen) is never a popup's: registered as a length, so bindPopoverPosition (ui_interactions.js) reads it resolved. */
+@property --ui-popup-inset-top {
+    syntax: '<length>';
+    inherits: false;
+    initial-value: 0px;
+}
 .ui-popup {
+    --ui-popup-inset-top: var(--inset-top);
     position: fixed;
     margin: 0;
     right: auto;
@@ -1257,7 +1271,8 @@ textarea.ui-control { resize: vertical; }
 .ui-hint[data-cramped="true"] { overflow-y: auto; overscroll-behavior: contain; }
 .ui-hint-line, .ui-hint-rule { margin: 0; }
 .ui-hint-word { margin-inline-end: var(--space-2); color: var(--text-primary); font-weight: 600; }
-.ui-hint-rule { margin-top: 2px; color: var(--text-secondary); }
+.ui-hint-rule, .ui-hint-fact { margin-top: 2px; }
+.ui-hint-rule { color: var(--text-secondary); }
 .ui-hint-action {
     display: block;
     margin-top: var(--space-1);

@@ -425,6 +425,15 @@ test('a held tool call is worded by what is known, never as a call that has not 
     assert.ok(!menuSrc.includes('has not returned'), 'the false sentence is gone');
 });
 
+test('a held merge request is worded by what its receipt shows', () => {
+    const base = { kind: 'merge_operation', task_id: 't-1', receipt_id: 'r-1' };
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_effect_unknown' }]),
+        'the outcome of a merge request of task t-1 is unknown');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_queued' }]), 'a merge of task t-1 is queued on GitHub');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_call_unreturned' }]), 'a merge of task t-1 is not settled');
+    assert.equal(heldWorkFacts([base]), 'a merge of task t-1 is not settled');
+});
+
 test('a refused Resume of a held Continue toasts its facts, with wait-or-stop only for running work', async () => {
     const toasts = [];
     const toast = (text, kind) => toasts.push([text, kind]);

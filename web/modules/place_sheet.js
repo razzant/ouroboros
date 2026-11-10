@@ -108,11 +108,14 @@ function stateHtml(place, ui) {
     const options = PLACE_STATES.map(({ value, label }) => ({ value, label }));
     const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state', title: 'Changes at once' });
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
-    // System voice, under the tray (fills never stack).
+    // System voice, under the tray (fills never stack). While consciousness is off it only hears (the host's
+    // `only_hears`), whatever the stored choice says it would do.
+    const note = place.onlyHears ? tr('places.only_hears.note', 'Consciousness is off: it only hears here.')
+        : state?.note || 'Its state could not be read.';
     return `<div class="settings-effort-card place-state">
             <label id="place-state-label">What it does here</label>
             ${group}
-            ${silent ? '' : `<p class="place-state-note">${escapeHtml(state?.note || 'Its state could not be read.')}</p>`}
+            ${silent ? '' : `<p class="place-state-note">${escapeHtml(note)}</p>`}
         </div>
         ${silent ? `<p class="place-silent-card" role="note">${escapeHtml(`${state.note} ${SILENT_CARD}`)}</p>` : ''}`;
 }
@@ -134,7 +137,8 @@ function wakesHtml(place, ui) {
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
-        ${place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
+        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
         ${place.state === 'paused' ? `<p class="place-sheet-note">${tr('places.wake.paused', 'While this place is Paused, nothing here wakes it.')}</p>` : ''}
         <p class="place-sheet-note">${tr('places.wake.honesty', 'Everything else here it sees at its next own wake and decides what to read.')}</p>`;
 }

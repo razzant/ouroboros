@@ -100,6 +100,18 @@ def _project(effective: dict) -> dict:
 _ABSENT: Tuple[dict, dict] = ({}, {})  # no saved document: the route keys read as every other key
 
 
+def route_view(read_settings) -> Tuple[dict, dict]:
+    """``(effective document, env-shaped projection)`` of what ``read_settings`` (a loader) reads over
+    ``skill_environ``, normalized as every route consumer reads it. The live view is this read of the saved
+    document; a deployment policy judges the document a write would save with the same read
+    (``config.settings_of_document``), so an echo never stands in for a cleared key there either."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+    from ouroboros.settings_integrity import skill_settings
+
+    effective = apply_runtime_provider_defaults(skill_settings(read_settings))[0]
+    return effective, _project(effective)
+
+
 def route_settings_view() -> Optional[Tuple[dict, dict]]:
     """``(effective document, env-shaped projection)`` of the route keys as the document reads now.
 
@@ -111,8 +123,7 @@ def route_settings_view() -> Optional[Tuple[dict, dict]]:
     isolated runs keep the verified reader the loader already uses."""
     global _VIEW
     from ouroboros import config
-    from ouroboros.server_runtime import apply_runtime_provider_defaults
-    from ouroboros.settings_integrity import read_settings_json_verified, skill_settings
+    from ouroboros.settings_integrity import read_settings_json_verified
 
     source = _read_source()
     stamp, signature = _document_stamp(), tuple(source.get(key) for key in _SIGNATURE_KEYS)
@@ -128,11 +139,10 @@ def route_settings_view() -> Optional[Tuple[dict, dict]]:
         try:
             if not isinstance(read_settings_json_verified(config.SETTINGS_PATH), dict):
                 return None
-            effective, _changed, _keys = apply_runtime_provider_defaults(
-                skill_settings(lambda: config.load_settings_lock_held(_settings_lock_held=False)))
+            effective, projection = route_view(lambda: config.load_settings_lock_held(_settings_lock_held=False))
         except Exception:
             return None
-        _VIEW = (stamp, signature, effective, _project(effective))
+        _VIEW = (stamp, signature, effective, projection)
         return _VIEW[2], _VIEW[3]
 
 

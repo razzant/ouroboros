@@ -25,6 +25,7 @@ from ouroboros.delegate_capture_attempt import (collection_due, record_attempt, 
                                                 capture_required, legacy_cap)
 from ouroboros.delegate_directory import is_in_place_run
 from ouroboros.delegate_named_evidence import saved_named_evidence
+from ouroboros.execution_domain import EngineClients, run_gateway
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
 
 log = logging.getLogger(__name__)
@@ -267,11 +268,12 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
     entry = current.run(root, run_id)
     if entry is None or not entry.terminal_source:
         return {"status": "pending", "reason": "terminal_not_observed"}
-    lock = c.disposition_lock_path(root, entry)
+    lock, held = c.disposition_lock_path(root, entry), {}
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True)
-    if fd is None:
-        return {"status": "pending", "reason": "collection_in_progress"}
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True, outcome=held)
+    if fd is None:  # only contention is another collector; any other refusal keeps the platform's cause
+        return ({"status": "pending", "reason": "collection_in_progress"} if held.get("reason") == "contention"
+                else {"status": "pending", "reason": "collection_lock_unavailable", "lock_outcome": dict(held)})
     capture = None
     transient = False
     retention = {}
@@ -293,8 +295,8 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             or (output_attempt.get("retry") == "transient" and output_attempt.get("generation") != generation))
         if (gateway is None and gateway_factory is not None
                 and (retry_output or (not background and capture_required(entry)))):
-            try:
-                owned_gateway = gateway = gateway_factory()
+            try:  # the run's own engine (``execution_domain``), else the caller's discovery
+                owned_gateway = gateway = run_gateway(entry, gateway_factory)
             except Exception:
                 pass  # Retained output, local capture and money do not require transport.
         retry_capture = recapture or legacy_cap(entry) or (entry.collection_attempt.get("generation") != generation
@@ -533,6 +535,7 @@ class BodyRuntime:
         self._compact_wait = False
         self._observing = None
         self._connecting = None
+        self._work = EngineClients()  # a work engine's runs are observed through their own engine
         self.thread = threading.Thread(target=self._drive, name="delegated-body", daemon=True)
         try:
             self.thread.start()
@@ -573,10 +576,12 @@ class BodyRuntime:
         from ouroboros.claudexor_daemon import read_owned_gateway
         return read_owned_gateway()
 
-    def _observer_gateway(self):
-        """One observation client; discovery and handshake never hold the runtime lock."""
+    def _observer_gateway(self, entry=None):
+        """One observation client per engine; discovery and handshake never hold the runtime lock."""
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
+        if getattr(entry, "engine_ref", None):
+            return self._work.get(entry)
         with self.lock:
             gateway = self._observing
         endpoint = getattr(gateway, "_endpoint", None)
@@ -605,12 +610,14 @@ class BodyRuntime:
     def _observation_key(self, entry):
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
-        gateway = self._observing
+        gateway = self._work.held(entry) if entry.engine_ref else self._observing
         endpoint = getattr(gateway, "_endpoint", None)
         generation = endpoint_generation(endpoint) if endpoint is not None else id(gateway)
         return generation, entry.invocation_id, entry.daemon_store_id
 
     def _drop_observer_gateway(self, gateway=None):
+        if self._work.drop(gateway) and gateway is not None:
+            return
         with self.lock:
             if gateway is not None and self._observing is not gateway:
                 return
@@ -627,7 +634,7 @@ class BodyRuntime:
         is "not supported this beat", nothing is cached, and the old read runs regardless."""
         from ouroboros.gateways import claudexor_observation as observation
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
-        gateway = self._observer_gateway()
+        gateway = self._observer_gateway(entry)
         try:
             supported = observation.wait_many_supported(gateway, timeout_sec=SHORT_POLL_TIMEOUT_SEC)
         except ClaudexorUnavailable:
@@ -650,7 +657,7 @@ class BodyRuntime:
         if c.daemon_says_absent(exc) and entry.terminal_source:
             return True  # Retention loss cannot erase a terminal fact, including an in-flight publication.
         if c.daemon_says_absent(exc, gateway=gateway, run=entry):
-            c.close_absent_run(self.root, gateway, entry, "body_observation_absent")
+            c.close_absent_run(self.root, gateway, entry, "body_observation_absent", absence=exc)
             return True
         if c.daemon_says_absent(exc):
             c.record_containment_fault(self.root, entry, "run_absence_identity_unproven",
@@ -859,7 +866,7 @@ class BodyRuntime:
             entry = copy.deepcopy(run.entry)  # every job its own entry: what this body read stays as read
             with self.lock:
                 if run.observe and self.observation_gaps.get(entry.run_id) != self._observation_key(entry):
-                    if compact:
+                    if compact and not entry.engine_ref:  # one compact wait per pass holds the owned engine's runs
                         watch.append(entry)
                     else:
                         previous = self.reads.get(entry.run_id)

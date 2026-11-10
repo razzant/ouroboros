@@ -73,6 +73,10 @@ TERMINAL_WRITERS = {
     # turn's own typed terminal, recorded in its carrier before the exception unwinds; its
     # projector never replaces a row that is already truly terminal.
     ('supervisor/worker_chat_lane.py::conversation_exception_terminal', 'STATUS_CANCELLED if stopped else STATUS_FAILED'): 'terminal',
+    # A deployment's hold that met a task inside its carrier (handle_task's before-start check raised: the pool
+    # worker's exception boundary and the conversation lane's) is that task's typed failed terminal, nothing spent;
+    # its projector never replaces a row that is already truly terminal.
+    ('ouroboros/deployment_extensions.py::record_held_task', 'STATUS_FAILED'): 'terminal',
     ('ouroboros/agent_task_pipeline.py::_store_task_result', 'status'): 'dynamic',
     ('ouroboros/delegate_terminal.py::record_terminal_reconciliation', 'str(existing.get("status") or STATUS_RUNNING)'): 'dynamic',
     # Foreign-root disclosure preserves CURRENT status and pointers under the
@@ -84,10 +88,6 @@ TERMINAL_WRITERS = {
     # Preparation markers land only on a row still in the named non-terminal
     # status (requested by default); the projector refuses any other row.
     ('supervisor/workspace_preparation.py::_transition', 'status'): 'dynamic',
-    # #1376: the host-composed diagnostic's create-only "requested" receipt, the
-    # same seed a schedule_subagent request writes; create_only refuses any
-    # existing row, so it can neither end nor overwrite a task.
-    ('supervisor/silence_attention.py::_admit', '"requested"'): 'dynamic',
     # F6 upstream sync: the cursor/backfill refresh rewrites a stale stored
     # disclosure without changing the task's terminal status (same preserved
     # read as its record_terminal_reconciliation sibling).

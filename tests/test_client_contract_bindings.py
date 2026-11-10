@@ -386,8 +386,9 @@ def test_recent_wake_rows_match_the_typed_contract(client, monkeypatch, with_sum
     assert panel["recent_wakes_coverage"] == "Wakes that reached a model call in the last 48 h"
     history = {key: panel[key] for key in _declared("RecentWakesView")}
     assert not validate_ingress(history, contract_typed_dict("RecentWakesView"))
+    assert not validate_ingress({**row, "place_id": "mail"}, shape), "a focus wake's place id is declared"
     for field, invalid in (("live", "false"), ("phase", "completed"), ("cause", "own_clock"), ("ended_at", 7),
-                           ("tool_calls", "16"), ("checks", [{"chip": "checked", "tool": 7}]),
+                           ("place_id", 7), ("tool_calls", "16"), ("checks", [{"chip": "checked", "tool": 7}]),
                            ("cost_presentation", {"scope": "root_tree"})):
         assert validate_ingress({**row, field: invalid}, shape), field
     assert validate_ingress({key: value for key, value in row.items() if key != "task_id"}, shape)
@@ -465,6 +466,9 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert place["label"] == "Test chat · Room" and place["state"] == "silent"
     assert not validate_ingress(place, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place
+    # The derived «only hears» fact is an optional boolean: present, it validates; any other type does not.
+    assert not validate_ingress({**place, "only_hears": True}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "only_hears": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
     assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
     assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
     assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))
@@ -526,3 +530,47 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     disconnect = {"expected_revision": listed["places"][0]["revision"]}
     assert not validate_ingress(disconnect, contract_typed_dict("PlaceDisconnectRequest"))
     assert client.request("DELETE", path, json=disconnect).status_code == 200
+
+
+def test_place_conflict_lookup_keeps_its_id_after_handler_cancellation(client, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from starlette.requests import Request
+    from ouroboros.gateway import places_api
+
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [{
+        "skill": "bridge", "id": "chat", "destination": "vendor:chat", "label": "Test chat", "wakes": ["mention"],
+    }])
+    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "note": "Help here."}
+    created = client.post("/api/places", json=connect)
+    assert created.status_code == 200, created.text
+    place = created.json()["place"]
+
+    async def exercise():
+        queued = asyncio.Event()
+        pending = []
+
+        async def delayed_read(function):
+            # A read worker can outlive its cancelled HTTP waiter.
+            pending.append(function)
+            queued.set()
+            await asyncio.Event().wait()
+
+        async def receive():
+            return {"type": "http.request", "body": json.dumps(connect).encode(), "more_body": False}
+
+        # Keep the mutation helper's real executor; control only this route's read dispatch.
+        monkeypatch.setattr(places_api, "asyncio", SimpleNamespace(to_thread=delayed_read))
+        request = Request({"type": "http", "method": "POST", "path": "/api/places",
+                           "path_params": {}, "app": client.app}, receive=receive)
+        handler = asyncio.create_task(places_api.api_places(request))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=10)
+        finally:
+            handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await handler
+        current, = pending
+        assert json.loads(json.dumps(current())) == place
+
+    asyncio.run(exercise())

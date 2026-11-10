@@ -98,6 +98,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true, mainNote = false } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
+    let offeredSlots = [];  // every slot in contract order; a `managed` one (a deployment's checker) is shown, never a row
     let rows = [];
     let settings = {};
     let providerProfiles = {};
@@ -250,6 +251,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             </div></details>`;
     }
 
+    // A role the deployment fixes: its model said in its place, no control to edit and nothing collected.
+    const fixedGroupHtml = (slot) => `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}" data-model-role-fixed>
+        <div class="model-role-head"><h4>${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4><span class="ui-chip skills-chip" data-tone="neutral">Set by your organization</span></div>
+        <p class="model-role-copy">${escapeHtml(parseModelSource(settings[slot.settingKey]).model || String(settings[slot.settingKey] || ''))}. Its administrator changes it.</p>
+    </section>`;
+
     function rowHtml(row, index, total) {
         const isFallback = row.slot.slot === 'fallback';
         const inputId = inputIdFor(row);
@@ -273,7 +280,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
             <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
-            <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + slots.map((slot) => {
+            <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + offeredSlots.map((slot) => {
+            if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">
@@ -515,7 +523,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     return {
         load(value, contract = {}) {
             validationAttempted = false;
-            settings = { ...value }; slots = contract.modelSlots || slots;
+            settings = { ...value }; offeredSlots = contract.modelSlots || offeredSlots;
+            slots = offeredSlots.filter((slot) => !slot.managed);
             processingPreference = String(settings[PROCESSING_PREFERENCE_KEY] || ''); processingTouched = false;
             providerProfiles = contract.providerProfiles || providerProfiles;
             connections = apiConnections(settings, providerProfiles);

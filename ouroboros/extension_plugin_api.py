@@ -38,6 +38,7 @@ from ouroboros.contracts.plugin_api import (
     normalize_extension_route_methods,
 )
 from ouroboros.event_bus import VALID_TOPICS as VALID_EVENT_TOPICS, get_global_event_bus
+from ouroboros.deployment_extensions import discloses_failure
 from ouroboros.extension_companion import companion_spawn_env, CompanionDescriptor, get_global_supervisor, is_server_process
 from ouroboros.extension_isolated_deps import (
     async_isolated_site_dirs_scope,
@@ -597,7 +598,7 @@ class PluginAPIImpl:
                 except Exception:
                     restarts += 1
                     if spec.restart_policy != "on_failure" or restarts > spec.max_restarts:
-                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=True)
+                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=discloses_failure(self._skill))
                         return
                     await asyncio.sleep(max(0.1, float(spec.backoff_seconds)))
 
@@ -720,7 +721,7 @@ class PluginAPIImpl:
             try:
                 broadcaster(payload)
             except Exception:
-                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=True)
+                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=discloses_failure(self._skill))
 
     def _send_ws_message_via_host(self, short: str, data: Dict[str, Any]) -> None:
         """Best-effort WS push from an out-of-process child/companion via Host Service."""
@@ -958,7 +959,7 @@ class PluginAPIImpl:
                 log.warning(
                     "extension %s post-swap side effect failed; the published "
                     "bundle is disposed through the standard unload path",
-                    self._skill, exc_info=True,
+                    self._skill, exc_info=discloses_failure(self._skill),
                 )
                 raise
         # Companion PROCESSES start OUTSIDE the registry lock (the pre-split
@@ -972,7 +973,7 @@ class PluginAPIImpl:
                 companion_supervisor.start(spawn.descriptor)
             except Exception:
                 log.warning("extension %s companion %s failed to start; disposed through "
-                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=True)
+                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=discloses_failure(self._skill))
                 raise
 
     def _close_runtime_access(self) -> None:

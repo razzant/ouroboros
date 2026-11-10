@@ -1264,6 +1264,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
+            from ouroboros.place_reply import note_dispatch
+            note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):
@@ -1515,17 +1517,12 @@ def process_tool_results(
         if ctx is not None and published.get("review_delivery") and not result_partial:
             from ouroboros.review_waiting import acknowledge_delivery
             acknowledge_delivery(ctx, published["review_delivery"])
-        # Keyed on the wake the RESULT published, not on a tool name: a call that published none has nothing to ack.
-        # A delivered refusal wake too: ``acknowledge_pending_wake`` itself verifies what the text carried.
-        if ctx is not None and published.get("supervision_wake_id"):
-            try:
-                from ouroboros.delegate_supervision import acknowledge_pending_wake, stage_pending_wake_exposure
-                from ouroboros.working_checkpoint import defer_content_ack
-
-                stage_pending_wake_exposure(ctx, truncated_result)
-                defer_content_ack(ctx, lambda delivered=truncated_result: acknowledge_pending_wake(ctx, delivered))
-            except Exception:
-                log.debug("Failed to acknowledge injected delegate wake", exc_info=True)
+        # Keyed on the wake the RESULT published, not on a tool name, refusal wakes included: exposure and the ACK
+        # follow only a complete delivery of it, inline or its exact source read whole (``deliver_wake``).
+        if ctx is not None and (published.get("supervision_wake_id") or (
+                published.get("read_view") and getattr(ctx, "_wake_sources", None))):
+            from ouroboros.delegate_supervision import deliver_wake
+            deliver_wake(ctx, exec_result, view, truncated_result)
 
         # Keep the call-ID map for diagnostic callers. Compaction takes exact
         # provenance from the occurrence-bound record on the canonical row.
