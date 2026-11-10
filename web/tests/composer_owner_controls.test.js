@@ -486,7 +486,9 @@ test('the context capsule: ring, Context and the mode; it opens into exactly thr
     assert.ok(m.contextEl.classList.contains('chat-capsule'));
     assert.equal(m.contextEl.getAttribute('aria-label'), 'Context size mode');
     assert.match(m.contextEl.innerHTML, /class="chat-capsule-name">Context</);
-    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Max');
+    // Closed, the value is what this room's latest requests were sent in: before any census, a dash, never the choice.
+    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, '—');
+    assert.equal(m.contextEl.dataset.contextActual, 'unknown');
     assert.ok(!m.contextHead.title, 'no hover-only title: the hint says it on every surface');
     assert.deepEqual(['word', 'text', 'rule'].map((part) => m.contextHint.querySelector(`.ui-hint-${part}`).textContent),
         ['Max', 'The full context window.', CHANGE_RULE]);
@@ -513,7 +515,8 @@ test('the context capsule: ring, Context and the mode; it opens into exactly thr
     assert.equal(later.defaultPrevented, false, 'a closed capsule leaves Escape to the room');
     m.controls.syncState({ context_mode: 'nano' });
     assert.equal(m.contextEl.dataset.contextMode, 'nano', 'the Main composer reads Main mode');
-    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Nano');
+    assert.equal(m.seg('nano').getAttribute('aria-checked'), 'true', 'the open strip marks the saved mode');
+    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, '—', 'a saved mode is not an observation');
     m.controls.syncState({ context_mode: 'huge' });
     assert.equal(m.contextEl.dataset.contextMode, 'max', 'an unknown mode reads as Max');
     m.controls.destroy();
@@ -525,7 +528,7 @@ test('a context choice posts the owner endpoint at once, waits for the answer, s
     await m.choose('low');
     assert.deepEqual(m.posts, [['/api/owner/context-mode', { mode: 'low' }]]);
     assert.equal(m.contextEl.dataset.contextMode, 'low');
-    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Low');
+    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, '—', 'a choice never paints the observation');
     assert.equal(m.seg('low').getAttribute('aria-checked'), 'true');
     assert.equal(m.contextEl.dataset.disabled, 'false');
     assert.deepEqual(m.refreshes, [true]);
@@ -534,7 +537,7 @@ test('a context choice posts the owner endpoint at once, waits for the answer, s
     m.answer.value = { ok: false, json: async () => ({ error: 'Context mode can only be lowered while Ouroboros is idle.' }) };
     await m.choose('max');
     assert.equal(m.contextEl.dataset.contextMode, 'low', 'a refusal leaves the saved mode');
-    assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, 'Low');
+    assert.equal(m.seg('low').getAttribute('aria-checked'), 'true');
     assert.deepEqual(m.toasts, [['Context mode can only be lowered while Ouroboros is idle.', 'error']]);
     assert.deepEqual(m.refreshes, [true, true]);
     // While a save is on its way the strip waits: a second choice and a stale poll change nothing.
@@ -560,6 +563,230 @@ test('a context choice posts the owner endpoint at once, waits for the answer, s
     assert.equal(m.posts.length, 5, 'past the end nothing moves and nothing is posted');
     assert.equal(m.controls.hasPendingSave(), false, 'both saves are settled');
     assert.equal(await m.controls.pendingSave(), true);
+    m.controls.destroy();
+});
+
+// A census row of a room's own work whose latest sent request carries its physical context (neutral fixture).
+const sent = (applied, { chat = 1, id = 'work-a', preferred = 'max', cause = 'memory', at = '2026-01-05T10:04:00Z', ...rest } = {}) => ({
+    activity_id: id, chat_id: chat, project_id: '', kind: 'managed_task', phase: 'working', task_attempt: 1, ...rest,
+    context_attempt: { attempt_id: `${id}-1`, ledger_state: 'dispatched', round_id: 'r1', preferred_at_send: preferred, applied,
+        profile: `owner_${applied}`, cause: applied === preferred ? '' : cause, observed_at: at, task_attempt: 1,
+        llm_call_id: 'c1', execution_id: 'e1', call_attempt: 1 },
+});
+const closed = (m) => ({
+    value: m.contextEl.querySelector('.chat-capsule-value').textContent, actual: m.contextEl.dataset.contextActual,
+    lit: m.contextEl.querySelectorAll('.chat-context-arc').filter((arc) => arc.getAttribute('data-lit') === 'true').map((arc) => arc.dataset.arc),
+    dot: m.contextEl.dataset.contextDiffers === 'true'
+        ? [m.contextEl.querySelector('.chat-context-choice').getAttribute('cx'), m.contextEl.querySelector('.chat-context-choice').getAttribute('cy')] : null,
+    label: m.contextHead.getAttribute('aria-label'),
+    fact: m.contextHint.querySelector('.ui-hint-fact').hidden ? null
+        : [m.contextHint.querySelector('.ui-hint-fact-word').textContent, m.contextHint.querySelector('.ui-hint-fact-text').textContent],
+});
+
+test('closed, Context says the mode this room\'s latest request was sent in; the saved mode is a dot on its arc only while they disagree', async () => {
+    const m = mountPair();
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')] });
+    const low = closed(m);
+    assert.deepEqual([low.value, low.actual, low.lit, low.dot, low.label], ['Low', 'low', ['low'], ['157.78', '115.94'], 'Context: Low now, Max chosen'],
+        'one word and one lit arc for the observation; Effort\'s dot on the Max arc keeps the choice');
+    assert.equal(low.fact[0], 'Low now');
+    assert.match(low.fact[1], /^The history does not fit the Max window\. Request at .+\.$/, 'one short cause and the request\'s time');
+    assert.deepEqual(m.posts, [], 'painting the observation saves nothing');
+    assert.equal(m.contextEl.dataset.contextMode, 'max', 'nor changes the saved mode');
+    await m.press(m.contextHead);
+    assert.equal(m.seg('max').getAttribute('aria-checked'), 'true', 'open, the strip marks the saved mode');
+    assert.deepEqual(['word', 'text'].map((part) => m.contextHint.querySelector(`.ui-hint-${part}`).textContent), ['Max', 'The full context window.']);
+    // Choosing the observed mode makes them agree: today's closed capsule, no dot, the head's own words; open, the hint
+    // still dates the observation (no cause: nothing differs).
+    await m.choose('low');
+    const agreed = closed(m);
+    assert.deepEqual({ ...agreed, fact: null }, { value: 'Low', actual: 'low', lit: ['low'], dot: null, label: '', fact: null });
+    assert.equal(agreed.fact[0], 'Low now');
+    assert.match(agreed.fact[1], /^Request at .+\.$/);
+    // A choice changes the dot, never the word: the next request will try Nano, the last one was sent in Low.
+    await m.choose('nano');
+    assert.deepEqual([closed(m).value, closed(m).lit, closed(m).dot], ['Low', ['low'], ['26.22', '115.94']]);
+    assert.equal(closed(m).fact[1].split(' Request at')[0], 'The history does not fit the Max window.',
+        'the cause is about the mode its work held at send');
+    m.controls.destroy();
+});
+
+test('a room reads only its own root works: now, mixed, last and unknown; helpers, other rooms and older attempts never count', () => {
+    const main = mountPair(), project = mountPair({ projectId: 'alpha', chatId: 42 });
+    const rows = [
+        sent('max', { id: 'helper', parent_task_id: 'work-a', delegation_role: 'subagent' }),
+        sent('nano', { id: 'other-room', chat: 42 }),
+        { ...sent('nano', { id: 'old-attempt' }), task_attempt: 2 },
+        sent('low', { id: 'work-a' }),
+    ];
+    const data = (activities) => ({ context_mode: 'max', projects: [{ id: 'alpha', cognition: { context_mode: 'max' } }], active_chat_activities: activities });
+    for (const m of [main, project]) m.controls.syncState(data(rows));
+    assert.deepEqual([closed(main).value, closed(main).lit], ['Low', ['low']], 'Main: its root work alone');
+    assert.deepEqual([closed(project).value, closed(project).lit], ['Nano', ['nano']], 'the Project: its own room');
+    // Two of Main's own works in two modes: both arcs, one word, never one of them passed off as the room's.
+    main.controls.syncState(data([...rows, sent('max', { id: 'work-b', at: '2026-01-05T10:06:00Z' })]));
+    assert.deepEqual([closed(main).value, closed(main).actual, closed(main).lit, closed(main).label],
+        ['Mixed', 'mixed', ['low', 'max'], 'Context: Mixed, Low and Max, Max chosen']);
+    // Each work's own latest request; the time is the newest of them (10:06 here), not a moment both shared.
+    assert.equal(closed(main).fact[0], 'Mixed');
+    assert.match(closed(main).fact[1], /^Latest requests of works here: Low and Max\. Newest at .+\.$/);
+    // A body without the census (a Project's own cognition read) keeps what was seen.
+    main.controls.syncState({ context_mode: 'max' });
+    assert.equal(closed(main).value, 'Mixed');
+    // No work in the census now: the newest request this page saw, said as the last one; it agrees with Max here, so
+    // closed it is today's capsule, and open the hint still dates it.
+    main.controls.syncState(data([]));
+    assert.deepEqual([closed(main).value, closed(main).lit, closed(main).dot, closed(main).label], ['Max', ['max'], null, '']);
+    assert.equal(closed(main).fact[0], 'Max last');
+    assert.match(closed(main).fact[1], /^Request at .+\.$/);
+    project.controls.syncState(data([]));
+    assert.deepEqual([closed(project).value, closed(project).label, closed(project).fact[0]], ['Nano', 'Context: Nano last, Max chosen', 'Nano last']);
+    // A page that saw nothing says so: a dash in secondary ink, no lit arc, the choice's dot.
+    const fresh = mountPair();
+    fresh.controls.syncState(data([]));
+    assert.deepEqual(closed(fresh), { value: '—', actual: 'unknown', lit: [], dot: ['157.78', '115.94'],
+        label: 'Context: actual unknown, Max chosen', fact: ['Unknown', 'No request from this room seen since this page opened.'] });
+    for (const m of [main, project, fresh]) m.controls.destroy();
+});
+
+test('staggered completion preserves the newest request even when an older work outlives it', () => {
+    const m = mountPair();
+    const read = (rows) => m.controls.syncState({ context_mode: 'max', active_chat_activities: rows });
+    const older = sent('low'), newer = sent('max', { id: 'work-b', at: '2026-01-05T10:06:00Z' });
+    read([older, newer]);
+    assert.equal(closed(m).value, 'Mixed');
+    read([older]);
+    assert.deepEqual([closed(m).value, closed(m).fact[0]], ['Low', 'Low now']);
+    read([]);
+    const last = closed(m);
+    assert.deepEqual([last.value, last.fact[0]], ['Max', 'Max last']);
+    const fresh = mountPair();
+    fresh.controls.syncState({ context_mode: 'max', active_chat_activities: [newer] });
+    fresh.controls.syncState({ context_mode: 'max', active_chat_activities: [] });
+    assert.deepEqual(last, closed(fresh), 'the date too is the newer request, not the last work to leave');
+    for (const control of [m, fresh]) control.controls.destroy();
+});
+
+test('a released dispatch retracts only that attempt in current and retained facts, keeping its previous genuine send', () => {
+    for (const priorSend of [false, true]) for (const partial of [false, true]) for (const ended of [false, true]) {
+        const m = mountPair();
+        const read = (rows, incomplete = false) => m.controls.syncState({ context_mode: 'max', active_chat_activities: rows,
+            active_chat_activities_complete: !incomplete });
+        const previous = sent('max', { at: '2026-01-05T10:01:00Z' }).context_attempt;
+        previous.attempt_id = 'earlier-send'; previous.ledger_state = 'settled';
+        const candidate = sent('low');
+        if (priorSend) candidate.context_attempt.previous = previous;
+        read([candidate]);
+        assert.equal(closed(m).value, 'Low');
+        if (ended) { read([]); assert.equal(closed(m).fact[0], 'Low last'); }
+        const retracted = { ...candidate, context_attempt: { ...candidate.context_attempt, ledger_state: 'released' } };
+        read([retracted], partial);
+        assert.equal(closed(m).value, priorSend ? 'Max' : '—');
+        if (priorSend) {
+            assert.equal(closed(m).fact[0], partial ? 'Max last' : 'Max now');
+            assert.doesNotMatch(closed(m).fact[1], /history/);
+        }
+        read([candidate]);  // a late poll cannot revive the retracted identity
+        assert.equal(closed(m).value, priorSend ? 'Max' : '—');
+        read([]);
+        assert.equal(closed(m).value, priorSend ? 'Max' : '—');
+        if (priorSend) assert.equal(closed(m).fact[0], 'Max last');
+        m.controls.destroy();
+    }
+});
+
+test('a later release retracts a previous send carried by a resumed released attempt', () => {
+    const m = mountPair();
+    const read = (rows) => m.controls.syncState({ context_mode: 'max', active_chat_activities: rows });
+    const b = sent('low', { at: '2026-01-05T10:04:00Z' });
+    read([b]);
+    const c = sent('low', { at: '2026-01-05T10:05:00Z' });
+    c.context_attempt.attempt_id = 'work-a-2';
+    c.context_attempt.previous = { ...b.context_attempt, attempt_id: 'work-a-1' };
+    c.context_attempt.ledger_state = 'released';
+    read([c]);
+    assert.equal(closed(m).value, 'Low', 'the resumed release temporarily exposes its earlier send');
+    // The production event stream corrects C in place: supervisor/events.py
+    // removes C.previous when B is proved never to have started.
+    const cCorrected = { ...c, context_attempt: { ...c.context_attempt } };
+    delete cCorrected.context_attempt.previous;
+    read([cCorrected]);
+    assert.deepEqual([closed(m).value, closed(m).actual], ['—', 'unknown'],
+        'once the earlier attempt is disproven, the carried observation is retracted too');
+    read([c]);  // a stale retry frame cannot restore the disproven earlier send
+    assert.deepEqual([closed(m).value, closed(m).actual], ['—', 'unknown']);
+    m.controls.destroy();
+});
+
+test('without a current read (a socket close or a failed read) now is never claimed: the dated last stands until a read returns', () => {
+    const m = mountPair();
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')] });
+    assert.equal(closed(m).label, 'Context: Low now, Max chosen');
+    m.controls.syncState({ projects: [] });  // a Project list read carries no census: nothing changes
+    assert.equal(closed(m).label, 'Context: Low now, Max chosen');
+    m.controls.syncState({ accounting: { available: false } });  // chat.js's frame on a close and on a failed read
+    assert.deepEqual([closed(m).value, closed(m).label, closed(m).fact[0]], ['Low', 'Context: Low last, Max chosen', 'Low last']);
+    assert.match(closed(m).fact[1], /The current read is incomplete\.$/, 'no read is no departure of the work');
+    assert.equal(m.contextEl.dataset.contextMode, 'max');
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')] });
+    assert.equal(closed(m).label, 'Context: Low now, Max chosen', 'a current read says now again');
+    m.controls.destroy();
+});
+
+test('a disconnection is no departure: a send released after it never takes the earlier ended work\'s request with it', () => {
+    const m = mountPair();
+    const read = (rows) => m.controls.syncState({ context_mode: 'max', active_chat_activities: rows });
+    const a = sent('max', { at: '2026-01-05T10:01:00Z' });
+    const b = sent('low', { id: 'work-b', at: '2026-01-05T10:06:00Z' });
+    read([a]);
+    read([]);  // A completed in Max
+    read([b]);  // B provisionally dispatched in Low
+    assert.deepEqual([closed(m).value, closed(m).fact[0]], ['Low', 'Low now']);
+    m.controls.syncState({ accounting: { available: false } });  // the socket closes: no current read
+    assert.deepEqual([closed(m).value, closed(m).fact[0]], ['Low', 'Low last']);
+    read([{ ...b, context_attempt: { ...b.context_attempt, ledger_state: 'released' } }]);  // B never started
+    assert.deepEqual([closed(m).value, closed(m).actual, closed(m).fact[0]], ['Max', 'max', 'Max last']);
+    read([]);
+    assert.deepEqual([closed(m).value, closed(m).fact[0]], ['Max', 'Max last']);
+    m.controls.destroy();
+});
+
+test('an explicitly incomplete census never claims the room\'s current mode: its facts count as seen, the newest stands as last', () => {
+    const m = mountPair();
+    const read = (rows, flags = {}) => m.controls.syncState({ context_mode: 'max', active_chat_activities: rows, ...flags });
+    read([sent('low')], { active_chat_activities_complete: true, supervisor_ready: true });
+    assert.equal(closed(m).label, 'Context: Low now, Max chosen', 'a complete read is current');
+    // An incomplete read lists a newer request of another work: seen (it becomes the newest), never "now" or Mixed.
+    read([sent('max', { id: 'work-b', at: '2026-01-05T10:07:00Z' })], { active_chat_activities_complete: false, supervisor_ready: true });
+    assert.deepEqual([closed(m).value, closed(m).actual, closed(m).lit, closed(m).dot, closed(m).label], ['Max', 'max', ['max'], null, '']);
+    assert.equal(closed(m).fact[0], 'Max last');
+    assert.match(closed(m).fact[1], /^Request at .+\. The current read is incomplete\.$/);
+    // An incomplete read that lists nothing for this room (a supervisor not ready): the newest seen stays, as last.
+    read([], { active_chat_activities_complete: true, supervisor_ready: false });
+    assert.deepEqual([closed(m).value, closed(m).fact[0]], ['Max', 'Max last']);
+    assert.match(closed(m).fact[1], /The current read is incomplete\.$/);
+    // A complete read again: current, and only what it lists.
+    read([sent('low')], { active_chat_activities_complete: true, supervisor_ready: true });
+    assert.deepEqual([closed(m).value, closed(m).label], ['Low', 'Context: Low now, Max chosen']);
+    assert.doesNotMatch(closed(m).fact[1], /incomplete/);
+    m.controls.destroy();
+    // A fresh page whose first read is incomplete: its listed fact is kept, dated, as last (never now).
+    const fresh = mountPair();
+    fresh.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')], active_chat_activities_complete: false });
+    assert.deepEqual([closed(fresh).value, closed(fresh).label, closed(fresh).fact[0]], ['Low', 'Context: Low last, Max chosen', 'Low last']);
+    assert.match(closed(fresh).fact[1], /^The history does not fit the Max window\. Request at .+\. The current read is incomplete\.$/);
+    // ... and one whose incomplete read lists nothing: unknown, saying why.
+    const empty = mountPair();
+    empty.controls.syncState({ context_mode: 'max', active_chat_activities: [], supervisor_ready: false });
+    assert.deepEqual([closed(empty).value, closed(empty).actual, closed(empty).fact], ['—', 'unknown', ['Unknown', 'The current read is incomplete.']]);
+    for (const x of [fresh, empty]) x.controls.destroy();
+});
+
+test('a late census read never takes a work back to an older request of the same attempt', () => {
+    const m = mountPair();
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('max', { at: '2026-01-05T10:09:00Z' })] });
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low', { at: '2026-01-05T10:04:00Z' })] });
+    assert.deepEqual([closed(m).value, closed(m).dot], ['Max', null]);
     m.controls.destroy();
 });
 

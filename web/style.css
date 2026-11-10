@@ -4994,11 +4994,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 :is(.chat-context-mode, .chat-subagents-mode) .chat-seg[aria-checked="true"] {
     color: var(--mode-ink);
 }
-.chat-context-mode[data-context-mode="nano"] .chat-context-arc[data-arc="nano"],
-.chat-context-mode[data-context-mode="low"] .chat-context-arc[data-arc="low"],
-.chat-context-mode[data-context-mode="max"] .chat-context-arc[data-arc="max"] {
-    stroke: var(--mode-ink);
-}
+.chat-context-arc[data-lit="true"] { stroke: var(--accent-light); }
+.chat-context-arc[data-lit="true"][data-arc="low"] { stroke: var(--status-neutral-fg); }
+.chat-context-arc[data-lit="true"][data-arc="nano"] { stroke: var(--project); }
+/* The saved mode's dot (Effort's primary dot) stands only while the observation disagrees with it; an observation
+   this page has not made reads as a dash in secondary ink, like a value that has not arrived. */
+.chat-context-mode:not([data-context-differs="true"]) .chat-context-choice { display: none; }
+.chat-context-mode[data-context-actual="unknown"] .chat-capsule-value { color: var(--text-secondary); }
 .chat-context-strip {
     position: relative;
     flex: 0 0 auto;

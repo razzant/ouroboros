@@ -118,6 +118,20 @@ from supervisor.steering import (  # noqa: E402 -- intentional re-import
 )
 
 
+def _late_release(phase: str, fact: Any, held: Any, identity: Dict[str, Any]) -> str:
+    """Where a ledger release retracts a send this task attempt's record still holds under that exact call identity:
+    ``current``, ``previous`` or "". It is honoured after its call closed (an owner Pause's sender settles late) and
+    beside a newer call; any other attempt id or identity changes nothing. Constant time, one nonrecursive level."""
+    if phase != "dispatched" or not isinstance(fact, dict) or fact.get("ledger_state") != "released" \
+            or not isinstance(held, dict):
+        return ""
+    for where, sent in (("current", held), ("previous", held.get("previous"))):
+        if isinstance(sent, dict) and sent.get("attempt_id") == fact.get("attempt_id") \
+                and all(sent.get(key) == value for key, value in identity.items()):
+            return where
+    return ""
+
+
 def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = str(evt.get("task_id") or "")
     phase = str(evt.get("phase") or "").strip().lower()
@@ -126,7 +140,7 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     round_id = str(evt.get("round_id") or "")
     if (
         not task_id
-        or phase not in {"started", "observed", "finished", "failed"}
+        or phase not in {"started", "dispatched", "observed", "finished", "failed"}
         or not llm_call_id
         or not execution_id
         or not round_id
@@ -181,15 +195,43 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "round_id": round_id,
         "call_attempt": call_attempt,
     }
-    if phase != "observed":
+    if phase not in {"observed", "dispatched"}:
         # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
         # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
         root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
         LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
+    old = direct.context_attempt if direct is not None else meta.get("context_attempt")
+    late = _late_release(phase, evt.get("context_attempt"), old, identity)
+    if late == "previous":  # that earlier send never started: the current send keeps no previous
+        old = {key: value for key, value in old.items() if key != "previous"}
+        if direct is not None:
+            direct.context_attempt = old
+        else:
+            meta["context_attempt"] = old
+        return
+    if phase != "started" and not late and (not isinstance(active, dict)
+                                            or any(active.get(key) != value for key, value in identity.items())):
+        return  # a frame of a call that is not this task attempt's active one, a late old outcome among them
+    if phase != "started" and isinstance(fact := evt.get("context_attempt"), dict):
+        # Keep one earlier send while this dispatch can still be disproven. A release is carried to the
+        # browser under its own identity, never disguised as silence or as the older send's outcome.
+        fact = {**fact, **identity}
+        if isinstance(old, dict) and old.get("task_attempt") == task_attempt:
+            same = old.get("attempt_id") == fact.get("attempt_id")
+            if same:
+                fact["observed_at"] = old["observed_at"]  # settlement must not make an old send newer
+            previous = old.get("previous") if same or old.get("ledger_state") == "released" else {
+                key: value for key, value in old.items() if key != "previous"}
+            if previous and fact.get("ledger_state") in {"dispatched", "released"}:
+                fact["previous"] = previous
+        if direct is not None:
+            direct.context_attempt = fact
+        else:
+            meta["context_attempt"] = fact
+    if phase == "dispatched":  # the ledger's dispatch of the active call: only its context, the call stays open
+        return
     if phase == "started":
         updated = {**identity, "started_at": time.time()}
-    elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
-        return
     elif phase == "observed":
         activity = evt.get("model_activity")
         if not isinstance(activity, dict):

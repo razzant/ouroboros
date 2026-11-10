@@ -396,6 +396,67 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     assert rebound.projection(mode).memory_facts == fresh.projection(mode).memory_facts
 
 
+def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, monkeypatch):
+    """A task that started in Max and was rebound to Low is parked and cold-restored where the new capture's own fit
+    starts Low (``ContextFitPlan.start`` of a fresh plan). The continuation serializer carries the task's start beside
+    its model role, an exact Resume's checkpoint keeps the source's (written before the rebind), and the restore lays
+    it onto the new plan before every rebind: the restored task still started in Max, so its Low is ``after_start``.
+    A source written before the start was carried (an old checkpoint right after Update) has no known start: it is
+    ``UNKNOWN_START`` through every later checkpoint and restore, its Low names no cause and the next-start read says
+    the original start is not known; nothing is reread and the restore's own fit never becomes the task's start."""
+    import ouroboros.context
+    import ouroboros.loop
+    from ouroboros import context_fit, memory_floor as mf, memory_view as mv, owner_wait, working_checkpoint
+    from ouroboros.context_fit import UNKNOWN_START
+    from ouroboros.context_measurement import mode_cause
+    from ouroboros.owner_wait import resume_native_loop
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    started = plan(1_000_000, tool_schemas=[])  # the source task's own start
+    fresh = next(candidate for window in (200_000, 150_000, 120_000, 100_000, 90_000, 80_000, 70_000, 60_000)
+                 if (candidate := plan(window, tool_schemas=[])).initial_mode == "low" and candidate.start[1])
+    assert started.start == ("max", "") and fresh.start[0] == "low" and fresh.start[1]
+    source = ToolRegistry(repo_dir=tmp_path / "s", drive_root=tmp_path / "s")
+    source._ctx.context_fit_plan = dataclasses.replace(started, initial_mode="low")  # rebound to Low after its start
+    saved = json.loads(json.dumps(owner_wait.continuation_state(source._ctx, [], {}, {}, 3, [], set())))
+    assert saved["context_start"] == ["max", ""]
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=1_000_000)
+    monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ouroboros.loop, "get_context_mode", lambda: "max")
+    for name, carried, expected, cause in (("carried", saved["context_start"], ("max", ""), "after_start"),
+                                           ("legacy", None, UNKNOWN_START, "")):
+        registry = ToolRegistry(repo_dir=tmp_path / name, drive_root=tmp_path / name)
+        registry._ctx.context_fit_plan, registry._ctx.owner_wait_resume = fresh, {}
+        registry._ctx.owner_wait_callback, registry._ctx.task_id = (lambda *_a: None), "restored-" + name
+        state = {"messages": copy.deepcopy(_long_tail(fresh)), "trace": {}, "usage": {}, "seen": [],
+                 "owner_directives": [], "delivery": {}, "acceptance": {}, "context_model_role": "main",
+                 "route": {"active_model": "m", "active_effort": "high", "active_use_local": False,
+                           "active_context_mode": "low"}, "tool_schemas": [], "round_idx": 3,
+                 **({"context_start": carried} if carried is not None else {})}
+        # An exact Resume's checkpoint is written before the rebind: it keeps the source's start, not the new fit's.
+        working_checkpoint.save_resumed(registry, state, copy.deepcopy(state["messages"]), {}, {}, set())
+        _bytes, written = working_checkpoint.read_working(working_checkpoint._root(registry._ctx), "restored-" + name,
+                                                          int(getattr(registry._ctx, "task_attempt", None) or 1))
+        assert written["context_start"] == list(expected), name
+        *_route, active, _round, rebound = resume_native_loop(registry, state, [], {}, {}, set())
+        assert active == "low" == rebound.initial_mode and rebound.start == expected != fresh.start, name
+        assert registry._ctx.context_fit_plan.start == expected and mode_cause(rebound, "low") == cause, name
+        # The next checkpoint carries what the restore holds; a second cold restore keeps it, unknown included.
+        again = json.loads(json.dumps(owner_wait.continuation_state(registry._ctx, [], {}, {}, 4, [], set())))
+        assert again["context_start"] == list(expected), name
+        assert context_fit.restored_start(fresh, again["context_start"]).start == expected, name
+        lines = "\n".join(mf.counterfactual_lines(mf.counterfactual_starts(
+            rebound, {"as captured": mv.snapshot_from_json(rebound.core.memory_view_json)})))
+        assert ("This task's original start is not known: its continuation did not carry it." in lines) is (
+            name == "legacy") and ("This task started in max" in lines) is (name == "carried"), name
+        assert "This task started in low" not in lines, name
+    for malformed in (["", ""], ["huge", ""], ["low", "after_start"], ["low"], "max", {"mode": "max"}):
+        assert context_fit.restored_start(fresh, malformed).start == UNKNOWN_START, malformed
+
+
 def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low", view=None, books=0):
     """The owner's ``owner_mode`` on the fixture's real Claudexor Main call with a captured core (``view``: another
     memory snapshot in it; ``books``: Max's books grown by that many characters, as ``test_memory_view_modes._built``

@@ -71,7 +71,7 @@ export function mount({ hover = false, save, win } = {}) {
 
 /* The composer row as chat.js builds it: the Subagents anchor, then the context anchor; Effort mounts after Context.
    `subagents` mounts the Subagents capsule on its anchor too (its writer answers `subagentAnswer`). */
-export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', subagents = false } = {}) {
+export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', chatId, subagents = false } = {}) {
     const doc = stubDocument();
     const box = doc.createElement('section');
     const row = doc.createElement('div');
@@ -102,7 +102,7 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     } : {};
     const controls = createComposerOwnerControls({
         ...subagentsWriter,
-        projectId, row, box: withBox ? box : null, doc, win: win || hoverWindow(hover),
+        projectId, ...(chatId === undefined ? {} : { chatId }), row, box: withBox ? box : null, doc, win: win || hoverWindow(hover),
         byId: (suffix) => (suffix === 'context-mode' ? contextEl : suffix === 'subagents-mode' ? subagentsEl : null),
         apiFetch: async (url, init) => {
             const body = JSON.parse(init.body); posts.push([url, body]);

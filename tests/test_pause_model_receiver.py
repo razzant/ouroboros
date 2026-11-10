@@ -500,3 +500,141 @@ def test_temporary_api_client_stays_with_its_abandoned_sender(tmp_path, scope, m
     manifest, payload, _ = read_call_payload(tmp_path, task_id="root", call_id=f"physical_{row['attempt_id']}_response")
     assert manifest["control_reason"] == "owner_pause_abandoned"
     assert payload["response"] == response.model_dump()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("neighbour", ["alone", "after-genuine-send", "beside-newer-send"])
+@pytest.mark.parametrize("direct", [False, True], ids=["pooled", "direct"])
+def test_a_late_proof_of_no_start_retracts_the_paused_send_in_the_public_census(
+        tmp_path, scope, monkeypatch, direct, neighbour, asynchronous):
+    """Pause leaves the sent Low request dispatched and its call closed; its sender later proves it never started.
+    The real ledger releases it, the sender publishes that release through the bound observer (``llm_observability``),
+    and the activity record (pooled RUNNING or the direct registry) retracts exactly that retained identity after its
+    call closed: an earlier genuine send stays its one previous, a newer send stays current and only loses the
+    disproven previous; a forged release of another call or task attempt changes nothing."""
+    from copy import deepcopy
+    from dataclasses import replace
+
+    from ouroboros.gateway import state as gateway_state
+    from ouroboros.llm_observability import emit_main_call_state
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext, observe_dispatch
+    from ouroboros.transport_custody import ProviderNotDispatched
+    from supervisor import events, queue as task_queue
+    from supervisor.active_activity import get_direct_activity_registry
+
+    write_task_result(tmp_path, "root", "running", root_task_id="root", chat_id=1, task_attempt=1,
+                      _is_direct_chat=direct)
+    meta = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1, "_attempt": 1}, "attempt": 1, "started_at": 1.0}
+    running = {} if direct else {"root": meta}
+    for name, value in (("RUNNING", running), ("PENDING", []), ("BUDGET_ROOT_FENCES", {})):
+        monkeypatch.setattr(task_queue, name, value)
+    registry = get_direct_activity_registry()
+    registry.clear()
+    owner = model_wait.TaskModelWait(task={"id": "root", "_attempt": 1}, drive_root=tmp_path, event_queue=None,
+                                     worker_slot_held=not direct)
+    if direct:
+        registry.register("root", 1, actor=SimpleNamespace(tools=SimpleNamespace(
+            _ctx=SimpleNamespace(model_wait_context=owner))))
+
+    class EventQueue:
+        def put(self, event):
+            if event.get("type") == "main_llm_call_state":
+                events._handle_main_llm_call_state(deepcopy(event), SimpleNamespace(RUNNING=running))
+        put_nowait = put
+
+    queue_ = EventQueue()
+    census = lambda: gateway_state._chat_activities_snapshot_safe(tmp_path)[0].get("context_attempt")  # noqa: E731
+    paused = ("root", 1, "call-x", "exec", "exec:round:1", 1)
+    low = PhysicalAttemptContext(profile="task_local_low", rendered_mode="low", measurement_basis="cold_estimate",
+                                 route_fp="", round_id="exec:round:1", target_total_tokens=None,
+                                 capacity_total_tokens=None, context_target_miss=False, automatic_pass_used=False,
+                                 preferred_mode="max", mode_cause="memory")
+    request = ua.AttemptRequest(model="m", provider="test", reservation_usd=.2, physical_context=low)
+    sent, release, outcome = threading.Event(), threading.Event(), {}
+
+    def refused():
+        raise ProviderNotDispatched("the transport proves generation never started")
+
+    def send():
+        sent.set()
+        assert release.wait(10)
+        refused()
+
+    async def send_async():
+        sent.set()
+        await asyncio.to_thread(release.wait, 10)
+        refused()
+
+    closed = threading.Event()
+
+    def close(exc):  # the loop's own closing frame of the paused call, as ``loop_llm_call`` emits it
+        outcome["error"] = exc
+        emit_main_call_state(queue_, paused, "failed", capture=ua.physical_attempt_capture_from_exception(exc))
+        closed.set()
+
+    async def attempt_async():
+        try:
+            await ua.execute_physical_attempt_async(request, send_async, extractor=_extract)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+            if (sender := getattr(exc, "model_sender_future", None)) is not None:
+                await asyncio.wait_for(sender, 10)  # the abandoned sender settles before this loop ends
+
+    def run():
+        emit_main_call_state(queue_, paused, "started")
+        try:
+            with ua.usage_scope(scope), model_wait.operation_wait_scope(owner), receiver_abandonable(), \
+                    observe_dispatch(lambda capture: emit_main_call_state(queue_, paused, "dispatched", capture=capture)):
+                if asynchronous:
+                    asyncio.run(attempt_async())
+                else:
+                    ua.execute_physical_attempt(request, send, extractor=_extract)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+
+    if neighbour == "after-genuine-send":  # an earlier call of this task attempt sent P in Max and was answered
+        prior_id = ("root", 1, "call-w", "exec", "exec:round:0", 1)
+        p = SimpleNamespace(state="dispatched", attempt_id="attempt-p", physical_context=replace(
+            low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:0"))
+        emit_main_call_state(queue_, prior_id, "started")
+        emit_main_call_state(queue_, prior_id, "dispatched", capture=p)
+        emit_main_call_state(queue_, prior_id, "finished", capture=SimpleNamespace(**{**vars(p), "state": "settled"}))
+        assert census()["ledger_state"] == "settled"
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert sent.wait(10)
+        owner_pause.install_fence(tmp_path, "root", request_id="pause")
+        assert closed.wait(10)
+        assert getattr(outcome.get("error"), "receiver_abandoned", False)
+        held = census()
+        assert (held["ledger_state"], held["applied"], held["llm_call_id"]) == ("dispatched", "low", "call-x")
+        if neighbour == "after-genuine-send":
+            assert (held["previous"]["attempt_id"], held["previous"]["applied"]) == ("attempt-p", "max")
+        record = registry.get("root") if direct else None
+        assert (record.active_llm_call if direct else meta.get("active_llm_call")) is None, "its call is closed"
+        expected = {**held, "ledger_state": "released"}  # the same send, its time and its one previous kept
+        if neighbour == "beside-newer-send":  # the next call of this task attempt sent B in Max; A is its previous
+            newer_id = ("root", 1, "call-y", "exec", "exec:round:2", 1)
+            emit_main_call_state(queue_, newer_id, "started")
+            b = SimpleNamespace(state="dispatched", attempt_id="attempt-b", physical_context=replace(
+                low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:2"))
+            emit_main_call_state(queue_, newer_id, "dispatched", capture=b)
+            assert census()["previous"]["attempt_id"] == held["attempt_id"]
+            expected = {key: value for key, value in census().items() if key != "previous"}
+        # Forged releases of the same attempt under another call or task attempt change nothing.
+        for forged in ({"call_attempt": 2}, {"llm_call_id": "call-z"}, {"task_attempt": 2}):
+            frame = {"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1, "llm_call_id": "call-x",
+                     "execution_id": "exec", "round_id": "exec:round:1", "call_attempt": 1, "phase": "dispatched",
+                     "context_attempt": {**held, "ledger_state": "released"}, **forged}
+            before = census()
+            queue_.put(frame)
+            assert census() == before, forged
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert _until(lambda: attempt_rows_in_start_order(tmp_path)[0]["state"] == "released")
+    assert len(attempt_rows_in_start_order(tmp_path)) == 1, "one physical send, released once"
+    assert _until(lambda: census() == expected), (census(), expected)
+    registry.clear()

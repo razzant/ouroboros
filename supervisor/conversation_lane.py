@@ -537,6 +537,8 @@ def lane_turn_rows() -> List[Dict[str, Any]]:
             active = meta.get("active_llm_call")
             if isinstance(active, dict) and active.get("task_attempt") == attempt and active.get("model_activity"):
                 row["model_activity"] = dict(active["model_activity"])
+            if isinstance(sent := meta.get("context_attempt"), dict) and sent.get("task_attempt") == attempt:
+                row["context_attempt"] = dict(sent)
             rows.append(row)
     return rows
 

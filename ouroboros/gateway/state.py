@@ -661,6 +661,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
+                    "context_attempt": meta.get("context_attempt"),
                     "owner_wait": dict(meta.get("owner_wait") or {}),
                     "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
@@ -824,6 +825,8 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
                 **({"model_activity": row["model_activity"]} if row.get("model_activity")
                    and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
+                **({"context_attempt": row["context_attempt"]} if isinstance(row.get("context_attempt"), dict)
+                   and row["context_attempt"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }

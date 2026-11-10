@@ -12,11 +12,10 @@ import { haptic } from './haptics.js';
 import { createComposerFold } from './composer_fold.js';
 import { createSubagentsControl } from './composer_subagents.js';
 import { createHint } from './ui_hint.js';
+import { CONTEXT_LABELS, CONTEXT_MODES, UNKNOWN_CONTEXT, contextShown, observeContext } from './context_observation.js';
 
 const N = OWNER_TIERS.length - 1;
 const HANDLES = ['min', 'rec', 'max'];
-const CONTEXT_MODES = ['nano', 'low', 'max'];
-const CONTEXT_LABELS = Object.freeze({ nano: 'Nano', low: 'Low', max: 'Max' });
 const CONTEXT_MEANINGS = Object.freeze({
     nano: 'The compact owner window.', low: 'Aims for about 250K tokens.', max: 'The full context window.',
 });
@@ -71,8 +70,9 @@ const indicesOf = (range) => ({
 const sameIndices = (a, b) => Boolean(a && b) && HANDLES.every((key) => a[key] === b[key]);
 
 /* The ring glyph: the range in miniature (a 300° arc; the band is min..max, the dot the recommended
-   level). Context's ring is the same frame cut into three arcs, the chosen mode's arc lit: a
-   position among three modes, never a fill level or a capacity. */
+   level). Context's ring is the same frame cut into three arcs, the observed modes' arcs lit:
+   positions among three modes, never a fill level or a capacity. Effort's dot, on the saved
+   mode's arc, keeps the owner's choice while the observation disagrees. */
 const RING = { cx: 92, cy: 92, r: 70, a0: 120, sweep: 300 };
 const CONTEXT_ARCS = { nano: [120, 200], low: [230, 310], max: [340, 420] };
 const ringPoint = (angle) => ({
@@ -107,7 +107,8 @@ function effortRangeMarkup() {
 }
 
 function contextModeMarkup() {
-    const arcs = CONTEXT_MODES.map((mode) => `<path class="chat-context-arc" data-arc="${mode}" d="${ringArc(...CONTEXT_ARCS[mode])}" fill="none" stroke-width="24" stroke-linecap="round"></path>`).join('');
+    const arcs = CONTEXT_MODES.map((mode) => `<path class="chat-context-arc" data-arc="${mode}" data-lit="false" d="${ringArc(...CONTEXT_ARCS[mode])}" fill="none" stroke-width="24" stroke-linecap="round"></path>`).join('')
+        + '<circle class="chat-effort-glyph-dot chat-context-choice" r="22"></circle>';
     const modes = CONTEXT_MODES.map((mode) =>
         `<button class="chat-seg ui-hit-area" type="button" role="radio" tabindex="-1" aria-checked="false" data-mode="${mode}"><span class="chat-seg-text">${CONTEXT_LABELS[mode]}</span></button>`).join('');
     return capsuleHead(arcs, 'Context', 'chat-context-head')
@@ -686,7 +687,7 @@ export function createEffortRangeControl({
 }
 
 /** Context saves apply to future room participants; a refusal retains the saved mode. */
-function createContextModeControl({ el, row, saveContextMode, showToast, refreshState, onLayout, onSettled, win, doc }) {
+function createContextModeControl({ el, row, chatId, saveContextMode, showToast, refreshState, onLayout, onSettled, win, doc }) {
     el.classList.add('chat-capsule');
     el.setAttribute('role', 'group');
     el.setAttribute('aria-label', 'Context size mode');
@@ -695,15 +696,31 @@ function createContextModeControl({ el, row, saveContextMode, showToast, refresh
     const strip = el.querySelector('.chat-context-strip');
     const thumb = el.querySelector('.chat-context-thumb');
     const segs = Array.from(el.querySelectorAll('.chat-seg'));
+    const head = el.querySelector('.chat-context-head');
+    const arcs = Array.from(el.querySelectorAll('.chat-context-arc'));
+    const dot = el.querySelector('.chat-context-choice');
     const current = () => contextModeOf(el.dataset.contextMode);
     const chosen = () => segs.find((seg) => seg.dataset.mode === current());
     let capsule = null;
-    let named = '';  // the mode the value names (an overlay may have translated the word)
+    let named = '';  // the word the value says (an overlay may have translated it)
+    // The modes this page last saw this room's works' requests sent in (context_observation.js); a choice never paints it.
+    let observation = UNKNOWN_CONTEXT;
+    let shown = contextShown(observation, current());
 
     function render() {
         const mode = current();
         const open = Boolean(capsule?.isOpen());
-        if (named !== mode) { named = mode; value.textContent = CONTEXT_LABELS[mode]; }
+        shown = contextShown(observation, mode);
+        if (named !== shown.word) { named = shown.word; value.textContent = shown.word; }
+        el.dataset.contextActual = shown.actual;
+        el.dataset.contextDiffers = String(shown.differs);
+        for (const arc of arcs) arc.setAttribute('data-lit', String(shown.lit.includes(arc.dataset.arc)));
+        const [a0, a1] = CONTEXT_ARCS[mode];
+        const at = ringPoint((a0 + a1) / 2);
+        dot.setAttribute('cx', at.x.toFixed(2));
+        dot.setAttribute('cy', at.y.toFixed(2));
+        if (shown.label) head.setAttribute('aria-label', shown.label);
+        else head.removeAttribute('aria-label');
         for (const seg of segs) {
             seg.setAttribute('aria-checked', String(seg.dataset.mode === mode));
             seg.tabIndex = open && seg.dataset.mode === mode ? 0 : -1;  // one tab stop; arrows move within
@@ -715,10 +732,11 @@ function createContextModeControl({ el, row, saveContextMode, showToast, refresh
         }
         capsule?.sayHint();
     }
-    // What the hint says: the chosen mode, or the one a mouse rests on.
+    // The chosen mode, or the one a mouse rests on; under it, the dated observation,
+    // with its cause when it differs from the choice.
     const say = (preview) => {
         const mode = CONTEXT_MODES.includes(preview) ? preview : current();
-        return { word: CONTEXT_LABELS[mode], text: CONTEXT_MEANINGS[mode] };
+        return { word: CONTEXT_LABELS[mode], text: CONTEXT_MEANINGS[mode], fact: shown.fact };
     };
     let saving = null, lastOk = true, destroyed = false;
     function choose(mode) {
@@ -788,6 +806,22 @@ function createContextModeControl({ el, row, saveContextMode, showToast, refresh
             el.dataset.contextMode = contextModeOf(data.context_mode);
             render();
         },
+        /** One `/api/state` read: this room's works' recorded requests (`context_attempt`). A body without the census
+         *  keeps what was seen, except chat.js's unavailable frame (`accounting.available === false`, sent on a socket
+         *  close and a failed state read): no current read then, so `now` becomes the dated `last` until a read returns,
+         *  an incomplete read (no work departed, so a later release cannot take a retained earlier send with it).
+         *  An explicitly incomplete census (`active_chat_activities_complete`/`supervisor_ready` false) is kept as
+         *  seen, never as the room's whole current mode.
+         *  The saved mode is never written from it. */
+        observe(data) {
+            if (destroyed) return;
+            const census = data?.active_chat_activities;
+            if (!Array.isArray(census) && data?.accounting?.available !== false) return;
+            const complete = Array.isArray(census) && data?.active_chat_activities_complete !== false
+                && data?.supervisor_ready !== false;
+            observation = observeContext(observation, Array.isArray(census) ? census : [], chatId, { complete });
+            render();
+        },
         hasPendingSave: () => Boolean(saving),
         pendingSave: () => saving || Promise.resolve(lastOk),
         destroy() {
@@ -810,10 +844,11 @@ function createContextModeControl({ el, row, saveContextMode, showToast, refresh
  * @param {(message: string, tone?: string) => void} deps.showToast
  * @param {(force?: boolean) => Promise<void>|void} deps.refreshState  a forced `/api/state` re-read
  * @param {() => void} [deps.onLayout]  a strip opened or closed on its own line
+ * @param {number|null} [deps.chatId]  the room whose works' observed context mode the Context capsule shows (Main: 1)
  * @param {HTMLElement} [deps.box]  independently sized page the composer docks inside
  * @param {() => boolean} [deps.readingBack]  the owner's own gesture took the room off its newest row (composer_fold.js)
  */
-export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', box = null, win = globalThis.window, doc = globalThis.document, readingBack }) {
+export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRange, saveSubagentsMode, openSettings = () => {}, showToast, refreshState, onLayout, projectId = '', chatId = projectId ? null : 1, box = null, win = globalThis.window, doc = globalThis.document, readingBack }) {
     let destroyed = false;
     const scoped = body => projectId ? { ...body, project_id: projectId } : body;
     const readback = reply => {
@@ -875,7 +910,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     }
     const shared = { showToast, refreshState, onLayout, onSettled: fitNames, win, doc };
     const contextEl = byId('context-mode');
-    const context = contextEl ? createContextModeControl({ el: contextEl, row: row || contextEl.parentElement, saveContextMode, ...shared }) : null;
+    const context = contextEl ? createContextModeControl({ el: contextEl, row: row || contextEl.parentElement, chatId, saveContextMode, ...shared }) : null;
     const effort = row ? createEffortRangeControl({ row, saveEffortRange: saveRoomEffort, ...shared }) : null;
     const subagentsEl = row && saveSubagentsMode ? byId('subagents-mode') : null;
     const saveRoomSubagents = async ({ mode }) => {
@@ -925,6 +960,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
             if (destroyed) return;
             const values = projectId ? data?.projects?.find(project => project.id === projectId)?.cognition : data;
             subagents?.syncState(values, data?.subagents_availability);
+            context?.observe(data);
             if (!values) return;
             context?.syncState(values); effort?.syncState(values); fitNames();
         },

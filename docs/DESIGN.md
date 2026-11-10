@@ -468,15 +468,16 @@ tells them apart, and Swarm never fills the capsule (owner 28.10).
 Until the room's values arrive the ring stays unlit and the value secondary,
 never a faded capsule. Closed, Effort names only the primary level; its ring (a 300°
 arc: band minimum..maximum, dot primary) and the button's name carry the range.
-Context's ring is three arcs, the chosen one lit: one of three modes, never a fill
-level or capacity. Subagents' mark is a small network (owner 27.10, G): Ouroboros joined by threads to three helpers; Off lights none, Auto one helper and its thread, Swarm every helper and the threads between them.
+Context's word/arcs show its root works' observed modes, not the setting or helpers (owner 08.11).
+Its dot marks the chosen arc when they differ; `Mixed` lights the observed modes, unseen is `—`.
+Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three helpers: Off lights none,
+Auto one helper/thread, Swarm all helpers and their connecting threads.
 
-**A capsule opens inline, in the row, never as a dropdown or a panel, one at a time** (owner 11.10; the panels tried
-on 26.10 were withdrawn on 27.10); its value yields to the strip. Context's is Nano · Low · Max under a glass thumb; a
-choice posts at once and the strip waits for the answer. Subagents' is Off · Auto · Swarm the same way. While any
-capsule is open, the one hint ("Hints") stands above it (owner 28.10): the value's word and what it means (a mouse
-resting on another of Subagents' or Context's modes previews that one's) and «Applies to new steps; running work
-finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
+**A capsule opens inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
+withdrawn 27.10); its value yields to the strip. Context: Nano · Low · Max under a glass thumb;
+choosing posts at once, then waits for the answer. Subagents: Off · Auto · Swarm, likewise. Open, one
+hint ("Hints") above it (owner 28.10) gives the mode's meaning (hovering another previews it), Context's
+dated observation/cause, and «Applies to new steps; running work finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
 and Swarm are disabled and the hint says why with `Open Settings`, the keyboard's next stop after the strip; the room
 keeps its own value. Effort's seven levels carry
 a primary pill and two helper bounds; the primary may lie outside them. A

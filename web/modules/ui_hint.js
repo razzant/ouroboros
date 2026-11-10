@@ -4,7 +4,8 @@
  * lives inside its control: the control's own press, hover and focus handling covers it, a reader hears it as the
  * control's description, and Tab reaches its one action right after the control.
  *
- * `say({ word, text, rule, action })` writes only the words that changed since it last said them, so a translation the
+ * `say({ word, text, fact, rule, action })` writes only the words that changed since it last said them (`fact`, an
+ * optional `{ word, text }` line under the first, is what the control observed apart from its value), so a translation the
  * overlay put in their place stays; a row that watches its words for a refit leaves the hint's alone
  * (composer_owner_controls.js). `onAction()` runs the action.
  */
@@ -18,12 +19,15 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
     el.id = `ui-hint-${++made}`;
     el.hidden = true;
     el.innerHTML = '<p class="ui-hint-line"><span class="ui-hint-word"></span><span class="ui-hint-text"></span></p>'
+        + '<p class="ui-hint-line ui-hint-fact" hidden><span class="ui-hint-word ui-hint-fact-word"></span><span class="ui-hint-text ui-hint-fact-text"></span></p>'
         + '<p class="ui-hint-rule"></p><button type="button" class="ui-hint-action ui-hit-area"></button>';
     const parts = {
         word: el.querySelector('.ui-hint-word'), text: el.querySelector('.ui-hint-text'),
         rule: el.querySelector('.ui-hint-rule'), action: el.querySelector('.ui-hint-action'),
+        factWord: el.querySelector('.ui-hint-fact-word'), factText: el.querySelector('.ui-hint-fact-text'),
     };
-    const said = { word: null, text: null, rule: null, action: null };
+    const factLine = el.querySelector('.ui-hint-fact');
+    const said = { word: null, text: null, rule: null, action: null, factWord: null, factText: null };
     const write = (part, words = '') => {
         if (said[part] === words) return;
         said[part] = words;
@@ -77,9 +81,12 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
 
     return {
         el,
-        say({ word = '', text = '', rule = '', action = '' } = {}) {
+        say({ word = '', text = '', fact = null, rule = '', action = '' } = {}) {
             write('word', word);
             write('text', text);
+            write('factWord', fact?.word || '');
+            write('factText', fact?.text || '');
+            factLine.hidden = !fact?.word;
             write('rule', rule);
             write('action', action);
             if (!el.hidden) { place(); later(); }

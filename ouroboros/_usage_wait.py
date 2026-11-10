@@ -479,7 +479,8 @@ def retain_unadopted(request, reservation, **facts):
 def late_settler(reservation, request, extractor, manifest_ref, capture, late_owner):
     """``model_send``'s ``settle_late``: the SENDER's settlement of an answer its receiver abandoned.
 
-    The late answer or error goes through the SAME accounting as a taken one; a received
+    The late answer or error goes through the SAME accounting and capture as a taken one (so a
+    late proof that it never started publishes its release, like the async sender's); a received
     answer is retained as evidence (never adopted); the transport's ``late_owner`` then
     acknowledges or closes it. The receiver recorded the attempt as still dispatched.
     """
@@ -490,7 +491,8 @@ def late_settler(reservation, request, extractor, manifest_ref, capture, late_ow
     def settle_late(*, result=None, error=None) -> None:
         try:
             if error is not None:
-                ua._terminalize_failed_attempt(reservation, error)
+                state = ua._terminalize_failed_attempt(reservation, error)
+                ua._record_attempt_capture(reservation, request, state, candidate_manifest_ref=manifest_ref, exc=error)
             else:
                 ua._account_response(reservation, request, result, extractor, manifest_ref)
                 retain(result, ua.last_physical_attempt_capture() or capture)
