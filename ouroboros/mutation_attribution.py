@@ -96,6 +96,8 @@ def _run_git(root: pathlib.Path, *args: str, timeout: float | None = None) -> st
         cwd=str(root),
         capture_output=True,
         text=True,
+        encoding="utf-8",  # Git writes paths as UTF-8 bytes, never in the locale's code page (cp1252 on Windows)
+        errors="surrogateescape",
         check=False,
         env=host_git_env(),
         timeout=timeout,
@@ -235,7 +237,7 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
     try:
         config = work_domain.run(
             ["git", "config", "--type=bool", "--null", "--get-regexp", r"^core\.(filemode|symlinks)$"],
-            cwd=str(root), capture_output=True, text=True, check=False,
+            cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="surrogateescape", check=False,
         )
         if config.returncode not in (0, 1):
             raise RuntimeError("Git mode configuration unavailable")

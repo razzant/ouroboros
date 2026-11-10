@@ -1424,10 +1424,6 @@ def test_rewriting_the_bytes_a_file_already_holds_produces_nothing_and_buys_no_w
     from ouroboros.tools.review_result import produced_material, required_material, result_review_at_delivery
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
-    # The exact bytes the calls below carry: the shared fixture's text-mode write is CRLF on Windows.
-    (ctx.workspace_root / "app.py").write_bytes(b"VALUE = 1\n")
-    (ctx.workspace_root / "lib.py").write_bytes(b"LIB = 'base'\n")
-    shared.git(ctx.workspace_root, "commit", "-qam", "exact fixture bytes", "--allow-empty")
     _baselined(ctx)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
