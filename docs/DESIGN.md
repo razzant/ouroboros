@@ -458,9 +458,10 @@ Enter as a line break.
 ### Composer owner controls
 
 Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after ☰ (owner 10.11, «1. A»). Main supplies a one-time copy of the last three to new Projects; a
-room's Model is never copied: it follows Main until the room chooses, and says so (name `Main`, value Main's model);
-later changes stay in their room.
+in that order after ☰: Model first (owner 08.11 of the model chip, «кажется она должна быть самой левой»; the
+mock-up he approved 10.11). Main supplies a one-time copy of the last three to new Projects; a room's Model is
+never copied: it follows Main until the room chooses, and says so (name `Main`, value Main's model), and a choice
+stays with its room (owner 10.11, «1. A»); later changes stay in their room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
