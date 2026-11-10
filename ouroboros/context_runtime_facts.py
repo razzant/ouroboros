@@ -832,10 +832,14 @@ def admission_observation(data_root: Any, *, observed_at: str) -> str:
 
 
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
-    """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
-    site, ``context.build_runtime_section``."""
+    """The Runtime section's ``storage``, ``vitals`` and ``kept_services`` keys, each present only with its fact: one
+    call site, ``context.build_runtime_section``. ``kept_services`` is what custody says runs now, never a task's
+    ``services_kept`` history (``launch_custody.kept_services_fact``)."""
+    from ouroboros.launch_custody import kept_services_fact
+
     facts = {"storage": storage_fact(data_root, observed_at=observed_at),
-             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
+             "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at),
+             "kept_services": kept_services_fact(data_root)}
     return {key: value for key, value in facts.items() if value is not None}
 
 

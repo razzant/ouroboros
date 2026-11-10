@@ -932,7 +932,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
 # 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
-EXPECTED_SCAN_PATHS = 457
+# 457 -> 458 (#2833): a kept service's output declaration, on the service-log row: ``services/kept_outputs/*/*`` for
+# one owed a capture and ``services/*/*`` beside its log for one that declares none (``tools/kept_service_outputs.py``).
+EXPECTED_SCAN_PATHS = 463
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

@@ -1189,7 +1189,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
-                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held"})
+                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held",
+                                   "kept_service_capture_owed"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1311,7 +1312,8 @@ def record_rest(rested: Optional[Dict[str, Any]], layout: str, parent: pathlib.P
 
 def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: Optional[LiveProbe],
                        guard: Optional[Guard] = None, stop: Optional[Callable[[], bool]] = None,
-                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None,
+                       owed: Any = None) -> Dict[str, Any]:
     """The one decision to delete one of TASK's own execution drives; see the module docstring.
 
     ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live,
@@ -1320,7 +1322,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive. ``owed``: the pass's one read of the
+    kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
@@ -1334,9 +1337,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.tools.kept_service_outputs import owed_output_hold
         from ouroboros.workspace_preflight import review_scratch_held
         if review_scratch_held(canonical, drive):
             raise _Retained("review_environment_held")
+        if owed_output_hold(canonical, base, owed=owed):  # a kept service's declared outputs here still owe their capture
+            raise _Retained("kept_service_capture_owed")
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
@@ -1370,6 +1376,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 raise _Retained("drive_occupant_changed")
             if review_scratch_held(canonical, drive):
                 raise _Retained("review_environment_held")
+            if owed_output_hold(canonical, base):
+                raise _Retained("kept_service_capture_owed")
             for item in prepared:
                 alive = live(item["task_id"])
                 if alive is not False:
@@ -1473,10 +1481,12 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
     the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
     from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
     held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
+    owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
     except (FileNotFoundError, NotADirectoryError):
@@ -1486,7 +1496,7 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             break
         holding, failed = False, ""
         try:  # the scratch release and every retained record's handoff are the conditions of the removal
-            holding, retained = release_trash_entry(canonical_root, entry)
+            holding, retained = release_trash_entry(canonical_root, entry, owed=owed)
         except Exception as exc:  # whatever failed, the entry and every record still in it wait
             failed = f"{entry.name}: {type(exc).__name__}"
             held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]

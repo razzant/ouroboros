@@ -1,16 +1,13 @@
 """Private Git copies for helpers: one primitive, one record per copy.
 
-Every private Git copy — a delegated writer's or investigation's execution
-snapshot, a native acting child's task copy, an own-body candidate — is a
-linked ``git worktree`` under a root OUTSIDE ``repo/`` and ``data/``. A copy of
-the source's CURRENT files starts from a snapshot commit that git itself makes:
-a private index seeded from the source's real index stages the tracked files and
-every untracked file Git does not ignore, ``commit-tree`` records it and a
-ref under ``refs/ouroboros/delegated/`` pins it. ``git worktree add --detach
---no-checkout`` plus ``reset --hard`` (no hooks) checks it out. A linked worktree
-shares the source's object database, so shallow and partial clones work, and a
-source edit after the snapshot cannot reach the copy. The copy shares the
-source repository's refs, stash, hooks and config.
+Every private Git copy — a delegated writer's or investigation's execution snapshot, a native acting child's
+task copy, an own-body candidate — is a linked ``git worktree`` under a root OUTSIDE ``repo/`` and
+``data/``. A copy of the source's CURRENT files starts from a snapshot commit that git itself makes: a
+private index seeded from the source's real index stages the tracked files and every untracked file Git does
+not ignore, ``commit-tree`` records it and a ref under ``refs/ouroboros/delegated/`` pins it. ``git worktree
+add --detach --no-checkout`` plus ``reset --hard`` (no hooks) checks it out. A linked worktree shares the
+source's object database, so shallow and partial clones work, and a source edit after the snapshot cannot
+reach the copy. The copy shares the source repository's refs, stash, hooks and config.
 
 git has no automatic worktree garbage collection, so each copy has one durable
 record file ``data/state/private_copies/<name>.json``, written BEFORE the effect
@@ -1325,12 +1322,11 @@ def remove_execution_snapshot(
     holds: Optional[Callable[[Dict[str, Any]], bool]] = None,
     reasons: Optional[Dict[str, str]] = None,
 ) -> bool:
-    """Remove a disposed snapshot: its checkout (if still there), its baseline and
-    result pins and its record. Call only after explicit disposition or GC's
-    ownership/custody proof. A surviving tree, or one outside the worktree root,
-    keeps its record and pins; unchanged failures wait until a new process. The record read under
-    the lock decides, with ``holds`` (GC's proof) and the owner's keep, also after apply or reject.
-    ``reasons`` receives the keep gate's refusal by the copy's path, as in ``prune_orphans``.
+    """Remove a disposed snapshot: its checkout (if still there), its baseline and result pins and its record. Call only
+    after explicit disposition or GC's ownership/custody proof. A surviving tree, or one outside the worktree root, keeps
+    its record and pins; unchanged failures wait until a new process. The record read under the lock decides, with ``holds``
+    (GC's proof) and the owner's keep, also after apply or reject. ``reasons`` receives the keep gate's refusal by the
+    copy's path, as in ``prune_orphans``.
     """
     entry = find_execution_snapshot(snapshot_id, data_dir)
     if entry is None or worktree_removal.unchanged(entry):
@@ -1373,11 +1369,12 @@ def _task_proven_over(task_id: str, data_dir: Any, live: Any) -> bool:
         return False  # unreadable or unknown ownership never authorizes GC
 
 
-def snapshot_released(entry: Dict[str, Any], open_snapshot_ids: set, *, data_dir: Any = None, live: Any = None) -> bool:
-    """The one proof a delegated snapshot goes by, for the custody GC and the owner's free action
-    alike (its preview offers exactly what this answers): the keep-set does not name it, its task is
-    proven over (``live``: the supervisor's probe unless given), fresh readable custody does not hold it."""
+def snapshot_released(entry: Dict[str, Any], open_snapshot_ids: set, *, data_dir: Any = None, live: Any = None, owed=None) -> bool:
+    """The one proof a delegated snapshot goes by, custody GC and owner's Free alike (its preview offers exactly this): the
+    keep-set does not name it, its task is proven over (``live``: the supervisor's probe unless given), fresh readable custody
+    does not hold it, and no kept service's outputs still owe a capture in it (``owed``: the pass's one read of the debts)."""
     from ouroboros import delegate_custody as custody
+    from ouroboros.tools.kept_service_outputs import owed_output_hold
 
     if live is None:
         from supervisor.queue import task_settlement_liveness as live
@@ -1386,7 +1383,8 @@ def snapshot_released(entry: Dict[str, Any], open_snapshot_ids: set, *, data_dir
         return snap not in open_snapshot_ids and _task_proven_over(str(entry.get("task_id") or ""), data_dir, live) \
             and not owner_keep.is_kept(_data_dir(data_dir), entry.get("task_id")) \
             and not custody.custody_log_unreadable(_data_dir(data_dir)) \
-            and snap not in custody.open_snapshot_ids(_data_dir(data_dir))
+            and snap not in custody.open_snapshot_ids(_data_dir(data_dir)) \
+            and not (entry.get("path") and owed_output_hold(_data_dir(data_dir), str(entry["path"]), owed=owed))
     except Exception:
         return False
 
@@ -1405,17 +1403,19 @@ def prune_execution_snapshots(
     before each removal). A provisional snapshot can precede START_REQUESTED, so absent custody is not
     proof its owner is over; unknown task/process/custody state keeps even a missing checkout's row
     and pin. ``only`` restricts the pass; surviving trees keep ``removal_failed``. ``reasons``: as in ``prune_orphans``."""
+    from ouroboros.tools.kept_service_outputs import owed_declarations
     open_ids = {str(s) for s in (open_snapshot_ids or set())}
     chosen = None if only is None else {str(s) for s in only}
     removed: List[str] = []
     kept: List[str] = []
+    owed = owed_declarations(_data_dir(data_dir))  # one read of the kept-output debts for this whole pass
     for entry in _records(data_dir, op="prune_execution_snapshots"):
         if entry.get("kind") != _KIND_DELEGATED_EXEC:
             continue
         snap = str(entry.get("snapshot_id") or "")
         if chosen is not None and snap not in chosen:
             continue
-        if not snapshot_released(entry, open_ids, data_dir=data_dir, live=live):
+        if not snapshot_released(entry, open_ids, data_dir=data_dir, live=live, owed=owed):
             kept.append(snap)
             continue
         (removed if remove_execution_snapshot(snap, worktree_root=worktree_root, data_dir=data_dir, holds=lambda row: snapshot_released(
@@ -1503,17 +1503,15 @@ def prune_orphans(
 ) -> Dict[str, Any]:
     """Reconcile worktrees on the custody cadence and the owner's free action.
 
-    A plain copy missing or past retention goes only with proof its task is over: its record is
-    terminal, ``live(task_id)`` (the supervisor's probe: True live, False proven not live, None
-    unknown) answers False, no lineage process lives, and its unique work is proven saved
-    (``copy_capture_proof``). Without a probe or with an unknown answer, age alone deletes nothing. ``only`` restricts the pass to
-    those task ids (the free action's previewed rows), leaving every other copy untouched.
-    ``only_rows`` (path -> the record previewed) names exact objects: one whose record changed stays.
-    Each decision is rechecked under that copy's record lock; a checkout that survives
-    removal keeps its first failure stamp and pin; a new process or directory identity retries it.
-    ``reasons``, when given, receives by copy path the typed answer a kept copy got from this pass
-    (a body verdict's reason, a busy or unreadable record, the keep gate's refusal); a proof that
-    simply no longer holds names none: the caller reads that fresh.
+    A plain copy missing or past retention goes only with proof its task is over: its record is terminal, ``live(task_id)``
+    (the supervisor's probe: True live, False proven not live, None unknown) answers False, no lineage process lives, and
+    its unique work is proven saved (``copy_capture_proof``). Without a probe or with an unknown answer, age alone deletes
+    nothing. ``only`` restricts the pass to those task ids (the free action's previewed rows), leaving every other copy
+    untouched. ``only_rows`` (path -> the record previewed) names exact objects: one whose record changed stays.
+    Each decision is rechecked under that copy's record lock; a checkout that survives removal keeps its first failure
+    stamp and pin; a new process or directory identity retries it. ``reasons``, when given, receives by copy path the typed
+    answer a kept copy got from this pass (a body verdict's reason, a busy or unreadable record, the keep gate's refusal);
+    a proof that simply no longer holds names none: the caller reads that fresh.
     """
     reasons = {} if reasons is None else reasons
     retention = retention_days if retention_days is not None else get_gc_retention_days()
@@ -1532,9 +1530,11 @@ def prune_orphans(
     if not selected:
         return {"removed": 0, "kept": len(entries)}
     # Candidate evidence comes without any lock; each decision is rechecked under that copy's own lock.
-    from functools import partial
+    from functools import cache, partial
     from ouroboros import body_candidate
     from ouroboros.copy_capture_proof import plain_copy_branch
+    from ouroboros.tools.kept_service_outputs import owed_declarations
+    owed = cache(partial(owed_declarations, _data_dir(data_dir)))  # the verdicts' one read of the debts, by the first needing it
     verdicts: Dict[str, Dict[str, Any]] = {}
     for entry in selected:
         if entry.get("kind") == _KIND_BODY_CANDIDATE:
@@ -1542,7 +1542,7 @@ def prune_orphans(
             # A kept task's candidate is not captured: no pin or event for what stays (the gate reads the keep again).
             verdicts[str(entry.get("path") or "")] = {"remove": False, "reason": owner_keep.OWNER_KEEP} if expired and \
                 owner_keep.is_kept(_data_dir(data_dir), entry.get("task_id")) else body_candidate.retention_verdict(
-                    entry, data_dir=data_dir, expired=expired)
+                    entry, data_dir=data_dir, expired=expired, owed=owed)
 
     def body_branch(verdict: Dict[str, Any], match: Dict[str, Any], branch: str) -> Optional[str]:
         if body_candidate.verdict_holds(match, verdict, data_dir=data_dir):

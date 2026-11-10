@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -932,4 +933,670 @@ def test_a_process_table_that_never_answers_at_shutdown_still_gets_the_native_ki
             if thread.name.startswith("owned-stop-"):
                 thread.join(timeout=30)
         monkeypatch.undo()
+        _end(pid, birth)
+
+
+# --------------------------------------------------------------------------- kept services after their task
+# A task's kept service outlives the task (and the worker that held it): the one inventory reads it from custody,
+# and the owner's Activity Stop and a root task's stop_service(service_id=...) end that one launch through the same
+# handler (``launch_custody.stop_kept_service``). The registry below keeps the Popen, as a still-alive worker does,
+# so the stopped leader lingers unreaped: a corpse is not a running service.
+
+def _kept_view(drive):
+    from ouroboros.launch_custody import kept_services
+
+    return kept_services(drive)
+
+
+def test_a_kept_service_is_listed_after_its_task_and_one_reasoned_stop_ends_only_that_launch(tmp_path, monkeypatch,
+                                                                                            scripts):
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.tools.services import stop_task_services
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
+    _start(registry, scripts, tmp_path / "other.port", "sidecar", keep_alive=True)
+    _start(registry, scripts, tmp_path / "plain.port", "plain")
+    servers = {name: _server(tmp_path / f"{name}.port") for name in ("kept", "other", "plain")}
+    drive = tmp_path / "data"
+    log = drive / "services" / "producer" / "preview.log"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("  Local:   http://127.0.0.1:4173/?token=secret\n")
+    try:
+        ended = {item["name"]: item["lifecycle"] for item in stop_task_services(registry._ctx)}  # the task ends
+        assert ended == {"preview": "kept", "sidecar": "kept", "plain": "stopped"}
+
+        view = _kept_view(drive)
+        assert view["complete"] is True and view["note"] == ""
+        listed = {item["name"]: item for item in view["services"]}
+        assert set(listed) == {"preview", "sidecar"}, view  # a task-scoped service is never a kept one
+        preview = listed["preview"]
+        assert preview["task_id"] == "producer" and preview["state"] == "running" and preview["backend"] == "host"
+        assert preview["launch_id"].startswith("launch-") and preview["since"]
+        assert preview["address"] == "http://127.0.0.1:4173", "scheme, host and port only, never a query"
+        assert preview["log_path"] == str(log)
+
+        for launch_id, reason, outcome in (("launch-" + "0" * 32, "no such launch", "not_found"),
+                                           (preview["launch_id"], "", "refused"), ("../etc", "x", "refused")):
+            receipt = stop_kept_service(drive, launch_id, reason=reason, actor="owner:test")
+            assert receipt["outcome"] == outcome and receipt["ok"] is False, receipt
+        assert all(_answers(servers[name][0]) for name in ("kept", "other")), "a refusal signals nothing"
+
+        receipt = stop_kept_service(drive, preview["launch_id"], reason="the preview is no longer needed",
+                                    actor="owner:test")
+        assert receipt["outcome"] == "stopped" and receipt["ok"] is True, receipt
+        assert receipt["name"] == "preview" and receipt["task_id"] == "producer" and receipt["log_path"] == str(log)
+        assert not _answers(servers["kept"][0]) and not _same_process_alive(*servers["kept"][1:])
+        assert _answers(servers["other"][0]), "only that one launch"
+        assert log.exists() and "http://127.0.0.1:4173" in log.read_text(encoding="utf-8"), "its log is kept"
+        assert [item["name"] for item in _kept_view(drive)["services"]] == ["sidecar"]
+        again = stop_kept_service(drive, preview["launch_id"], reason="again", actor="owner:test")
+        assert again["outcome"] == "not_found"
+        rows = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        stops = [row for row in rows if row.get("type") == "kept_service_stop"]
+        assert [(row["outcome"], row["reason"]) for row in stops][-2:] == [
+            ("stopped", "the preview is no longer needed"), ("not_found", "again")]
+    finally:
+        for name in ("preview", "sidecar", "plain"):
+            registry.execute("stop_service", {"name": name})
+        for _port, pid, birth in servers.values():
+            _end(pid, birth)
+
+
+def _queue_view(drive, running=()):
+    """A fresh supervisor queue publication (snapshot and its liveness certificate) naming ``running`` tasks."""
+    from ouroboros.utils import utc_now_iso
+
+    state = drive / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "queue_snapshot.json").write_text(json.dumps({
+        "generation": "g-kept", "pending": [],
+        "running": [{"id": task, "task": {"id": task}} for task in running]}), encoding="utf-8")
+    (state / "queue.alive").write_text(json.dumps({"generation": "g-kept", "ts": utc_now_iso(), "heartbeats": {}}),
+                                       encoding="utf-8")
+
+
+def test_a_root_task_stops_only_a_finished_producers_kept_service_and_a_delegated_one_never(tmp_path, monkeypatch,
+                                                                                            scripts):
+    """The owner chose (quiz f4023bf9) that Ouroboros may stop a service a FINISHED task left running. A root task's
+    stop by launch id therefore refuses, signalling nothing, while the producer is live, unrecorded, or its finish is
+    not proven by a fresh queue view; a finished producer's launch stops; the own-name stop is unchanged."""
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import services
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
+    port, pid, birth = _server(tmp_path / "kept.port")
+    drive = tmp_path / "data"
+    try:
+        launch_id = _kept_view(drive)["services"][0]["launch_id"]
+        registry._ctx.task_id = "integrator"  # another task: its own name space has no "preview"
+        assert "SERVICE_NOT_FOUND" in registry.execute("stop_service", {"name": "preview"}), "own-name stop unchanged"
+
+        real_profile = services.active_tool_profile
+        monkeypatch.setattr(services, "active_tool_profile", lambda _ctx: "acting_subagent")
+        refused = registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"})
+        assert "SERVICE_STOP_BLOCKED" in refused and _answers(port), refused
+        monkeypatch.setattr(services, "active_tool_profile", real_profile)
+
+        unreasoned = registry.execute("stop_service", {"service_id": launch_id})
+        assert "SERVICE_STOP_REFUSED" in unreasoned and "a reason is required" in unreasoned and _answers(port)
+
+        _queue_view(drive)
+        unknown = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
+        assert unknown["outcome"] == "refused" and "no result recorded" in unknown["detail"], unknown  # unverified
+        write_task_result(drive, "producer", "running")
+        live = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
+        assert live["outcome"] == "refused" and "has not finished (running)" in live["detail"], live
+        write_task_result(drive, "producer", "completed")
+        _queue_view(drive, running=("producer",))  # its result is written, but its worker still runs it
+        winding = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
+        assert winding["outcome"] == "refused" and "may still run" in winding["detail"], winding
+        (drive / "state" / "queue.alive").unlink()  # no fresh queue view: its finish is not proven
+        unproven = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
+        assert unproven["outcome"] == "refused" and "may still run" in unproven["detail"], unproven
+        assert _answers(port) and _same_process_alive(pid, birth), "a refusal signals nothing"
+        assert _kept_view(drive)["services"][0]["state"] == "running"
+
+        _queue_view(drive)
+        too_long = registry.execute("stop_service", {"service_id": launch_id, "reason": "x" * 1001})
+        assert "SERVICE_STOP_REFUSED" in too_long and "longer than 1000 characters" in too_long and _answers(port)
+        done = registry.execute("stop_service", {"service_id": launch_id, "reason": "integrated; preview not needed"})
+        receipt = _payload(done)
+        assert receipt["outcome"] == "stopped" and receipt["actor"] == "agent:integrator", receipt
+        assert not _answers(port) and _kept_view(drive)["services"] == []
+    finally:
+        registry._ctx.task_id = "producer"
+        registry.execute("stop_service", {"name": "preview"})
+        _end(pid, birth)
+
+
+def test_a_kept_local_executor_service_is_one_launch_and_its_stop_retires_its_record(tmp_path, monkeypatch, scripts):
+    from ouroboros import workspace_executor
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.tools import services
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    ctx, workspace = _executor_ctx(tmp_path)
+    started = json.loads(services._start_service(
+        ctx, name="local", cmd=_runner_cmd(scripts, tmp_path / "local.port"), cwd=str(workspace), keep_alive=True,
+        readiness={"log_contains": "READY", "timeout_sec": 20}))
+    assert started["executor"]["type"] == "local", started
+    port, pid, birth = _server(tmp_path / "local.port")
+    record = workspace_executor._SERVICES["exec-task:local"]
+    try:
+        view = _kept_view(tmp_path / "data")
+        assert [(item["name"], item["backend"], item["state"]) for item in view["services"]] == [
+            ("local", "local_executor", "running")], view  # its ledger row and executor record: one launch
+        receipt = stop_kept_service(tmp_path / "data", view["services"][0]["launch_id"], reason="done",
+                                    actor="owner:test")
+        assert receipt["outcome"] == "stopped", receipt
+        assert not _answers(port) and not record.durable_record_path.exists()
+        assert _kept_view(tmp_path / "data")["services"] == []
+    finally:
+        services._stop_service(ctx, name="local")
+        _end(pid, birth)
+
+
+LATE_WRITER = r'''
+import os, pathlib, sys, time
+print("READY", flush=True)
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.02)
+pathlib.Path("report.txt").write_bytes(b"report written after its task ended\n")
+print("  Local: http://127.0.0.1:4173/ (report.txt written)", flush=True)
+while True:
+    time.sleep(60)
+'''
+
+
+def _start_late_writer(registry, scripts, tmp_path):
+    """A kept service of task ``producer`` that writes its declared output only once ``go`` exists."""
+    from ouroboros.process_census import measure_birth
+
+    task_drive = tmp_path / "data" / "task_drives" / "producer"
+    task_drive.mkdir(parents=True, exist_ok=True)
+    (scripts / "late_writer.py").write_text(LATE_WRITER, encoding="utf-8")
+    started = json.loads(registry.execute("start_service", {
+        "name": "reporter", "cmd": [sys.executable, str(scripts / "late_writer.py"), str(tmp_path / "go")],
+        "cwd": str(task_drive), "outputs": ["report.txt"], "keep_alive": True,
+        "readiness": {"log_contains": "READY", "timeout_sec": 20}}))
+    assert started["state"] == "running", started
+    return started, task_drive, (started["pid"], measure_birth(started["pid"]))
+
+
+def test_a_kept_services_output_written_after_its_task_ended_is_captured_into_that_task_by_the_owners_stop(
+        tmp_path, monkeypatch, scripts):
+    """The declared output exists only after the task ended. The owner's stop captures it as that task's own stop
+    would, into ITS store (never the stopper's), names who stopped it and why, and ordinary retention then archives
+    the log under that task while the output stays addressable."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools.kept_service_outputs import declaration_path
+    from ouroboros.tools.services import prune_service_logs, stop_task_services
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    started, task_drive, (pid, birth) = _start_late_writer(registry, scripts, tmp_path)
+    drive = tmp_path / "data"
+    payload = b"report written after its task ended\n"
+    try:
+        assert "kept_declaration_problem" not in started
+        assert [item["lifecycle"] for item in stop_task_services(registry._ctx)] == ["kept"]  # the task ends
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        deadline = time.monotonic() + _PATIENCE
+        while not (task_drive / "report.txt").exists() or (task_drive / "report.txt").read_bytes() != payload:
+            assert time.monotonic() < deadline, "the kept service never wrote its output"
+            time.sleep(0.02)
+        assert registered_task_artifact(drive, "producer", "report.txt") is None, "nothing captured it yet"
+        (service,) = _kept_view(drive)["services"]
+
+        receipt = stop_kept_service(drive, service["launch_id"], reason="the report server is no longer needed",
+                                    actor="agent:integrator")
+        assert receipt["outcome"] == "stopped" and receipt["ok"] is True, receipt
+        assert receipt["outputs"]["state"] == "captured" and receipt["outputs"]["task_id"] == "producer", receipt
+        assert receipt["outputs"]["registered"] is True and "report.txt" in receipt["outputs"]["detail"]
+        assert not _same_process_alive(pid, birth)
+        artifact = registered_task_artifact(drive, "producer", "report.txt")
+        assert artifact["kind"] == "process_output" and Path(artifact["path"]).read_bytes() == payload, artifact
+        assert artifact["source_path"] == str((task_drive / "report.txt").resolve())
+        assert registered_task_artifact(drive, "integrator", "report.txt") is None, "never the stopper's"
+        assert not declaration_path(drive, "producer", service["launch_id"]).exists(), "it now lives in the event row"
+        events = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        (captured,) = [row for row in events if row.get("type") == "kept_service_outputs"]
+        assert (captured["task_id"], captured["launch_id"], captured["actor"], captured["reason"], captured["state"]) == (
+            "producer", service["launch_id"], "agent:integrator", "the report server is no longer needed", "captured")
+        assert captured["declaration"]["outputs"] == ["report.txt"] and captured["declaration"]["context"]["tool_profile"]
+
+        report = prune_service_logs(drive, retention_days=0, now=time.time() + 60)  # ordinary retention, later
+        assert report["archived_files"] == 1 and not (drive / "services" / "producer").exists(), report
+        events = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        (pruned,) = [row for row in events if row.get("type") == "service_log_pruned"]
+        assert (pruned["task_id"], pruned["name"]) == ("producer", "reporter")
+        assert "(report.txt written)" in read_blob_ref(drive, pruned["full_log_ref"], expected_kind="txt")
+        assert Path(registered_task_artifact(drive, "producer", "report.txt")["path"]).read_bytes() == payload
+    finally:
+        registry._ctx.task_id = "producer"
+        registry.execute("stop_service", {"name": "reporter"})
+        _end(pid, birth)
+
+
+def test_a_kept_start_without_its_declaration_says_its_outputs_were_not_captured(tmp_path, monkeypatch, scripts):
+    """A declaration that could not be written is said at the start, and its stop is not reported done: the output
+    stays where the service wrote it, nothing is captured in anyone's name."""
+    from ouroboros import utils
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.launch_custody import stop_kept_service
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    real_write = utils.atomic_write_json
+
+    def refuse_declaration(path, *args, **kwargs):
+        if str(path).endswith(".kept.json"):
+            raise OSError("disk full")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(utils, "atomic_write_json", refuse_declaration)
+    started, task_drive, (pid, birth) = _start_late_writer(registry, scripts, tmp_path)
+    monkeypatch.setattr(utils, "atomic_write_json", real_write)
+    drive = tmp_path / "data"
+    try:
+        assert "disk full" in started["kept_declaration_problem"], started
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        deadline = time.monotonic() + _PATIENCE
+        while not (task_drive / "report.txt").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        (service,) = _kept_view(drive)["services"]
+        receipt = stop_kept_service(drive, service["launch_id"], reason="done", actor="owner:test")
+        assert receipt["outcome"] == "stopped" and receipt["ok"] is False, receipt
+        assert receipt["outputs"]["state"] == "unavailable", receipt
+        assert "recorded no output declaration" in receipt["outputs"]["detail"]
+        assert (task_drive / "report.txt").exists() and registered_task_artifact(drive, "producer", "report.txt") is None
+    finally:
+        registry.execute("stop_service", {"name": "reporter"})
+        _end(pid, birth)
+
+
+def _wait_report(task_drive, payload=b"report written after its task ended\n"):
+    deadline = time.monotonic() + _PATIENCE
+    while not (task_drive / "report.txt").exists() or (task_drive / "report.txt").read_bytes() != payload:
+        assert time.monotonic() < deadline, "the kept service never wrote its output"
+        time.sleep(0.02)
+
+
+def _settle_drive(drive, task_drive, task="producer"):
+    """The one owner that deletes a task's own drive (``task_custody.settle_child_drive``), its task proven not live."""
+    from ouroboros import task_custody
+
+    return task_custody.settle_child_drive(drive, task, task_drive, live=lambda _task: False)
+
+
+def _retire_between(drive, task_drive, launch_id):
+    """Ordinary retirement between a failed capture and its retry: log retention (the maintenance child's default, then
+    a forced prune) and the task-drive settlement. An owed declaration and the drive holding its sources survive, with
+    the hold said; nothing here depends on how long ago the service started."""
+    from ouroboros.tools.kept_service_outputs import declaration_path
+    from ouroboros.tools.services import prune_service_logs
+
+    declaration = declaration_path(drive, "producer", launch_id)
+    long_ago = time.time() - 400 * 86400  # older than any retention (at most 365 days)
+    os.utime(declaration, (long_ago, long_ago))
+    for days in (None, 0):
+        report = prune_service_logs(drive, retention_days=days, now=time.time() + 1)
+        assert declaration.exists() and not report["errors"], (days, report)
+        assert launch_id in report.get("capture_owed", []), report
+    settled = _settle_drive(drive, task_drive)
+    assert settled["status"] == "retained" and settled["reason"] == "kept_service_capture_owed", settled
+    assert (task_drive / "report.txt").read_bytes() == b"report written after its task ended\n"
+    owed = [item for item in _kept_view(drive)["services"] if item["launch_id"] == launch_id]
+    assert [item["state"] for item in owed] == ["capture_owed"], owed  # the hold is visible where kept services are
+    return declaration
+
+
+def test_an_incomplete_capture_keeps_its_declaration_and_source_and_a_repeated_stop_captures_them(tmp_path,
+                                                                                                   monkeypatch,
+                                                                                                   scripts):
+    """The service is confirmed ended but its output cannot be copied (the artifact store refuses the write): the
+    receipt says ``incomplete``; the declaration and the sources survive ordinary retirement (log prune, task-drive
+    settlement) with no timer; the same stop by launch id, once the cause is gone, captures the original bytes into the
+    producer's store though the launch is no longer running (nothing signalled), and that ends the hold."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import shell_outputs
+    from ouroboros.tools.kept_service_outputs import owed_output_hold
+    from ouroboros.tools.services import stop_task_services
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    started, task_drive, (pid, birth) = _start_late_writer(registry, scripts, tmp_path)
+    drive = tmp_path / "data"
+    real_copy = shell_outputs.copy_file_to_task_artifacts
+    try:
+        assert [item["lifecycle"] for item in stop_task_services(registry._ctx)] == ["kept"]
+        write_task_result(drive, "producer", "completed")
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        _wait_report(task_drive)
+        (service,) = _kept_view(drive)["services"]
+
+        def refuse(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", refuse)
+        first = stop_kept_service(drive, service["launch_id"], reason="done", actor="owner:test")
+        assert first["outcome"] == "stopped" and first["ok"] is False, first
+        assert first["outputs"]["state"] == "incomplete" and "No space left" in first["outputs"]["detail"], first
+        assert "stop_service(service_id=" in first["outputs"]["detail"], "the retry is named"
+        assert not _same_process_alive(pid, birth)
+        assert registered_task_artifact(drive, "producer", "report.txt") is None
+        assert owed_output_hold(drive, task_drive) and not owed_output_hold(drive, tmp_path / "elsewhere")
+
+        declaration = _retire_between(drive, task_drive, service["launch_id"])
+
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", real_copy)
+        again = stop_kept_service(drive, service["launch_id"], reason="retry the capture", actor="owner:test")
+        assert again["outcome"] == "not_found" and again["ok"] is True, again
+        assert "nothing was signalled" in again["detail"] and again["outputs"]["state"] == "captured", again
+        artifact = registered_task_artifact(drive, "producer", "report.txt")
+        assert Path(artifact["path"]).read_bytes() == b"report written after its task ended\n", artifact
+        assert not declaration.exists(), "a complete capture consumes it"
+        assert not owed_output_hold(drive, task_drive) and _kept_view(drive)["services"] == []
+        assert _settle_drive(drive, task_drive)["reason"] != "kept_service_capture_owed"
+        events = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [row["state"] for row in events if row.get("type") == "kept_service_outputs"] == ["incomplete", "captured"]
+        third = stop_kept_service(drive, service["launch_id"], reason="again", actor="owner:test")
+        assert third["outcome"] == "not_found" and "outputs" not in third, third
+    finally:
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", real_copy)
+        registry.execute("stop_service", {"name": "reporter"})
+        _end(pid, birth)
+
+
+def test_an_owed_declaration_holds_only_its_own_sources_and_one_without_outputs_retires(tmp_path, monkeypatch):
+    """Owed means a declaration that names outputs no complete capture consumed: no timer ends it. It holds the drive
+    or copy containing its working directory, an output or the drive its capture writes into, never an unrelated one;
+    an unreadable one stops the retirement reading it. A kept start that declared nothing owes nothing, is no
+    outstanding entry at all (beside its log, unread by the hot readers) and retires with its logs."""
+    from ouroboros.tools.kept_service_outputs import (KeptDeclarationUnreadable, declaration_path, owed_declarations,
+                                                      owed_output_hold)
+    from ouroboros.tools.services import prune_service_logs
+
+    drive = tmp_path / "data"
+    task_drive, other = drive / "task_drives" / "producer", drive / "task_drives" / "other"
+    for folder in (task_drive, other):
+        folder.mkdir(parents=True)
+
+    def declare(task, launch, **fields):
+        path = declaration_path(drive, task, f"launch-{launch * 32}", owed=bool(fields["outputs"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "launch_id": f"launch-{launch * 32}", "task_id": task, **fields}),
+                        encoding="utf-8")
+        long_ago = time.time() - 400 * 86400
+        os.utime(path, (long_ago, long_ago))
+        return path
+
+    owed = declare("producer", "a", name="reporter", cwd=str(task_drive), outputs=["report.txt"])
+    quiet = declare("other", "b", name="sidecar", cwd=str(other), outputs=[])
+    assert owed_output_hold(drive, task_drive) and owed_output_hold(drive, drive / "task_drives")
+    assert not owed_output_hold(drive, other), "a declaration naming nothing holds nothing"
+    escaped = declare("producer", "c", name="writer", cwd=str(task_drive), outputs=["../shared/out.txt"])
+    assert owed_output_hold(drive, drive / "task_drives" / "shared"), "an output outside its cwd is held where it is"
+    escaped.unlink()
+
+    assert [path for path, _declaration in owed_declarations(drive)] == [owed], "only what is owed costs a read"
+    report = prune_service_logs(drive, retention_days=0, now=time.time() + 1)
+    assert owed.exists() and not quiet.exists() and report["capture_owed"] == ["launch-" + "a" * 32], report
+    report = prune_service_logs(drive, now=time.time() + 1)
+    assert owed.exists() and report["capture_owed"] == ["launch-" + "a" * 32], report
+
+    unreadable = declaration_path(drive, "other", "launch-" + "d" * 32)
+    unreadable.parent.mkdir(parents=True)
+    unreadable.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(KeptDeclarationUnreadable):  # unknown could name anything: the retirement reading it stops
+        owed_output_hold(drive, other)
+
+
+def test_a_kept_services_own_stop_consumes_its_declaration_once_it_captured(tmp_path, monkeypatch, scripts):
+    """Its own task's stop by name captures its outputs as always; a captured kept launch then owes nothing, so no
+    retirement keeps its copy for it and no inventory lists it."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.tools.kept_service_outputs import declaration_path, owed_output_hold
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    started, task_drive, (pid, birth) = _start_late_writer(registry, scripts, tmp_path)
+    drive = tmp_path / "data"
+    try:
+        (service,) = _kept_view(drive)["services"]
+        declaration = declaration_path(drive, "producer", service["launch_id"])
+        assert declaration.exists() and owed_output_hold(drive, task_drive)
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        _wait_report(task_drive)
+        stopped = _payload(registry.execute("stop_service", {"name": "reporter"}))
+        assert not stopped.get("artifact_output_failed"), stopped
+        assert registered_task_artifact(drive, "producer", "report.txt") is not None
+        assert not declaration.exists() and not owed_output_hold(drive, task_drive)
+        assert _kept_view(drive)["services"] == []
+    finally:
+        registry.execute("stop_service", {"name": "reporter"})
+        _end(pid, birth)
+
+
+EXITING_WRITER = r'''
+import os, pathlib, sys, time
+print("READY", flush=True)
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.02)
+pathlib.Path("report.txt").write_bytes(b"report written after its task ended\n")
+'''
+
+
+def test_a_kept_service_that_exited_on_its_own_still_has_its_outputs_captured_by_a_stop_of_its_launch(
+        tmp_path, monkeypatch, scripts):
+    """Its task ended; the service wrote its output and exited by itself, so it no longer runs. Its declaration still
+    names the output: it is listed as owed, survives log prune and task-drive settlement, and a stop of that launch by
+    a root task signals nothing and captures the original bytes for the producer."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.services import stop_task_services
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    task_drive = tmp_path / "data" / "task_drives" / "producer"
+    task_drive.mkdir(parents=True, exist_ok=True)
+    (scripts / "exiting_writer.py").write_text(EXITING_WRITER, encoding="utf-8")
+    started = json.loads(registry.execute("start_service", {
+        "name": "reporter", "cmd": [sys.executable, str(scripts / "exiting_writer.py"), str(tmp_path / "go")],
+        "cwd": str(task_drive), "outputs": ["report.txt"], "keep_alive": True,
+        "readiness": {"log_contains": "READY", "timeout_sec": 20}}))
+    drive = tmp_path / "data"
+    try:
+        (service,) = _kept_view(drive)["services"]
+        assert [item["lifecycle"] for item in stop_task_services(registry._ctx)] == ["kept"]
+        write_task_result(drive, "producer", "completed")
+        _queue_view(drive)
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        _wait_report(task_drive)
+        deadline = time.monotonic() + _PATIENCE
+        while [item for item in _kept_view(drive)["services"] if item["state"] != "capture_owed"]:
+            assert time.monotonic() < deadline, "its exit was never read as ended"
+            time.sleep(0.05)
+        declaration = _retire_between(drive, task_drive, service["launch_id"])
+        registry._ctx.task_id = "integrator"
+        receipt = _payload(registry.execute("stop_service", {"service_id": service["launch_id"],
+                                                             "reason": "collect the report it left"}))
+        assert receipt["outcome"] == "not_found" and receipt["ok"] is True, receipt
+        assert receipt["outputs"]["state"] == "captured" and receipt["outputs"]["task_id"] == "producer", receipt
+        artifact = registered_task_artifact(drive, "producer", "report.txt")
+        assert Path(artifact["path"]).read_bytes() == b"report written after its task ended\n", artifact
+        assert registered_task_artifact(drive, "integrator", "report.txt") is None
+        assert not declaration.exists() and _kept_view(drive)["services"] == []
+    finally:
+        registry._ctx.task_id = "producer"
+        registry.execute("stop_service", {"name": "reporter"})
+        _end(started["pid"], "")
+
+
+PRODUCER = r'''
+"""A producer task in its own interpreter: starts a kept service declaring an output, ends, records its finish, exits."""
+import json, os, pathlib, sys
+
+repo, data, script, go = (pathlib.Path(arg) for arg in sys.argv[1:5])
+os.environ["OUROBOROS_RUNTIME_MODE"] = "advanced"
+sys.path.insert(0, str(repo))
+from ouroboros import config as cfg
+cfg.reset_runtime_mode_baseline_for_tests()
+os.environ.pop(cfg.BOOT_RUNTIME_MODE_ENV_KEY, None)
+import ouroboros.safety
+ouroboros.safety.check_safety = lambda *a, **k: (True, "")
+from ouroboros.task_results import write_task_result
+from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.services import stop_task_services
+
+(data.parent / "repo").mkdir(exist_ok=True)
+registry = ToolRegistry(repo_dir=data.parent / "repo", drive_root=data)
+registry._ctx.task_id = "producer"
+task_drive = data / "task_drives" / "producer"
+task_drive.mkdir(parents=True, exist_ok=True)
+started = json.loads(registry.execute("start_service", {
+    "name": "reporter", "cmd": [sys.executable, str(script), str(go)], "cwd": str(task_drive),
+    "outputs": ["report.txt"], "keep_alive": True, "readiness": {"log_contains": "READY", "timeout_sec": 20}}))
+ended = [item["lifecycle"] for item in stop_task_services(registry._ctx)]
+write_task_result(data, "producer", "completed")
+print(json.dumps({"started": started, "ended": ended, "producer_pid": os.getpid()}), flush=True)
+'''
+
+
+def test_a_kept_service_outlives_its_producer_process_and_another_root_tasks_stop_captures_into_the_producers_store(
+        tmp_path, monkeypatch, scripts):
+    """The real boundary: the producer task runs in its own interpreter, starts a kept service with a declared output,
+    ends, records its finish and EXITS (nothing of it holds the service any more). This process, a different root
+    task, finds the launch only through custody, stops it with a reason, and the output lands in the PRODUCER's
+    artifact store from the declaration the producer persisted, never in the stopper's."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_census import measure_birth
+    from ouroboros.tools.kept_service_outputs import declaration_path
+
+    registry = _registry(tmp_path, monkeypatch, task_id="integrator")
+    drive = tmp_path / "data"
+    (scripts / "late_writer.py").write_text(LATE_WRITER, encoding="utf-8")
+    (scripts / "producer.py").write_text(PRODUCER, encoding="utf-8")
+    repo = Path(__file__).resolve().parents[1]
+    producer = subprocess.run(
+        [sys.executable, str(scripts / "producer.py"), str(repo), str(drive), str(scripts / "late_writer.py"),
+         str(tmp_path / "go")], capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+    assert producer.returncode == 0, producer.stderr[-4000:]
+    facts = json.loads(producer.stdout.strip().splitlines()[-1])
+    pid = int(facts["started"]["pid"])
+    birth = measure_birth(pid)
+    task_drive = drive / "task_drives" / "producer"
+    try:
+        assert facts["started"]["state"] == "running" and "kept_declaration_problem" not in facts["started"], facts
+        assert facts["ended"] == ["kept"], facts
+        assert pid_provably_gone(facts["producer_pid"]), "the producer's interpreter exited and was reaped"
+        assert birth and _same_process_alive(pid, birth), "its kept service outlived it"
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        _wait_report(task_drive)
+        (service,) = _kept_view(drive)["services"]
+        assert (service["task_id"], service["name"], service["state"]) == ("producer", "reporter", "running"), service
+        _queue_view(drive)  # the supervisor's fresh view: nothing of the producer runs
+
+        receipt = _payload(registry.execute("stop_service", {"service_id": service["launch_id"],
+                                                             "reason": "producer finished; report server unused"}))
+        assert receipt["outcome"] == "stopped" and receipt["ok"] is True, receipt
+        assert receipt["actor"] == "agent:integrator" and receipt["task_id"] == "producer", receipt
+        assert receipt["outputs"]["state"] == "captured" and receipt["outputs"]["registered"] is True, receipt
+        assert not _same_process_alive(pid, birth) and _kept_view(drive)["services"] == []
+        artifact = registered_task_artifact(drive, "producer", "report.txt")
+        assert artifact["kind"] == "process_output", artifact
+        assert Path(artifact["path"]).read_bytes() == b"report written after its task ended\n"
+        assert artifact["source_path"] == str((task_drive / "report.txt").resolve())
+        assert registered_task_artifact(drive, "integrator", "report.txt") is None, "never the stopper's"
+        assert not declaration_path(drive, "producer", service["launch_id"]).exists()
+    finally:
+        _end(pid, birth)
+
+
+def test_a_failed_capture_after_its_producer_exited_survives_retirement_and_a_retry_captures_the_original_bytes(
+        tmp_path, monkeypatch, scripts):
+    """The real lifecycle: a producer interpreter starts a kept service declaring an output, records its finish and
+    exits. Another root task stops the launch, but the capture fails. Ordinary log prune and the producer's task-drive
+    settlement then run and must keep the declaration and the drive holding the output, with the hold said; the
+    stopper's retry captures the ORIGINAL bytes into the producer's store, and only then do they owe nothing."""
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_census import measure_birth
+    from ouroboros.tools import shell_outputs
+
+    registry = _registry(tmp_path, monkeypatch, task_id="integrator")
+    drive = tmp_path / "data"
+    (scripts / "late_writer.py").write_text(LATE_WRITER, encoding="utf-8")
+    (scripts / "producer.py").write_text(PRODUCER, encoding="utf-8")
+    repo = Path(__file__).resolve().parents[1]
+    producer = subprocess.run(
+        [sys.executable, str(scripts / "producer.py"), str(repo), str(drive), str(scripts / "late_writer.py"),
+         str(tmp_path / "go")], capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+    assert producer.returncode == 0, producer.stderr[-4000:]
+    facts = json.loads(producer.stdout.strip().splitlines()[-1])
+    pid = int(facts["started"]["pid"])
+    birth = measure_birth(pid)
+    task_drive = drive / "task_drives" / "producer"
+    real_copy = shell_outputs.copy_file_to_task_artifacts
+    try:
+        assert pid_provably_gone(facts["producer_pid"]) and birth and _same_process_alive(pid, birth), facts
+        (tmp_path / "go").write_text("go", encoding="utf-8")
+        _wait_report(task_drive)
+        (service,) = _kept_view(drive)["services"]
+        _queue_view(drive)
+
+        def refuse(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", refuse)
+        failed = registry.execute("stop_service", {"service_id": service["launch_id"], "reason": "producer finished"})
+        assert "ARTIFACT_OUTPUT_ERROR" in failed, failed
+        receipt = _payload(failed)
+        assert receipt["outcome"] == "stopped" and receipt["outputs"]["state"] == "incomplete", receipt
+        assert not _same_process_alive(pid, birth)
+
+        declaration = _retire_between(drive, task_drive, service["launch_id"])
+
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", real_copy)
+        retried = _payload(registry.execute("stop_service", {"service_id": service["launch_id"],
+                                                             "reason": "retry after freeing space"}))
+        assert retried["outcome"] == "not_found" and retried["ok"] is True, retried
+        assert retried["outputs"]["state"] == "captured" and retried["outputs"]["task_id"] == "producer", retried
+        artifact = registered_task_artifact(drive, "producer", "report.txt")
+        assert Path(artifact["path"]).read_bytes() == b"report written after its task ended\n", artifact
+        assert artifact["source_path"] == str((task_drive / "report.txt").resolve())
+        assert registered_task_artifact(drive, "integrator", "report.txt") is None
+        assert not declaration.exists() and _kept_view(drive)["services"] == []
+        assert _settle_drive(drive, task_drive)["reason"] != "kept_service_capture_owed"
+    finally:
+        monkeypatch.setattr(shell_outputs, "copy_file_to_task_artifacts", real_copy)
+        _end(pid, birth)
+
+
+def test_an_unlisted_id_is_unknown_while_custody_cannot_be_read_whole_and_nothing_is_signalled(tmp_path, monkeypatch,
+                                                                                               scripts):
+    from ouroboros.launch_custody import stop_kept_service
+    from ouroboros.owned_shutdown import owned_processes_path
+
+    registry = _registry(tmp_path, monkeypatch, task_id="producer")
+    _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
+    port, pid, birth = _server(tmp_path / "kept.port")
+    drive = tmp_path / "data"
+    owned = owned_processes_path(drive)
+    saved = owned.read_bytes()
+    try:
+        assert _kept_view(drive)["complete"] is True
+        owned.write_text("{ not json", encoding="utf-8")  # the ownership set cannot be read: it may name more
+        view = _kept_view(drive)
+        assert view["complete"] is False and "ownership set cannot be read" in view["note"], view
+        receipt = stop_kept_service(drive, "launch-" + "0" * 32, reason="cleanup", actor="owner:test")
+        assert receipt["outcome"] == "unknown" and receipt["ok"] is False, receipt
+        assert "could not be read whole" in receipt["detail"] and "nothing was signalled" in receipt["detail"]
+        assert _answers(port) and _same_process_alive(pid, birth)
+    finally:
+        owned.write_bytes(saved)
+        registry.execute("stop_service", {"name": "preview"})
         _end(pid, birth)
