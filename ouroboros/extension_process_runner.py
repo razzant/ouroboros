@@ -779,7 +779,7 @@ def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir
     reconcile, enable, reload) runs the child and replaces the record, which is how a registration reading past the key
     is run anew. Concurrent loads share one run. A run is recorded only when it loaded the key's bytes with Host Service
     access; a failed run leaves no earlier result to take, and a busy record or a load without identity runs its own."""
-    from contextlib import ExitStack
+    from contextlib import ExitStack, suppress
 
     from ouroboros.context_timing import counted
     from ouroboros.extension_import_staging import extension_cache_lock
@@ -801,7 +801,8 @@ def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir
         access = _host_service_access(pathlib.Path(drive_root), skill.name, skill.skill_dir)
         counted("catalog_child", key=skill.name)
         if recorded:
-            path.unlink(missing_ok=True)
+            with suppress(OSError):  # a file in use (a Windows share violation): the write below replaces it
+                path.unlink(missing_ok=True)
         catalog = _catalog_child(skill, drive_root, repo_dir, skills_repo_path, {**env, **access}, settings)
         if recorded and access and catalog.get("content_hash") == skill.content_hash:
             atomic_write_json(path, {"identity": identity, "catalog": catalog})

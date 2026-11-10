@@ -264,9 +264,14 @@ def test_a_server_load_that_fails_leaves_no_earlier_catalog_for_a_worker(tmp_pat
     monkeypatch.setattr(runner, "_run_child", run_child)
     assert _on_the_server(monkeypatch, drive, repo, {}, "fragile")[0] is None and record.exists() and len(runs) == 1
     assert _birth(drive, repo, {}, "fragile")[0] is None and len(runs) == 1
+    with monkeypatch.context() as in_use:  # a record the platform will not delete yet does not fail the load
+        unlink = pathlib.Path.unlink
+        in_use.setattr(pathlib.Path, "unlink", lambda self, *a, **kw: unlink(self, *a, **kw) if self != record else (
+            _ for _ in ()).throw(PermissionError("in use")))
+        assert _on_the_server(monkeypatch, drive, repo, {}, "fragile")[0] is None and len(runs) == 2
     child["fails"] = True
     assert _on_the_server(monkeypatch, drive, repo, {}, "fragile")[0] is not None and not record.exists()
-    assert _birth(drive, repo, {}, "fragile")[0] is not None and len(runs) == 3  # the worker's own child, not a record
+    assert _birth(drive, repo, {}, "fragile")[0] is not None and len(runs) == 4  # the worker's own child, not a record
 
 
 def test_catalog_record_follows_its_inputs_and_never_holds_a_failure(tmp_path, monkeypatch, settled):
