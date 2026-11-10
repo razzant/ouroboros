@@ -9,6 +9,7 @@ export const TASK_CAUSE_PHRASES = {
     author_stop: "Ouroboros stopped with unfinished work.",
     review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
     author_finish: "Ouroboros delivered this answer without the reviewers' sign-off.",
+    author_finish_pending: "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives.",
     review_degraded: "The reviewers did not reach a verdict on this answer.",
     infra_failure: "The review could not run because of an infrastructure failure, so there is no verdict.",
     acceptance_preparation_failed: "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",

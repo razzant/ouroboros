@@ -22,12 +22,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import stat
-import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
+from ouroboros import work_domain
 from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 from ouroboros.utils import safe_relpath, utc_now_iso
 
@@ -46,8 +45,13 @@ _OBSERVED_EFFECT_STATES = frozenset({"observed_window", "quiescent"})
 ESTABLISHED_BASES = frozenset({"original", "derived", "carried"})
 
 
-def attribution_task_id(results_drive_root: Any, candidates: Iterable[Any]) -> str:
-    """Return the first task id in lineage order with a durable baseline."""
+def attribution_task_id(results_drive_root: Any, candidates: Iterable[Any], *, repo_root: Any = None,
+                        surface_type: str = "") -> str:
+    """Return the first task id in lineage order with a durable baseline; with ``repo_root``, one whose baseline
+    observes that Git root, and with ``surface_type`` one observing a Git surface of that type (``system_repo``:
+    the body, by its serving checkout or a candidate copy). A baseline of another admitted folder says nothing
+    about either."""
+    root = str(_canonical_root(repo_root)) if repo_root is not None else ""
     for candidate in candidates:
         task_id = str(candidate or "").strip()
         if not task_id:
@@ -57,7 +61,12 @@ def attribution_task_id(results_drive_root: Any, candidates: Iterable[Any]) -> s
         except Exception:
             continue
         evidence = result.get("mutation_evidence")
-        if isinstance(evidence, dict) and isinstance(evidence.get("baseline"), dict):
+        baseline = evidence.get("baseline") if isinstance(evidence, dict) else None
+        if isinstance(baseline, dict) and (not (root or surface_type) or any(
+                isinstance(row, dict) and isinstance(row.get("git"), dict)
+                and (not root or row.get("canonical_root") == root)
+                and (not surface_type or row.get("surface_type") == surface_type)
+                for row in baseline.get("surfaces") or [])):
             return task_id
     return ""
 
@@ -66,7 +75,7 @@ def _canonical_root(value: Any) -> pathlib.Path:
     text = str(value or "").strip()
     if not text:
         raise ValueError("mutation surface root is required")
-    return pathlib.Path(text).expanduser().resolve(strict=False)
+    return work_domain.settle(pathlib.Path(text).expanduser())  # a work folder keeps its spelling; any other resolves
 
 
 def _stable_hash(payload: Any) -> str:
@@ -79,21 +88,54 @@ def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _run_git(root: pathlib.Path, *args: str) -> str:
+def _run_git(root: pathlib.Path, *args: str, timeout: float | None = None) -> str:
     from ouroboros.git_observation import host_git_env
 
-    proc = subprocess.run(
+    proc = work_domain.run(  # a work folder's Git, with its config and filters, runs as the work domain
         ["git", *args],
         cwd=str(root),
         capture_output=True,
         text=True,
         check=False,
         env=host_git_env(),
+        timeout=timeout,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "git command failed").strip()
         raise RuntimeError(detail)
     return proc.stdout
+
+
+_GIT_PROBE_TIMEOUT_SEC = 10.0  # one rev-parse of a surface's HEAD or top level; the status walk keeps no bound
+
+
+def _current_head(root: pathlib.Path) -> str:
+    """HEAD's commit, or "" on a positively unborn branch (a folder initialized with nothing committed yet), read
+    with ``workspace_preflight.git_head_basis``'s bounded probes. A HEAD proven neither raises: never a guessed
+    empty tree."""
+    from ouroboros.workspace_preflight import git_head_basis
+
+    head, state = git_head_basis(root)
+    if state == "unknown":
+        raise RuntimeError(f"HEAD of {root} is neither a readable commit nor a proven unborn branch")
+    return head
+
+
+def _git_basis(root: pathlib.Path) -> dict[str, str]:
+    """The commit and tree a Git surface's observation starts from: HEAD's, or on an unborn branch no commit and the
+    empty tree (``workspace_patch_capture._git_empty_tree_oid``, in the repository's own object format), marked
+    ``head_state="unborn"``. Its first commit is then a moved base like any other."""
+    head = _current_head(root)
+    if head:
+        return {"base_commit": head,
+                "base_tree": _run_git(root, "rev-parse", f"{head}^{{tree}}", timeout=_GIT_PROBE_TIMEOUT_SEC).strip()}
+    from ouroboros.workspace_patch_capture import _git_empty_tree_oid
+
+    errors: list[dict[str, Any]] = []
+    tree = _git_empty_tree_oid(root, errors)
+    if not tree:
+        raise RuntimeError(f"the empty tree of unborn {root} could not be named: {errors}")
+    return {"base_commit": "", "base_tree": tree, "head_state": "unborn"}
 
 
 def _git_status_paths(root: pathlib.Path) -> list[str]:
@@ -138,37 +180,42 @@ def _git_committed_paths(root: pathlib.Path, base_commit: str, current_head: str
 
 
 def _path_fingerprint(path: pathlib.Path) -> dict[str, Any]:
-    """Fingerprint one exact known path without walking any parent directory."""
+    """Fingerprint one exact known path without walking any parent directory. A work path's metadata and bytes
+    come through the confined intake, never a service open of its pathname."""
     try:
-        stat = path.lstat()
+        info = work_domain.lstat(path)
     except FileNotFoundError:
         return {"kind": "missing"}
-    if path.is_symlink():
+    if stat.S_ISLNK(info.st_mode):
         return {
             "kind": "symlink",
-            "target": os.readlink(path),
+            "target": work_domain.readlink(path),
         }
-    if path.is_file():
-        if int(stat.st_size) > _FINGERPRINT_MAX_BYTES:
+    if stat.S_ISREG(info.st_mode):
+        if int(info.st_size) > _FINGERPRINT_MAX_BYTES:
             return {
                 "kind": "file",
-                "size": int(stat.st_size),
+                "size": int(info.st_size),
                 "sha256_skipped": "over_size_cap",
             }
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        if work_domain.is_work(path):
+            sha256 = work_domain.measure(path)["sha256"]
+        else:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            sha256 = digest.hexdigest()
         return {
             "kind": "file",
-            "size": int(stat.st_size),
-            "sha256": digest.hexdigest(),
+            "size": int(info.st_size),
+            "sha256": sha256,
         }
-    if path.is_dir():
+    if stat.S_ISDIR(info.st_mode):
         # Deliberately do not recurse.  user_files may be the owner's home and
         # the contract permits only declared targets / existing artifact refs.
         return {"kind": "directory"}
-    return {"kind": "other", "size": int(stat.st_size)}
+    return {"kind": "other", "size": int(info.st_size)}
 
 
 def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str, dict[str, Any]]:
@@ -186,7 +233,7 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
     for row in files.values():
         row["git_mode"] = None
     try:
-        config = subprocess.run(
+        config = work_domain.run(
             ["git", "config", "--type=bool", "--null", "--get-regexp", r"^core\.(filemode|symlinks)$"],
             cwd=str(root), capture_output=True, text=True, check=False,
         )
@@ -213,7 +260,7 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
             elif options.get("core.filemode", "true") == "false":
                 row["git_mode"] = indexed if indexed in {"100644", "100755"} else "100644"
             else:
-                row["git_mode"] = "100755" if (root / path).lstat().st_mode & stat.S_IXUSR else "100644"
+                row["git_mode"] = "100755" if work_domain.lstat(root / path).st_mode & stat.S_IXUSR else "100644"
     except (OSError, RuntimeError, ValueError):
         logging.getLogger(__name__).debug("Git fingerprint mode unavailable", exc_info=True)
     return fingerprints
@@ -282,17 +329,13 @@ def _capture_surface(surface: Mapping[str, Any]) -> dict[str, Any]:
         except Exception:
             inside = False
         if inside:
+            basis = _git_basis(root)  # an unborn branch starts from the empty tree, before any commit
             dirty_paths = _git_status_paths(root)
             if len(dirty_paths) > _BASELINE_DIRTY_PATHS_MAX:
-                row["git"] = {
-                    "base_commit": _run_git(root, "rev-parse", "HEAD").strip(),
-                    "base_tree": _run_git(root, "rev-parse", "HEAD^{tree}").strip(),
-                    "dirty_overflow": len(dirty_paths),
-                }
+                row["git"] = {**basis, "dirty_overflow": len(dirty_paths)}
                 return row
             row["git"] = {
-                "base_commit": _run_git(root, "rev-parse", "HEAD").strip(),
-                "base_tree": _run_git(root, "rev-parse", "HEAD^{tree}").strip(),
+                **basis,
                 "dirty_paths": dirty_paths,
                 "dirty_fingerprints": _git_path_fingerprints(root, dirty_paths),
             }
@@ -421,6 +464,54 @@ def capture_mutation_baseline(
     if not isinstance(confirmed, dict) or confirmed.get("baseline") != baseline:
         raise RuntimeError("mutation baseline was not durably confirmed")
     return dict(confirmed)
+
+
+def capture_root_baseline(
+    results_drive_root: Any, task: Mapping[str, Any], *, system_repo: Any, workspace: Any, conversation: bool,
+) -> dict[str, Any] | None:
+    """The baseline a root task's admitted resources start from, captured before its first operation: the
+    serving repository for a queued root (commit staging attributes against it), and the admitted folder it
+    works in when that is a Git tree of its own, for every root, a conversation's too (owner, 8 Nov 2026: queue
+    membership is not what makes production attributable). A resumed task keeps the surfaces it started with:
+    a folder its start never observed is not baselined after work was done. A freshly initialized folder starts
+    from the empty tree (``_git_basis``); a surface whose capture still fails is left without a baseline (a named
+    gap at its readers), never at the cost of the other."""
+    task_id = str(task.get("id") or "").strip()
+    surfaces = [] if conversation else [{"surface_type": "system_repo", "host_root": str(system_repo)}]
+    folder = _canonical_root(workspace) if str(workspace or "").strip() else None
+    if folder is not None and folder != _canonical_root(system_repo):
+        try:  # at its own top level cdup is empty: Git in a container prints its own spelling of any address
+            own_tree = _run_git(folder, "rev-parse", "--is-inside-work-tree", "--show-cdup",
+                                timeout=_GIT_PROBE_TIMEOUT_SEC).strip() == "true"
+        except Exception:
+            own_tree = False
+        evidence = (load_task_result(results_drive_root, task_id) or {}).get("mutation_evidence") if own_tree else None
+        prior = evidence.get("baseline") if isinstance(evidence, dict) else None
+        if own_tree and (not isinstance(prior, dict) or any(
+                isinstance(row, dict) and row.get("canonical_root") == str(folder) for row in prior.get("surfaces") or [])):
+            surfaces.append({"surface_type": "external_workspace", "host_root": str(folder)})
+    if not surfaces:
+        return None
+    predecessor = (task.get("predecessor_authority") or {}).get("source")
+
+    def capture(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        return capture_mutation_baseline(results_drive_root, task_id, rows, owner_kind="task_root",
+                                         owner_id=str(task.get("root_task_id") or task_id),
+                                         predecessor_source=predecessor if isinstance(predecessor, Mapping) else None)
+
+    try:
+        return capture(surfaces)
+    except Exception:
+        if len(surfaces) < 2:
+            raise
+    captured = None
+    for surface in surfaces:  # one failing surface never costs the other its baseline
+        try:
+            captured = capture([surface])
+        except Exception:
+            logging.getLogger(__name__).warning("%s %s of task %s has no baseline", surface["surface_type"],
+                                                surface["host_root"], task_id, exc_info=True)
+    return captured
 
 
 def _predecessor_git_changes(
@@ -680,7 +771,7 @@ def attributed_git_candidates(
             "baseline_hash": str(baseline.get("baseline_hash") or ""),
         }
     try:
-        current_head = _run_git(root, "rev-parse", "HEAD").strip()
+        current_head = _current_head(root)  # "" while an unborn baseline's branch still has no commit
         changed = _git_status_paths(root)
     except Exception:
         blockers.append("candidate_scan_failed")
@@ -715,6 +806,24 @@ def attributed_git_candidates(
             "copy": {"basis": basis, **({"candidate": dict(row["candidate"])}
                                        if isinstance(row.get("candidate"), dict) else {})}} if copy else {}),
     }
+
+
+def attributed_commit_paths(results_drive_root: Any, task_id: str, repo_root: Any) -> list[str]:
+    """Paths the task's own reviewed commits changed in ``repo_root``, read from its ``attributed_commit`` epochs
+    (``advance_mutation_baseline``): committed work stays visible after a clean commit. A HEAD move no epoch
+    records (a shell commit, a pull) attributes nothing here and stays ``baseline_stale``; base..HEAD alone is
+    never authorship."""
+    root = _canonical_root(repo_root)
+    evidence = (load_task_result(results_drive_root, str(task_id or "")) or {}).get("mutation_evidence")
+    baseline = evidence.get("baseline") if isinstance(evidence, dict) else None
+    paths: list[str] = []
+    for epoch in baseline.get("epochs") or [] if isinstance(baseline, dict) else []:
+        if (isinstance(epoch, dict) and epoch.get("reason") == "attributed_commit" and epoch.get("commit")
+                and any(isinstance(row, dict) and row.get("canonical_root") == str(root) for row in epoch.get("previous") or [])):
+            raw = _run_git(root, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames",
+                           str(epoch["commit"]))  # --root: an unborn folder's first commit lists its files too
+            paths.extend(path for path in raw.split("\0") if path)
+    return sorted(dict.fromkeys(paths))
 
 
 def _evidence_blockers(evidence: Mapping[str, Any], states: frozenset) -> list[str]:
@@ -871,19 +980,22 @@ def record_terminal_mutation_candidates(
                     "candidates": [],
                     "excluded_preexisting_dirty": [],
                     "blockers": ["baseline_dirty_overflow"],
-                    "uncommitted_paths": [], "uncommitted_state": "unknown",
+                    # An admitted folder's work is its delivery, never a body candidate's uncommitted remainder.
+                    **({} if row["surface_type"] == "external_workspace" else
+                       {"uncommitted_paths": [], "uncommitted_state": "unknown"}),
                 })
                 rows.append(row)
                 continue
             try:
                 root = _canonical_root(root_text)
-                current_head = _run_git(root, "rev-parse", "HEAD").strip()
+                current_head = _current_head(root)
                 uncommitted = _git_status_paths(root)
                 changed = sorted(dict.fromkeys(
                     uncommitted
                     + _git_committed_paths(
                         root,
-                        str(git.get("base_commit") or ""),
+                        # An unborn baseline has no commit: its interval starts at the empty tree.
+                        str(git.get("base_commit") or git.get("base_tree") or ""),
                         current_head,
                     )
                 ))
@@ -923,6 +1035,8 @@ def record_terminal_mutation_candidates(
                     and current_head != str(git.get("base_commit") or "")
                 ),
             })
+            if row["surface_type"] == "external_workspace":  # an admitted folder's work is its delivery, not a
+                row.pop("uncommitted_paths"), row.pop("uncommitted_state")  # body candidate's uncommitted remainder
         else:
             root = _canonical_root(root_text)
             prior = surface.get("known_path_fingerprints") or {}
@@ -994,7 +1108,7 @@ def try_reanchor_stale_baseline(
         current_head = _run_git(root, "rev-parse", "HEAD").strip()
         if not base_commit or base_commit == current_head:
             return False
-        ancestor_probe = subprocess.run(
+        ancestor_probe = work_domain.run(
             ["git", "merge-base", "--is-ancestor", base_commit, current_head],
             cwd=str(root),
             capture_output=True,
@@ -1102,8 +1216,10 @@ __all__ = [
     "MUTATION_EVIDENCE_VERSION",
     "advance_mutation_baseline",
     "attribution_task_id",
+    "attributed_commit_paths",
     "attributed_git_candidates",
     "capture_mutation_baseline",
+    "capture_root_baseline",
     "load_mutation_evidence_projection",
     "mutation_evidence_projection",
     "record_terminal_mutation_candidates",

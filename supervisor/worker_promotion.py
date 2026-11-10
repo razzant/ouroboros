@@ -379,6 +379,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "context_requires_self_body_docs": evt.get("context_requires_self_body_docs", False),
         **({"context_requires_development": evt["context_requires_development"]}
            if isinstance(evt.get("context_requires_development"), bool) else {}),
+        **({"review_answer": True} if evt.get("review_answer") is True else {}),  # task_contract.review_answer
         **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),  # explicit start only
         "objective_author": dict(evt.get("objective_author") or {}),
         "owner_corpus": list(evt.get("owner_corpus") or []),

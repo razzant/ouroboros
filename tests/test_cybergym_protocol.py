@@ -1591,3 +1591,29 @@ def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
     assert report["status"] == "nothing_pending"
     assert report["pending_attempts"] == 0
     assert report["already_recorded"] == ["arvo:1"]
+
+
+def test_the_result_review_of_the_measured_task_is_a_supported_recorded_choice(tmp_path):
+    """The runner's own knobs for the measured task's result review (owner, 8 Nov 2026): the stock run keeps it Off;
+    a selected mode, enforcement and paid-wave ceiling are applied and recorded beside the other applied settings."""
+    from types import SimpleNamespace
+
+    from devtools.benchmarks.cybergym.run_cybergym import (
+        _prepare_applied_settings, _validate_launcher_values, parse_args,
+    )
+
+    stock = parse_args([])
+    assert (stock.task_review_mode, stock.review_enforcement, stock.review_max_cycles) == ("off", "advisory", "2")
+    template = tmp_path / "settings.json"
+    template.write_text("{}", encoding="utf-8")
+    (tmp_path / "run").mkdir()
+    path, metadata = _prepare_applied_settings(template, tmp_path / "run", SimpleNamespace(
+        model=OFFICIAL_MODEL, budget_usd=3500, timeout_sec=4, max_rounds=1000, per_task_cost_usd=20, workers=3,
+        task_review_mode="required", review_enforcement="blocking", review_max_cycles="Unlimited"))
+    applied = json.loads(path.read_text(encoding="utf-8"))
+    assert (applied["OUROBOROS_TASK_REVIEW_MODE"], applied["OUROBOROS_REVIEW_ENFORCEMENT"],
+            applied["OUROBOROS_REVIEW_MAX_CYCLES"]) == ("required", "blocking", "unlimited")
+    assert metadata["result_review"] == {"mode": "required", "enforcement": "blocking", "max_cycles": "unlimited"}
+    bad = parse_args(["--review-max-cycles", "0", "--dry-run"])
+    with pytest.raises(ValueError, match="review_max_cycles"):
+        _validate_launcher_values(bad)

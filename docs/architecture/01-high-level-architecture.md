@@ -127,6 +127,7 @@ ouroboros/ — agent core and shared runtime (§6)
   improvement_backlog.py — the authored backlog note's complete current text for the evolution chooser and context; no host writer (§6 Post-task work)
   loop.py — the LLM tool loop, finalization nudges and the FINAL ANSWER candidate (§6 Task lifecycle)
   late_review_marks.py — a review settled after its author could receive it (a plan reply, a left wave), kept in its room's view until the mind releases it (§6 Review stack)
+  result_material.py — what a task produced, exact copies (§6 Result review)
   owner_source.py — resolves owner chat/quiz/mailbox membership; action meaning belongs to Main (§6 Owner routing verbs)
   delivery_seal.py — the root admission seal at an author stop, re-exported from `loop`; stored names keep the former fence's (§6 Result review)
   review_price.py — the measured price of one review by one reviewer row, from the usage ledger (§6 Result review; §7 Review pool)
@@ -541,7 +542,7 @@ ouroboros/ — agent core and shared runtime (§6)
     plan_packet.py — Delivery builder and `PLAN_REPLY_CONTRACT`
     plan_delivery.py — A repeat participant's cross-talk and retained texts
     review.py — Multi-model review and the unified pre-commit review gate (§6 Review stack)
-    review_result.py — `review_change(subject="result")`: the frozen result subject, its brief and the Required floor at a root delivery (§6 Result review)
+    review_result.py — `review_change(subject="result")`: frozen subject, brief, delivery step (§6 Result review)
     review_skill.py — the skill subject of `review_change`: frozen payload, skill brief (checklist, governance layer, change since the last verdict), post-map to the gate's status, manual-lane ceiling
     review_multi_model.py, review_file_pack.py, review_prompt_text.py — commit-wave packet fan-out, working-tree file packs and prompt vocabulary; the packet's carrier cut and inline-governance exclusions (§6 Guaranteed-fit ladder)
     review_checklist.py — the layered change-review checklist as review surfaces read it: one `## Header` section of docs/CHECKLISTS.md, the layers, `checklist_fingerprint` on every ledger record (§6 Change review on any root)

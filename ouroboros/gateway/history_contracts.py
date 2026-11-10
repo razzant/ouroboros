@@ -174,6 +174,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     card: ChatHistoryCard
     summary_kind: str
     historical_terminal: Dict[str, Any]
+    current_outcome: Dict[str, Any]  # the current terminal outcome projection; distinct from historical_terminal
     model_waits: Dict[str, Any]  # system_type task_model_wait: wait_id -> the wait's latest revision
     lifecycle_virtual: bool  # the running skill operation, rebuilt on every read, never stored
     review_group: Dict[str, Any]  # folded skill review attempts of one task-bound group

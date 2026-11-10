@@ -442,8 +442,10 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
 
     Called only after successful writes. Capture cannot undo those effects, so a
     copy failure reports them as already applied and never requests a write retry.
-    Git workspaces keep their existing patch capture; child artifacts use the
-    child's own store and its existing result promotion to the canonical owner.
+    A Git workspace keeps its existing patch capture for what Git tracks; of the
+    written paths, only those Git ignores (no status row, no patch) are retained
+    here. Child artifacts use the child's own store and its existing result
+    promotion to the canonical owner.
     """
     from ouroboros.artifacts import copy_file_to_task_artifacts, task_id_for_artifacts
     from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
@@ -453,8 +455,10 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
     if (not ((work_domain.kind(root) == "dir") if work_domain.is_work(root) else root.is_dir())
             or task_id_for_artifacts(ctx) == "interactive"
             or root == system_repo_dir_for(ctx).resolve(strict=False)
-            or root != work_domain.settle(active_repo_dir_for(ctx))
-            or has_git_metadata(root)):
+            or root != work_domain.settle(active_repo_dir_for(ctx))):
+        return ""
+    git_root = has_git_metadata(root)
+    if git_root and not (paths := _git_ignored(root, paths)):
         return ""
     captured, unavailable, removed = [], [], []
     for relative in dict.fromkeys(paths):
@@ -470,7 +474,10 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
             captured.append(f"{relative} (artifact_store:{record['name']}, {record['size']} bytes, sha256={record['sha256']})")
         except Exception as exc:
             unavailable.append(f"{relative}: {type(exc).__name__}: {exc}")
-    notes = [f"{source_tool}: changes are already on disk in the selected folder; no separate patch apply is needed."] if include_preamble else []
+    notes = ([f"{source_tool}: Git ignores these written paths, so no workspace patch carries them; their bytes are "
+              "retained here. Files are on disk but NOT committed."] if git_root else
+             [f"{source_tool}: changes are already on disk in the selected folder; no separate patch apply is needed."]
+             if include_preamble else [])
     if captured:
         notes.append("Retained file outputs: " + "; ".join(captured))
     if removed:
@@ -479,3 +486,23 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
         notes.append("⚠️ OUTPUT_CAPTURE_FAILED: " + "; ".join(unavailable)
                      + ". The writes remain applied; do not repeat them to retry artifact capture.")
     return "\n".join(notes)
+
+
+def _git_ignored(root, paths):
+    """The written paths Git ignores in ``root`` (``git check-ignore``, which never names a tracked path), in their
+    order; none when Git cannot say. A work folder's Git is the work domain's: a refusal or an end the container did
+    not confirm is Git not saying, and the landed write keeps its own receipt."""
+    from ouroboros.git_observation import host_git_env
+
+    names = [str(path) for path in dict.fromkeys(paths) if str(path)]
+    if not names:
+        return []
+    try:
+        proc = work_domain.run(["git", "check-ignore", "-z", "--stdin"], cwd=str(root), input="\0".join(names).encode("utf-8"),
+                               capture_output=True, env=host_git_env(), check=False)
+    except (OSError, ValueError):
+        return []
+    if proc.returncode not in (0, 1):
+        return []
+    ignored = set(proc.stdout.decode("utf-8", "replace").split("\0"))
+    return [name for name in names if name in ignored]

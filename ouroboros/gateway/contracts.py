@@ -1099,6 +1099,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]

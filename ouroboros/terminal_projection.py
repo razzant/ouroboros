@@ -266,6 +266,8 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "outcome_authority": "canonical_task_result_after_finalization",
         # Memory stamps copy the recorded objective; readers interpret it using answer provenance.
         "outcome_axes": row.get("outcome_axes") or {}, "reason_code": str(row.get("reason_code") or ""),
+        **({"delegated_runs_unreconciled": row["delegated_runs_unreconciled"]}
+           if isinstance(row.get("delegated_runs_unreconciled"), list) else {}),
         "_result_text_present": (isinstance(row.get("result"), str) and bool(row["result"]))
         if "result" in row else row.get("_result_text_present") is True,
         "terminal_origin": str(row.get("terminal_origin") or ""),
@@ -684,8 +686,9 @@ def _stamp_entry(task_id: str, row: dict, source: str, address: Any = None) -> d
     """One task's stamp: the keys every page carries, then optional facts copied from the same source.
 
     Copied, never interpreted: ``outcome_final``, ``outcome_authority`` and ``reason_code``
-    as the source holds them, ``objective_status`` from its ``outcome_axes``; the axes
-    themselves stay with their source (one axis can be kilobytes of policy denials).
+    as the source holds them, ``objective_status`` with its ``objective_source`` and
+    ``objective_reason`` from its ``outcome_axes`` (an author's acceptance is never a reviewer's
+    pass); the axes themselves stay with their source (one axis can be kilobytes of policy denials).
     """
     entry = {"task_id": task_id, "status": str(row.get("status") or ""), "outcome": str(row.get("outcome") or ""),
              "outcome_phase": str(row.get("outcome_phase") or ""), "source": source,
@@ -703,6 +706,7 @@ def _stamp_entry(task_id: str, row: dict, source: str, address: Any = None) -> d
     objective = axes.get("objective") if isinstance(axes, dict) else None
     if isinstance(objective, dict) and objective.get("status"):
         entry["objective_status"] = str(objective["status"])
+        entry.update({f"objective_{key}": str(objective[key]) for key in ("source", "reason") if objective.get(key)})
     where = _source_address(address) if address is not None else None
     if where:
         entry["source_address"] = where

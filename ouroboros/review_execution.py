@@ -787,25 +787,26 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             # The cap the stored body itself sends (a replay keeps its bytes); absence = clock off, 0.
             seconds = (bounded_seconds(run_request["maxSeconds"], default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
                        if "maxSeconds" in run_request else 0)
-            unrequested = False  # neither a paid stamp nor an ambiguous write can be undone
-            invoke_review_paid_stamp(invocation.dispatch_stamp)
-            try:
+            try:  # the paid stamp follows the start row, before any POST: a refusal proven unsent spends no wave
                 requested = custody.record_start_requested(
                     custody_drive, run_id="", task_id=task_id, idempotency_key=key, invocation_id=invocation_id,
-                    operation_id=str(invocation.operation_id or ""),
-                    max_seconds=seconds, request=run_request, project_id=project_id,
-                    project_owned=bool(project_id) and not existing_project, route=route.route_id,
-                    surface=surface, slot_id=slot_id,
+                    operation_id=str(invocation.operation_id or ""), max_seconds=seconds, request=run_request,
+                    project_id=project_id, project_owned=bool(project_id) and not existing_project,
+                    route=route.route_id, surface=surface, slot_id=slot_id,
                     **store_facts({"handshake_store_id": getattr(gateway, "store_identity", ""), "store_identity_unproven": True}),
-                    root_task_id=root_task_id, parent_task_id=parent_task_id,
-                    review_source_delivery=delivery_facts,
-                    work_order_source_request=delivery_facts,
-                    prompt_cache_ttl=delivery_facts.get("prompt_cache_ttl"),
-                    **usage_custody, **checking.get("custody", {}), **seat_engine,
-                )
-            except BillingAuthorityUnavailable as exc:  # Outer pre-start boundary owns cleanup; nothing sent.
+                    # #112: pending recovery replays the request row's lineage.
+                    root_task_id=root_task_id, parent_task_id=parent_task_id, review_source_delivery=delivery_facts,
+                    work_order_source_request=delivery_facts, prompt_cache_ttl=delivery_facts.get("prompt_cache_ttl"),
+                    **usage_custody, **checking.get("custody", {}), **seat_engine)
+            except BillingAuthorityUnavailable as exc:  # raised before any row or POST: unsent, unpaid, unrequested
                 raise ReviewRouteUnavailable(f"{exc}; the delegated review session was NOT started",
                                              code="billing_authority_unavailable") from exc
+            except BaseException:  # whether the row landed is unknown, so a replay may POST it: that is paid
+                unrequested = False
+                invoke_review_paid_stamp(invocation.dispatch_stamp)
+                raise
+            unrequested = False  # neither a paid stamp nor an ambiguous write can be undone
+            invoke_review_paid_stamp(invocation.dispatch_stamp)
             if not requested:  # no POST was sent, but a False write may still have landed
                 raise ReviewRouteUnavailable("the durable start-request row could not be written; the delegated "
                                              "review session was NOT started", code="start_request_row_unwritable")
