@@ -525,7 +525,9 @@ def test_a_level_holds_the_whole_story_only_when_its_text_is_the_whole_story():
     story_step = next(step for step in mv.STORY_STEPS if table.ids.get(step))
     assert mv.whole_story_at(snapshot, mv.FULL_VIEW)
     assert not mv.whole_story_at(snapshot, table.level({(story_step, table.ids[story_step][0])}))
-    assert mv.whole_story_at(snapshot, mv.FloorLevel(addressed=(("F5", ("no-such-page",)),)))
+    with measured_sections():
+        assert mv.whole_story_at(snapshot, mv.FloorLevel(addressed=(("F5", ("no-such-page",)),)))
+        assert section_spans()["work"]["view_renders"] == 2  # the two texts an equal price left to compare
 
 
 def test_an_unactivated_snapshot_is_priced_without_the_floor_note():
