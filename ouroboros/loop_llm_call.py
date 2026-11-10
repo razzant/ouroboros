@@ -1155,33 +1155,26 @@ def _record_round_cache_facts(
     model: str = "",
     provider: str = "",
 ) -> tuple:
-    """Cold-restart telemetry — FACTS of this round only (no dollar counterfactuals).
+    """Cache facts of this round only (no dollar counterfactuals).
 
-    Returns ``(prompt_cache_ttl, cache_hit_rate, cache_cold_restart,
-    gap_since_prev_round_sec, duration_ms)``: a later round whose prompt was almost entirely
-    re-written is a provider-cache expiry/invalidation made structurally visible,
-    and the gap since the previous successful round is the datum that separates a
-    TTL expiry (long wait) from a prefix rewrite. Also records the APPLIED TTL of
-    this task's latest send — the recorded fact the wait-tool cache-horizon
-    disclosure reads (one place, never re-derived). ``duration_ms`` spans the logical
-    round from its first started frame (retries, fallbacks and waits included) and
-    settles it: a later call on the same round id (a wrap-up) measures only itself.
+    Returns ``(prompt_cache_ttl, cache_hit_rate, gap_since_prev_round_sec, duration_ms)``: the
+    provider's cached share and the gap since the previous successful round, which separates a
+    TTL expiry (long wait) from a prefix rewrite. Also records the APPLIED TTL of this task's
+    latest send — the recorded fact the wait-tool cache-horizon disclosure reads (one place, never
+    re-derived). ``duration_ms`` spans the logical round from its first started frame (retries,
+    fallbacks and waits included) and settles it: a later call on the same round id (a wrap-up)
+    measures only itself. No verdict ("cold restart") is derived from these counters: on a
+    Codex route the provider reports no cache writes, so one would never fire there.
     """
     reported = event_token_counts(usage)  # #1578: REPORTED counters; an unreported one makes these null
     prompt_tokens, cached_tokens = reported["prompt_tokens"], reported["cached_tokens"]
-    cache_write_tokens, prompt_cache_ttl = reported["cache_write_tokens"], str(usage.get("prompt_cache_ttl") or "")
+    prompt_cache_ttl = str(usage.get("prompt_cache_ttl") or "")
     known = None not in (prompt_tokens, cached_tokens)
     cache_hit_rate = (cached_tokens / prompt_tokens if prompt_tokens else 0.0) if known else None
     now, prev_finished = time.monotonic(), accumulated_usage.get("_last_llm_round_finished_monotonic")
     gap_since_prev_round_sec = round(max(0.0, now - float(prev_finished)), 1) if isinstance(prev_finished, (int, float)) else None
     started = accumulated_usage.pop(ROUND_STARTED_KEY, None)
     duration_ms = round(max(0.0, now - float(started["at"])) * 1000) if isinstance(started, dict) and started.get("round_id") == round_id else None
-    if round_idx <= 1 or prompt_tokens == 0:
-        cache_cold_restart = False  # a first round always writes; an empty prompt re-wrote nothing
-    else:
-        low = None if None in (prompt_tokens, cached_tokens) else cached_tokens < 0.2 * prompt_tokens
-        high = None if None in (prompt_tokens, cache_write_tokens) else cache_write_tokens > 0.5 * prompt_tokens
-        cache_cold_restart = False if False in (low, high) else None if None in (low, high) else True
     accumulated_usage["_last_llm_round_finished_monotonic"] = now
     accumulated_usage["_last_prompt_cache_ttl"] = prompt_cache_ttl
     from ouroboros.transcript_prefix import served_account_fields, settle_rewrite_reread
@@ -1192,7 +1185,7 @@ def _record_round_cache_facts(
         "finished_at": time.time(), **served_account_fields(usage, earlier, provider, model),  # wall clock: survives a restart
         REPORTED_TOKENS_KEY: reported}  # cache routing reads the billing-shaped counters above; route facts these
     settle_rewrite_reread(accumulated_usage)  # this answer measures the history change it carried
-    return prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms
+    return prompt_cache_ttl, cache_hit_rate, gap_since_prev_round_sec, duration_ms
 
 
 def _prepare_main_messages(
@@ -1526,7 +1519,7 @@ def call_llm_with_retry(
                           TRANSPORT_DEATHS_KEY, TIMEOUT_REPEAT_KEY, "_pending_transport_outcome"):
                 accumulated_usage.pop(stale, None)  # a USABLE response closes the round's repeat records
             accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
-            prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms = (
+            prompt_cache_ttl, cache_hit_rate, gap_since_prev_round_sec, duration_ms = (
                 _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id,
                                           model=display_model, provider=provider))
             ledger_ids = list(usage.get("ledger_attempt_ids") or [])  # the last one carried this response (#807)
@@ -1540,7 +1533,7 @@ def call_llm_with_retry(
                 "provider": provider, "source": "loop", "model_category": infer_model_category(display_model),
                 **event_token_counts(usage),  # each counter reported, a reported 0, or null (#1578)
                 "prompt_cache_ttl": prompt_cache_ttl, "cache_hit_rate": cache_hit_rate,
-                "cache_cold_restart": cache_cold_restart, "gap_since_prev_round_sec": gap_since_prev_round_sec,
+                "gap_since_prev_round_sec": gap_since_prev_round_sec,
                 "duration_ms": duration_ms, "cost_usd": cost, **context_fit_event_fields,
                 "ledger_attempt_ids": ledger_ids, "physical_attempt_id": ledger_ids[-1] if ledger_ids else None,
                 "request_ref": request_ref.get("manifest_ref") if request_ref else None,
