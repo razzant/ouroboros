@@ -268,11 +268,12 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
     entry = current.run(root, run_id)
     if entry is None or not entry.terminal_source:
         return {"status": "pending", "reason": "terminal_not_observed"}
-    lock = c.disposition_lock_path(root, entry)
+    lock, held = c.disposition_lock_path(root, entry), {}
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True)
-    if fd is None:
-        return {"status": "pending", "reason": "collection_in_progress"}
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True, outcome=held)
+    if fd is None:  # only contention is another collector; any other refusal keeps the platform's cause
+        return ({"status": "pending", "reason": "collection_in_progress"} if held.get("reason") == "contention"
+                else {"status": "pending", "reason": "collection_lock_unavailable", "lock_outcome": dict(held)})
     capture = None
     transient = False
     retention = {}
@@ -656,7 +657,7 @@ class BodyRuntime:
         if c.daemon_says_absent(exc) and entry.terminal_source:
             return True  # Retention loss cannot erase a terminal fact, including an in-flight publication.
         if c.daemon_says_absent(exc, gateway=gateway, run=entry):
-            c.close_absent_run(self.root, gateway, entry, "body_observation_absent")
+            c.close_absent_run(self.root, gateway, entry, "body_observation_absent", absence=exc)
             return True
         if c.daemon_says_absent(exc):
             c.record_containment_fault(self.root, entry, "run_absence_identity_unproven",

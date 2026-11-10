@@ -600,8 +600,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                               execution_binding_fingerprint=binding_fingerprint, **continuation.custody, **engine)
         requested, claim_refusal = claimed_start_request(
             drive, actor_ctx=ctx, initial_bootstrap=_initial_bootstrap and not recovering,
+            serving_store_id=str(getattr(gateway, "store_identity", "") or ""),
             run_id="", task_id=str(getattr(ctx, "task_id", "") or ""),
-            idempotency_key=key, invocation_id=invocation_id,
+            idempotency_key=key, invocation_id=invocation_id,  # claimed_start_request records store observations, not admission
             max_seconds=seconds, max_seconds_basis=seconds_basis, request=request_body, project_id=project_id,
             project_owned=bool(owned_project_id), project_persistent=project_persistent, route=route.route_id,
             root_task_id=str(lineage.get("root_task_id") or ""), parent_task_id=str(lineage.get("parent_task_id") or ""),
@@ -674,7 +675,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     durable = record_started_custody(
         drive, run_id, ctx, route, authority,
         key=key, access=access, root=root, seconds=seconds,
-        invocation_id=invocation_id, project_id=project_id,
+        invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),
         project_owned=bool(owned_project_id), project_persistent=project_persistent,
         **actor_facts, **{k: v for k, v in snapshot_facts.items() if k not in plan_facts(snapshot_facts)},
         plan_facts=plan_facts(snapshot_facts), processing=processing_info, prompt_cache_ttl=ttl_info,

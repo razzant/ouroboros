@@ -559,9 +559,7 @@ def review_session_output_schema(surface: str, shape: str = "") -> Optional[Dict
 # session route and the native tool-round route consume it.
 from ouroboros.review_verdict_extraction import (  # noqa: F401 — re-exported seam surface
     _EXTRACT_MAX_CHARS,
-    _UNEXTRACTABLE,
     _extract_verdict_via_light_model,
-    _findings_array,
     _strictly_parseable,
     canonicalize_session_verdict,
 )
@@ -674,6 +672,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.execution_domain import seat_gateway
+    from ouroboros.delegate_pending import store_facts
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, final_attempt_facts
     from ouroboros.subagents import delegated_run_shape
     from ouroboros.usage_accounting import current_usage_scope
@@ -715,11 +714,10 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             generation_end = continuation_generation_end(invocation, record, run_id)
             source_request = record.get("work_order_source_request") or {}
             delivery_facts.update(source_request)
-            recovery_prompt = prompt
-            if source_request.get("original_prompt_sha256") == hashlib.sha256(prompt.encode("utf-8")).hexdigest():
-                recovery_prompt = str((run_request or {}).get("prompt") or "")
             route, project_id, existing_project, key, schema_asked = review_recovery_facts(
-                record, run_request, started_custody, prompt=recovery_prompt, root=root,
+                record, run_request, started_custody, root=root,
+                prompt=(str((run_request or {}).get("prompt") or "")
+                        if source_request.get("original_prompt_sha256") == hashlib.sha256(prompt.encode("utf-8")).hexdigest() else prompt),
                 claimant_task_id=task_id, claimant_surface=surface, claimant_slot_id=slot_id,
                 claimant_operation_id=str(invocation.operation_id or ""))
             shape = recorded_review_shape(run_request)  # replay original rights and checking copy
@@ -738,6 +736,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             raise ReviewRouteUnavailable("the exact delegated review invocation is no longer available for "
                 "reconciliation; refusing to start a second paid run", code="review_custody_lost")
         seat_engine, gateway = seat_gateway(record if recovering else None, root)  # recorded engine, else the domain's
+        if recovering and not run_id and (unproven := custody.replay_store_unproven(record, getattr(gateway, "store_identity", ""))):
+            raise ReviewRouteUnavailable(f"{unproven}; the review start was not re-sent", code="invocation_store_unproven")
         if use_thread and shape.investigation and not run_id:
             from ouroboros.review_thread_continuity import require_delegated_review_threads
             require_delegated_review_threads(gateway)
@@ -796,7 +796,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                     max_seconds=seconds, request=run_request, project_id=project_id,
                     project_owned=bool(project_id) and not existing_project, route=route.route_id,
                     surface=surface, slot_id=slot_id,
-                    # #112: pending recovery replays the request row's lineage.
+                    **store_facts({"handshake_store_id": getattr(gateway, "store_identity", ""), "store_identity_unproven": True}),
                     root_task_id=root_task_id, parent_task_id=parent_task_id,
                     review_source_delivery=delivery_facts,
                     work_order_source_request=delivery_facts,
@@ -845,7 +845,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         else:
             entry = custody.RunCustody(
                 run_id=run_id, task_id=task_id, route_id=route.route_id, model=str(route.model or ""),
-                profile_id=str(getattr(route, "profile_id", "") or ""),
+                profile_id=str(getattr(route, "profile_id", "") or ""), daemon_store_id=custody.admitted_store_id(handle),
                 prompt_cache_ttl=(delivery_facts.get("prompt_cache_ttl")
                                   if isinstance(delivery_facts.get("prompt_cache_ttl"), dict) else None),
                 project_id=project_id, project_owned=bool(project_id) and not existing_project,
@@ -859,7 +859,6 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 "isolation": shape.isolation, "delegated": shape.delegated, "max_seconds": seconds,
                 "root": root, "surface": surface, "slot_id": slot_id,
             }))
-        # Pending custody remains above throughout polling, including failures.
         window = min(float("inf") if timeout_sec is None else float(timeout_sec),  # no window: observe until terminal
                      float("inf") if generation_end is None else max(0.0, generation_end - time.monotonic()))
         poll_deadline = time.monotonic() + window
@@ -913,7 +912,6 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             "late_success_accepted": late_success, "settlement": settlement,
             "review_source_delivery": delivery_facts, "review_continuations": continuations,
             "route_id": str(entry.route_id), "run_dir": str(summary.get("runDir") or ""),
-            # One final attempt, never the requested pool or a mixed summary route.
             "effective_route_ids": [observed["harness_id"]] if observed.get("harness_id") else [],
             "observed_attempt": observed, "model": observed.get("model", ""),
             "usage": session_usage_chain(run_id, requested_route=str(entry.route_id), observed_attempt=observed,
@@ -1006,11 +1004,8 @@ def _session_thread_receipt(gateway: Any, thread_id: str, run_id: str, turn_id: 
 def _effective_route_carries_schema(gateway: Any, route_id: str) -> bool:
     """Can the EFFECTIVE route actually carry ``outputSchema`` on this run (D19)?
 
-    Judged on the pinned route's live manifest (``GET /v2/harnesses``), NOT on
-    the agent-capability catalog: the catalog's harness rows carry no
-    structured-output field at all, so the old catalog read was constantly
-    False and the preferred D19 path was dead in production. Two manifest
-    facts must BOTH hold before asking:
+    The pinned route's live manifest (``GET /v2/harnesses``) owns these facts;
+    the agent-capability catalog has no structured-output field. Both must hold:
 
     - ``capabilities.json_schema_output`` — the adapter has a native
       structured-output flag at all;

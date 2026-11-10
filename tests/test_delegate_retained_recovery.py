@@ -51,8 +51,10 @@ class AbsentGateway:
             raise ClaudexorUnavailable("daemon_unreachable", "controlled transport gap")
 
     def get_run(self, rid):
+        from tests._shared import run_absent_in
+
         self.reads += 1
-        raise ClaudexorUnavailable("not_found", "run gone", status_code=404)
+        raise run_absent_in(self.store_identity)
 
     def close(self):
         self.closed = True

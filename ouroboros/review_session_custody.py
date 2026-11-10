@@ -312,7 +312,7 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
                                      code="invalid_continuation_handle")
     record_terminal_money(root, entry, detail)  # the stopped run's money; the final settlement takes the successor's
     successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
-        continuation_of=entry.run_id, ledger_root=str(root),
+        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=custody.admitted_store_id(handle),
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
             "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
             "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})

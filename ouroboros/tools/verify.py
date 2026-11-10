@@ -607,7 +607,7 @@ def _record_delegation_zero_run(
         return (
             "⚠️ TOOL_ERROR (verify_and_record): zero_run_custody_unknown: "
             "the host could not atomically prove empty custody and claim the "
-            f"zero-run decision; no receipt was written ({type(exc).__name__})."
+            f"zero-run decision; no receipt was written ({type(exc).__name__}: {exc})."
         )
     if not written:
         return (

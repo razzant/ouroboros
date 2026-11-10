@@ -390,12 +390,17 @@ def test_another_engines_absence_never_settles_a_run(env, tmp_path):
     ref = work_ref(env)
     work_run, owned_run = started(drive, "run-w", engine_ref=ref, store=STORE), started(drive, "run-s", store="store-s")
     gone = ClaudexorUnavailable("run_not_found", "gone", status_code=404)
+    assert not custody.daemon_says_absent(gone, gateway=_gateway(STORE, ref), run=work_run)  # no answering-store proof
+    gone.problem = {"context": {"storeId": STORE}}
     assert not custody.daemon_says_absent(gone, gateway=_gateway("store-s"), run=work_run)  # the owned engine's 404
     assert not custody.daemon_says_absent(gone, gateway=_gateway(STORE), run=work_run)  # same store id, no binding
     assert not custody.daemon_says_absent(gone, gateway=_gateway(STORE, {**ref, "store": "other"}), run=work_run)
     assert custody.daemon_says_absent(gone, gateway=_gateway(STORE, ref), run=work_run)
     assert not custody.daemon_says_absent(gone, gateway=_gateway("store-s", ref), run=owned_run)  # and the reverse
-    assert custody.daemon_says_absent(gone, gateway=_gateway("store-s"), run=owned_run)
+    assert not custody.daemon_says_absent(gone, gateway=_gateway("store-s"), run=owned_run)
+    owned_gone = ClaudexorUnavailable("run_not_found", "gone", status_code=404)
+    owned_gone.problem = {"context": {"storeId": "store-s"}}
+    assert custody.daemon_says_absent(owned_gone, gateway=_gateway("store-s"), run=owned_run)
 
     def absent(*_a, **_kw):
         raise gone
@@ -446,7 +451,7 @@ def test_the_sweep_replays_and_settles_each_engines_work_only_through_that_engin
 
         def start_run(request, idempotency_key=""):
             seen[name].append(("start", idempotency_key, request))
-            return {"runId": "run-w-replayed"}
+            return {"runId": "run-w-replayed", "storeId": store}  # admission receipt, not the earlier handshake
         return SimpleNamespace(store_identity=store, engine_ref=engine_ref, handshake=lambda: {}, close=lambda: None,
                                get_run=get_run, start_run=start_run, cancel_run=lambda rid, **_kw: {"accepted": True})
 
@@ -715,7 +720,9 @@ def test_the_body_observes_a_work_run_through_its_own_engine(env, tmp_path, monk
 
     def gone(*a, **_k):
         asked.append(("work",) + a)
-        raise ClaudexorUnavailable("run_not_found", "gone", status_code=404)
+        absent = ClaudexorUnavailable("run_not_found", "gone", status_code=404)
+        absent.problem = {"context": {"storeId": STORE}}
+        raise absent
 
     work = SimpleNamespace(store_identity=STORE, engine_ref=ref, close=lambda: asked.append(("closed",)), get_run=gone)
     monkeypatch.setattr(domain, "work_gateway", lambda r, **_kw: work)

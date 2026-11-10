@@ -1,14 +1,13 @@
-"""``integrate_delegated_patch``: the C1 delegated-run disposition seam.
-
-Owns typed CR1-3 refusals, capture-at-disposition, dispose/resolve records, drift refusal
-and locked apply. Extracted at the v7 DEL1 size gate: ``subagent_integration`` re-exports
-the same objects, retaining sibling imports and monkeypatch targets on that surface.
+"""``integrate_delegated_patch`` owns typed refusals, capture-at-disposition, disposition records and locked apply.
+Extracted at the v7 DEL1 size gate; ``subagent_integration`` re-exports the same objects,
+retaining sibling imports and monkeypatch targets on that surface.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import subprocess
 from contextlib import ExitStack
@@ -26,8 +25,8 @@ from ouroboros.delegate_named_evidence import (
 from ouroboros.runtime_mode_policy import (
     mode_allows_protected_write,
     protected_paths_in,
-    protected_write_block_message,
 )
+from ouroboros.workspace_copies import protected_apply_refusal
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.workspace_patch_rules import format_patch_exclusions
 from ouroboros.tools.patch_staging import (
@@ -539,12 +538,8 @@ def _integrate_delegated_patch(
     acknowledge_ambiguous: bool = False,
     paths: List[str] | None = None,
 ) -> str:
-    """Serialize a captured run's disposition across owners and retry successors.
-
-    The canonical capture address keeps every caller on the same lock even with
-    separate task drives. Admission is repeated inside it; a stale custody object
-    must never authorize a second materialization or an obsolete starter.
-    """
+    """Serialize disposition at the canonical capture address across task drives and retry successors.
+    Recheck admission inside the lock: stale custody authorizes neither a second apply nor an obsolete starter."""
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_shared import orphan_disposition_status
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -560,13 +555,18 @@ def _integrate_delegated_patch(
     if status != custody.OWNED or entry is None:
         return _delegated_disposition_refusal(status, entry, rid, acknowledge_ambiguous)
     captured_before = bool(entry.patch_captured)  # before any wait: a capture made meanwhile was never shown
-    lock_path = custody.disposition_lock_path(drive, entry)  # one per snapshot, shared by a continuation chain
+    lock_path, held = custody.disposition_lock_path(drive, entry), {}
     try:
-        lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, owner_aware_stale=True)
+        lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, owner_aware_stale=True, outcome=held)
     except Exception as exc:
         return f"⚠️ INTEGRATE_LOCK_TIMEOUT: could not lock the captured result: {type(exc).__name__}: {exc}."
     if lock_fd is None:
-        return "⚠️ INTEGRATE_LOCK_TIMEOUT: another disposition holds this captured result; retry after it completes."
+        if held.get("reason") == "contention":
+            return "⚠️ INTEGRATE_LOCK_TIMEOUT: another disposition holds this captured result; retry after it completes."
+        code = held.get("errno")
+        cause = f", errno {code} ({os.strerror(code)})" if isinstance(code, int) else ""
+        return (f"⚠️ INTEGRATE_LOCK_TIMEOUT: the captured result's lock was not taken (platform outcome "
+                f"{held.get('reason') or 'unknown'}{cause}); nothing was applied or rejected.")
     try:
         from ouroboros.delegate_continuation import disposition_refusal
         from ouroboros.delegate_custody_current import run
@@ -842,8 +842,8 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                 ctx, f"run_{rid}", outcome="blocked_protected", reason=reason, files=touched,
                 manifest=manifest, applied=False, conflicts=[],
                 protected=[p.path for p in protected], target=str(target))
-            return protected_write_block_message(
-                path=protected[0].path, runtime_mode=runtime_mode,
+            return protected_apply_refusal(
+                path=protected[0].path, runtime_mode=runtime_mode, grant_ok=grant_ok,
                 action=f"integrate delegated run {rid} patch touching")
 
     def admission_refusal():

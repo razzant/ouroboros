@@ -58,8 +58,36 @@ def run_view(data: Any, run_id: str) -> dict:
     return view
 
 
-def save_view(path: Path, drive: Any, task_id: str, view: dict) -> None:
-    """Merge this view's edits, preserving siblings and unmodified task facts."""
+def save_view(path: Path, drive: Any, task_id: str, view: dict, stage: str = "") -> None:
+    """Merge edits without losing siblings; annotate a save failure with its caller's stage."""
+    try:
+        _merge_view(path, drive, task_id, view)
+    except OSError as exc:
+        if stage:
+            exc.supervision_stage = stage
+        observed = (view.get("pending_wake") or {}).get("payload")
+        if stage == "wake_publication" and isinstance(observed, dict):
+            # Save failure cannot erase an observation (a confirmed cancellation included).
+            exc.supervision_observed_payload = dict(observed)
+            exc.supervision_observed_run_id = str(view.get("run_id") or "")
+        raise
+
+
+def save_failure(exc: OSError, stage: str) -> tuple[str, dict]:
+    """Project a checkpoint write failure, preserving separately any already-observed wake."""
+    observed = getattr(exc, "supervision_observed_payload", None)
+    prefix = f"The {stage} save did not land: {exc}. "
+    if isinstance(observed, dict):
+        return (prefix + "An observation was already produced and is returned as observed_payload; checkpoint "
+                "persistence is unknown, so do not infer cancellation, replay or re-send from this failure. "
+                "A later wait must reconcile the observed facts.",
+                {"stage": stage, "run_id": str(getattr(exc, "supervision_observed_run_id", "") or ""),
+                 "observed_payload": observed, "observed_checkpoint_state": "unsaved"})
+    return (prefix + "No observed wake facts are available from this save attempt; cancellation, replay and "
+            "re-send remain unknown. delegate_wait on the same run starts from its last saved state.", {"stage": stage})
+
+
+def _merge_view(path: Path, drive: Any, task_id: str, view: dict) -> None:
     with custody.actor_decision_lock(drive, task_id):
         data = read(path)
         run_id = str(view.get("run_id") or "")

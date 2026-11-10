@@ -298,7 +298,7 @@ def record_started_custody(
     resource_ref: Dict[str, Any], capture_mode: str, processing: Mapping[str, Any] | None = None,
     prompt_cache_ttl: Mapping[str, Any] | None = None,
     continuation_of: str = "", capture_id: str = "", snapshot_task_id: str = "", max_seconds_basis: str = "",
-    row_effort: Optional[str] = None, plan_facts: Optional[dict] = None, engine_ref: Optional[dict] = None,
+    row_effort: Optional[str] = None, plan_facts: Optional[dict] = None, daemon_store_id: str = "", engine_ref: Optional[dict] = None,
 ) -> bool:
     """Write the one STARTED custody row, including the source binding.
 
@@ -308,8 +308,9 @@ def record_started_custody(
     lineage and the hand-over replay with every other start fact. ``max_seconds_basis``
     records HOW ``seconds`` was decided (``delegate_registration_policy.CAP_BASIS_*``)
     beside the cap itself, so a later expiry can be told apart from the nanny's
-    own deadline or lifetime. ``engine_ref`` is the managed work engine the pending
-    invocation was bound to (``execution_domain``); its store binds the run at once.
+    own deadline or lifetime. ``daemon_store_id`` is the store the start's own receipt named
+    (``delegate_custody.admitted_store_id``); "" leaves the run unbound.
+    ``engine_ref`` independently keeps the managed endpoint chosen before POST.
     """
 
     from ouroboros import delegate_custody as custody_module
@@ -333,6 +334,7 @@ def record_started_custody(
         ledger_root=str(drive),
         idempotency_key=key,
         invocation_id=invocation_id,
+        daemon_store_id=str(daemon_store_id or ""),
         selected_subagent_id=selected_subagent_id,
         config_fingerprint=config_fingerprint,
         work_order_fingerprint=work_order_fingerprint,
@@ -356,7 +358,6 @@ def record_started_custody(
         capture_id=str(capture_id or ""),
         snapshot_task_id=str(snapshot_task_id or ""),
         engine_ref=dict(engine_ref or {}),
-        daemon_store_id=str((engine_ref or {}).get("store") or ""),
     )
     recorded = custody_module.record_started(
         drive,
